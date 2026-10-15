@@ -1732,7 +1732,7 @@ The `TopicProtectionAuthProvider` is configured with the dynamically generated `
 
 1.  It compares the authenticated `user_id` of the connecting client against the stored `service_username`.
 2.  If they match exactly, the client is identified as the internal service client.
-3.  The provider then **bypasses all topic protection rules** (`BlockAll`, `AdminRequired`, etc.) and delegates the authorization decision to the next provider in the chain (e.g., the ACL provider).
+3.  The provider then **authorizes the request without consulting the topic protection rules** (`BlockAll`, `AdminRequired`, etc.) **or the ACL**. The one exception is a publish to the Sparkplug certificate namespace with Sparkplug aware on, which only the broker itself writes. The service username is random, so an ACL could only grant it with a `user *` rule that also grants every other user; consulting the ACL would make any ACL that names only application users deny the node's own request handler, presence and event publishers.
 
 This mechanism is secure because the credentials are node-local, random, and ephemeral. An external client cannot guess the credentials, and simply using a client ID with an `mqdb-` prefix provides no special access, as the check is performed on the authenticated username.
 
