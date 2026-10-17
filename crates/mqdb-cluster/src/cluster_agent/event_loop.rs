@@ -671,17 +671,6 @@ impl ClusteredAgent {
         while let Ok(req) = rx.recv_async().await {
             Self::dispatch_local_publish(&admin_client, &router, &retained_writer, &semaphore, req)
                 .await;
-
-            while let Ok(req) = rx.try_recv() {
-                Self::dispatch_local_publish(
-                    &admin_client,
-                    &router,
-                    &retained_writer,
-                    &semaphore,
-                    req,
-                )
-                .await;
-            }
         }
     }
 

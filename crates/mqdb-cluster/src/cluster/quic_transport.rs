@@ -397,6 +397,22 @@ impl QuicDirectTransport {
             ))),
         }
     }
+
+    fn enqueue_local_publish(&self, request: LocalPublishRequest) {
+        let queue_len = self.local_publish_tx.len();
+        if queue_len > 1000 && queue_len.is_multiple_of(1000) {
+            warn!(topic = %request.topic, queue_len, "local_publish queue growing");
+        }
+        let topic = request.topic.clone();
+        let kind = request.kind;
+        if let Err(e) = self.local_publish_tx.try_send(request) {
+            warn!(
+                topic,
+                ?kind,
+                "local_publish queue full, dropping request: {e}"
+            );
+        }
+    }
 }
 
 impl ClusterTransport for QuicDirectTransport {
@@ -464,19 +480,13 @@ impl ClusterTransport for QuicDirectTransport {
     }
 
     async fn queue_local_publish(&self, topic: String, payload: Vec<u8>, qos: u8) {
-        let queue_len = self.local_publish_tx.len();
-        if queue_len > 1000 && queue_len.is_multiple_of(1000) {
-            warn!(topic, queue_len, "local_publish queue growing");
-        }
-        if let Err(e) = self.local_publish_tx.try_send(LocalPublishRequest {
-            topic: topic.clone(),
+        self.enqueue_local_publish(LocalPublishRequest {
+            topic,
             payload,
             qos,
             kind: LocalPublishKind::Plain,
             user_properties: Vec::new(),
-        }) {
-            warn!(topic, "local_publish queue full, dropping message: {e}");
-        }
+        });
     }
 
     async fn queue_local_publish_with_properties(
@@ -486,68 +496,43 @@ impl ClusterTransport for QuicDirectTransport {
         qos: u8,
         user_properties: Vec<(String, String)>,
     ) {
-        let queue_len = self.local_publish_tx.len();
-        if queue_len > 1000 && queue_len.is_multiple_of(1000) {
-            warn!(topic, queue_len, "local_publish queue growing");
-        }
-        if let Err(e) = self.local_publish_tx.try_send(LocalPublishRequest {
-            topic: topic.clone(),
+        self.enqueue_local_publish(LocalPublishRequest {
+            topic,
             payload,
             qos,
             kind: LocalPublishKind::Plain,
             user_properties,
-        }) {
-            warn!(topic, "local_publish queue full, dropping message: {e}");
-        }
+        });
     }
 
     async fn queue_forwarded_publish(&self, topic: String, payload: Vec<u8>, qos: u8) {
-        let queue_len = self.local_publish_tx.len();
-        if queue_len > 1000 && queue_len.is_multiple_of(1000) {
-            warn!(topic, queue_len, "local_publish queue growing");
-        }
-        if let Err(e) = self.local_publish_tx.try_send(LocalPublishRequest {
-            topic: topic.clone(),
+        self.enqueue_local_publish(LocalPublishRequest {
+            topic,
             payload,
             qos,
             kind: LocalPublishKind::Forwarded,
             user_properties: Vec::new(),
-        }) {
-            warn!(
-                topic,
-                "local_publish queue full, dropping forwarded message: {e}"
-            );
-        }
+        });
     }
 
     async fn queue_local_publish_retained(&self, topic: String, payload: Vec<u8>, qos: u8) {
-        if let Err(e) = self.local_publish_tx.try_send(LocalPublishRequest {
-            topic: topic.clone(),
+        self.enqueue_local_publish(LocalPublishRequest {
+            topic,
             payload,
             qos,
             kind: LocalPublishKind::Retained,
             user_properties: Vec::new(),
-        }) {
-            warn!(
-                topic,
-                "local_publish queue full, dropping retained message: {e}"
-            );
-        }
+        });
     }
 
     async fn queue_retained_refresh(&self, topic: String) {
-        if let Err(e) = self.local_publish_tx.try_send(LocalPublishRequest {
-            topic: topic.clone(),
+        self.enqueue_local_publish(LocalPublishRequest {
+            topic,
             payload: Vec::new(),
             qos: 0,
             kind: LocalPublishKind::RetainedRefresh,
             user_properties: Vec::new(),
-        }) {
-            warn!(
-                topic,
-                "local_publish queue full, dropping retained refresh: {e}"
-            );
-        }
+        });
     }
 }
 
