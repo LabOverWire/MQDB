@@ -53,52 +53,69 @@ jobs:
   publish-npm:
     name: Publish mqdb-wasm to npm
     runs-on: ubuntu-latest
+    needs: publish
     permissions:
       contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check whether this version is on npm
+        id: npm-check
+        run: |
+          VERSION=$(grep '^version' crates/mqdb-wasm/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if npm view "mqdb-wasm@$VERSION" version > /dev/null 2>&1; then
+            echo "mqdb-wasm@$VERSION already published to npm"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install Rust
+        if: steps.npm-check.outputs.skip != 'true'
         uses: dtolnay/rust-toolchain@1.98.0
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Cache dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: crates/mqdb-wasm
-
       - name: Setup Node.js
+        if: steps.npm-check.outputs.skip != 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
-      - name: Update npm for trusted publishing
-        run: npm install -g npm@latest
+      - name: Install npm 11 for trusted publishing
+        if: steps.npm-check.outputs.skip != 'true'
+        run: npm install -g npm@11.21.1
 
       - name: Find wasm-bindgen version
+        if: steps.npm-check.outputs.skip != 'true'
         id: wasm-bindgen
         run: |
-          VERSION=$(grep -A1 '^name = "wasm-bindgen"$' crates/mqdb-wasm/Cargo.lock | sed -n 's/^version = "\(.*\)"$/\1/p')
+          VERSION=$(cargo metadata --manifest-path crates/mqdb-wasm/Cargo.toml --format-version 1 | python3 -c "import json, sys; versions = {p['version'] for p in json.load(sys.stdin)['packages'] if p['name'] == 'wasm-bindgen'}; assert len(versions) == 1, versions; print(versions.pop())")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Install cargo-make and wasm-bindgen
-        uses: taiki-e/install-action@v2
+        if: steps.npm-check.outputs.skip != 'true'
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283
         with:
           tool: cargo-make,wasm-bindgen@${{ steps.wasm-bindgen.outputs.version }}
 
       - name: Install wasm-opt
+        if: steps.npm-check.outputs.skip != 'true'
         run: |
           BINARYEN=binaryen-version_125-x86_64-linux.tar.gz
           curl -sSLO "https://github.com/WebAssembly/binaryen/releases/download/version_125/$BINARYEN"
-          curl -sSLO "https://github.com/WebAssembly/binaryen/releases/download/version_125/$BINARYEN.sha256"
-          sha256sum -c "$BINARYEN.sha256"
+          echo "7c3bc16599c8274a04d34a504fe4be2047884f900e0e2da2f6fb9cd667183be4  $BINARYEN" | sha256sum -c
           tar xzf "$BINARYEN" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/binaryen-version_125/bin" >> "$GITHUB_PATH"
 
+      - name: Check wasm-opt
+        if: steps.npm-check.outputs.skip != 'true'
+        run: wasm-opt --version
+
       - name: Publish mqdb-wasm
+        if: steps.npm-check.outputs.skip != 'true'
         run: cargo make wasm-publish
 
   build-binaries:

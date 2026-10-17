@@ -213,8 +213,9 @@ dependencies = ["wasm-compile", "wasm-bindgen", "wasm-opt"]
 
 [tasks.wasm-compile]
 description = "Compile WASM binary"
+cwd = "crates/mqdb-wasm"
 command = "cargo"
-args = ["build", "--target", "wasm32-unknown-unknown", "--release", "--manifest-path", "crates/mqdb-wasm/Cargo.toml"]
+args = ["build", "--target", "wasm32-unknown-unknown", "--release"]
 
 [tasks.wasm-bindgen]
 description = "Generate JS bindings"
@@ -276,6 +277,7 @@ cat > crates/mqdb-wasm/pkg/package.json <<PKGJSON
   "version": "$VERSION",
   "description": "WASM client library for MQDB reactive database",
   "license": "Apache-2.0",
+  "type": "module",
   "repository": {
     "type": "git",
     "url": "https://github.com/LabOverWire/MQDB"
