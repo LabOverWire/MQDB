@@ -290,6 +290,7 @@ cat > crates/mqdb-wasm/pkg/package.json <<PKGJSON
 }
 PKGJSON
 cp LICENSE-APACHE crates/mqdb-wasm/pkg/LICENSE
+cp crates/mqdb-wasm/README.md crates/mqdb-wasm/pkg/README.md
 cd crates/mqdb-wasm/pkg
 npm pkg fix
 npm publish
