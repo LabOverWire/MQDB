@@ -32,6 +32,7 @@ const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalPublishKind {
     Plain,
+    Forwarded,
     Retained,
     RetainedRefresh,
 }
@@ -497,6 +498,25 @@ impl ClusterTransport for QuicDirectTransport {
             user_properties,
         }) {
             warn!(topic, "local_publish queue full, dropping message: {e}");
+        }
+    }
+
+    async fn queue_forwarded_publish(&self, topic: String, payload: Vec<u8>, qos: u8) {
+        let queue_len = self.local_publish_tx.len();
+        if queue_len > 1000 && queue_len.is_multiple_of(1000) {
+            warn!(topic, queue_len, "local_publish queue growing");
+        }
+        if let Err(e) = self.local_publish_tx.try_send(LocalPublishRequest {
+            topic: topic.clone(),
+            payload,
+            qos,
+            kind: LocalPublishKind::Forwarded,
+            user_properties: Vec::new(),
+        }) {
+            warn!(
+                topic,
+                "local_publish queue full, dropping forwarded message: {e}"
+            );
         }
     }
 

@@ -3282,3 +3282,85 @@ async fn every_replicated_retained_write_refreshes_the_broker() {
         "writes arriving in quick succession must each reach the broker"
     );
 }
+
+fn forwarded_publish_targets(outbox: &Mutex<Vec<(NodeId, ClusterMessage)>>) -> Vec<NodeId> {
+    outbox
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, message)| matches!(message, ClusterMessage::ForwardedPublish(_)))
+        .map(|(to, _)| *to)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_forwarded_publish_reaches_local_subscribers_without_being_forwarded_again() {
+    use mqtt5::broker::events::{BrokerEventHandler, ClientPublishEvent};
+    use mqtt5::broker::router::{DeliveryLanes, MessageRouter, SubscriptionRequest};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let outbox = Arc::clone(&transport.outbox);
+    let ctrl = create_test_controller(node1, transport);
+    ctrl.stores()
+        .topics
+        .subscribe("plant/temp", "remote-dashboard", PartitionId::ZERO, 1)
+        .unwrap();
+    ctrl.stores()
+        .client_locations
+        .set("remote-dashboard", node2);
+    let ctrl = Arc::new(tokio::sync::RwLock::new(ctrl));
+    let handler = Arc::new(crate::cluster::event_handler::ClusterEventHandler::new(
+        node1,
+        Arc::clone(&ctrl),
+    ));
+    let router = MessageRouter::new().with_event_handler(Arc::clone(&handler) as _);
+
+    let (lanes, mut receivers) = DeliveryLanes::channel(8);
+    let disconnect_tx = tokio::sync::oneshot::channel().0;
+    router
+        .register_client(
+            "local-dashboard".to_string(),
+            lanes,
+            router.queue_handle("local-dashboard"),
+            disconnect_tx,
+        )
+        .await;
+    router
+        .subscribe(SubscriptionRequest::new(
+            "local-dashboard",
+            "plant/temp",
+            mqtt5::QoS::AtLeastOnce,
+        ))
+        .await
+        .unwrap();
+
+    crate::cluster::deliver_forwarded_publish(&router, "plant/temp", b"21.5".to_vec(), 1).await;
+
+    let delivered = receivers.try_recv().unwrap();
+    assert_eq!(&delivered.publish.payload[..], b"21.5");
+    assert!(
+        forwarded_publish_targets(&outbox).is_empty(),
+        "a forwarded publish must not be forwarded again to the other node's subscriber"
+    );
+
+    handler
+        .on_client_publish(ClientPublishEvent {
+            client_id: "mqdb-admin-1".into(),
+            user_id: None,
+            topic: "plant/temp".into(),
+            payload: b"21.5".to_vec().into(),
+            qos: mqtt5::QoS::AtLeastOnce,
+            retain: false,
+            packet_id: Some(1),
+            response_topic: None,
+            correlation_data: None,
+        })
+        .await;
+    assert_eq!(
+        forwarded_publish_targets(&outbox),
+        vec![node2],
+        "the same publish made by the admin client is forwarded to the other node"
+    );
+}

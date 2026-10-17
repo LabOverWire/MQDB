@@ -13,6 +13,7 @@ mod event_handler;
 mod heartbeat;
 mod idempotency_store;
 mod inflight_store;
+mod local_delivery;
 mod lwt;
 mod message_processor;
 mod migration;
@@ -68,6 +69,7 @@ pub use idempotency_store::{
     idempotency_storage_key,
 };
 pub use inflight_store::{InflightMessage, InflightStore, InflightStoreError, inflight_key};
+pub use local_delivery::deliver_forwarded_publish;
 pub use lwt::{
     LwtAction, LwtError, LwtPrepared, LwtPublisher, determine_lwt_action, generate_lwt_token,
 };

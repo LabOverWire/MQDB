@@ -1216,7 +1216,7 @@ impl<T: ClusterTransport> NodeController<T> {
         );
 
         self.transport
-            .queue_local_publish(fwd.topic.clone(), fwd.payload.clone(), fwd.qos)
+            .queue_forwarded_publish(fwd.topic.clone(), fwd.payload.clone(), fwd.qos)
             .await;
     }
 
@@ -1440,7 +1440,7 @@ impl<T: ClusterTransport> NodeController<T> {
         );
 
         self.transport
-            .queue_local_publish(fwd.topic.clone(), fwd.payload.clone(), fwd.qos)
+            .queue_forwarded_publish(fwd.topic.clone(), fwd.payload.clone(), fwd.qos)
             .await;
     }
 
