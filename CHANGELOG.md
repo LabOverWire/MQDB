@@ -4,16 +4,20 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
-## 2026-10-16 — mqdb-cluster 0.4.25, mqdb-cli 0.8.53
+## 2026-10-17 — mqdb-cluster 0.4.25, mqdb-cli 0.8.53
 
 ### Fixed
 
 - **Cluster publishes are no longer delivered over and over** (#176). A publish forwarded to another node was republished there through the node's internal `mqdb-admin` client, so that node routed it again and forwarded it back to every node with a matching subscriber. One message from a client, or one will, then circulated between nodes for as long as its subscribers stayed connected. Measured on 3- and 5-node clusters with one subscriber per node and 20 publishes from each node, the previous release delivered from a few hundred to over a million copies per subscriber and never delivered up to 90% of the distinct messages, at every QoS; a will was delivered up to 713,000 times, or not at all. Now each subscriber receives each message once, at QoS 0, 1 and 2, and a non-retained will once.
 - How it works now: a forwarded publish goes straight into the receiving node's broker router, which delivers it to that node's subscribers without passing through the node's publish handler, so it is not forwarded again. The deprecated MQTT bridge transport already republished through its own `mqdb-forward` client, which the handler skips, and is unchanged.
 
+### Changed
+
+- **`mqdb-wasm` is published to npm again**, by the release workflow through npm trusted publishing instead of by hand. The npm package was last updated at 0.3.3; this release publishes 0.3.6, the version already on crates.io.
+
 ### Known limitations
 
-- A retained message published on one node can reach a live subscriber twice on a node that holds the topic's primary or replica: once as the forwarded publish and once when the retained sync writes it into that node's broker, which also delivers it to current subscribers. mqtt5 has no way to store a retained message without delivering it.
+- A retained message published on one node can reach a live subscriber twice on a node that holds the topic's primary or replica: once as the forwarded publish and once when the retained sync writes it into that node's broker, which also delivers it to current subscribers. mqtt5 has no way to store a retained message without delivering it (#192).
 
 ## 2026-10-15 — mqdb-agent 0.8.37, mqdb-cluster 0.4.24, mqdb-vault 0.1.8, mqdb-cli 0.8.52
 
