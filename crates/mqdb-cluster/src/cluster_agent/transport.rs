@@ -172,6 +172,15 @@ impl ClusterTransport for ClusterTransportKind {
         }
     }
 
+    async fn queue_forwarded_publish(&self, topic: String, payload: Vec<u8>, qos: u8) {
+        match self {
+            #[cfg(feature = "mqtt-bridge")]
+            #[allow(deprecated)]
+            Self::Mqtt(t) => t.queue_forwarded_publish(topic, payload, qos).await,
+            Self::Quic(t) => t.queue_forwarded_publish(topic, payload, qos).await,
+        }
+    }
+
     async fn queue_local_publish_retained(&self, topic: String, payload: Vec<u8>, qos: u8) {
         match self {
             #[cfg(feature = "mqtt-bridge")]

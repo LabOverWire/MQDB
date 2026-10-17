@@ -529,6 +529,15 @@ pub trait ClusterTransport: Send + Sync + Debug + Clone {
         qos: u8,
     ) -> impl std::future::Future<Output = ()> + Send;
 
+    fn queue_forwarded_publish(
+        &self,
+        topic: String,
+        payload: Vec<u8>,
+        qos: u8,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        self.queue_local_publish(topic, payload, qos)
+    }
+
     fn queue_local_publish_retained(
         &self,
         topic: String,

@@ -52,12 +52,19 @@ fn set_unique_group(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum QueuedPublish {
+    Plain(String, Vec<u8>, u8),
+    Forwarded(String, Vec<u8>, u8),
+}
+
 #[derive(Debug, Clone)]
 struct MockTransport {
     node_id: NodeId,
     inbox: Arc<Mutex<VecDeque<InboundMessage>>>,
     outbox: Arc<Mutex<Vec<(NodeId, ClusterMessage)>>>,
     linked: Arc<Mutex<Option<Vec<NodeId>>>>,
+    queued_publishes: Arc<Mutex<Vec<QueuedPublish>>>,
 }
 
 impl MockTransport {
@@ -67,6 +74,7 @@ impl MockTransport {
             inbox: Arc::new(Mutex::new(VecDeque::new())),
             outbox: Arc::new(Mutex::new(Vec::new())),
             linked: Arc::new(Mutex::new(None)),
+            queued_publishes: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -80,6 +88,10 @@ impl MockTransport {
 
     fn sent_messages(&self) -> Vec<(NodeId, ClusterMessage)> {
         self.outbox.lock().unwrap().clone()
+    }
+
+    fn queued_publishes(&self) -> Vec<QueuedPublish> {
+        self.queued_publishes.lock().unwrap().clone()
     }
 }
 
@@ -136,10 +148,79 @@ impl ClusterTransport for MockTransport {
         self.inbox.lock().unwrap().push_front(msg);
     }
 
-    async fn queue_local_publish(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
+    async fn queue_local_publish(&self, topic: String, payload: Vec<u8>, qos: u8) {
+        self.queued_publishes
+            .lock()
+            .unwrap()
+            .push(QueuedPublish::Plain(topic, payload, qos));
+    }
+
+    async fn queue_forwarded_publish(&self, topic: String, payload: Vec<u8>, qos: u8) {
+        self.queued_publishes
+            .lock()
+            .unwrap()
+            .push(QueuedPublish::Forwarded(topic, payload, qos));
+    }
 
     async fn queue_local_publish_retained(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
     async fn queue_retained_refresh(&self, _topic: String) {}
+}
+
+fn forwarded_publish(origin: NodeId, topic: &str) -> ClusterMessage {
+    ClusterMessage::ForwardedPublish(crate::cluster::protocol::ForwardedPublish::new(
+        origin,
+        topic.to_string(),
+        1,
+        false,
+        b"reading".to_vec(),
+        vec![crate::cluster::protocol::ForwardTarget::new(
+            "subscriber".to_string(),
+            1,
+        )],
+    ))
+}
+
+#[tokio::test]
+async fn a_forwarded_publish_is_queued_for_delivery_not_republished_as_a_client() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+
+    ctrl.transport
+        .inject_message(node2, forwarded_publish(node2, "plant/temp"));
+    ctrl.process_messages().await;
+
+    assert_eq!(
+        ctrl.transport.queued_publishes(),
+        vec![QueuedPublish::Forwarded(
+            "plant/temp".to_string(),
+            b"reading".to_vec(),
+            1
+        )]
+    );
+}
+
+#[tokio::test]
+async fn a_forwarded_publish_from_the_message_processor_is_queued_for_delivery() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+
+    ctrl.handle_filtered_message(InboundMessage {
+        from: node2,
+        message: forwarded_publish(node2, "plant/temp"),
+        received_at: 0,
+    })
+    .await;
+
+    assert_eq!(
+        ctrl.transport.queued_publishes(),
+        vec![QueuedPublish::Forwarded(
+            "plant/temp".to_string(),
+            b"reading".to_vec(),
+            1
+        )]
+    );
 }
 
 #[test]
