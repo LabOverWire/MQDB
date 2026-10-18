@@ -3315,7 +3315,7 @@ async fn a_forwarded_publish_reaches_local_subscribers_without_being_forwarded_a
         node1,
         Arc::clone(&ctrl),
     ));
-    let router = MessageRouter::new().with_event_handler(Arc::clone(&handler) as _);
+    let router = Arc::new(MessageRouter::new().with_event_handler(Arc::clone(&handler) as _));
 
     let (lanes, mut receivers) = DeliveryLanes::channel(8);
     let disconnect_tx = tokio::sync::oneshot::channel().0;
@@ -3336,9 +3336,20 @@ async fn a_forwarded_publish_reaches_local_subscribers_without_being_forwarded_a
         .await
         .unwrap();
 
-    crate::cluster::deliver_forwarded_publish(&router, "plant/temp", b"21.5".to_vec(), 1).await;
+    crate::cluster::ForwardedDeliveryLanes::spawn(&router)
+        .deliver(crate::cluster::LocalPublishRequest {
+            topic: "plant/temp".to_string(),
+            payload: b"21.5".to_vec(),
+            qos: 1,
+            kind: crate::cluster::LocalPublishKind::Forwarded,
+            user_properties: Vec::new(),
+        })
+        .await;
 
-    let delivered = receivers.try_recv().unwrap();
+    let delivered = tokio::time::timeout(std::time::Duration::from_secs(1), receivers.recv())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(&delivered.publish.payload[..], b"21.5");
     assert!(
         forwarded_publish_targets(&outbox).is_empty(),

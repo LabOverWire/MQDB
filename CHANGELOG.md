@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-17 — mqdb-cluster 0.4.26, mqdb-cli 0.8.54
+
+### Fixed
+
+- **Messages on one topic reach subscribers on other nodes in order** (#190). A node delivered each publish forwarded from another node in its own task, so messages from one publisher on one topic could reach that node's subscribers in any order; subscribers on the publisher's own node were not affected. With 2000 messages published back to back from node1 at QoS 0 and 1, every subscriber on another node of a 3-node cluster saw 583 to 617 messages arrive after a later one, and 297 to 442 on a 5-node cluster. Now each subscriber receives them in publish order.
+- How it works now: a node hands each forwarded publish to one of 32 delivery lanes chosen by its topic. A lane delivers one message at a time, so a topic keeps its order, while different topics are delivered in parallel.
+
 ## 2026-10-17 — mqdb-cluster 0.4.25, mqdb-cli 0.8.53
 
 ### Fixed

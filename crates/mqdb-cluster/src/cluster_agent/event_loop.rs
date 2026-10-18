@@ -3,9 +3,9 @@
 
 use super::{AdminRequest, ClusteredAgent, MESH_CHECK_INTERVAL_SECS, RunningBroker};
 use crate::cluster::{
-    ClusterMessage, ClusterTransport, LocalPublishKind, LocalPublishRequest, LocalRetainedWriter,
-    NodeController, NodeId, PartitionId, ProcessingBatch, TopicSubscriptionBroadcast,
-    WildcardBroadcast, deliver_forwarded_publish,
+    ClusterMessage, ClusterTransport, ForwardedDeliveryLanes, LocalPublishKind,
+    LocalPublishRequest, LocalRetainedWriter, NodeController, NodeId, PartitionId, ProcessingBatch,
+    TopicSubscriptionBroadcast, WildcardBroadcast,
 };
 use mqtt5::broker::router::MessageRouter;
 use mqtt5::time::Duration;
@@ -667,16 +667,23 @@ impl ClusteredAgent {
     ) {
         const MAX_CONCURRENT: usize = 256;
         let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
+        let forwarded = ForwardedDeliveryLanes::spawn(&router);
 
         while let Ok(req) = rx.recv_async().await {
-            Self::dispatch_local_publish(&admin_client, &router, &retained_writer, &semaphore, req)
-                .await;
+            Self::dispatch_local_publish(
+                &admin_client,
+                &forwarded,
+                &retained_writer,
+                &semaphore,
+                req,
+            )
+            .await;
         }
     }
 
     async fn dispatch_local_publish(
         admin_client: &mqtt5::MqttClient,
-        router: &Arc<MessageRouter>,
+        forwarded: &ForwardedDeliveryLanes,
         retained_writer: &LocalRetainedWriter,
         semaphore: &Arc<tokio::sync::Semaphore>,
         req: LocalPublishRequest,
@@ -685,9 +692,7 @@ impl ClusteredAgent {
             LocalPublishKind::Plain => {
                 Self::spawn_local_publish(admin_client, semaphore, req).await
             }
-            LocalPublishKind::Forwarded => {
-                Self::spawn_forwarded_delivery(router, semaphore, req).await
-            }
+            LocalPublishKind::Forwarded => forwarded.deliver(req).await,
             LocalPublishKind::Retained => {
                 retained_writer
                     .write(&req.topic, &req.payload, req.qos)
@@ -695,21 +700,6 @@ impl ClusteredAgent {
             }
             LocalPublishKind::RetainedRefresh => retained_writer.refresh(&req.topic).await,
         }
-    }
-
-    async fn spawn_forwarded_delivery(
-        router: &Arc<MessageRouter>,
-        semaphore: &Arc<tokio::sync::Semaphore>,
-        req: LocalPublishRequest,
-    ) {
-        let Ok(permit) = Arc::clone(semaphore).acquire_owned().await else {
-            return;
-        };
-        let router = Arc::clone(router);
-        tokio::spawn(async move {
-            deliver_forwarded_publish(&router, &req.topic, req.payload, req.qos).await;
-            drop(permit);
-        });
     }
 
     async fn spawn_local_publish(
@@ -1069,19 +1059,32 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn forwarded_publish_is_delivered_by_the_router_without_the_admin_client() {
-        use mqtt5::broker::router::{DeliveryLanes, SubscriptionRequest};
+    fn forwarded_request(topic: &str, payload: Vec<u8>) -> LocalPublishRequest {
+        LocalPublishRequest {
+            topic: topic.to_string(),
+            payload,
+            qos: 1,
+            kind: LocalPublishKind::Forwarded,
+            user_properties: Vec::new(),
+        }
+    }
 
-        let admin_client = mqtt5::MqttClient::new("mqdb-admin-test");
-        let router = Arc::new(MessageRouter::new());
-        let retained_writer = LocalRetainedWriter::new(
-            Arc::clone(&router),
+    fn retained_writer_for(router: &Arc<MessageRouter>) -> LocalRetainedWriter {
+        LocalRetainedWriter::new(
+            Arc::clone(router),
             Arc::new(RetainedStore::new(NodeId::validated(1).unwrap())),
             Arc::new(RetainedEchoes::new()),
-        );
-        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
-        let (lanes, mut receivers) = DeliveryLanes::channel(8);
+        )
+    }
+
+    async fn router_with_subscriber(
+        topic: &str,
+        capacity: usize,
+    ) -> (Arc<MessageRouter>, mqtt5::broker::router::LaneReceivers) {
+        use mqtt5::broker::router::{DeliveryLanes, SubscriptionRequest};
+
+        let router = Arc::new(MessageRouter::new());
+        let (lanes, receivers) = DeliveryLanes::channel(capacity);
         let disconnect_tx = tokio::sync::oneshot::channel().0;
         router
             .register_client(
@@ -1094,24 +1097,28 @@ mod tests {
         router
             .subscribe(SubscriptionRequest::new(
                 "dashboard",
-                "plant/temp",
+                topic,
                 mqtt5::QoS::AtLeastOnce,
             ))
             .await
             .unwrap();
+        (router, receivers)
+    }
+
+    #[tokio::test]
+    async fn forwarded_publish_is_delivered_by_the_router_without_the_admin_client() {
+        let admin_client = mqtt5::MqttClient::new("mqdb-admin-test");
+        let (router, mut receivers) = router_with_subscriber("plant/temp", 8).await;
+        let retained_writer = retained_writer_for(&router);
+        let forwarded = ForwardedDeliveryLanes::spawn(&router);
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
 
         ClusteredAgent::dispatch_local_publish(
             &admin_client,
-            &router,
+            &forwarded,
             &retained_writer,
             &semaphore,
-            LocalPublishRequest {
-                topic: "plant/temp".to_string(),
-                payload: b"21.5".to_vec(),
-                qos: 1,
-                kind: LocalPublishKind::Forwarded,
-                user_properties: Vec::new(),
-            },
+            forwarded_request("plant/temp", b"21.5".to_vec()),
         )
         .await;
 
@@ -1122,20 +1129,51 @@ mod tests {
         assert_eq!(&delivered.publish.payload[..], b"21.5");
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn forwarded_publishes_on_one_topic_are_delivered_in_order() {
+        const MESSAGES: u32 = 2000;
+        let admin_client = mqtt5::MqttClient::new("mqdb-admin-test");
+        let (router, mut receivers) =
+            router_with_subscriber("plant/temp", usize::try_from(MESSAGES).unwrap()).await;
+        let retained_writer = retained_writer_for(&router);
+        let forwarded = ForwardedDeliveryLanes::spawn(&router);
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(256));
+
+        for sequence in 0..MESSAGES {
+            ClusteredAgent::dispatch_local_publish(
+                &admin_client,
+                &forwarded,
+                &retained_writer,
+                &semaphore,
+                forwarded_request("plant/temp", sequence.to_be_bytes().to_vec()),
+            )
+            .await;
+        }
+
+        let mut received = Vec::new();
+        while received.len() < MESSAGES as usize {
+            let delivered = tokio::time::timeout(Duration::from_secs(5), receivers.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            received.push(u32::from_be_bytes(
+                delivered.publish.payload[..].try_into().unwrap(),
+            ));
+        }
+        assert_eq!(received, (0..MESSAGES).collect::<Vec<_>>());
+    }
+
     #[tokio::test]
     async fn retained_local_publish_is_written_to_the_router_without_the_admin_client() {
         let admin_client = mqtt5::MqttClient::new("mqdb-admin-test");
         let router = Arc::new(MessageRouter::new());
-        let retained_writer = LocalRetainedWriter::new(
-            Arc::clone(&router),
-            Arc::new(RetainedStore::new(NodeId::validated(1).unwrap())),
-            Arc::new(RetainedEchoes::new()),
-        );
+        let retained_writer = retained_writer_for(&router);
+        let forwarded = ForwardedDeliveryLanes::spawn(&router);
         let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
 
         ClusteredAgent::dispatch_local_publish(
             &admin_client,
-            &router,
+            &forwarded,
             &retained_writer,
             &semaphore,
             retained_request("$DB/_presence/c1", b"connect"),
@@ -1148,7 +1186,7 @@ mod tests {
 
         ClusteredAgent::dispatch_local_publish(
             &admin_client,
-            &router,
+            &forwarded,
             &retained_writer,
             &semaphore,
             retained_request("$DB/_presence/c1", b""),
