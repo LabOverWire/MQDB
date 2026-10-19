@@ -70,6 +70,8 @@ pub use idempotency_store::{
 };
 pub use inflight_store::{InflightMessage, InflightStore, InflightStoreError, inflight_key};
 pub(crate) use local_delivery::ForwardedDeliveryLanes;
+#[cfg(test)]
+pub(crate) use local_delivery::subscribe_test_client;
 pub use lwt::{
     LwtAction, LwtError, LwtPrepared, LwtPublisher, determine_lwt_action, generate_lwt_token,
 };

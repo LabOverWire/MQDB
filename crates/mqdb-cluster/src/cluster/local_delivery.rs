@@ -12,13 +12,8 @@ use tracing::warn;
 const FORWARDED_LANES: usize = 32;
 const FORWARDED_LANE_CAPACITY: usize = 1024;
 
-async fn deliver_forwarded_publish(router: &MessageRouter, topic: &str, payload: Vec<u8>, qos: u8) {
-    let publish = PublishPacket::new(topic, payload, QoS::from(qos));
-    router.route_message(&publish, None).await;
-}
-
 pub(crate) struct ForwardedDeliveryLanes {
-    lanes: [flume::Sender<LocalPublishRequest>; FORWARDED_LANES],
+    lanes: [flume::Sender<PublishPacket>; FORWARDED_LANES],
 }
 
 impl ForwardedDeliveryLanes {
@@ -33,8 +28,9 @@ impl ForwardedDeliveryLanes {
 
     pub(crate) async fn deliver(&self, request: LocalPublishRequest) {
         let lane = &self.lanes[lane_for(&request.topic)];
-        if let Err(e) = lane.send_async(request).await {
-            warn!(topic = %e.0.topic, "forwarded delivery lane closed, dropping message");
+        let publish = PublishPacket::new(request.topic, request.payload, QoS::from(request.qos));
+        if let Err(e) = lane.send_async(publish).await {
+            warn!(topic = %e.0.topic_name, "forwarded delivery lane closed, dropping message");
         }
     }
 }
@@ -45,17 +41,42 @@ fn lane_for(topic: &str) -> usize {
     usize::from(hasher.finish().to_le_bytes()[0]) % FORWARDED_LANES
 }
 
-async fn run_lane(router: Arc<MessageRouter>, rx: flume::Receiver<LocalPublishRequest>) {
-    while let Ok(request) = rx.recv_async().await {
-        deliver_forwarded_publish(&router, &request.topic, request.payload, request.qos).await;
+async fn run_lane(router: Arc<MessageRouter>, rx: flume::Receiver<PublishPacket>) {
+    while let Ok(publish) = rx.recv_async().await {
+        router.route_message(&publish, None).await;
     }
+}
+
+#[cfg(test)]
+pub(crate) async fn subscribe_test_client(
+    router: &MessageRouter,
+    client_id: &str,
+    topic: &str,
+    capacity: usize,
+) -> mqtt5::broker::router::LaneReceivers {
+    use mqtt5::broker::router::{DeliveryLanes, SubscriptionRequest};
+
+    let (lanes, receivers) = DeliveryLanes::channel(capacity);
+    let disconnect_tx = tokio::sync::oneshot::channel().0;
+    router
+        .register_client(
+            client_id.to_string(),
+            lanes,
+            router.queue_handle(client_id),
+            disconnect_tx,
+        )
+        .await;
+    router
+        .subscribe(SubscriptionRequest::new(client_id, topic, QoS::AtLeastOnce))
+        .await
+        .unwrap();
+    receivers
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cluster::LocalPublishKind;
-    use mqtt5::broker::router::{DeliveryLanes, LaneReceivers, SubscriptionRequest};
     use std::time::Duration;
 
     fn forwarded(topic: &str, payload: &[u8]) -> LocalPublishRequest {
@@ -68,29 +89,6 @@ mod tests {
         }
     }
 
-    async fn subscribe(
-        router: &MessageRouter,
-        client_id: &str,
-        topic: &str,
-        capacity: usize,
-    ) -> LaneReceivers {
-        let (lanes, receivers) = DeliveryLanes::channel(capacity);
-        let disconnect_tx = tokio::sync::oneshot::channel().0;
-        router
-            .register_client(
-                client_id.to_string(),
-                lanes,
-                router.queue_handle(client_id),
-                disconnect_tx,
-            )
-            .await;
-        router
-            .subscribe(SubscriptionRequest::new(client_id, topic, QoS::AtLeastOnce))
-            .await
-            .unwrap();
-        receivers
-    }
-
     #[tokio::test]
     async fn a_stalled_subscriber_does_not_delay_topics_on_other_lanes() {
         let stalled_topic = "plant/stalled";
@@ -99,8 +97,8 @@ mod tests {
             .find(|topic| lane_for(topic) != lane_for(stalled_topic))
             .unwrap();
         let router = Arc::new(MessageRouter::new());
-        let stalled_receivers = subscribe(&router, "stalled", stalled_topic, 1).await;
-        let mut live_receivers = subscribe(&router, "live", &live_topic, 8).await;
+        let stalled_receivers = subscribe_test_client(&router, "stalled", stalled_topic, 1).await;
+        let mut live_receivers = subscribe_test_client(&router, "live", &live_topic, 8).await;
         let delivery = ForwardedDeliveryLanes::spawn(&router);
 
         delivery

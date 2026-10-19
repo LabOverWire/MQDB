@@ -1047,7 +1047,7 @@ pub(super) async fn clear_expired_session_subscriptions<T: ClusterTransport>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cluster::{RetainedEchoes, RetainedStore};
+    use crate::cluster::{RetainedEchoes, RetainedStore, subscribe_test_client};
 
     fn retained_request(topic: &str, payload: &[u8]) -> LocalPublishRequest {
         LocalPublishRequest {
@@ -1077,38 +1077,11 @@ mod tests {
         )
     }
 
-    async fn router_with_subscriber(
-        topic: &str,
-        capacity: usize,
-    ) -> (Arc<MessageRouter>, mqtt5::broker::router::LaneReceivers) {
-        use mqtt5::broker::router::{DeliveryLanes, SubscriptionRequest};
-
-        let router = Arc::new(MessageRouter::new());
-        let (lanes, receivers) = DeliveryLanes::channel(capacity);
-        let disconnect_tx = tokio::sync::oneshot::channel().0;
-        router
-            .register_client(
-                "dashboard".to_string(),
-                lanes,
-                router.queue_handle("dashboard"),
-                disconnect_tx,
-            )
-            .await;
-        router
-            .subscribe(SubscriptionRequest::new(
-                "dashboard",
-                topic,
-                mqtt5::QoS::AtLeastOnce,
-            ))
-            .await
-            .unwrap();
-        (router, receivers)
-    }
-
     #[tokio::test]
     async fn forwarded_publish_is_delivered_by_the_router_without_the_admin_client() {
         let admin_client = mqtt5::MqttClient::new("mqdb-admin-test");
-        let (router, mut receivers) = router_with_subscriber("plant/temp", 8).await;
+        let router = Arc::new(MessageRouter::new());
+        let mut receivers = subscribe_test_client(&router, "dashboard", "plant/temp", 8).await;
         let retained_writer = retained_writer_for(&router);
         let forwarded = ForwardedDeliveryLanes::spawn(&router);
         let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
@@ -1131,15 +1104,17 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn forwarded_publishes_on_one_topic_are_delivered_in_order() {
-        const MESSAGES: u32 = 2000;
+        const MESSAGES: usize = 2000;
         let admin_client = mqtt5::MqttClient::new("mqdb-admin-test");
-        let (router, mut receivers) =
-            router_with_subscriber("plant/temp", usize::try_from(MESSAGES).unwrap()).await;
+        let router = Arc::new(MessageRouter::new());
+        let mut receivers =
+            subscribe_test_client(&router, "dashboard", "plant/temp", MESSAGES).await;
         let retained_writer = retained_writer_for(&router);
         let forwarded = ForwardedDeliveryLanes::spawn(&router);
         let semaphore = Arc::new(tokio::sync::Semaphore::new(256));
 
         for sequence in 0..MESSAGES {
+            let sequence = u32::try_from(sequence).unwrap();
             ClusteredAgent::dispatch_local_publish(
                 &admin_client,
                 &forwarded,
@@ -1150,17 +1125,16 @@ mod tests {
             .await;
         }
 
-        let mut received = Vec::new();
-        while received.len() < MESSAGES as usize {
+        let mut received = [0u32; MESSAGES];
+        for slot in &mut received {
             let delivered = tokio::time::timeout(Duration::from_secs(5), receivers.recv())
                 .await
                 .unwrap()
                 .unwrap();
-            received.push(u32::from_be_bytes(
-                delivered.publish.payload[..].try_into().unwrap(),
-            ));
+            *slot = u32::from_be_bytes(delivered.publish.payload[..].try_into().unwrap());
         }
-        assert_eq!(received, (0..MESSAGES).collect::<Vec<_>>());
+        let expected: [u32; MESSAGES] = std::array::from_fn(|i| u32::try_from(i).unwrap());
+        assert_eq!(received, expected);
     }
 
     #[tokio::test]
