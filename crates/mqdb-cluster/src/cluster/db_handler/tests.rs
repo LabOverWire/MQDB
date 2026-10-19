@@ -3296,7 +3296,7 @@ fn forwarded_publish_targets(outbox: &Mutex<Vec<(NodeId, ClusterMessage)>>) -> V
 #[tokio::test]
 async fn a_forwarded_publish_reaches_local_subscribers_without_being_forwarded_again() {
     use mqtt5::broker::events::{BrokerEventHandler, ClientPublishEvent};
-    use mqtt5::broker::router::{DeliveryLanes, MessageRouter, SubscriptionRequest};
+    use mqtt5::broker::router::MessageRouter;
 
     let node1 = NodeId::validated(1).unwrap();
     let node2 = NodeId::validated(2).unwrap();
@@ -3315,30 +3315,25 @@ async fn a_forwarded_publish_reaches_local_subscribers_without_being_forwarded_a
         node1,
         Arc::clone(&ctrl),
     ));
-    let router = MessageRouter::new().with_event_handler(Arc::clone(&handler) as _);
+    let router = Arc::new(MessageRouter::new().with_event_handler(Arc::clone(&handler) as _));
 
-    let (lanes, mut receivers) = DeliveryLanes::channel(8);
-    let disconnect_tx = tokio::sync::oneshot::channel().0;
-    router
-        .register_client(
-            "local-dashboard".to_string(),
-            lanes,
-            router.queue_handle("local-dashboard"),
-            disconnect_tx,
-        )
+    let mut receivers =
+        crate::cluster::subscribe_test_client(&router, "local-dashboard", "plant/temp", 8).await;
+
+    crate::cluster::ForwardedDeliveryLanes::spawn(&router)
+        .deliver(crate::cluster::LocalPublishRequest {
+            topic: "plant/temp".to_string(),
+            payload: b"21.5".to_vec(),
+            qos: 1,
+            kind: crate::cluster::LocalPublishKind::Forwarded,
+            user_properties: Vec::new(),
+        })
         .await;
-    router
-        .subscribe(SubscriptionRequest::new(
-            "local-dashboard",
-            "plant/temp",
-            mqtt5::QoS::AtLeastOnce,
-        ))
+
+    let delivered = tokio::time::timeout(std::time::Duration::from_secs(1), receivers.recv())
         .await
+        .unwrap()
         .unwrap();
-
-    crate::cluster::deliver_forwarded_publish(&router, "plant/temp", b"21.5".to_vec(), 1).await;
-
-    let delivered = receivers.try_recv().unwrap();
     assert_eq!(&delivered.publish.payload[..], b"21.5");
     assert!(
         forwarded_publish_targets(&outbox).is_empty(),
