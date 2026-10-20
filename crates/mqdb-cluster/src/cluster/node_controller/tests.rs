@@ -55,7 +55,7 @@ fn set_unique_group(
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum QueuedPublish {
     Plain(String, Vec<u8>, u8),
-    Forwarded(String, Vec<u8>, u8),
+    Routed(RoutedPublish),
 }
 
 #[derive(Debug, Clone)]
@@ -155,11 +155,11 @@ impl ClusterTransport for MockTransport {
             .push(QueuedPublish::Plain(topic, payload, qos));
     }
 
-    async fn queue_forwarded_publish(&self, topic: String, payload: Vec<u8>, qos: u8) {
+    async fn queue_routed_publish(&self, publish: RoutedPublish) {
         self.queued_publishes
             .lock()
             .unwrap()
-            .push(QueuedPublish::Forwarded(topic, payload, qos));
+            .push(QueuedPublish::Routed(publish));
     }
 
     async fn queue_local_publish_retained(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
@@ -167,17 +167,24 @@ impl ClusterTransport for MockTransport {
 }
 
 fn forwarded_publish(origin: NodeId, topic: &str) -> ClusterMessage {
-    ClusterMessage::ForwardedPublish(crate::cluster::protocol::ForwardedPublish::new(
-        origin,
-        topic.to_string(),
-        1,
-        false,
-        b"reading".to_vec(),
-        vec![crate::cluster::protocol::ForwardTarget::new(
-            "subscriber".to_string(),
+    ClusterMessage::ForwardedPublish(
+        crate::cluster::protocol::ForwardedPublish::new(
+            origin,
+            topic.to_string(),
             1,
-        )],
-    ))
+            false,
+            b"reading".to_vec(),
+            vec![crate::cluster::protocol::ForwardTarget::new(
+                "subscriber".to_string(),
+                1,
+            )],
+        )
+        .with_user_properties(vec![(
+            "x-origin-client-id".to_string(),
+            "sensor-7".to_string(),
+        )])
+        .with_order_key(Some("plant/temp/sensor-7".to_string())),
+    )
 }
 
 #[tokio::test]
@@ -192,11 +199,13 @@ async fn a_forwarded_publish_is_queued_for_delivery_not_republished_as_a_client(
 
     assert_eq!(
         ctrl.transport.queued_publishes(),
-        vec![QueuedPublish::Forwarded(
-            "plant/temp".to_string(),
-            b"reading".to_vec(),
-            1
-        )]
+        vec![QueuedPublish::Routed(RoutedPublish {
+            topic: "plant/temp".to_string(),
+            payload: b"reading".to_vec(),
+            qos: 1,
+            user_properties: vec![("x-origin-client-id".to_string(), "sensor-7".to_string())],
+            order_key: Some("plant/temp/sensor-7".to_string()),
+        })]
     );
 }
 
@@ -215,12 +224,57 @@ async fn a_forwarded_publish_from_the_message_processor_is_queued_for_delivery()
 
     assert_eq!(
         ctrl.transport.queued_publishes(),
-        vec![QueuedPublish::Forwarded(
-            "plant/temp".to_string(),
-            b"reading".to_vec(),
-            1
-        )]
+        vec![QueuedPublish::Routed(RoutedPublish {
+            topic: "plant/temp".to_string(),
+            payload: b"reading".to_vec(),
+            qos: 1,
+            user_properties: vec![("x-origin-client-id".to_string(), "sensor-7".to_string())],
+            order_key: Some("plant/temp/sensor-7".to_string()),
+        })]
     );
+}
+
+#[tokio::test]
+async fn a_change_event_reaches_local_and_remote_subscribers_with_its_origin() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let ctrl = create_test_controller(node1, MockTransport::new(node1));
+    ctrl.stores()
+        .topics
+        .subscribe("$DB/ev/events/r1", "remote-watcher", PartitionId::ZERO, 1)
+        .unwrap();
+    ctrl.stores().client_locations.set("remote-watcher", node2);
+    let event = mqdb_core::events::ChangeEvent::update(
+        "ev".to_string(),
+        "r1".to_string(),
+        serde_json::json!({"id": "r1", "n": 1}),
+    )
+    .with_client_id(Some("editor-1".to_string()));
+    let payload = serde_json::to_vec(&event).unwrap();
+
+    ctrl.publish_and_deliver_change_event(event, "op-1").await;
+
+    let origin = vec![("x-origin-client-id".to_string(), "editor-1".to_string())];
+    assert_eq!(
+        ctrl.transport.queued_publishes(),
+        vec![QueuedPublish::Routed(RoutedPublish {
+            topic: "$DB/ev/events/r1".to_string(),
+            payload: payload.clone(),
+            qos: 1,
+            user_properties: origin.clone(),
+            order_key: Some("ev/r1".to_string()),
+        })]
+    );
+    let sent = ctrl.transport.sent_messages();
+    assert_eq!(sent.len(), 1);
+    let (to, ClusterMessage::ForwardedPublish(forwarded)) = &sent[0] else {
+        panic!("expected a forwarded publish, got {:?}", sent[0].1);
+    };
+    assert_eq!(*to, node2);
+    assert_eq!(forwarded.topic, "$DB/ev/events/r1");
+    assert_eq!(forwarded.payload, payload);
+    assert_eq!(forwarded.user_properties, origin);
+    assert_eq!(forwarded.order_key.as_deref(), Some("ev/r1"));
 }
 
 #[test]

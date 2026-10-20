@@ -66,6 +66,7 @@ pub(crate) fn cmd_dev_test(
     wildcards: bool,
     retained: bool,
     lwt: bool,
+    events: bool,
     ownership: bool,
     sharing: bool,
     presence: bool,
@@ -81,6 +82,7 @@ pub(crate) fn cmd_dev_test(
             && !wildcards
             && !retained
             && !lwt
+            && !events
             && !ownership
             && !sharing
             && !presence
@@ -111,6 +113,10 @@ pub(crate) fn cmd_dev_test(
 
     if lwt || run_all {
         run_test_lwt(nodes, &ports);
+    }
+
+    if events || run_all {
+        run_test_events(nodes, &ports);
     }
 
     if ownership {
@@ -512,6 +518,121 @@ fn run_test_lwt(nodes: u8, ports: &[u16]) {
     }
 
     println!("\nResults: {passed} passed, {failed} failed\n");
+}
+
+fn run_test_events(nodes: u8, ports: &[u16]) {
+    println!("=== Cross-Node Change Event Test ({nodes} nodes) ===\n");
+
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mqdb"));
+    let mut passed = 0;
+    let mut failed = 0;
+
+    let ts = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_millis());
+    let entity = format!("events_test_{ts}");
+    let expected = ports.len() * 3;
+
+    let watchers: Vec<Option<std::process::Child>> = ports
+        .iter()
+        .map(|&port| {
+            spawn_event_watcher(port, &entity, expected, &format!("{entity}-watcher-{port}"))
+        })
+        .collect();
+    std::thread::sleep(Duration::from_secs(2));
+
+    for (idx, &port) in ports.iter().enumerate() {
+        let node = idx + 1;
+        let id = format!("n{node}");
+        let succeeded =
+            |args: &[&str]| mqdb_cmd(&exe, args, port).is_ok_and(|o| o.status.success());
+        let created = succeeded(&[
+            "create",
+            &entity,
+            "-d",
+            &format!(r#"{{"id":"{id}","n":0}}"#),
+        ]);
+        let updated = succeeded(&["update", &entity, &id, "-d", r#"{"n":1}"#]);
+        let deleted = succeeded(&["delete", &entity, &id]);
+        record(
+            &mut passed,
+            &mut failed,
+            &format!("Create, update and delete via Node {node}"),
+            created && updated && deleted,
+        );
+    }
+
+    for (idx, watcher) in watchers.into_iter().enumerate() {
+        let node = idx + 1;
+        let events = watcher
+            .and_then(|child| child.wait_with_output().ok())
+            .map(|output| record_operations(&String::from_utf8_lossy(&output.stdout)))
+            .unwrap_or_default();
+        let in_order = (1..=ports.len()).all(|writer| {
+            let id = format!("n{writer}");
+            events
+                .iter()
+                .filter(|(event_id, _)| *event_id == id)
+                .map(|(_, operation)| operation.as_str())
+                .eq(["Create", "Update", "Delete"])
+        });
+        record(
+            &mut passed,
+            &mut failed,
+            &format!(
+                "Watcher on Node {node} got {}/{expected} events, each record in order",
+                events.len()
+            ),
+            events.len() == expected && in_order,
+        );
+    }
+
+    println!("\nResults: {passed} passed, {failed} failed\n");
+}
+
+fn spawn_event_watcher(
+    port: u16,
+    entity: &str,
+    expected: usize,
+    client_id: &str,
+) -> Option<std::process::Child> {
+    Command::new("mosquitto_sub")
+        .args([
+            "-V",
+            "mqttv5",
+            "-i",
+            client_id,
+            "-h",
+            "127.0.0.1",
+            "-p",
+            &port.to_string(),
+            "-u",
+            "admin",
+            "-P",
+            "admin",
+            "-q",
+            "1",
+            "-t",
+            &format!("$DB/{entity}/events/#"),
+            "-C",
+            &expected.to_string(),
+            "-W",
+            "20",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .ok()
+}
+
+fn record_operations(output: &str) -> Vec<(String, String)> {
+    output
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|event| {
+            Some((
+                event.get("id")?.as_str()?.to_string(),
+                event.get("operation")?.as_str()?.to_string(),
+            ))
+        })
+        .collect()
 }
 
 fn run_pubsub_test(pub_port: u16, sub_port: u16, topic: &str, msg: &str) -> bool {

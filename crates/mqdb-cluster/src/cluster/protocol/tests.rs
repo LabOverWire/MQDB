@@ -204,6 +204,86 @@ fn forwarded_publish_roundtrip() {
 }
 
 #[test]
+fn forwarded_publish_carries_user_properties_and_order_key() {
+    let origin = NodeId::validated(2).unwrap();
+    let fwd = ForwardedPublish::new(
+        origin,
+        "$DB/ev/events/r1".to_string(),
+        1,
+        false,
+        b"{}".to_vec(),
+        vec![ForwardTarget::new("watcher".to_string(), 1)],
+    )
+    .with_user_properties(vec![
+        ("x-origin-client-id".to_string(), "editor-1".to_string()),
+        ("trace".to_string(), String::new()),
+    ])
+    .with_order_key(Some("ev/r1".to_string()));
+
+    let decoded = ForwardedPublish::from_bytes(&fwd.to_bytes()).unwrap();
+
+    assert_eq!(
+        decoded.user_properties,
+        vec![
+            ("x-origin-client-id".to_string(), "editor-1".to_string()),
+            ("trace".to_string(), String::new()),
+        ]
+    );
+    assert_eq!(decoded.order_key.as_deref(), Some("ev/r1"));
+    assert_eq!(decoded.targets.len(), 1);
+}
+
+#[test]
+fn forwarded_publish_from_a_node_without_the_trailer_decodes_with_no_properties() {
+    let origin = NodeId::validated(2).unwrap();
+    let fwd = ForwardedPublish::new(
+        origin,
+        "sensors/temp".to_string(),
+        1,
+        false,
+        b"25.5".to_vec(),
+        vec![ForwardTarget::new("client-a".to_string(), 1)],
+    );
+    let bytes = fwd.to_bytes();
+    let without_trailer = &bytes[..bytes.len() - 4];
+
+    let decoded = ForwardedPublish::from_bytes(without_trailer).unwrap();
+
+    assert_eq!(decoded.payload, b"25.5");
+    assert_eq!(decoded.targets.len(), 1);
+    assert!(decoded.user_properties.is_empty());
+    assert_eq!(decoded.order_key, None);
+}
+
+#[test]
+fn forwarded_publish_with_more_targets_than_fit_keeps_its_properties() {
+    let origin = NodeId::validated(2).unwrap();
+    let targets = (0..300)
+        .map(|n| ForwardTarget::new(format!("watcher-{n}"), 1))
+        .collect();
+    let fwd = ForwardedPublish::new(
+        origin,
+        "$DB/ev/events/r1".to_string(),
+        1,
+        false,
+        b"{}".to_vec(),
+        targets,
+    )
+    .with_user_properties(vec![(
+        "x-origin-client-id".to_string(),
+        "editor-1".to_string(),
+    )]);
+
+    let decoded = ForwardedPublish::from_bytes(&fwd.to_bytes()).unwrap();
+
+    assert_eq!(decoded.targets.len(), 255);
+    assert_eq!(
+        decoded.user_properties,
+        vec![("x-origin-client-id".to_string(), "editor-1".to_string())]
+    );
+}
+
+#[test]
 fn forwarded_publish_empty_targets() {
     let origin = NodeId::validated(1).unwrap();
     let fwd = ForwardedPublish::new(origin, "test/topic".to_string(), 0, true, vec![], vec![]);

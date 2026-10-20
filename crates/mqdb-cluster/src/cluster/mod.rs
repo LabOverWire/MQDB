@@ -69,7 +69,7 @@ pub use idempotency_store::{
     idempotency_storage_key,
 };
 pub use inflight_store::{InflightMessage, InflightStore, InflightStoreError, inflight_key};
-pub(crate) use local_delivery::ForwardedDeliveryLanes;
+pub(crate) use local_delivery::RoutedDeliveryLanes;
 #[cfg(test)]
 pub(crate) use local_delivery::subscribe_test_client;
 pub use lwt::{
@@ -135,7 +135,8 @@ pub use topic_trie::{
     SubscriptionType, TopicTrie, WildcardSubscriber, is_wildcard_pattern, validate_pattern,
 };
 pub use transport::{
-    ClusterMessage, ClusterTransport, InboundMessage, TransportConfig, TransportError,
+    ClusterMessage, ClusterTransport, InboundMessage, RoutedPublish, TransportConfig,
+    TransportError,
 };
 pub use wildcard_store::{WildcardEntry, WildcardStore, WildcardStoreError, wildcard_key};
 pub use write_log::PartitionWriteLog;

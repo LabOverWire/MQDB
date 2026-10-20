@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-19 — mqdb-cluster 0.4.27, mqdb-cli 0.8.55
+
+### Fixed
+
+- **Cluster change events reach subscribers** (#195). A node published each change event through its internal admin client on `$DB/{entity}/events/...`, and its own publish handler took every `$DB/` topic for a database request, so no subscriber on any node ever received one. On 3- and 5-node clusters with a watcher on every node, the previous release delivered 0 events for creates, updates and deletes made through any node. Now every watcher receives every event, in commit order per record. In the same test, 2000 updates to one record arrived on every node with none out of order, and scoped entities (`--event-scope`) arrived 30 of 30 records in order.
+- How it works now: the node that commits the write delivers the event straight into its broker router, and sends it to every node with a matching subscriber, together with its user properties (`x-origin-client-id`) and an order key for the record. Each node delivers events through the per-topic lanes from 0.4.26, choosing the lane by record, so one record's created, updated and deleted events stay in order even on scoped topics. Events replayed from the outbox at startup take the same path.
+- **Subscriptions such as `$DB/x/events/#` match on other nodes.** The cluster's wildcard index never matched a topic starting with `$`, so a node never forwarded any `$` topic to wildcard subscribers on other nodes. Now only filters whose first level is a wildcard (`#`, `+/...`) skip `$` topics, as MQTT requires.
+- `ForwardedPublish` now carries user properties and an order key after its target list. Older nodes ignore those bytes and still decode the message. It also no longer corrupts the message when more than 255 targets are on one node, or a target client id is longer than 255 bytes; those targets are left out of the list, which the receiving node does not use.
+
+### Added
+
+- `mqdb dev test --events`: a watcher on every node must receive the created, updated and deleted events of a record written through each node, in order.
+
+### Known limitations
+
+- Writes executed on the primary for a request from another node publish their events without `client_id`, `x-origin-client-id` or the `--event-scope` topic (#199).
+- Event order is kept per record while the record's primary stays the same, not across a failover.
+
 ## 2026-10-19 — mqdb-cluster 0.4.26, mqdb-cli 0.8.54
 
 ### Fixed

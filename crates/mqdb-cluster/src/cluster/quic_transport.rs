@@ -1,7 +1,9 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use super::transport::{ClusterMessage, ClusterTransport, InboundMessage, TransportError};
+use super::transport::{
+    ClusterMessage, ClusterTransport, InboundMessage, RoutedPublish, TransportError,
+};
 use super::{NodeId, PartitionId};
 use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
@@ -32,7 +34,7 @@ const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalPublishKind {
     Plain,
-    Forwarded,
+    Routed,
     Retained,
     RetainedRefresh,
 }
@@ -43,6 +45,7 @@ pub struct LocalPublishRequest {
     pub qos: u8,
     pub kind: LocalPublishKind,
     pub user_properties: Vec<(String, String)>,
+    pub order_key: Option<String>,
 }
 
 pub struct QuicDirectTransport {
@@ -486,6 +489,7 @@ impl ClusterTransport for QuicDirectTransport {
             qos,
             kind: LocalPublishKind::Plain,
             user_properties: Vec::new(),
+            order_key: None,
         });
     }
 
@@ -502,16 +506,18 @@ impl ClusterTransport for QuicDirectTransport {
             qos,
             kind: LocalPublishKind::Plain,
             user_properties,
+            order_key: None,
         });
     }
 
-    async fn queue_forwarded_publish(&self, topic: String, payload: Vec<u8>, qos: u8) {
+    async fn queue_routed_publish(&self, publish: RoutedPublish) {
         self.enqueue_local_publish(LocalPublishRequest {
-            topic,
-            payload,
-            qos,
-            kind: LocalPublishKind::Forwarded,
-            user_properties: Vec::new(),
+            topic: publish.topic,
+            payload: publish.payload,
+            qos: publish.qos,
+            kind: LocalPublishKind::Routed,
+            user_properties: publish.user_properties,
+            order_key: publish.order_key,
         });
     }
 
@@ -522,6 +528,7 @@ impl ClusterTransport for QuicDirectTransport {
             qos,
             kind: LocalPublishKind::Retained,
             user_properties: Vec::new(),
+            order_key: None,
         });
     }
 
@@ -532,6 +539,7 @@ impl ClusterTransport for QuicDirectTransport {
             qos: 0,
             kind: LocalPublishKind::RetainedRefresh,
             user_properties: Vec::new(),
+            order_key: None,
         });
     }
 }

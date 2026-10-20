@@ -3320,13 +3320,14 @@ async fn a_forwarded_publish_reaches_local_subscribers_without_being_forwarded_a
     let mut receivers =
         crate::cluster::subscribe_test_client(&router, "local-dashboard", "plant/temp", 8).await;
 
-    crate::cluster::ForwardedDeliveryLanes::spawn(&router)
+    crate::cluster::RoutedDeliveryLanes::spawn(&router)
         .deliver(crate::cluster::LocalPublishRequest {
             topic: "plant/temp".to_string(),
             payload: b"21.5".to_vec(),
             qos: 1,
-            kind: crate::cluster::LocalPublishKind::Forwarded,
+            kind: crate::cluster::LocalPublishKind::Routed,
             user_properties: Vec::new(),
+            order_key: None,
         })
         .await;
 

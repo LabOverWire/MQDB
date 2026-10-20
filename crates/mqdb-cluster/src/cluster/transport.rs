@@ -490,6 +490,15 @@ impl InboundMessage {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutedPublish {
+    pub topic: String,
+    pub payload: Vec<u8>,
+    pub qos: u8,
+    pub user_properties: Vec<(String, String)>,
+    pub order_key: Option<String>,
+}
+
 pub trait ClusterTransport: Send + Sync + Debug + Clone {
     fn local_node(&self) -> NodeId;
 
@@ -529,13 +538,16 @@ pub trait ClusterTransport: Send + Sync + Debug + Clone {
         qos: u8,
     ) -> impl std::future::Future<Output = ()> + Send;
 
-    fn queue_forwarded_publish(
+    fn queue_routed_publish(
         &self,
-        topic: String,
-        payload: Vec<u8>,
-        qos: u8,
+        publish: RoutedPublish,
     ) -> impl std::future::Future<Output = ()> + Send {
-        self.queue_local_publish(topic, payload, qos)
+        self.queue_local_publish_with_properties(
+            publish.topic,
+            publish.payload,
+            publish.qos,
+            publish.user_properties,
+        )
     }
 
     fn queue_local_publish_retained(

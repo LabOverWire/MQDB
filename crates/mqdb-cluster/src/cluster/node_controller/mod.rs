@@ -21,10 +21,11 @@ use super::entity;
 use super::heartbeat::{HeartbeatManager, NodeStatus};
 use super::migration::{MigrationManager, MigrationPhase};
 use super::protocol::{
-    BatchReadRequest, CatchupRequest, ForwardedPublish, JsonDbOp, JsonDbRequest, JsonDbResponse,
-    QueryRequest, QueryResponse, ReplicationWrite, UniqueCommitRequest, UniqueCommitResponse,
-    UniqueReassertRequest, UniqueReleaseRequest, UniqueReleaseResponse, UniqueReserveRequest,
-    UniqueReserveResponse, UniqueReserveStatus, UniqueSealRequest, UniqueSealResponse,
+    BatchReadRequest, CatchupRequest, ForwardTarget, ForwardedPublish, JsonDbOp, JsonDbRequest,
+    JsonDbResponse, QueryRequest, QueryResponse, ReplicationWrite, UniqueCommitRequest,
+    UniqueCommitResponse, UniqueReassertRequest, UniqueReleaseRequest, UniqueReleaseResponse,
+    UniqueReserveRequest, UniqueReserveResponse, UniqueReserveStatus, UniqueSealRequest,
+    UniqueSealResponse,
 };
 use super::query_coordinator::QueryCoordinator;
 use super::quorum::PendingWrites;
@@ -37,7 +38,9 @@ use super::replication::{ReplicaRole, ReplicaState};
 use super::retained_store::RetainedMessage;
 use super::snapshot::{SnapshotBuilder, SnapshotRequest, SnapshotSender};
 use super::store_manager::StoreManager;
-use super::transport::{ClusterMessage, ClusterTransport, InboundMessage, TransportConfig};
+use super::transport::{
+    ClusterMessage, ClusterTransport, InboundMessage, RoutedPublish, TransportConfig,
+};
 use super::write_log::PartitionWriteLog;
 use super::{Epoch, NodeId, PartitionId, PartitionMap, PartitionMapExt};
 use mqdb_core::storage::StorageBackend;
@@ -1216,7 +1219,7 @@ impl<T: ClusterTransport> NodeController<T> {
         );
 
         self.transport
-            .queue_forwarded_publish(fwd.topic.clone(), fwd.payload.clone(), fwd.qos)
+            .queue_routed_publish(routed_from_forwarded(fwd))
             .await;
     }
 
@@ -1407,6 +1410,31 @@ impl<T: ClusterTransport> NodeController<T> {
         None
     }
 
+    pub(crate) fn connected_node(&self, client_id: &str) -> Option<NodeId> {
+        self.stores.client_locations.get(client_id).or_else(|| {
+            self.stores
+                .sessions
+                .get(client_id)
+                .filter(|s| s.connected == 1)
+                .and_then(|s| NodeId::validated(s.connected_node))
+        })
+    }
+
+    pub(crate) fn remote_targets(
+        &self,
+        targets: impl IntoIterator<Item = ForwardTarget>,
+    ) -> HashMap<NodeId, Vec<ForwardTarget>> {
+        let mut remote_nodes: HashMap<NodeId, Vec<ForwardTarget>> = HashMap::new();
+        for target in targets {
+            if let Some(target_node) = self.connected_node(&target.client_id)
+                && target_node != self.node_id
+            {
+                remote_nodes.entry(target_node).or_default().push(target);
+            }
+        }
+        remote_nodes
+    }
+
     async fn handle_forwarded_publish(&mut self, from: NodeId, fwd: &ForwardedPublish) {
         let fingerprint = Self::forward_fingerprint(fwd);
 
@@ -1440,7 +1468,7 @@ impl<T: ClusterTransport> NodeController<T> {
         );
 
         self.transport
-            .queue_forwarded_publish(fwd.topic.clone(), fwd.payload.clone(), fwd.qos)
+            .queue_routed_publish(routed_from_forwarded(fwd))
             .await;
     }
 
@@ -1728,3 +1756,13 @@ impl std::fmt::Display for ReplicationError {
 }
 
 impl std::error::Error for ReplicationError {}
+
+fn routed_from_forwarded(fwd: &ForwardedPublish) -> RoutedPublish {
+    RoutedPublish {
+        topic: fwd.topic.clone(),
+        payload: fwd.payload.clone(),
+        qos: fwd.qos,
+        user_properties: fwd.user_properties.clone(),
+        order_key: fwd.order_key.clone(),
+    }
+}

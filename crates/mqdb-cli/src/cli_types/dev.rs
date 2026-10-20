@@ -44,6 +44,8 @@ pub(crate) enum DevAction {
         retained: bool,
         #[arg(long, help = "Run Last Will & Testament tests")]
         lwt: bool,
+        #[arg(long, help = "Run change event tests")]
+        events: bool,
         #[arg(long, help = "Run ownership tests")]
         ownership: bool,
         #[arg(long, help = "Run diagram-sharing tests (needs a license)")]
