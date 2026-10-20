@@ -431,6 +431,7 @@ mqdb dev test --constraints         # Constraint tests
 mqdb dev test --wildcards           # Wildcard subscriptions
 mqdb dev test --retained            # Retained messages
 mqdb dev test --lwt                 # Last Will & Testament
+mqdb dev test --events              # Change events on every node, in order per record
 mqdb dev test --ownership --license /path/to/license.key  # Ownership (self-contained, see Section 22)
 mqdb dev test --stress-constraints  # Constraint stress tests
 

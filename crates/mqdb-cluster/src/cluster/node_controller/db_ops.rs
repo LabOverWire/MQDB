@@ -7,8 +7,10 @@ use super::{
     PendingFkWork, PendingUniqueWork, ReplicationWrite, UniqueCheckContinuation,
     UniqueReservationParams, entity,
 };
+use crate::cluster::protocol::{ForwardTarget, ForwardedPublish};
 use crate::cluster::replication::ReplicaState;
 use crate::cluster::store_manager::outbox::{CascadeOutboxPayload, CascadeRemoteOp, OutboxPayload};
+use crate::cluster::{PublishRouter, RoutedPublish};
 use mqdb_core::events::ChangeEvent;
 use mqdb_core::types::{AccessLevel, MAX_LIST_RESULTS, OwnershipDecision};
 use serde_json::Value;
@@ -74,13 +76,17 @@ pub(crate) fn spawn_cascade_ack_waiter(
     });
 }
 
-pub(crate) fn build_change_event_outbox(event: &ChangeEvent) -> OutboxPayload {
-    let topic = event.event_topic(0);
-    let user_properties: Vec<(String, String)> = event
+fn change_event_user_properties(event: &ChangeEvent) -> Vec<(String, String)> {
+    event
         .client_id
         .as_ref()
         .map(|cid| vec![("x-origin-client-id".to_string(), cid.clone())])
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+pub(crate) fn build_change_event_outbox(event: &ChangeEvent) -> OutboxPayload {
+    let topic = event.event_topic(0);
+    let user_properties = change_event_user_properties(event);
     let payload = serde_json::to_vec(event).unwrap_or_default();
     let operation_id = uuid::Uuid::new_v4().to_string();
     OutboxPayload::new(operation_id, &topic, &payload, &user_properties)
@@ -1434,20 +1440,62 @@ impl<T: ClusterTransport> NodeController<T> {
         event: ChangeEvent,
         operation_id: &str,
     ) {
-        let topic = event.event_topic(0);
-        let user_properties: Vec<(String, String)> = event
-            .client_id
-            .as_ref()
-            .map(|cid| vec![("x-origin-client-id".to_string(), cid.clone())])
-            .unwrap_or_default();
         if let Ok(payload) = serde_json::to_vec(&event) {
-            self.transport
-                .queue_local_publish_with_properties(topic, payload, 1, user_properties)
-                .await;
+            self.deliver_change_event(RoutedPublish {
+                topic: event.event_topic(0),
+                payload,
+                qos: 1,
+                user_properties: change_event_user_properties(&event),
+                order_key: Some(format!("{}/{}", event.entity, event.id)),
+            })
+            .await;
         }
         if let Some(outbox) = self.stores.cluster_outbox() {
             let _ = outbox.mark_delivered(operation_id);
         }
+    }
+
+    pub(crate) async fn deliver_change_event(&self, publish: RoutedPublish) {
+        let wildcards = self.stores.wildcards.match_topic(&publish.topic);
+        let targets =
+            PublishRouter::new(&self.stores.topics).route_targets(&publish.topic, &wildcards);
+        let target_count = targets.len();
+        let remote_nodes = self.remote_targets(
+            targets
+                .into_iter()
+                .map(|target| ForwardTarget::new(target.client_id, target.qos)),
+        );
+        tracing::debug!(
+            topic = %publish.topic,
+            target_count,
+            remote_node_count = remote_nodes.len(),
+            "delivering change event"
+        );
+        for (target_node, targets) in remote_nodes {
+            let forwarded = ForwardedPublish::new(
+                self.node_id,
+                publish.topic.clone(),
+                publish.qos,
+                false,
+                publish.payload.clone(),
+                targets,
+            )
+            .with_user_properties(publish.user_properties.clone())
+            .with_order_key(publish.order_key.clone());
+            if let Err(e) = self
+                .transport
+                .send(target_node, ClusterMessage::ForwardedPublish(forwarded))
+                .await
+            {
+                tracing::warn!(
+                    target = target_node.get(),
+                    topic = %publish.topic,
+                    error = %e,
+                    "failed to forward change event"
+                );
+            }
+        }
+        self.transport.queue_routed_publish(publish).await;
     }
 
     pub(crate) async fn execute_local_cascade_set_null(

@@ -9,17 +9,17 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use tracing::warn;
 
-const FORWARDED_LANES: usize = 32;
-const FORWARDED_LANE_CAPACITY: usize = 1024;
+const ROUTED_LANES: usize = 32;
+const ROUTED_LANE_CAPACITY: usize = 1024;
 
-pub(crate) struct ForwardedDeliveryLanes {
-    lanes: [flume::Sender<PublishPacket>; FORWARDED_LANES],
+pub(crate) struct RoutedDeliveryLanes {
+    lanes: [flume::Sender<PublishPacket>; ROUTED_LANES],
 }
 
-impl ForwardedDeliveryLanes {
+impl RoutedDeliveryLanes {
     pub(crate) fn spawn(router: &Arc<MessageRouter>) -> Self {
-        let lanes = [(); FORWARDED_LANES].map(|()| {
-            let (tx, rx) = flume::bounded(FORWARDED_LANE_CAPACITY);
+        let lanes = [(); ROUTED_LANES].map(|()| {
+            let (tx, rx) = flume::bounded(ROUTED_LANE_CAPACITY);
             tokio::spawn(run_lane(Arc::clone(router), rx));
             tx
         });
@@ -27,18 +27,25 @@ impl ForwardedDeliveryLanes {
     }
 
     pub(crate) async fn deliver(&self, request: LocalPublishRequest) {
-        let lane = &self.lanes[lane_for(&request.topic)];
-        let publish = PublishPacket::new(request.topic, request.payload, QoS::from(request.qos));
+        let lane = &self.lanes[lane_of(&request)];
+        let publish = request.user_properties.into_iter().fold(
+            PublishPacket::new(request.topic, request.payload, QoS::from(request.qos)),
+            |publish, (key, value)| publish.with_user_property(key, value),
+        );
         if let Err(e) = lane.send_async(publish).await {
-            warn!(topic = %e.0.topic_name, "forwarded delivery lane closed, dropping message");
+            warn!(topic = %e.0.topic_name, "routed delivery lane closed, dropping message");
         }
     }
 }
 
-fn lane_for(topic: &str) -> usize {
+fn lane_of(request: &LocalPublishRequest) -> usize {
+    lane_for(request.order_key.as_deref().unwrap_or(&request.topic))
+}
+
+fn lane_for(key: &str) -> usize {
     let mut hasher = DefaultHasher::new();
-    topic.hash(&mut hasher);
-    usize::from(hasher.finish().to_le_bytes()[0]) % FORWARDED_LANES
+    key.hash(&mut hasher);
+    usize::from(hasher.finish().to_le_bytes()[0]) % ROUTED_LANES
 }
 
 async fn run_lane(router: Arc<MessageRouter>, rx: flume::Receiver<PublishPacket>) {
@@ -79,13 +86,14 @@ mod tests {
     use crate::cluster::LocalPublishKind;
     use std::time::Duration;
 
-    fn forwarded(topic: &str, payload: &[u8]) -> LocalPublishRequest {
+    fn routed(topic: &str, payload: &[u8]) -> LocalPublishRequest {
         LocalPublishRequest {
             topic: topic.to_string(),
             payload: payload.to_vec(),
             qos: 1,
-            kind: LocalPublishKind::Forwarded,
+            kind: LocalPublishKind::Routed,
             user_properties: Vec::new(),
+            order_key: None,
         }
     }
 
@@ -99,13 +107,13 @@ mod tests {
         let router = Arc::new(MessageRouter::new());
         let stalled_receivers = subscribe_test_client(&router, "stalled", stalled_topic, 1).await;
         let mut live_receivers = subscribe_test_client(&router, "live", &live_topic, 8).await;
-        let delivery = ForwardedDeliveryLanes::spawn(&router);
+        let delivery = RoutedDeliveryLanes::spawn(&router);
 
         delivery
-            .deliver(forwarded(stalled_topic, b"fills the lane"))
+            .deliver(routed(stalled_topic, b"fills the lane"))
             .await;
-        delivery.deliver(forwarded(stalled_topic, b"waits")).await;
-        delivery.deliver(forwarded(&live_topic, b"live")).await;
+        delivery.deliver(routed(stalled_topic, b"waits")).await;
+        delivery.deliver(routed(&live_topic, b"live")).await;
 
         let delivered = tokio::time::timeout(Duration::from_millis(500), live_receivers.recv())
             .await
@@ -113,5 +121,46 @@ mod tests {
             .unwrap();
         assert_eq!(&delivered.publish.payload[..], b"live");
         drop(stalled_receivers);
+    }
+
+    #[test]
+    fn requests_with_one_order_key_share_a_lane_across_topics() {
+        let created = "$DB/diagrams/d1/events/created";
+        let other_lane_topic = (0..)
+            .map(|n| format!("$DB/diagrams/d1/events/updated/{n}"))
+            .find(|topic| lane_for(topic) != lane_for(created))
+            .unwrap();
+        let keyed = |topic: &str| LocalPublishRequest {
+            order_key: Some("diagrams/d1".to_string()),
+            ..routed(topic, b"{}")
+        };
+
+        assert_eq!(lane_of(&keyed(created)), lane_of(&keyed(&other_lane_topic)));
+    }
+
+    #[tokio::test]
+    async fn user_properties_reach_the_subscriber() {
+        let router = Arc::new(MessageRouter::new());
+        let mut receivers = subscribe_test_client(&router, "watcher", "$DB/ev/events/r1", 8).await;
+        let delivery = RoutedDeliveryLanes::spawn(&router);
+
+        delivery
+            .deliver(LocalPublishRequest {
+                user_properties: vec![("x-origin-client-id".to_string(), "editor-1".to_string())],
+                ..routed("$DB/ev/events/r1", b"{}")
+            })
+            .await;
+
+        let delivered = tokio::time::timeout(Duration::from_secs(1), receivers.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            delivered
+                .publish
+                .properties
+                .get_user_property_value("x-origin-client-id"),
+            Some("editor-1")
+        );
     }
 }

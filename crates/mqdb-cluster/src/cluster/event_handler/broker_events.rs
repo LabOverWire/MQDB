@@ -170,7 +170,7 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
             ctrl.write_or_forward(location_delete).await;
 
             if event.unexpected
-                && let Some(lwt_data) = Self::prepare_lwt_forwarding(&ctrl, node_id, client_id)
+                && let Some(lwt_data) = Self::prepare_lwt_forwarding(&ctrl, client_id)
             {
                 let is_clean = lwt_data.is_clean_session;
                 let token = lwt_data.token;

@@ -143,13 +143,15 @@ impl TopicTrie {
 
     #[must_use]
     pub fn match_topic(&self, topic: &str) -> Vec<&WildcardSubscriber> {
-        if topic.starts_with('$') {
-            return Vec::new();
-        }
-
         let levels: Vec<&str> = topic.split('/').collect();
         let mut matches = Vec::new();
-        Self::match_recursive(&self.root, &levels, 0, &mut matches);
+        if topic.starts_with('$') {
+            if let Some(child) = self.root.children.get(levels[0]) {
+                Self::match_recursive(child, &levels, 1, &mut matches);
+            }
+        } else {
+            Self::match_recursive(&self.root, &levels, 0, &mut matches);
+        }
         matches
     }
 
@@ -406,5 +408,20 @@ mod tests {
 
         let matches = trie.match_topic("$SYS/mqdb/stats");
         assert_eq!(matches.len(), 0);
+    }
+
+    #[test]
+    fn dollar_topics_match_filters_that_name_their_first_level() {
+        let mut trie = TopicTrie::new();
+        trie.insert("#", WildcardSubscriber::mqtt("everything", 1));
+        trie.insert("+/ev/events/#", WildcardSubscriber::mqtt("any-root", 1));
+        trie.insert("$DB/ev/events/#", WildcardSubscriber::mqtt("watcher", 1));
+        trie.insert("$DB/+/events/r1", WildcardSubscriber::mqtt("record", 1));
+
+        let matches = trie.match_topic("$DB/ev/events/r1");
+        let mut client_ids: Vec<&str> = matches.iter().map(|s| s.client_id.as_str()).collect();
+        client_ids.sort_unstable();
+
+        assert_eq!(client_ids, ["record", "watcher"]);
     }
 }

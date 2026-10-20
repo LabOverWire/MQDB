@@ -16,7 +16,8 @@ use tracing::{debug, trace, warn};
 impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
     pub(super) async fn client_is_live_elsewhere(&self, client_id: &str) -> bool {
         let ctrl = self.controller.read().await;
-        Self::resolve_connected_node(&ctrl, client_id).is_some_and(|node| node != self.node_id)
+        ctrl.connected_node(client_id)
+            .is_some_and(|node| node != self.node_id)
     }
 
     pub(super) async fn emit_presence(&self, presence: &mqdb_agent::presence::PresenceEvent) {
@@ -56,36 +57,6 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
     ) {
         let msg = ClusterMessage::TopicSubscriptionBroadcast(broadcast);
         let _ = ctrl.transport().broadcast(msg).await;
-    }
-
-    pub(super) fn resolve_connected_node(
-        ctrl: &NodeController<T>,
-        client_id: &str,
-    ) -> Option<NodeId> {
-        ctrl.stores().client_locations.get(client_id).or_else(|| {
-            ctrl.stores()
-                .sessions
-                .get(client_id)
-                .filter(|s| s.connected == 1)
-                .and_then(|s| NodeId::validated(s.connected_node))
-        })
-    }
-
-    pub(super) fn collect_remote_targets(
-        ctrl: &NodeController<T>,
-        targets: impl IntoIterator<Item = ForwardTarget>,
-        local_node: NodeId,
-    ) -> HashMap<NodeId, Vec<ForwardTarget>> {
-        let mut remote_nodes: HashMap<NodeId, Vec<ForwardTarget>> = HashMap::new();
-        for target in targets {
-            let connected_node = Self::resolve_connected_node(ctrl, &target.client_id);
-            if let Some(target_node) = connected_node
-                && target_node != local_node
-            {
-                remote_nodes.entry(target_node).or_default().push(target);
-            }
-        }
-        remote_nodes
     }
 
     pub(super) async fn forward_publish_to_remotes(
@@ -357,28 +328,11 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             "routing publish"
         );
 
-        let mut remote_nodes: HashMap<NodeId, Vec<ForwardTarget>> = HashMap::new();
-        for target in targets {
-            let connected_node = Self::resolve_connected_node(&ctrl, &target.client_id);
-            let is_local = connected_node == Some(node_id);
-
-            debug!(
-                client_id = %target.client_id,
-                client_partition = ?target.client_partition,
-                ?connected_node,
-                is_local,
-                "routing target"
-            );
-
-            if let Some(target_node) = connected_node
-                && target_node != node_id
-            {
-                remote_nodes
-                    .entry(target_node)
-                    .or_default()
-                    .push(ForwardTarget::new(target.client_id, target.qos));
-            }
-        }
+        let remote_nodes = ctrl.remote_targets(
+            targets
+                .into_iter()
+                .map(|target| ForwardTarget::new(target.client_id, target.qos)),
+        );
 
         if remote_nodes.is_empty() {
             drop(ctrl);
@@ -401,7 +355,6 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
 
     pub(super) fn prepare_lwt_forwarding(
         ctrl: &NodeController<T>,
-        node_id: NodeId,
         client_id: &str,
     ) -> Option<LwtForwardingData<T>> {
         let lwt_publisher = LwtPublisher::new(&ctrl.stores().sessions);
@@ -423,13 +376,11 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
         let router = PublishRouter::new(&ctrl.stores().topics);
         let route = router.route_with_wildcards(&lwt.topic, &wildcards);
 
-        let remote_nodes = Self::collect_remote_targets(
-            ctrl,
+        let remote_nodes = ctrl.remote_targets(
             route
                 .targets
                 .into_iter()
                 .map(|t| ForwardTarget::new(t.client_id, t.qos)),
-            node_id,
         );
 
         let is_clean_session = ctrl

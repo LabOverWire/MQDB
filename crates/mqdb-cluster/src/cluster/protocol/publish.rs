@@ -25,6 +25,8 @@ pub struct ForwardedPublish {
     pub payload: Vec<u8>,
     pub targets: Vec<ForwardTarget>,
     pub timestamp_us: u64,
+    pub user_properties: Vec<(String, String)>,
+    pub order_key: Option<String>,
 }
 
 impl ForwardedPublish {
@@ -53,7 +55,21 @@ impl ForwardedPublish {
             payload,
             targets,
             timestamp_us,
+            user_properties: Vec::new(),
+            order_key: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_user_properties(mut self, user_properties: Vec<(String, String)>) -> Self {
+        self.user_properties = user_properties;
+        self
+    }
+
+    #[must_use]
+    pub fn with_order_key(mut self, order_key: Option<String>) -> Self {
+        self.order_key = order_key;
+        self
     }
 
     #[must_use]
@@ -75,13 +91,38 @@ impl ForwardedPublish {
         buf.push(u8::from(self.retain));
         buf.extend_from_slice(&(self.payload.len() as u32).to_be_bytes());
         buf.extend_from_slice(&self.payload);
-        buf.push(self.targets.len() as u8);
+        let encodable_targets = self
+            .targets
+            .iter()
+            .filter(|t| t.client_id.len() <= usize::from(u8::MAX))
+            .take(usize::from(u8::MAX));
+        buf.push(encodable_targets.clone().count() as u8);
 
-        for target in &self.targets {
+        for target in encodable_targets {
             let client_bytes = target.client_id.as_bytes();
             buf.push(client_bytes.len() as u8);
             buf.extend_from_slice(client_bytes);
             buf.push(target.qos);
+        }
+
+        let order_key = self
+            .order_key
+            .as_deref()
+            .filter(|key| key.len() <= usize::from(u16::MAX))
+            .unwrap_or("");
+        put_str16(&mut buf, order_key);
+
+        let encodable_properties = self
+            .user_properties
+            .iter()
+            .filter(|(key, value)| {
+                key.len() <= usize::from(u16::MAX) && value.len() <= usize::from(u16::MAX)
+            })
+            .take(usize::from(u16::MAX));
+        buf.extend_from_slice(&(encodable_properties.clone().count() as u16).to_be_bytes());
+        for (key, value) in encodable_properties {
+            put_str16(&mut buf, key);
+            put_str16(&mut buf, value);
         }
 
         buf
@@ -162,6 +203,29 @@ impl ForwardedPublish {
             });
         }
 
+        let (order_key, user_properties) = if offset == bytes.len() {
+            (None, Vec::new())
+        } else {
+            let (order_key, mut offset) = read_str16(bytes, offset)?;
+            if bytes.len() < offset + 2 {
+                return None;
+            }
+            let property_count =
+                usize::from(u16::from_be_bytes([bytes[offset], bytes[offset + 1]]));
+            offset += 2;
+            let mut user_properties = Vec::with_capacity(property_count);
+            for _ in 0..property_count {
+                let (key, next) = read_str16(bytes, offset)?;
+                let (value, next) = read_str16(bytes, next)?;
+                offset = next;
+                user_properties.push((key, value));
+            }
+            (
+                (!order_key.is_empty()).then_some(order_key),
+                user_properties,
+            )
+        };
+
         Some(Self {
             origin_node: NodeId::validated(origin_node)?,
             topic,
@@ -170,6 +234,27 @@ impl ForwardedPublish {
             payload,
             targets,
             timestamp_us,
+            user_properties,
+            order_key,
         })
     }
+}
+
+fn put_str16(buf: &mut Vec<u8>, value: &str) {
+    let len = u16::try_from(value.len()).unwrap_or(0);
+    buf.extend_from_slice(&len.to_be_bytes());
+    buf.extend_from_slice(&value.as_bytes()[..usize::from(len)]);
+}
+
+fn read_str16(bytes: &[u8], offset: usize) -> Option<(String, usize)> {
+    if bytes.len() < offset + 2 {
+        return None;
+    }
+    let len = usize::from(u16::from_be_bytes([bytes[offset], bytes[offset + 1]]));
+    let start = offset + 2;
+    if bytes.len() < start + len {
+        return None;
+    }
+    let value = String::from_utf8(bytes[start..start + len].to_vec()).ok()?;
+    Some((value, start + len))
 }

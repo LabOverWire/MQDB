@@ -6,6 +6,7 @@
 use crate::cluster::MqttTransport;
 use crate::cluster::{
     ClusterMessage, ClusterTransport, InboundMessage, NodeId, PartitionId, QuicDirectTransport,
+    RoutedPublish,
 };
 
 #[derive(Debug, Clone)]
@@ -172,12 +173,12 @@ impl ClusterTransport for ClusterTransportKind {
         }
     }
 
-    async fn queue_forwarded_publish(&self, topic: String, payload: Vec<u8>, qos: u8) {
+    async fn queue_routed_publish(&self, publish: RoutedPublish) {
         match self {
             #[cfg(feature = "mqtt-bridge")]
             #[allow(deprecated)]
-            Self::Mqtt(t) => t.queue_forwarded_publish(topic, payload, qos).await,
-            Self::Quic(t) => t.queue_forwarded_publish(topic, payload, qos).await,
+            Self::Mqtt(t) => t.queue_routed_publish(publish).await,
+            Self::Quic(t) => t.queue_routed_publish(publish).await,
         }
     }
 
