@@ -13,7 +13,7 @@ use super::node_controller::{
     NodeController, PendingFkDeleteWork, PendingFkWork, PendingUniqueWork,
 };
 use super::transport::ClusterTransport;
-use mqdb_core::types::{OwnershipConfig, ScopeConfig};
+use mqdb_core::types::OwnershipConfig;
 use mqdb_vault::VaultKeyStore;
 use std::sync::Arc;
 
@@ -69,7 +69,6 @@ pub enum FkCheckCompletion {
 pub struct DbRequestHandler {
     node_id: NodeId,
     ownership: Arc<OwnershipConfig>,
-    scope_config: Arc<ScopeConfig>,
     vault_key_store: Arc<VaultKeyStore>,
 }
 
@@ -80,7 +79,6 @@ impl DbRequestHandler {
         Self {
             node_id,
             ownership: Arc::new(OwnershipConfig::default()),
-            scope_config: Arc::new(ScopeConfig::default()),
             vault_key_store: Arc::new(VaultKeyStore::new()),
         }
     }
@@ -88,12 +86,6 @@ impl DbRequestHandler {
     #[must_use]
     pub fn with_ownership(mut self, ownership: Arc<OwnershipConfig>) -> Self {
         self.ownership = ownership;
-        self
-    }
-
-    #[must_use]
-    pub fn with_scope_config(mut self, scope_config: Arc<ScopeConfig>) -> Self {
-        self.scope_config = scope_config;
         self
     }
 
@@ -222,7 +214,6 @@ impl std::fmt::Debug for DbRequestHandler {
         f.debug_struct("DbRequestHandler")
             .field("node_id", &self.node_id)
             .field("ownership", &self.ownership)
-            .field("scope_config", &self.scope_config)
             .finish_non_exhaustive()
     }
 }

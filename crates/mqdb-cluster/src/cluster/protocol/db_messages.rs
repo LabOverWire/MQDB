@@ -13,151 +13,100 @@ pub struct JsonDbRequest {
     pub response_topic: String,
     pub correlation_data: Option<Vec<u8>>,
     pub sender: Option<String>,
+    pub client_id: Option<String>,
 }
 
 impl JsonDbRequest {
     pub const VERSION: u8 = 2;
+    pub const WIDE_VERSION: u8 = 3;
 
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let entity_bytes = self.entity.as_bytes();
-        let id_bytes = self.id.as_ref().map(String::as_bytes);
-        let id_len = id_bytes.map_or(0, <[u8]>::len);
-        let response_topic_bytes = self.response_topic.as_bytes();
-        let corr_len = self.correlation_data.as_ref().map_or(0, Vec::len);
-        let sender_bytes = self.sender.as_ref().map(String::as_bytes);
-        let sender_len = sender_bytes.map_or(0, <[u8]>::len);
+    pub fn fits_wire(&self) -> bool {
+        let short_fields = [
+            self.entity.len(),
+            self.id.as_deref().map_or(0, str::len),
+            self.response_topic.len(),
+            self.correlation_data.as_deref().map_or(0, <[u8]>::len),
+            self.sender.as_deref().map_or(0, str::len),
+            self.client_id.as_deref().map_or(0, str::len),
+        ];
+        short_fields.iter().all(|len| u16::try_from(*len).is_ok())
+            && u32::try_from(self.payload.len()).is_ok()
+    }
+
+    #[must_use]
+    pub fn to_bytes(&self) -> Option<Vec<u8>> {
+        let entity = self.entity.as_bytes();
+        let id = self.id.as_deref().map_or(&[][..], str::as_bytes);
+        let response_topic = self.response_topic.as_bytes();
+        let correlation = self.correlation_data.as_deref().unwrap_or_default();
+        let sender = self.sender.as_deref().map_or(&[][..], str::as_bytes);
+        let client_id = self.client_id.as_deref().map_or(&[][..], str::as_bytes);
+        let narrow = [entity, id, sender]
+            .iter()
+            .all(|field| u8::try_from(field.len()).is_ok());
 
         let mut buf = Vec::with_capacity(
-            19 + entity_bytes.len()
-                + id_len
+            26 + entity.len()
+                + id.len()
                 + self.payload.len()
-                + response_topic_bytes.len()
-                + corr_len
-                + sender_len,
+                + response_topic.len()
+                + correlation.len()
+                + sender.len()
+                + client_id.len(),
         );
-
-        buf.push(Self::VERSION);
+        buf.push(if narrow {
+            Self::VERSION
+        } else {
+            Self::WIDE_VERSION
+        });
         buf.extend_from_slice(&self.request_id.to_be_bytes());
         buf.push(self.op as u8);
-        buf.push(entity_bytes.len() as u8);
-        buf.extend_from_slice(entity_bytes);
-        buf.push(id_len as u8);
-        if let Some(ib) = id_bytes {
-            buf.extend_from_slice(ib);
-        }
-        buf.extend_from_slice(&(self.payload.len() as u32).to_be_bytes());
+        push_length_prefixed(&mut buf, entity, narrow)?;
+        push_length_prefixed(&mut buf, id, narrow)?;
+        buf.extend_from_slice(&u32::try_from(self.payload.len()).ok()?.to_be_bytes());
         buf.extend_from_slice(&self.payload);
-        buf.extend_from_slice(&(response_topic_bytes.len() as u16).to_be_bytes());
-        buf.extend_from_slice(response_topic_bytes);
-        buf.extend_from_slice(&(corr_len as u16).to_be_bytes());
-        if let Some(c) = &self.correlation_data {
-            buf.extend_from_slice(c);
-        }
-        buf.push(sender_len as u8);
-        if let Some(sb) = sender_bytes {
-            buf.extend_from_slice(sb);
-        }
-
-        buf
+        push_length_prefixed(&mut buf, response_topic, false)?;
+        push_length_prefixed(&mut buf, correlation, false)?;
+        push_length_prefixed(&mut buf, sender, narrow)?;
+        push_length_prefixed(&mut buf, client_id, false)?;
+        Some(buf)
     }
 
     #[must_use]
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 18 {
+        let mut reader = WireReader { bytes, offset: 0 };
+        let version = reader.u8()?;
+        if !(1..=Self::WIDE_VERSION).contains(&version) {
             return None;
         }
+        let wide = version == Self::WIDE_VERSION;
 
-        let version = bytes[0];
-        if version != 1 && version != Self::VERSION {
-            return None;
-        }
+        let request_id = reader.u64()?;
+        let op = JsonDbOp::from_u8(reader.u8()?)?;
+        let entity_len = reader.length(wide)?;
+        let entity = reader.text(entity_len)?;
+        let id_len = reader.length(wide)?;
+        let id = Some(reader.text(id_len)?).filter(|id| !id.is_empty());
+        let payload_len = usize::try_from(reader.u32()?).ok()?;
+        let payload = reader.take(payload_len)?.to_vec();
+        let response_topic_len = reader.length(true)?;
+        let response_topic = reader.text(response_topic_len)?;
+        let correlation_len = reader.length(true)?;
+        let correlation_data =
+            Some(reader.take(correlation_len)?.to_vec()).filter(|c| !c.is_empty());
 
-        let request_id = u64::from_be_bytes([
-            bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8],
-        ]);
-        let op = JsonDbOp::from_u8(bytes[9])?;
-        let entity_len = bytes[10] as usize;
-
-        let mut offset = 11;
-        if bytes.len() < offset + entity_len + 1 {
-            return None;
-        }
-
-        let entity = String::from_utf8(bytes[offset..offset + entity_len].to_vec()).ok()?;
-        offset += entity_len;
-
-        let id_len = bytes[offset] as usize;
-        offset += 1;
-
-        let id = if id_len > 0 {
-            if bytes.len() < offset + id_len + 4 {
-                return None;
-            }
-            let i = String::from_utf8(bytes[offset..offset + id_len].to_vec()).ok()?;
-            offset += id_len;
-            Some(i)
+        let sender = if version >= 2 && !reader.is_exhausted() {
+            let sender_len = reader.length(wide)?;
+            Some(reader.text(sender_len)?).filter(|s| !s.is_empty())
         } else {
             None
         };
-
-        if bytes.len() < offset + 4 {
-            return None;
-        }
-
-        let payload_len = u32::from_be_bytes([
-            bytes[offset],
-            bytes[offset + 1],
-            bytes[offset + 2],
-            bytes[offset + 3],
-        ]) as usize;
-        offset += 4;
-
-        if bytes.len() < offset + payload_len + 4 {
-            return None;
-        }
-
-        let payload = bytes[offset..offset + payload_len].to_vec();
-        offset += payload_len;
-
-        let response_topic_len = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
-        offset += 2;
-
-        if bytes.len() < offset + response_topic_len + 2 {
-            return None;
-        }
-
-        let response_topic =
-            String::from_utf8(bytes[offset..offset + response_topic_len].to_vec()).ok()?;
-        offset += response_topic_len;
-
-        let corr_len = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]) as usize;
-        offset += 2;
-
-        let correlation_data = if corr_len > 0 {
-            if bytes.len() < offset + corr_len {
-                return None;
-            }
-            Some(bytes[offset..offset + corr_len].to_vec())
-        } else {
+        let client_id = if reader.is_exhausted() {
             None
-        };
-        offset += corr_len;
-
-        let sender = if version >= 2 && offset < bytes.len() {
-            let sender_len = bytes[offset] as usize;
-            offset += 1;
-            if sender_len > 0 {
-                if bytes.len() < offset + sender_len {
-                    return None;
-                }
-                Some(String::from_utf8(bytes[offset..offset + sender_len].to_vec()).ok()?)
-            } else {
-                None
-            }
         } else {
-            None
+            let client_id_len = reader.length(true)?;
+            Some(reader.text(client_id_len)?).filter(|c| !c.is_empty())
         };
 
         Some(Self {
@@ -169,7 +118,64 @@ impl JsonDbRequest {
             response_topic,
             correlation_data,
             sender,
+            client_id,
         })
+    }
+}
+
+fn push_length_prefixed(buf: &mut Vec<u8>, field: &[u8], narrow: bool) -> Option<()> {
+    if narrow {
+        buf.push(u8::try_from(field.len()).ok()?);
+    } else {
+        buf.extend_from_slice(&u16::try_from(field.len()).ok()?.to_be_bytes());
+    }
+    buf.extend_from_slice(field);
+    Some(())
+}
+
+struct WireReader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> WireReader<'a> {
+    fn take(&mut self, len: usize) -> Option<&'a [u8]> {
+        let end = self.offset.checked_add(len)?;
+        let slice = self.bytes.get(self.offset..end)?;
+        self.offset = end;
+        Some(slice)
+    }
+
+    fn u8(&mut self) -> Option<u8> {
+        self.take(1)?.first().copied()
+    }
+
+    fn u16(&mut self) -> Option<u16> {
+        Some(u16::from_be_bytes(self.take(2)?.try_into().ok()?))
+    }
+
+    fn u32(&mut self) -> Option<u32> {
+        Some(u32::from_be_bytes(self.take(4)?.try_into().ok()?))
+    }
+
+    fn u64(&mut self) -> Option<u64> {
+        Some(u64::from_be_bytes(self.take(8)?.try_into().ok()?))
+    }
+
+    fn length(&mut self, wide: bool) -> Option<usize> {
+        if wide {
+            self.u16().map(usize::from)
+        } else {
+            self.u8().map(usize::from)
+        }
+    }
+
+    fn text(&mut self, len: usize) -> Option<String> {
+        String::from_utf8(self.take(len)?.to_vec()).ok()
+    }
+
+    fn is_exhausted(&self) -> bool {
+        self.offset >= self.bytes.len()
     }
 }
 
@@ -200,26 +206,20 @@ impl JsonDbResponse {
     }
 
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let response_topic_bytes = self.response_topic.as_bytes();
-        let corr_len = self.correlation_data.as_ref().map_or(0, Vec::len);
+    pub fn to_bytes(&self) -> Option<Vec<u8>> {
+        let response_topic = self.response_topic.as_bytes();
+        let correlation = self.correlation_data.as_deref().unwrap_or_default();
 
         let mut buf =
-            Vec::with_capacity(15 + self.payload.len() + response_topic_bytes.len() + corr_len);
+            Vec::with_capacity(17 + self.payload.len() + response_topic.len() + correlation.len());
 
         buf.push(Self::VERSION);
         buf.extend_from_slice(&self.request_id.to_be_bytes());
-        buf.extend_from_slice(&(self.payload.len() as u32).to_be_bytes());
+        buf.extend_from_slice(&u32::try_from(self.payload.len()).ok()?.to_be_bytes());
         buf.extend_from_slice(&self.payload);
-        buf.extend_from_slice(&(response_topic_bytes.len() as u16).to_be_bytes());
-        buf.extend_from_slice(response_topic_bytes);
-        buf.extend_from_slice(&(corr_len as u16).to_be_bytes());
-        if let Some(c) = &self.correlation_data {
-            buf.extend_from_slice(c);
-        }
-
-        buf
+        push_length_prefixed(&mut buf, response_topic, false)?;
+        push_length_prefixed(&mut buf, correlation, false)?;
+        Some(buf)
     }
 
     #[must_use]
@@ -294,8 +294,9 @@ mod tests {
             response_topic: "resp/topic".to_string(),
             correlation_data: Some(b"corr".to_vec()),
             sender: Some("alice".to_string()),
+            client_id: None,
         };
-        let bytes = req.to_bytes();
+        let bytes = req.to_bytes().unwrap();
         let decoded = JsonDbRequest::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.request_id, 42);
         assert_eq!(decoded.entity, "users");
@@ -304,6 +305,77 @@ mod tests {
         assert_eq!(decoded.response_topic, "resp/topic");
         assert_eq!(decoded.correlation_data.as_deref(), Some(b"corr".as_ref()));
         assert_eq!(decoded.sender.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn request_carries_client_id_after_sender_and_decodes_without_it() {
+        let req = JsonDbRequest {
+            request_id: 7,
+            op: JsonDbOp::Create,
+            entity: "msg".to_string(),
+            id: None,
+            payload: b"{}".to_vec(),
+            response_topic: "resp".to_string(),
+            correlation_data: None,
+            sender: Some("alice".to_string()),
+            client_id: Some("editor-1".to_string()),
+        };
+        let bytes = req.to_bytes().unwrap();
+        let decoded = JsonDbRequest::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.sender.as_deref(), Some("alice"));
+        assert_eq!(decoded.client_id.as_deref(), Some("editor-1"));
+
+        let from_older_node = &bytes[..bytes.len() - 2 - "editor-1".len()];
+        let decoded = JsonDbRequest::from_bytes(from_older_node).unwrap();
+        assert_eq!(decoded.sender.as_deref(), Some("alice"));
+        assert!(decoded.client_id.is_none());
+    }
+
+    #[test]
+    fn request_with_long_sender_or_id_round_trips_every_field() {
+        let request_with = |id_len: usize, sender_len: usize| JsonDbRequest {
+            request_id: 9,
+            op: JsonDbOp::Delete,
+            entity: "doc".to_string(),
+            id: Some("i".repeat(id_len)),
+            payload: b"{}".to_vec(),
+            response_topic: "resp".to_string(),
+            correlation_data: Some(b"corr".to_vec()),
+            sender: Some("s".repeat(sender_len)),
+            client_id: Some("editor-1".to_string()),
+        };
+        for (id_len, sender_len, version) in [
+            (3, 255, JsonDbRequest::VERSION),
+            (3, 256, JsonDbRequest::WIDE_VERSION),
+            (3, 300, JsonDbRequest::WIDE_VERSION),
+            (512, 5, JsonDbRequest::WIDE_VERSION),
+        ] {
+            let bytes = request_with(id_len, sender_len).to_bytes().unwrap();
+            assert_eq!(bytes[0], version);
+            let decoded = JsonDbRequest::from_bytes(&bytes).unwrap();
+            assert_eq!(decoded.id.map(|id| id.len()), Some(id_len));
+            assert_eq!(decoded.sender.map(|s| s.len()), Some(sender_len));
+            assert_eq!(decoded.client_id.as_deref(), Some("editor-1"));
+            assert_eq!(decoded.payload, b"{}");
+            assert_eq!(decoded.correlation_data.as_deref(), Some(b"corr".as_ref()));
+        }
+    }
+
+    #[test]
+    fn request_too_long_for_the_wire_is_not_encoded() {
+        let request = JsonDbRequest {
+            request_id: 1,
+            op: JsonDbOp::Create,
+            entity: "doc".to_string(),
+            id: Some("i".repeat(usize::from(u16::MAX) + 1)),
+            payload: b"{}".to_vec(),
+            response_topic: "resp".to_string(),
+            correlation_data: None,
+            sender: None,
+            client_id: None,
+        };
+        assert!(!request.fits_wire());
+        assert!(request.to_bytes().is_none());
     }
 
     #[test]
@@ -317,8 +389,9 @@ mod tests {
             response_topic: "resp".to_string(),
             correlation_data: None,
             sender: None,
+            client_id: None,
         };
-        let bytes = req.to_bytes();
+        let bytes = req.to_bytes().unwrap();
         let decoded = JsonDbRequest::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.entity, "items");
         assert!(decoded.sender.is_none());

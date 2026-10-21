@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::{AdminRequest, ClusteredAgent, MESH_CHECK_INTERVAL_SECS, RunningBroker};
+use crate::cluster::node_controller::db_ops::EventOrigin;
 use crate::cluster::{
     ClusterMessage, ClusterTransport, LocalPublishKind, LocalPublishRequest, LocalRetainedWriter,
     NodeController, NodeId, PartitionId, ProcessingBatch, RoutedDeliveryLanes,
@@ -881,7 +882,7 @@ async fn send_cascade_operations<T: ClusterTransport>(
                             entity,
                             id,
                             &[],
-                            sender.as_deref(),
+                            EventOrigin::new(sender.as_deref(), None),
                         )
                         .await
                     {
@@ -895,7 +896,14 @@ async fn send_cascade_operations<T: ClusterTransport>(
                     expected_value,
                 } => {
                     if let Some(rx) = ctrl
-                        .send_cascade_set_null_request(partition, entity, id, field, expected_value)
+                        .send_cascade_set_null_request(
+                            partition,
+                            entity,
+                            id,
+                            field,
+                            expected_value,
+                            None,
+                        )
                         .await
                     {
                         ack_receivers.push(rx);
@@ -928,23 +936,19 @@ async fn execute_local_cascade_work(
     for item in &work {
         for op in &item.ops {
             match op {
-                crate::cluster::CascadeRemoteOp::Delete { entity, id, .. } => {
+                crate::cluster::CascadeRemoteOp::Delete { entity, id, sender } => {
                     if let Ok((db_entity, write)) = ctrl.db_delete_prepare(entity, id) {
                         let data: serde_json::Value = serde_json::from_slice(&db_entity.data)
                             .unwrap_or(serde_json::Value::Null);
-                        let event = mqdb_core::events::ChangeEvent::delete(
-                            entity.clone(),
-                            id.clone(),
-                            data.clone(),
+                        let event = ctrl.change_event(
+                            mqdb_core::events::ChangeEvent::delete(
+                                entity.clone(),
+                                id.clone(),
+                                data.clone(),
+                            ),
+                            EventOrigin::new(sender.as_deref(), None),
                         );
-                        let outbox =
-                            crate::cluster::node_controller::db_ops::build_change_event_outbox(
-                                &event,
-                            );
-                        ctrl.db_commit(write, outbox.clone()).await;
-                        ctrl.release_unique_for_deleted_record(entity, id, &data)
-                            .await;
-                        ctrl.publish_and_deliver_change_event(event, &outbox.operation_id)
+                        ctrl.commit_delete_with_change_event(write, event, &data, None)
                             .await;
                     }
                 }
@@ -954,8 +958,15 @@ async fn execute_local_cascade_work(
                     field,
                     expected_value,
                 } => {
-                    ctrl.execute_local_cascade_set_null(entity, id, field, expected_value, now_ms)
-                        .await;
+                    ctrl.execute_local_cascade_set_null(
+                        entity,
+                        id,
+                        field,
+                        expected_value,
+                        now_ms,
+                        EventOrigin::default(),
+                    )
+                    .await;
                 }
             }
         }

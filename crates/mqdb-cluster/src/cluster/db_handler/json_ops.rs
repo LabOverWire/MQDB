@@ -6,6 +6,7 @@ use super::super::db::{self, data_partition};
 use super::super::db_topic::DbTopicOperation;
 #[cfg(feature = "http-api")]
 use super::super::node_controller::ShareResolveContinuation;
+use super::super::node_controller::db_ops::EventOrigin;
 use super::super::node_controller::{
     FkCheckContinuation, FkDeleteContinuation, NodeController, PendingFkDeleteWork, PendingFkWork,
     PendingUniqueWork, UniqueCheckContinuation,
@@ -192,7 +193,7 @@ impl DbRequestHandler {
                                 payload,
                                 response_topic,
                                 correlation_data,
-                                sender,
+                                EventOrigin::new(sender, mqtt_ctx.client_id),
                             )
                             .await;
                         return if forwarded {
@@ -244,7 +245,7 @@ impl DbRequestHandler {
                             &forward_payload,
                             response_topic,
                             correlation_data,
-                            sender,
+                            EventOrigin::new(sender, mqtt_ctx.client_id),
                         )
                         .await;
                     return if forwarded {
@@ -291,7 +292,7 @@ impl DbRequestHandler {
                             payload,
                             response_topic,
                             correlation_data,
-                            sender,
+                            EventOrigin::new(sender, mqtt_ctx.client_id),
                         )
                         .await;
                     return if forwarded {
@@ -432,7 +433,7 @@ impl DbRequestHandler {
                 payload,
                 response_topic,
                 mqtt_ctx.correlation_data,
-                sender,
+                EventOrigin::new(sender, mqtt_ctx.client_id),
             )
             .await;
         if forwarded {
@@ -643,7 +644,7 @@ impl DbRequestHandler {
                 payload,
                 mqtt_ctx.response_topic.unwrap_or(""),
                 mqtt_ctx.correlation_data,
-                mqtt_ctx.sender,
+                EventOrigin::new(mqtt_ctx.sender, mqtt_ctx.client_id),
             )
             .await;
         if forwarded {
@@ -779,15 +780,14 @@ impl DbRequestHandler {
         JsonOpResult::Response(
             match controller.db_create_prepare(entity, id, &data_bytes, now_ms) {
                 Ok((db_entity, write)) => {
-                    let scope = self.scope_config.resolve_scope(entity, data);
-                    let event = ChangeEvent::create(
-                        entity.to_string(),
-                        db_entity.id_str().to_string(),
-                        data.clone(),
-                    )
-                    .with_sender(sender.map(str::to_string))
-                    .with_client_id(client_id.map(str::to_string))
-                    .with_scope(scope);
+                    let event = controller.change_event(
+                        ChangeEvent::create(
+                            entity.to_string(),
+                            db_entity.id_str().to_string(),
+                            data.clone(),
+                        ),
+                        EventOrigin::new(sender, client_id),
+                    );
                     let outbox = Self::build_outbox(&event);
                     controller.db_commit(write, outbox.clone()).await;
                     controller
@@ -869,7 +869,7 @@ impl DbRequestHandler {
                     payload,
                     response_topic,
                     correlation_data,
-                    sender,
+                    EventOrigin::new(sender, mqtt_ctx.client_id),
                 )
                 .await;
             if forwarded {
@@ -1141,15 +1141,14 @@ impl DbRequestHandler {
         JsonOpResult::Response(
             match controller.db_update_prepare(entity, id, &data_bytes, now_ms) {
                 Ok((db_entity, write)) => {
-                    let scope = self.scope_config.resolve_scope(entity, merged_data);
-                    let event = ChangeEvent::update(
-                        entity.to_string(),
-                        db_entity.id_str().to_string(),
-                        merged_data.clone(),
-                    )
-                    .with_sender(sender.map(str::to_string))
-                    .with_client_id(client_id.map(str::to_string))
-                    .with_scope(scope);
+                    let event = controller.change_event(
+                        ChangeEvent::update(
+                            entity.to_string(),
+                            db_entity.id_str().to_string(),
+                            merged_data.clone(),
+                        ),
+                        EventOrigin::new(sender, client_id),
+                    );
                     let outbox = Self::build_outbox(&event);
                     controller.db_commit(write, outbox.clone()).await;
                     if has_unique_changes {
@@ -1287,7 +1286,9 @@ impl DbRequestHandler {
             Ok(effects) => effects,
             Err(msg) => return JsonOpResult::Response(Self::json_error(409, &msg)),
         };
-        let (cascade, ack_receivers) = controller.execute_fk_side_effects(&effects, sender).await;
+        let (cascade, ack_receivers) = controller
+            .execute_fk_side_effects(&effects, EventOrigin::new(sender, client_id))
+            .await;
         let ctx = JsonOpContext {
             entity,
             id: Some(id),
@@ -1315,22 +1316,13 @@ impl DbRequestHandler {
         let sender = ctx.sender;
         let client_id = ctx.client_id;
 
-        let pre_delete_scope = if self.scope_config.is_empty() {
-            None
-        } else {
-            controller
-                .db_get(entity, id)
-                .and_then(|e| serde_json::from_slice::<Value>(&e.data).ok())
-                .and_then(|data| self.scope_config.resolve_scope(entity, &data))
-        };
-
         match controller.db_delete_prepare(entity, id) {
             Ok((db_entity, write)) => {
                 let data: Value = serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
-                let event = ChangeEvent::delete(entity.to_string(), id.to_string(), data.clone())
-                    .with_sender(sender.map(str::to_string))
-                    .with_client_id(client_id.map(str::to_string))
-                    .with_scope(pre_delete_scope);
+                let event = controller.change_event(
+                    ChangeEvent::delete(entity.to_string(), id.to_string(), data.clone()),
+                    EventOrigin::new(sender, client_id),
+                );
                 let outbox = Self::build_outbox(&event);
                 if let Some(cas) = cascade {
                     controller
@@ -1617,15 +1609,14 @@ impl DbRequestHandler {
                         let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
                         match controller.db_create_prepare(&entity, &id, &data_bytes, now_ms) {
                             Ok((db_entity, write)) => {
-                                let scope = self.scope_config.resolve_scope(&entity, &data);
-                                let event = ChangeEvent::create(
-                                    entity.clone(),
-                                    db_entity.id_str().to_string(),
-                                    data.clone(),
-                                )
-                                .with_sender(sender)
-                                .with_client_id(client_id)
-                                .with_scope(scope);
+                                let event = controller.change_event(
+                                    ChangeEvent::create(
+                                        entity.clone(),
+                                        db_entity.id_str().to_string(),
+                                        data.clone(),
+                                    ),
+                                    EventOrigin::new(sender.as_deref(), client_id.as_deref()),
+                                );
                                 let outbox = Self::build_outbox(&event);
                                 controller.db_commit(write, outbox.clone()).await;
                                 controller
@@ -1726,15 +1717,14 @@ impl DbRequestHandler {
                         let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
                         match controller.db_update_prepare(&entity, &id, &data_bytes, now_ms) {
                             Ok((db_entity, write)) => {
-                                let scope = self.scope_config.resolve_scope(&entity, &merged_data);
-                                let event = ChangeEvent::update(
-                                    entity.clone(),
-                                    db_entity.id_str().to_string(),
-                                    merged_data.clone(),
-                                )
-                                .with_sender(sender)
-                                .with_client_id(client_id)
-                                .with_scope(scope);
+                                let event = controller.change_event(
+                                    ChangeEvent::update(
+                                        entity.clone(),
+                                        db_entity.id_str().to_string(),
+                                        merged_data.clone(),
+                                    ),
+                                    EventOrigin::new(sender.as_deref(), client_id.as_deref()),
+                                );
                                 let outbox = Self::build_outbox(&event);
                                 controller.db_commit(write, outbox.clone()).await;
                                 controller
@@ -1852,7 +1842,10 @@ impl DbRequestHandler {
                     }
                 };
                 let (cascade, ack_receivers) = controller
-                    .execute_fk_side_effects(&effects, sender.as_deref())
+                    .execute_fk_side_effects(
+                        &effects,
+                        EventOrigin::new(sender.as_deref(), client_id.as_deref()),
+                    )
                     .await;
                 let ctx = JsonOpContext {
                     entity: &entity,

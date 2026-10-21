@@ -224,9 +224,22 @@ impl ClusterMessage {
             Self::PartitionUpdate(u) => buf.extend_from_slice(&u.to_be_bytes()),
             Self::JsonDbRequest { partition, request } => {
                 buf.extend_from_slice(&partition.get().to_be_bytes());
-                buf.extend_from_slice(&request.to_bytes());
+                match request.to_bytes() {
+                    Some(bytes) => buf.extend_from_slice(&bytes),
+                    None => tracing::warn!(
+                        request_id = request.request_id,
+                        entity = request.entity,
+                        "json db request field too long to encode"
+                    ),
+                }
             }
-            Self::JsonDbResponse(resp) => buf.extend_from_slice(&resp.to_bytes()),
+            Self::JsonDbResponse(resp) => match resp.to_bytes() {
+                Some(bytes) => buf.extend_from_slice(&bytes),
+                None => tracing::warn!(
+                    request_id = resp.request_id,
+                    "json db response field too long to encode"
+                ),
+            },
             Self::UniqueReserveRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
             Self::UniqueReserveResponse(resp) => buf.extend_from_slice(&resp.to_be_bytes()),
             Self::UniqueCommitRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),

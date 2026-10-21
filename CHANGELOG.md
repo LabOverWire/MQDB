@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-21 — mqdb-cluster 0.4.31, mqdb-cli 0.8.59
+
+### Security
+
+- **A forwarded write can no longer skip the ownership check through a long user name.** A forwarded request stored the length of the writer's user name in one byte. A 256-byte name was read on the primary as no user at all, so the ownership check was skipped, and longer names were cut short. On 3- and 5-node clusters, a 256-byte user updated another user's records in 24 of 36 and 48 of 60 attempts through every node; now every attempt is refused. A 300-byte user could update their own records only through the node that held them, 6 of 18 and 6 of 30 attempts; now users with 256- and 300-byte names update their own records through every node. A request with a user name, entity or id longer than 255 bytes now uses a wider format that older nodes do not read, and a request too long for that format fails like any other forward failure.
+
+### Fixed
+
+- **Cluster change events look the same whichever node handles the write** (#199). A write that arrived on one node and ran on its record's primary published its event without `sender`, `client_id` or `x-origin-client-id`, and on the unscoped topic even with `--event-scope`. TTL expiry and foreign-key cascade events were never scoped either, and cascade events never carried the deleting writer, whichever node handled the delete. With a watcher on every node and writes made through every node, 3 of 36 scoped writes on a 3-node cluster and 12 of 60 on a 5-node cluster arrived on their scoped topic; now all do. Every write's event, including the cascade deletes and set-nulls it causes, now carries the writer's `sender` and `client_id`.
+- **Forwarded writes that waited on a unique or foreign-key check publish their change event.** When the primary had to wait for another node before committing a forwarded create or update, it committed the write and answered the client but published no event. 11 of 24 unique creates and updates on a 3-node cluster and 11 of 40 on a 5-node cluster produced an event, and 4 of 12 and 9 of 20 creates of a record with a foreign key; now all do.
+- A forwarded request now carries the writer's client id after its other fields. Older nodes ignore those bytes, so mixed-version clusters keep working.
+- **Records of the `--event-scope` entity created with a server-generated id publish on their own scoped topic.** Their events went to the unscoped `$DB/{entity}/events/{id}` topic on every node, because the scope was read from an `id` field the cluster never writes into the record. On 3- and 5-node clusters, 0 of 27 and 0 of 75 such room creates arrived on `$DB/room/{id}/events/created`; now all do.
+
+### Known limitations
+
+- A cascade replayed from the outbox after a restart publishes its events without `client_id`, and a set-null applied on another node's primary has no `sender`.
+- A record whose id is longer than 255 bytes still crashes the nodes that replicate it: the replication write stores the id length in one byte, and a replica that reads such a write panics.
+
 ## 2026-10-21 — mqdb-cluster 0.4.30, mqdb-cli 0.8.58
 
 ### Fixed

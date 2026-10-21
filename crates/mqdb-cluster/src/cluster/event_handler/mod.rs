@@ -62,15 +62,6 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
     }
 
     #[must_use]
-    pub fn with_scope_config(
-        mut self,
-        scope_config: std::sync::Arc<mqdb_core::types::ScopeConfig>,
-    ) -> Self {
-        self.db_handler = self.db_handler.with_scope_config(scope_config);
-        self
-    }
-
-    #[must_use]
     pub fn with_vault_key_store(mut self, store: Arc<VaultKeyStore>) -> Self {
         self.db_handler = self.db_handler.with_vault_key_store(Arc::clone(&store));
         self.vault_key_store = store;
