@@ -2805,3 +2805,112 @@ async fn forwarded_write_without_a_response_topic_keeps_no_vault_decrypt() {
     );
     assert_eq!(ctrl.pending_vault_decrypts.len(), 1);
 }
+
+fn three_node_map() -> PartitionMap {
+    let mut map = PartitionMap::new();
+    map.set(
+        PartitionId::ZERO,
+        crate::cluster::PartitionAssignment {
+            primary: NodeId::validated(1),
+            replicas: vec![NodeId::validated(2).unwrap(), NodeId::validated(3).unwrap()],
+            epoch: Epoch::new(1),
+        },
+    );
+    map
+}
+
+struct RunningProcessor {
+    tick: flume::Sender<u64>,
+    inbox: flume::Sender<InboundMessage>,
+    batches: flume::Receiver<crate::cluster::ProcessingBatch>,
+}
+
+fn spawn_message_processor(node: NodeId, map: PartitionMap) -> RunningProcessor {
+    let (tx_raft_messages, _rx_raft_messages) = flume::unbounded();
+    let (tx_raft_events, _rx_raft_events) = flume::unbounded();
+    let (tx_main_queue, _rx_main_queue) = flume::unbounded();
+    let (inbox, rx_inbox) = flume::unbounded();
+    let (tick, rx_tick) = flume::unbounded();
+    let (tx_batch, batches) = flume::unbounded();
+    let mut processor = crate::cluster::MessageProcessor::new(
+        node,
+        TransportConfig::default(),
+        tx_raft_messages,
+        tx_raft_events,
+        tx_main_queue,
+        rx_inbox,
+        rx_tick,
+    );
+    processor.update_partition_map(map);
+    tokio::spawn(processor.run(tx_batch));
+    RunningProcessor {
+        tick,
+        inbox,
+        batches,
+    }
+}
+
+async fn next_batch_with(
+    processor: &RunningProcessor,
+    now: u64,
+    wanted: impl Fn(&crate::cluster::ProcessingBatch) -> bool,
+) -> crate::cluster::ProcessingBatch {
+    for attempt in 0..50 {
+        processor.tick.send(now + attempt).unwrap();
+        let batch = processor.batches.recv_async().await.unwrap();
+        if wanted(&batch) {
+            return batch;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("processor never produced the expected batch");
+}
+
+#[tokio::test]
+async fn followers_adopt_the_unique_voters_the_leader_founds() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let mut leader = create_test_controller(node1, MockTransport::new(node1));
+    let mut follower = create_test_controller(node2, MockTransport::new(node2));
+    leader.update_partition_map(three_node_map());
+    follower.update_partition_map(three_node_map());
+    leader.manage_unique_voters(true, 3, 0);
+    assert_eq!(leader.unique_voter_group(), [node1, node2, node3]);
+    assert!(follower.unique_voter_group().is_empty());
+
+    let leader_processor = spawn_message_processor(node1, three_node_map());
+    let follower_processor = spawn_message_processor(node2, three_node_map());
+
+    let outgoing = next_batch_with(&leader_processor, 1000, |batch| {
+        batch.heartbeat_to_send.is_some()
+    })
+    .await
+    .heartbeat_to_send
+    .unwrap();
+    leader.broadcast_heartbeat(outgoing).await;
+    let broadcast = leader.transport.sent_messages();
+    let [(_, message)] = broadcast.as_slice() else {
+        panic!("expected one broadcast heartbeat, got {broadcast:?}");
+    };
+    let mut wire = Vec::new();
+    message.encode_payload(&mut wire);
+    let received = ClusterMessage::decode_from_wire(message.message_type(), &wire).unwrap();
+
+    follower_processor
+        .inbox
+        .send(InboundMessage {
+            from: node1,
+            message: received,
+            received_at: 1000,
+        })
+        .unwrap();
+    let batch = next_batch_with(&follower_processor, 1000, |batch| {
+        !batch.heartbeat_updates.is_empty()
+    })
+    .await;
+    follower.apply_heartbeat_updates(&batch.heartbeat_updates);
+
+    assert_eq!(follower.unique_voter_group(), [node1, node2, node3]);
+    assert_eq!(follower.unique_majority(), 2);
+}

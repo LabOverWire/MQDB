@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-21 — mqdb-cluster 0.4.30, mqdb-cli 0.8.58
+
+### Fixed
+
+- **Unique constraints work on every node of a cluster** (#204). Since v0.8.49, only the raft leader ever knew the unique-voter set: heartbeats were built from a copy of the heartbeat state that never holds it, so followers never adopted the set and failed every reserve they coordinated or owned with 503 after 5 seconds. A unique create or update succeeded only when its value's partition primary was the leader. On 3- and 5-node clusters, 9 and 6 of 30 creates with distinct values succeeded; now all 30 do, also after the leader is killed and after a follower restarts. When every node creates the same value at once, each of 10 values now ends up with exactly one record and the other nodes get 409; before, 7 of 10 values ended up with no record at all. The intermittent `mqdb dev test` constraints failure ("Create first product (SKU-001) via Node 1") was this bug.
+
 ## 2026-10-21 — mqdb-cluster 0.4.29, mqdb-cli 0.8.57
 
 ### Fixed

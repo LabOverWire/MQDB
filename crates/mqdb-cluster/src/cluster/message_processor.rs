@@ -20,7 +20,7 @@ pub struct HeartbeatUpdate {
 pub struct ProcessingBatch {
     pub heartbeat_updates: Vec<HeartbeatUpdate>,
     pub dead_nodes: Vec<NodeId>,
-    pub heartbeat_to_send: Option<ClusterMessage>,
+    pub heartbeat_to_send: Option<Heartbeat>,
     pub forwarded_publishes: Vec<(String, Vec<u8>, u8)>,
 }
 
@@ -110,7 +110,7 @@ impl MessageProcessor {
         self.last_batch_time = now;
 
         if self.heartbeat_manager.should_send(now) {
-            batch.heartbeat_to_send = Some(self.heartbeat_manager.create_heartbeat(now));
+            batch.heartbeat_to_send = Some(self.heartbeat_manager.build_heartbeat(now));
         }
 
         batch.dead_nodes = self.heartbeat_manager.check_timeouts(now);

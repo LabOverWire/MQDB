@@ -362,6 +362,10 @@ concurrent reserve/quorum await, and the remote-reserve timeout reservation leak
   `UNIQUE_VOTER_CHANGE_INTERVAL_MS`** (> the reserve quorum timeout), so any single membership change keeps
   every outstanding reservation a majority of the voter set (single-step safety). The voter set is stamped
   `(raft_term, seq)` and gossiped in the heartbeat (wire version 3); receivers adopt a strictly-newer stamp.
+  Before mqdb-cluster 0.4.30 this gossip never ran in production (#204): heartbeats were built by the
+  `MessageProcessor`'s own `HeartbeatManager`, which never holds the voter set, so only the raft leader had
+  one and every other node failed its reserves closed. The event loop now sends each heartbeat through
+  `NodeController::broadcast_heartbeat`, which stamps the controller's voter set.
   A departed voter is kept in the denominator until it is paced out (not dropped the instant it leaves the
   map), so a correlated multi-node loss fails closed rather than collapsing the denominator and overselling.
   Modeled: `specs/ClusterUniqueReconfigV4.tla` (the hazard survives raft liveness), `V5` (lazy admission is
