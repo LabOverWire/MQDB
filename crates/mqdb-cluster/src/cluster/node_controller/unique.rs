@@ -8,6 +8,7 @@ use super::{
     UniqueSealRequest, UniqueSealResponse,
 };
 use crate::cluster::Epoch;
+use crate::cluster::protocol::Heartbeat;
 use tokio::sync::oneshot;
 
 const UNIQUE_RESERVE_TIMEOUT_SECS: u64 = 5;
@@ -699,6 +700,14 @@ impl<T: ClusterTransport> NodeController<T> {
     pub fn seed_unique_voters(&mut self, voters: std::collections::BTreeSet<NodeId>) {
         let (term, seq) = self.heartbeat.voter_stamp();
         self.heartbeat.set_voters(term.max(1), seq + 1, voters);
+    }
+
+    pub async fn broadcast_heartbeat(&self, heartbeat: Heartbeat) {
+        let heartbeat = self.heartbeat.stamp_voters(heartbeat);
+        let _ = self
+            .transport
+            .broadcast(ClusterMessage::Heartbeat(heartbeat))
+            .await;
     }
 
     /// Leader-driven unique-voter management, called each tick with the current raft status. The

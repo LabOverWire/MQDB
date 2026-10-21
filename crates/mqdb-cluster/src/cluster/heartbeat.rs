@@ -122,6 +122,11 @@ impl HeartbeatManager {
     }
 
     pub fn create_heartbeat(&mut self, now: u64) -> ClusterMessage {
+        let heartbeat = self.build_heartbeat(now);
+        ClusterMessage::Heartbeat(self.stamp_voters(heartbeat))
+    }
+
+    pub fn build_heartbeat(&mut self, now: u64) -> Heartbeat {
         self.last_sent = Some(now);
         tracing::trace!(local_node = ?self.local_node, now, "creating heartbeat");
 
@@ -135,10 +140,14 @@ impl HeartbeatManager {
             }
         }
 
-        let voters: Vec<NodeId> = self.voters.iter().copied().collect();
-        hb.set_voters(self.voter_term, self.voter_seq, &voters);
+        hb
+    }
 
-        ClusterMessage::Heartbeat(hb)
+    #[must_use]
+    pub fn stamp_voters(&self, mut heartbeat: Heartbeat) -> Heartbeat {
+        let voters: Vec<NodeId> = self.voters.iter().copied().collect();
+        heartbeat.set_voters(self.voter_term, self.voter_seq, &voters);
+        heartbeat
     }
 
     pub fn receive_heartbeat(&mut self, from: NodeId, heartbeat: &Heartbeat, received_at: u64) {

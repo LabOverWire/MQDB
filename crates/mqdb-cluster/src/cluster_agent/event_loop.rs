@@ -277,7 +277,7 @@ impl ClusteredAgent {
     async fn handle_processing_batch(&self, batch: ProcessingBatch) {
         if let Some(hb) = batch.heartbeat_to_send {
             let ctrl = self.controller.read().await;
-            let _ = ctrl.transport().broadcast(hb).await;
+            ctrl.broadcast_heartbeat(hb).await;
         }
 
         if !batch.heartbeat_updates.is_empty() {
