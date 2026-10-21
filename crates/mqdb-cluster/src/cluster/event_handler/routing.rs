@@ -21,7 +21,9 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
     }
 
     pub(super) async fn emit_presence(&self, presence: &mqdb_agent::presence::PresenceEvent) {
-        if !mqdb_agent::presence::is_publishable_client_id(&presence.client_id) {
+        if mqdb_agent::presence::is_internal_client(&presence.client_id)
+            || !mqdb_agent::presence::is_publishable_client_id(&presence.client_id)
+        {
             return;
         }
         let payload = match presence.payload() {

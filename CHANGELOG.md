@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-19 — mqdb-agent 0.8.38, mqdb-cluster 0.4.28, mqdb-cli 0.8.56
+
+### Security
+
+- **Client ids starting with `mqdb-` are reserved for MQDB's own clients** (#198). Any authenticated user could connect as `mqdb-forward-...` and publish change events that the cluster delivered to subscribers, or connect as `mqdb-admin-{node}`. Now, when authentication is configured, a connect with an `mqdb-` client id is refused with `Client Identifier not valid` unless it logs in as the internal service account. This applies to password, SCRAM and JWT logins. The CLI's `mqdb-cli-` ids are not reserved, so released CLIs keep working. On 3- and 5-node clusters, a forged event from `mqdb-forward-bob` no longer reaches any subscriber, and connecting as `mqdb-admin-1` is refused.
+- **Scoped event topics are read-only** (#198). With `--event-scope {entity}=...`, any user could publish to `$DB/{entity}/{value}/events/...` and `$DB/{entity}/{value}/{other}/events/...`; in agent mode subscribers received those messages as change events. Only the service may publish there now, in agent and cluster mode.
+
+### Fixed
+
+- **`mqdb watch` on a cluster receives events committed on other nodes.** The cluster treated every client id starting with `mqdb-`, including the CLI's, as internal and never routed its subscriptions to other nodes. A watch on node3 of a 3-node cluster received 4 of 20 creates made through node1, and on node5 of a 5-node cluster 5 of 20; now it receives all 20. CLI clients still stay out of the presence feed.
+- Cluster nodes now apply change-only delivery to scoped event topics, as agent mode already did.
+
 ## 2026-10-19 — mqdb-cluster 0.4.27, mqdb-cli 0.8.55
 
 ### Fixed

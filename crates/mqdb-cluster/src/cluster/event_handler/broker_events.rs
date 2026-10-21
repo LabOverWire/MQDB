@@ -13,6 +13,7 @@ use super::{
     current_time_ms, deliver_retained_messages, handle_clean_session_cleanup, qos_to_u8,
 };
 use bebytes::BeBytes;
+use mqdb_agent::topic_protection::is_reserved_client_id;
 use mqtt5::QoS;
 use mqtt5::broker::events::{
     BrokerEventHandler, ClientConnectEvent, ClientDisconnectEvent, ClientPublishEvent,
@@ -30,7 +31,7 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
         event: ClientConnectEvent,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            if event.client_id.starts_with("mqdb-") {
+            if is_reserved_client_id(&event.client_id) {
                 trace!("skipping internal client connect");
                 return;
             }
@@ -116,7 +117,7 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         let node_id = self.node_id;
         Box::pin(async move {
-            if event.client_id.starts_with("mqdb-") {
+            if is_reserved_client_id(&event.client_id) {
                 trace!("skipping internal client disconnect");
                 return;
             }
@@ -215,7 +216,7 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
         event: ClientSubscribeEvent,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            if event.client_id.starts_with("mqdb-") {
+            if is_reserved_client_id(&event.client_id) {
                 trace!("skipping internal client subscription");
                 return;
             }
@@ -307,7 +308,7 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
         event: ClientUnsubscribeEvent,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            if event.client_id.starts_with("mqdb-") {
+            if is_reserved_client_id(&event.client_id) {
                 trace!("skipping internal client unsubscribe");
                 return;
             }
@@ -506,7 +507,7 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
         event: MessageDeliveredEvent,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            if event.client_id.starts_with("mqdb-") {
+            if is_reserved_client_id(&event.client_id) {
                 trace!("skipping internal client message delivered");
                 return;
             }

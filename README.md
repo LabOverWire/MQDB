@@ -477,11 +477,13 @@ MQDB enforces hardcoded protection on internal topics that cannot be overridden 
 | Tier | Topics | Behavior |
 |------|--------|----------|
 | BlockAll | `_mqdb/#`, `$DB/_idx/#`, `$DB/_unique/#`, `$DB/_fk/#`, `$DB/_query/#`, `$DB/p+/#` | All access denied |
-| ReadOnly | `$SYS/#`, `$DB/+/events/#`, `$DB/u/#` | Subscribe allowed, publish denied |
+| ReadOnly | `$SYS/#`, `$DB/+/events/#`, `$DB/u/#`, `$DB/{scope}/+/events/#` and `$DB/{scope}/+/+/events/#` with `--event-scope {scope}=...` | Subscribe allowed, publish denied |
 | WriteOnly | `$DB/_sub/#` | Publish allowed, subscribe denied |
 | AdminRequired | `$DB/_admin/#`, `$DB/_verify/#`, `$DB/_oauth_tokens/#`, `$DB/_identities/#`, `$DB/_identity_links/#` | Requires admin user or explicit ACL grant |
 
 Entities starting with `_` (e.g., `_sessions`, `_mqtt_subs`) require admin access. Exceptions: `$DB/_health`, `$DB/_vault/*`, and `$DB/_auth/*` are accessible to any authenticated user, and `$DB/_sub/*` is a user-callable request channel (the `mqdb subscribe` command) — any authenticated user may publish subscribe/heartbeat/unsubscribe requests, but only the server consumes them, so subscribing to `$DB/_sub/*` is denied to prevent request snooping. For `AdminRequired` topics, non-admin users with an explicit ACL grant for the specific topic are also allowed access. This enables operator-provisioned service accounts (e.g., an email verifier with ACL grants for `$DB/_verify/#`) without requiring full admin privileges.
+
+Client ids starting with `mqdb-` are reserved for MQDB's own clients, which connect as the internal service account. Any other user connecting with such an id is refused with `Client Identifier not valid`. The CLI's `mqdb-cli-` ids are the exception. With no authentication configured, there is no service account and the prefix is not reserved.
 
 `$DB/u/#` is the reserved per-user scoped-events namespace (`--scoped-events`). Publishing is service-only — blocked for all external users regardless of the flag — so only the internal event publisher writes there. Subscribing is allowed by the ReadOnly tier, and when scoped events are enabled a user may only subscribe to their own `$DB/u/{me}/events/#`. Because the top-level `u` segment is reserved, `u` cannot be used as a regular entity name.
 

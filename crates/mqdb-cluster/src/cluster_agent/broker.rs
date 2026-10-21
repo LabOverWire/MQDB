@@ -204,7 +204,11 @@ impl ClusteredAgent {
             },
             change_only_delivery_config: ChangeOnlyDeliveryConfig {
                 enabled: true,
-                topic_patterns: vec!["$DB/+/events/#".to_string()],
+                topic_patterns: vec![
+                    "$DB/+/events/#".to_string(),
+                    "$DB/+/+/events/#".to_string(),
+                    "$DB/+/+/+/events/#".to_string(),
+                ],
             },
             ..Default::default()
         }
@@ -295,7 +299,8 @@ impl ClusteredAgent {
         let current_provider = broker.auth_provider();
         let protected_provider =
             TopicProtectionAuthProvider::new(current_provider, admin_users.clone())
-                .with_internal_service_username(service_username.cloned());
+                .with_internal_service_username(service_username.cloned())
+                .with_event_scope_entity(Some(self.scope_config.scope_entity().to_string()));
         broker = broker.with_auth_provider(Arc::new(protected_provider));
         if admin_users.is_empty() {
             info!("topic protection enabled (no admin users configured)");
