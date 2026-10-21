@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-21 — mqdb-cluster 0.4.29, mqdb-cli 0.8.57
+
+### Fixed
+
+- **Cluster nodes apply JSON writes sent without a response topic** (#196). A node dropped any JSON create, update or delete that had no response topic, while agent mode applied it and only skipped the reply. The publisher still got a successful PUBACK, so nothing told it the write was lost. On 3- and 5-node clusters, updates, creates and deletes published without a response topic through every node were applied 0 times out of 15 and 25; now all of them are. A forwarded write keeps no pending vault decrypt when no reply will come back, and a node never publishes a reply to an empty topic.
+
 ## 2026-10-19 — mqdb-agent 0.8.38, mqdb-cluster 0.4.28, mqdb-cli 0.8.56
 
 ### Security

@@ -2201,6 +2201,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .map_or(0, |d| d.as_nanos() as u64);
 
         if let Some(sender_id) = sender
+            && !response_topic.is_empty()
             && mqdb_vault::transform::is_vault_eligible(entity, &self.ownership)
             && self.vault_key_store.get(sender_id).is_some()
         {

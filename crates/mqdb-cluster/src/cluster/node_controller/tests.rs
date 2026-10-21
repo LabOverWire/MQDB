@@ -2747,3 +2747,61 @@ async fn unlinked_nodes_is_empty_without_voter_gossip() {
     assert!(ctrl.known_members().is_empty());
     assert!(ctrl.unlinked_nodes().await.is_empty());
 }
+
+#[tokio::test]
+async fn forwarded_write_without_a_response_topic_keeps_no_vault_decrypt() {
+    use crate::cluster::protocol::JsonDbOp;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    ctrl.set_ownership(Arc::new(
+        mqdb_core::types::OwnershipConfig::parse("notes=owner").unwrap(),
+    ));
+    let keys = Arc::new(VaultKeyStore::new());
+    keys.set("alice", zeroize::Zeroizing::new(vec![7u8; 32]));
+    ctrl.set_vault_key_store(keys);
+
+    let partition = crate::cluster::db::data_partition("notes", "n1");
+    let mut map = PartitionMap::new();
+    map.set(
+        partition,
+        crate::cluster::PartitionAssignment {
+            primary: Some(node2),
+            replicas: vec![],
+            epoch: Epoch::new(1),
+        },
+    );
+    ctrl.update_partition_map(map);
+
+    let update = br#"{"n":6}"#;
+    assert!(
+        ctrl.forward_json_db_request(
+            partition,
+            JsonDbOp::Update,
+            "notes",
+            Some("n1"),
+            update,
+            "",
+            None,
+            Some("alice"),
+        )
+        .await
+    );
+    assert!(ctrl.pending_vault_decrypts.is_empty());
+
+    assert!(
+        ctrl.forward_json_db_request(
+            partition,
+            JsonDbOp::Update,
+            "notes",
+            Some("n1"),
+            update,
+            "resp/t",
+            None,
+            Some("alice"),
+        )
+        .await
+    );
+    assert_eq!(ctrl.pending_vault_decrypts.len(), 1);
+}
