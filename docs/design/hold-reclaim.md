@@ -172,8 +172,9 @@ Cluster (done): **do not** copy the LWT template. Two verified constraints shape
   broker's own matcher is spec-correct and does match `$DB/_presence/#`), rather than
   routing via `route_and_forward_publish`. A happy side effect: every node ends up holding
   the retained set, so a janitor sees the full picture from whichever node it attaches to.
-- The janitor must **not** be named `mqdb-*`: `on_client_subscribe` early-returns on that
-  prefix, so its subscription would never be registered cluster-wide.
+- The janitor must **not** be named `mqdb-*`: that prefix is reserved for MQDB's internal
+  clients, so the connect is refused when authentication is configured, and the cluster
+  never registers that prefix's subscriptions cluster-wide.
 
 Cluster limitations, all verified against a live 3-node cluster:
 - **A presence broadcast is one hop.** `transport.broadcast` walks only the sender's

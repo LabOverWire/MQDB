@@ -5,6 +5,7 @@ use crate::topic_rules::{BlockReason, check_topic_access};
 use mqtt5::broker::auth::{AuthProvider, AuthResult, EnhancedAuthResult};
 use mqtt5::error::Result;
 use mqtt5::packet::connect::ConnectPacket;
+use mqtt5::protocol::v5::reason_codes::ReasonCode;
 use std::collections::HashSet;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -16,9 +17,26 @@ pub struct TopicProtectionAuthProvider {
     inner: Arc<dyn AuthProvider>,
     admin_users: Arc<HashSet<String>>,
     internal_service_username: Option<String>,
+    event_scope_entity: Option<String>,
     all_users_admin: bool,
     scoped_events: bool,
     sparkplug_aware: bool,
+}
+
+const RESERVED_CLIENT_ID_PREFIX: &str = "mqdb-";
+const CLI_CLIENT_ID_PREFIX: &str = "mqdb-cli-";
+
+#[must_use]
+pub fn is_reserved_client_id(client_id: &str) -> bool {
+    client_id.starts_with(RESERVED_CLIENT_ID_PREFIX) && !client_id.starts_with(CLI_CLIENT_ID_PREFIX)
+}
+
+fn is_scoped_event_topic(topic: &str, scope_entity: &str) -> bool {
+    let mut levels = topic.split('/');
+    levels.next() == Some("$DB")
+        && levels.next() == Some(scope_entity)
+        && levels.next().is_some()
+        && levels.take(2).any(|level| level == "events")
 }
 
 /// If `topic` is a per-user event namespace `$DB/u/{user}/...`, return `{user}`.
@@ -40,6 +58,7 @@ impl TopicProtectionAuthProvider {
             inner,
             admin_users: Arc::new(admin_users),
             internal_service_username: None,
+            event_scope_entity: None,
             all_users_admin: false,
             scoped_events: false,
             sparkplug_aware: false,
@@ -55,6 +74,12 @@ impl TopicProtectionAuthProvider {
     #[must_use]
     pub fn with_internal_service_username(mut self, username: Option<String>) -> Self {
         self.internal_service_username = username;
+        self
+    }
+
+    #[must_use]
+    pub fn with_event_scope_entity(mut self, scope_entity: Option<String>) -> Self {
+        self.event_scope_entity = scope_entity.filter(|entity| !entity.is_empty());
         self
     }
 
@@ -75,6 +100,12 @@ impl TopicProtectionAuthProvider {
             (Some(internal), Some(user)) => internal == user,
             _ => false,
         }
+    }
+
+    fn reserves_client_id(&self, client_id: &str, user_id: Option<&str>) -> bool {
+        self.internal_service_username.is_some()
+            && is_reserved_client_id(client_id)
+            && !self.is_internal_service(user_id)
     }
 
     fn is_admin_user(&self, user_id: Option<&str>) -> bool {
@@ -99,11 +130,20 @@ impl AuthProvider for TopicProtectionAuthProvider {
         let username = connect.username.clone();
         Box::pin(async move {
             let result = self.inner.authenticate(connect, client_addr).await?;
+            let result = match username {
+                Some(user) if result.authenticated && result.user_id.is_none() => {
+                    AuthResult::success_with_user(user)
+                }
+                _ => result,
+            };
             if result.authenticated
-                && result.user_id.is_none()
-                && let Some(user) = username
+                && self.reserves_client_id(&connect.client_id, result.user_id.as_deref())
             {
-                return Ok(AuthResult::success_with_user(user));
+                debug!(
+                    client_id = %connect.client_id,
+                    "connect with a reserved client id denied"
+                );
+                return Ok(AuthResult::fail(ReasonCode::ClientIdentifierNotValid));
             }
             Ok(result)
         })
@@ -131,6 +171,19 @@ impl AuthProvider for TopicProtectionAuthProvider {
 
             if is_internal {
                 return true;
+            }
+
+            if self
+                .event_scope_entity
+                .as_deref()
+                .is_some_and(|scope_entity| is_scoped_event_topic(topic, scope_entity))
+            {
+                debug!(
+                    client_id = %client_id_owned,
+                    topic = %topic,
+                    "publish to scoped event topic denied (service-only)"
+                );
+                return false;
             }
 
             if self.scoped_events && user_scope_segment(topic).is_some() {
@@ -239,6 +292,15 @@ impl AuthProvider for TopicProtectionAuthProvider {
         auth_data: Option<&'a [u8]>,
         client_id: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<EnhancedAuthResult>> + Send + 'a>> {
+        if self.reserves_client_id(client_id, None) {
+            debug!(client_id, "enhanced auth with a reserved client id denied");
+            return Box::pin(async move {
+                Ok(EnhancedAuthResult::fail(
+                    auth_method,
+                    ReasonCode::ClientIdentifierNotValid,
+                ))
+            });
+        }
         self.inner
             .authenticate_enhanced(auth_method, auth_data, client_id)
     }
@@ -772,5 +834,127 @@ mod tests {
                 .authorize_subscribe("c", Some("mqdb-internal"), "$DB/_sub/subscribe")
                 .await
         );
+    }
+
+    fn connect_as(client_id: &str, username: &str) -> ConnectPacket {
+        ConnectPacket {
+            protocol_version: 5,
+            clean_start: true,
+            keep_alive: 60,
+            client_id: client_id.to_string(),
+            username: Some(username.to_string()),
+            password: Some(b"secret".to_vec()),
+            will: None,
+            properties: mqtt5::Properties::default(),
+            will_properties: mqtt5::Properties::default(),
+        }
+    }
+
+    fn client_addr() -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], 50000))
+    }
+
+    #[test]
+    fn reserved_client_ids_cover_internal_clients_but_not_the_cli() {
+        assert!(is_reserved_client_id("mqdb-admin-1"));
+        assert!(is_reserved_client_id("mqdb-forward-2"));
+        assert!(is_reserved_client_id("mqdb-internal-handler"));
+        assert!(!is_reserved_client_id("mqdb-cli-0b5c"));
+        assert!(!is_reserved_client_id("seat-holder-7"));
+    }
+
+    #[tokio::test]
+    async fn only_the_service_user_connects_with_a_reserved_client_id() {
+        let provider = create_test_provider_with_internal("mqdb-internal-abc123");
+
+        let forged = provider
+            .authenticate(&connect_as("mqdb-forward-bob", "bob"), client_addr())
+            .await
+            .unwrap();
+        assert!(!forged.authenticated);
+        assert_eq!(forged.reason_code, ReasonCode::ClientIdentifierNotValid);
+
+        let internal = provider
+            .authenticate(
+                &connect_as("mqdb-admin-1", "mqdb-internal-abc123"),
+                client_addr(),
+            )
+            .await
+            .unwrap();
+        assert!(internal.authenticated);
+
+        for client_id in ["mqdb-cli-0b5c", "bob-phone"] {
+            let result = provider
+                .authenticate(&connect_as(client_id, "bob"), client_addr())
+                .await
+                .unwrap();
+            assert!(result.authenticated, "{client_id} must connect");
+        }
+    }
+
+    #[tokio::test]
+    async fn reserved_client_ids_stay_open_without_a_service_user() {
+        let provider = create_test_provider(HashSet::new());
+        let result = provider
+            .authenticate(&connect_as("mqdb-admin-1", "bob"), client_addr())
+            .await
+            .unwrap();
+        assert!(result.authenticated);
+    }
+
+    #[tokio::test]
+    async fn enhanced_auth_rejects_a_reserved_client_id() {
+        let provider = create_test_provider_with_internal("mqdb-internal-abc123");
+        let result = provider
+            .authenticate_enhanced("SCRAM-SHA-256", None, "mqdb-forward-bob")
+            .await
+            .unwrap();
+        assert_eq!(
+            result.status,
+            mqtt5::broker::auth::EnhancedAuthStatus::Failed
+        );
+        assert_eq!(result.reason_code, ReasonCode::ClientIdentifierNotValid);
+    }
+
+    fn create_event_scope_provider() -> TopicProtectionAuthProvider {
+        create_test_provider_with_internal("mqdb-internal")
+            .with_event_scope_entity(Some("lists".to_string()))
+    }
+
+    #[tokio::test]
+    async fn scoped_event_topics_are_service_only() {
+        let provider = create_event_scope_provider();
+        for topic in [
+            "$DB/lists/L1/events/created",
+            "$DB/lists/L1/items/events/updated",
+        ] {
+            assert!(
+                !provider.authorize_publish("c", Some("bob"), topic).await,
+                "{topic} must be read-only"
+            );
+            assert!(
+                provider
+                    .authorize_publish("c", Some("mqdb-internal"), topic)
+                    .await,
+                "{topic} must stay open to the service"
+            );
+            assert!(provider.authorize_subscribe("c", Some("bob"), topic).await);
+        }
+    }
+
+    #[tokio::test]
+    async fn scope_entity_requests_stay_writable() {
+        let provider = create_event_scope_provider();
+        for topic in [
+            "$DB/lists/create",
+            "$DB/lists/L1/update",
+            "$DB/lists/L1/delete",
+            "$DB/items/L1/events/created",
+        ] {
+            assert!(
+                provider.authorize_publish("c", Some("bob"), topic).await,
+                "{topic} must be writable"
+            );
+        }
     }
 }

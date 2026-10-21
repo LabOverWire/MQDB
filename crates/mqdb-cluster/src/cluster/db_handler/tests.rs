@@ -3360,3 +3360,69 @@ async fn a_forwarded_publish_reaches_local_subscribers_without_being_forwarded_a
         "the same publish made by the admin client is forwarded to the other node"
     );
 }
+
+#[tokio::test]
+async fn cli_clients_are_routable_across_nodes() {
+    use mqtt5::broker::events::BrokerEventHandler;
+
+    let (handler, ctrl) = session_harness();
+    handler
+        .on_client_connect(session_connect("mqdb-cli-watch", true, 0))
+        .await;
+    handler
+        .on_client_subscribe(session_subscribe("mqdb-cli-watch", "$DB/wt/events/#"))
+        .await;
+
+    let ctrl = ctrl.read().await;
+    assert_eq!(
+        ctrl.stores().client_locations.get("mqdb-cli-watch"),
+        NodeId::validated(1)
+    );
+    assert_eq!(
+        ctrl.stores()
+            .wildcards
+            .get_client_patterns("mqdb-cli-watch"),
+        vec![("$DB/wt/events/#".to_string(), 1)]
+    );
+}
+
+#[tokio::test]
+async fn internal_clients_are_not_tracked() {
+    use mqtt5::broker::events::BrokerEventHandler;
+
+    let (handler, ctrl) = session_harness();
+    handler
+        .on_client_connect(session_connect("mqdb-admin-1", true, 0))
+        .await;
+    handler
+        .on_client_subscribe(session_subscribe("mqdb-admin-1", "$DB/wt/events/#"))
+        .await;
+
+    let ctrl = ctrl.read().await;
+    assert_eq!(ctrl.stores().client_locations.get("mqdb-admin-1"), None);
+    assert!(
+        ctrl.stores()
+            .wildcards
+            .get_client_patterns("mqdb-admin-1")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn cluster_presence_skips_cli_clients() {
+    use mqtt5::broker::events::BrokerEventHandler;
+
+    let (handler, retained, _outbox) = presence_handler_with_transport();
+    handler
+        .on_client_connect(cluster_connect_event("mqdb-cli-request"))
+        .await;
+    handler
+        .on_client_disconnect(mqtt5::broker::events::ClientDisconnectEvent {
+            client_id: "mqdb-cli-request".into(),
+            user_id: Some("alice".into()),
+            reason: mqtt5::types::ReasonCode::Success,
+            unexpected: false,
+        })
+        .await;
+    assert!(retained.lock().unwrap().is_empty());
+}

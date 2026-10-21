@@ -35,6 +35,7 @@ pub(super) struct AuthProviderConfig<'a> {
     pub admin_users: &'a HashSet<String>,
     pub allow_anonymous: bool,
     pub scoped_events: bool,
+    pub event_scope_entity: &'a str,
     pub sparkplug_aware: bool,
 }
 
@@ -291,6 +292,7 @@ impl MqdbAgent {
                 .with_internal_service_username(config.service_username.cloned())
                 .with_all_users_admin(config.allow_anonymous && config.admin_users.is_empty())
                 .with_scoped_events(config.scoped_events)
+                .with_event_scope_entity(Some(config.event_scope_entity.to_string()))
                 .with_sparkplug_aware(config.sparkplug_aware);
         broker = broker.with_auth_provider(Arc::new(protected_provider));
         if config.admin_users.is_empty() {

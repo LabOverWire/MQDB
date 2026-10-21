@@ -305,6 +305,7 @@ impl MqdbAgent {
                 admin_users: &admin_users,
                 allow_anonymous: self.auth_setup.allow_anonymous,
                 scoped_events: self.scoped_events,
+                event_scope_entity: self.scope_config.scope_entity(),
                 sparkplug_aware: self.sparkplug_aware,
             },
         )
@@ -406,6 +407,7 @@ impl MqdbAgent {
                 admin_users: &admin_users,
                 allow_anonymous: self.auth_setup.allow_anonymous,
                 scoped_events: self.scoped_events,
+                event_scope_entity: self.scope_config.scope_entity(),
                 sparkplug_aware: self.sparkplug_aware,
             },
         )
