@@ -131,7 +131,6 @@ impl ClusteredAgent {
         let event_handler = Arc::new(
             ClusterEventHandler::new(self.node_id, self.controller.clone())
                 .with_ownership(ownership)
-                .with_scope_config(Arc::clone(&self.scope_config))
                 .with_vault_key_store(Arc::clone(&self.vault_key_store))
                 .with_presence(self.presence)
                 .with_retained_echoes(Arc::clone(&self.retained_echoes)),

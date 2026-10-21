@@ -2472,6 +2472,7 @@ async fn forwarded_read_response(
         response_topic: "resp/t".to_string(),
         correlation_data: None,
         sender: Some(sender.to_string()),
+        client_id: None,
     };
     ctrl.handle_json_db_request(from, partition, &req).await;
     let (_, msg) = outbox.lock().unwrap().pop().expect("a response was sent");
@@ -3558,6 +3559,7 @@ async fn forwarded_write_without_a_response_topic_is_applied_without_a_reply() {
         response_topic: String::new(),
         correlation_data: None,
         sender: None,
+        client_id: None,
     };
     ctrl.handle_json_db_request(node2, partition, &request)
         .await;

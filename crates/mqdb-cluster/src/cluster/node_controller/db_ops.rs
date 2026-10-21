@@ -84,6 +84,22 @@ fn change_event_user_properties(event: &ChangeEvent) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct EventOrigin<'a> {
+    pub(crate) sender: Option<&'a str>,
+    pub(crate) client_id: Option<&'a str>,
+}
+
+impl<'a> EventOrigin<'a> {
+    pub(crate) fn new(sender: Option<&'a str>, client_id: Option<&'a str>) -> Self {
+        Self { sender, client_id }
+    }
+
+    fn of(request: &'a JsonDbRequest) -> Self {
+        Self::new(request.sender.as_deref(), request.client_id.as_deref())
+    }
+}
+
 pub(crate) fn build_change_event_outbox(event: &ChangeEvent) -> OutboxPayload {
     let topic = event.event_topic(0);
     let user_properties = change_event_user_properties(event);
@@ -245,6 +261,38 @@ impl<T: ClusterTransport> NodeController<T> {
         outbox: super::super::store_manager::outbox::OutboxPayload,
     ) {
         self.write_or_forward_with_outbox(write, outbox).await;
+    }
+
+    pub(crate) async fn commit_with_change_event(
+        &mut self,
+        write: ReplicationWrite,
+        event: ChangeEvent,
+    ) {
+        let outbox = build_change_event_outbox(&event);
+        self.db_commit(write, outbox.clone()).await;
+        self.publish_and_deliver_change_event(event, &outbox.operation_id)
+            .await;
+    }
+
+    pub(crate) async fn commit_delete_with_change_event(
+        &mut self,
+        write: ReplicationWrite,
+        event: ChangeEvent,
+        data: &Value,
+        cascade: Option<&CascadeOutboxPayload>,
+    ) {
+        let outbox = build_change_event_outbox(&event);
+        match cascade {
+            Some(cascade) => {
+                self.db_commit_with_cascade(write, outbox.clone(), cascade)
+                    .await;
+            }
+            None => self.db_commit(write, outbox.clone()).await,
+        }
+        self.release_unique_for_deleted_record(&event.entity, &event.id, data)
+            .await;
+        self.publish_and_deliver_change_event(event, &outbox.operation_id)
+            .await;
     }
 
     pub(crate) async fn db_commit_with_cascade(
@@ -797,6 +845,8 @@ impl<T: ClusterTransport> NodeController<T> {
                         request_id,
                         new_diff,
                         old_diff,
+                        sender: request.sender.clone(),
+                        client_id: request.client_id.clone(),
                         response_topic: request.response_topic.clone(),
                         correlation_data: request.correlation_data.clone(),
                     },
@@ -843,6 +893,8 @@ impl<T: ClusterTransport> NodeController<T> {
                                     now_ms,
                                     new_diff,
                                     old_diff,
+                                    sender: request.sender.clone(),
+                                    client_id: request.client_id.clone(),
                                     response_topic: request.response_topic.clone(),
                                     correlation_data: request.correlation_data.clone(),
                                 },
@@ -857,12 +909,11 @@ impl<T: ClusterTransport> NodeController<T> {
 
         let result = match self.db_update_prepare(entity, id, &data_bytes, now_ms) {
             Ok((db_entity, write)) => {
-                let event =
-                    ChangeEvent::update(entity.to_string(), id.to_string(), merged_data.clone());
-                let outbox = build_change_event_outbox(&event);
-                self.db_commit(write, outbox.clone()).await;
-                self.publish_and_deliver_change_event(event, &outbox.operation_id)
-                    .await;
+                let event = self.change_event(
+                    ChangeEvent::update(entity.to_string(), id.to_string(), merged_data.clone()),
+                    EventOrigin::of(request),
+                );
+                self.commit_with_change_event(write, event).await;
                 if has_unique_changes {
                     self.commit_unique_constraints(
                         entity,
@@ -963,6 +1014,7 @@ impl<T: ClusterTransport> NodeController<T> {
                             entity: entity.to_string(),
                             id: id.to_string(),
                             sender: request.sender.clone(),
+                            client_id: request.client_id.clone(),
                             response_topic: request.response_topic.clone(),
                             correlation_data: request.correlation_data.clone(),
                         },
@@ -984,11 +1036,10 @@ impl<T: ClusterTransport> NodeController<T> {
             Ok(effects) => effects,
             Err(msg) => return (Self::json_error(409, &msg), None),
         };
-        let (cascade, ack_receivers) = self
-            .execute_fk_side_effects(&effects, request.sender.as_deref())
-            .await;
+        let origin = EventOrigin::of(request);
+        let (cascade, ack_receivers) = self.execute_fk_side_effects(&effects, origin).await;
         (
-            self.execute_json_delete(entity, id, cascade.as_ref(), ack_receivers)
+            self.execute_json_delete(entity, id, cascade.as_ref(), ack_receivers, origin)
                 .await,
             None,
         )
@@ -1000,9 +1051,10 @@ impl<T: ClusterTransport> NodeController<T> {
         id: &str,
         cascade: Option<&CascadeOutboxPayload>,
         ack_receivers: Vec<oneshot::Receiver<bool>>,
+        origin: EventOrigin<'_>,
     ) -> Vec<u8> {
         match self
-            .delete_record_replicated(entity, id, cascade, ack_receivers)
+            .delete_record_replicated(entity, id, cascade, ack_receivers, origin)
             .await
         {
             Ok(()) => {
@@ -1028,20 +1080,15 @@ impl<T: ClusterTransport> NodeController<T> {
         id: &str,
         cascade: Option<&CascadeOutboxPayload>,
         ack_receivers: Vec<oneshot::Receiver<bool>>,
+        origin: EventOrigin<'_>,
     ) -> Result<(), super::db::DbDataStoreError> {
         let (db_entity, write) = self.db_delete_prepare(entity, id)?;
         let data: Value = serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
-        let event = ChangeEvent::delete(entity.to_string(), id.to_string(), data.clone());
-        let outbox = build_change_event_outbox(&event);
-        if let Some(cas) = cascade {
-            self.db_commit_with_cascade(write, outbox.clone(), cas)
-                .await;
-        } else {
-            self.db_commit(write, outbox.clone()).await;
-        }
-        self.release_unique_for_deleted_record(entity, id, &data)
-            .await;
-        self.publish_and_deliver_change_event(event, &outbox.operation_id)
+        let event = self.change_event(
+            ChangeEvent::delete(entity.to_string(), id.to_string(), data.clone()),
+            origin,
+        );
+        self.commit_delete_with_change_event(write, event, &data, cascade)
             .await;
         if self.ownership.owner_field(entity).is_some() {
             self.clear_all_resource_grants(entity, id).await;
@@ -1075,7 +1122,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 continue;
             }
             if self
-                .delete_record_replicated(&entity, &id, None, Vec::new())
+                .delete_record_replicated(&entity, &id, None, Vec::new(), EventOrigin::default())
                 .await
                 .is_ok()
             {
@@ -1195,7 +1242,7 @@ impl<T: ClusterTransport> NodeController<T> {
     pub(crate) async fn execute_fk_side_effects(
         &mut self,
         effects: &[CascadeSideEffect],
-        sender: Option<&str>,
+        origin: EventOrigin<'_>,
     ) -> (Option<CascadeOutboxPayload>, Vec<oneshot::Receiver<bool>>) {
         let now_ms = Self::current_time_ms();
         let mut remote_ops = Vec::new();
@@ -1206,12 +1253,11 @@ impl<T: ClusterTransport> NodeController<T> {
                     if let Ok((db_entity, write)) = self.db_delete_prepare(entity, id) {
                         let data: Value =
                             serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
-                        let event = ChangeEvent::delete(entity.clone(), id.clone(), data.clone());
-                        let outbox = build_change_event_outbox(&event);
-                        self.db_commit(write, outbox.clone()).await;
-                        self.release_unique_for_deleted_record(entity, id, &data)
-                            .await;
-                        self.publish_and_deliver_change_event(event, &outbox.operation_id)
+                        let event = self.change_event(
+                            ChangeEvent::delete(entity.clone(), id.clone(), data.clone()),
+                            origin,
+                        );
+                        self.commit_delete_with_change_event(write, event, &data, None)
                             .await;
                     }
                 }
@@ -1224,18 +1270,18 @@ impl<T: ClusterTransport> NodeController<T> {
                     {
                         let data_json: serde_json::Value =
                             serde_json::from_slice(updated_data).unwrap_or(Value::Null);
-                        let event = ChangeEvent::update(entity.clone(), id.clone(), data_json);
-                        let outbox = build_change_event_outbox(&event);
-                        self.db_commit(write, outbox.clone()).await;
-                        self.publish_and_deliver_change_event(event, &outbox.operation_id)
-                            .await;
+                        let event = self.change_event(
+                            ChangeEvent::update(entity.clone(), id.clone(), data_json),
+                            origin,
+                        );
+                        self.commit_with_change_event(write, event).await;
                     }
                 }
                 CascadeSideEffect::RemoteDelete { entity, id, .. } => {
                     remote_ops.push(CascadeRemoteOp::Delete {
                         entity: entity.clone(),
                         id: id.clone(),
-                        sender: sender.map(String::from),
+                        sender: origin.sender.map(String::from),
                     });
                 }
                 CascadeSideEffect::RemoteSetNull {
@@ -1275,17 +1321,15 @@ impl<T: ClusterTransport> NodeController<T> {
                         if let Ok((db_entity, write)) = self.db_delete_prepare(entity, id) {
                             let data: Value =
                                 serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
-                            let event =
-                                ChangeEvent::delete(entity.clone(), id.clone(), data.clone());
-                            let outbox = build_change_event_outbox(&event);
-                            self.db_commit(write, outbox.clone()).await;
-                            self.release_unique_for_deleted_record(entity, id, &data)
-                                .await;
-                            self.publish_and_deliver_change_event(event, &outbox.operation_id)
+                            let event = self.change_event(
+                                ChangeEvent::delete(entity.clone(), id.clone(), data.clone()),
+                                origin,
+                            );
+                            self.commit_delete_with_change_event(write, event, &data, None)
                                 .await;
                         }
                     } else if let Some(rx) = self
-                        .send_cascade_request(*partition, JsonDbOp::Delete, entity, id, &[], sender)
+                        .send_cascade_request(*partition, JsonDbOp::Delete, entity, id, &[], origin)
                         .await
                     {
                         ack_receivers.push(rx);
@@ -1305,6 +1349,7 @@ impl<T: ClusterTransport> NodeController<T> {
                             field,
                             expected_value,
                             now_ms,
+                            origin,
                         )
                         .await;
                     } else if let Some(rx) = self
@@ -1314,6 +1359,7 @@ impl<T: ClusterTransport> NodeController<T> {
                             id,
                             field,
                             expected_value,
+                            origin.client_id,
                         )
                         .await
                     {
@@ -1334,7 +1380,7 @@ impl<T: ClusterTransport> NodeController<T> {
         entity: &str,
         id: &str,
         payload: &[u8],
-        sender: Option<&str>,
+        origin: EventOrigin<'_>,
     ) -> Option<oneshot::Receiver<bool>> {
         let Some(primary) = self.partition_map.primary(partition) else {
             tracing::debug!(
@@ -1367,7 +1413,8 @@ impl<T: ClusterTransport> NodeController<T> {
             payload: payload.to_vec(),
             response_topic,
             correlation_data: None,
-            sender: sender.map(String::from),
+            sender: origin.sender.map(String::from),
+            client_id: origin.client_id.map(String::from),
         };
         let _ = self
             .transport
@@ -1386,6 +1433,7 @@ impl<T: ClusterTransport> NodeController<T> {
         id: &str,
         field: &str,
         expected_value: &str,
+        client_id: Option<&str>,
     ) -> Option<oneshot::Receiver<bool>> {
         let Some(primary) = self.partition_map.primary(partition) else {
             tracing::debug!(
@@ -1424,6 +1472,7 @@ impl<T: ClusterTransport> NodeController<T> {
             response_topic,
             correlation_data: None,
             sender: None,
+            client_id: client_id.map(String::from),
         };
         let _ = self
             .transport
@@ -1433,6 +1482,21 @@ impl<T: ClusterTransport> NodeController<T> {
             )
             .await;
         Some(rx)
+    }
+
+    pub(crate) fn change_event(&self, event: ChangeEvent, origin: EventOrigin<'_>) -> ChangeEvent {
+        let scope = if event.entity == self.scope_config.scope_entity() {
+            Some((event.entity.clone(), event.id.clone()))
+        } else {
+            event
+                .data
+                .as_ref()
+                .and_then(|data| self.scope_config.resolve_scope(&event.entity, data))
+        };
+        event
+            .with_sender(origin.sender.map(str::to_string))
+            .with_client_id(origin.client_id.map(str::to_string))
+            .with_scope(scope)
     }
 
     pub(crate) async fn publish_and_deliver_change_event(
@@ -1505,6 +1569,7 @@ impl<T: ClusterTransport> NodeController<T> {
         field: &str,
         expected_value: &str,
         now_ms: u64,
+        origin: EventOrigin<'_>,
     ) {
         let Some(existing) = self.stores.db_get(entity, id) else {
             return;
@@ -1528,11 +1593,11 @@ impl<T: ClusterTransport> NodeController<T> {
         obj.insert(field.to_string(), Value::Null);
         let updated_bytes = serde_json::to_vec(&record).unwrap_or_default();
         if let Ok((_, write)) = self.db_update_prepare(entity, id, &updated_bytes, now_ms) {
-            let event = ChangeEvent::update(entity.to_string(), id.to_string(), record);
-            let outbox = build_change_event_outbox(&event);
-            self.db_commit(write, outbox.clone()).await;
-            self.publish_and_deliver_change_event(event, &outbox.operation_id)
-                .await;
+            let event = self.change_event(
+                ChangeEvent::update(entity.to_string(), id.to_string(), record),
+                origin,
+            );
+            self.commit_with_change_event(write, event).await;
         }
     }
 
@@ -1583,6 +1648,8 @@ impl<T: ClusterTransport> NodeController<T> {
                         data,
                         partition,
                         request_id,
+                        sender: request.sender.clone(),
+                        client_id: request.client_id.clone(),
                         response_topic: request.response_topic.clone(),
                         correlation_data: request.correlation_data.clone(),
                     },
@@ -1685,6 +1752,8 @@ impl<T: ClusterTransport> NodeController<T> {
                         partition,
                         request_id,
                         now_ms,
+                        sender: request.sender.clone(),
+                        client_id: request.client_id.clone(),
                         response_topic: request.response_topic.clone(),
                         correlation_data: request.correlation_data.clone(),
                     },
@@ -1703,11 +1772,11 @@ impl<T: ClusterTransport> NodeController<T> {
                     &remote_reserved,
                 )
                 .await;
-                let event = ChangeEvent::create(entity.to_string(), id.clone(), data.clone());
-                let outbox = build_change_event_outbox(&event);
-                self.db_commit(write, outbox.clone()).await;
-                self.publish_and_deliver_change_event(event, &outbox.operation_id)
-                    .await;
+                let event = self.change_event(
+                    ChangeEvent::create(entity.to_string(), id.clone(), data.clone()),
+                    EventOrigin::of(request),
+                );
+                self.commit_with_change_event(write, event).await;
                 crate::cluster::db_handler::helpers::json_ok_with_id(db_entity.id_str(), &data)
             }
             Err(super::db::DbDataStoreError::AlreadyExists) => {
@@ -1883,9 +1952,10 @@ impl<T: ClusterTransport> NodeController<T> {
                 data,
                 partition,
                 request_id,
+                sender,
+                client_id,
                 response_topic,
                 correlation_data,
-                ..
             } => {
                 let now_ms = Self::current_time_ms();
                 let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
@@ -1926,6 +1996,8 @@ impl<T: ClusterTransport> NodeController<T> {
                         partition,
                         request_id,
                         now_ms,
+                        sender,
+                        client_id,
                         response_topic,
                         correlation_data,
                     },
@@ -1940,9 +2012,10 @@ impl<T: ClusterTransport> NodeController<T> {
                 request_id,
                 new_diff,
                 old_diff,
+                sender,
+                client_id,
                 response_topic,
                 correlation_data,
-                ..
             } => {
                 let now_ms = Self::current_time_ms();
                 let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
@@ -1984,6 +2057,8 @@ impl<T: ClusterTransport> NodeController<T> {
                         now_ms,
                         new_diff,
                         old_diff,
+                        sender,
+                        client_id,
                         response_topic,
                         correlation_data,
                     },
@@ -2031,12 +2106,14 @@ impl<T: ClusterTransport> NodeController<T> {
             entity,
             id,
             sender,
+            client_id,
             response_topic,
             correlation_data,
         } = continuation
         else {
             return;
         };
+        let origin = EventOrigin::new(sender.as_deref(), client_id.as_deref());
 
         let effects = match self.prepare_fk_side_effects(&side_effects) {
             Ok(effects) => effects,
@@ -2056,11 +2133,9 @@ impl<T: ClusterTransport> NodeController<T> {
                 return;
             }
         };
-        let (cascade, ack_receivers) = self
-            .execute_fk_side_effects(&effects, sender.as_deref())
-            .await;
+        let (cascade, ack_receivers) = self.execute_fk_side_effects(&effects, origin).await;
         let response_payload = self
-            .execute_json_delete(&entity, &id, cascade.as_ref(), ack_receivers)
+            .execute_json_delete(&entity, &id, cascade.as_ref(), ack_receivers, origin)
             .await;
         if !response_topic.is_empty() {
             let response =
@@ -2159,8 +2234,8 @@ impl<T: ClusterTransport> NodeController<T> {
         .unwrap_or(u64::MAX)
     }
 
-    #[allow(clippy::too_many_arguments, clippy::cast_possible_truncation)]
-    pub async fn forward_json_db_request(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn forward_json_db_request(
         &mut self,
         partition: PartitionId,
         op: JsonDbOp,
@@ -2169,7 +2244,7 @@ impl<T: ClusterTransport> NodeController<T> {
         payload: &[u8],
         response_topic: &str,
         correlation_data: Option<&[u8]>,
-        sender: Option<&str>,
+        origin: EventOrigin<'_>,
     ) -> bool {
         let start = std::time::Instant::now();
         let node_id = self.node_id.get();
@@ -2195,12 +2270,32 @@ impl<T: ClusterTransport> NodeController<T> {
             return false;
         }
 
-        #[allow(clippy::cast_possible_truncation)]
         let request_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos() as u64);
+            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
 
-        if let Some(sender_id) = sender
+        let request = JsonDbRequest {
+            request_id,
+            op,
+            entity: entity.to_string(),
+            id: id.map(String::from),
+            payload: payload.to_vec(),
+            response_topic: response_topic.to_string(),
+            correlation_data: correlation_data.map(<[u8]>::to_vec),
+            sender: origin.sender.map(String::from),
+            client_id: origin.client_id.map(String::from),
+        };
+        if !request.fits_wire() {
+            tracing::warn!(
+                node = node_id,
+                partition = partition.get(),
+                entity,
+                "forward_failed_request_too_long"
+            );
+            return false;
+        }
+
+        if let Some(sender_id) = origin.sender
             && !response_topic.is_empty()
             && mqdb_vault::transform::is_vault_eligible(entity, &self.ownership)
             && self.vault_key_store.get(sender_id).is_some()
@@ -2229,17 +2324,6 @@ impl<T: ClusterTransport> NodeController<T> {
             }
         }
 
-        let request = JsonDbRequest {
-            request_id,
-            op,
-            entity: entity.to_string(),
-            id: id.map(String::from),
-            payload: payload.to_vec(),
-            response_topic: response_topic.to_string(),
-            correlation_data: correlation_data.map(<[u8]>::to_vec),
-            sender: sender.map(String::from),
-        };
-
         let msg = ClusterMessage::JsonDbRequest { partition, request };
         if let Err(e) = self.transport.send(primary, msg).await {
             self.pending_vault_decrypts.remove(&request_id);
@@ -2247,7 +2331,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 node = node_id,
                 partition = partition.get(),
                 primary = primary.get(),
-                elapsed_us = start.elapsed().as_micros() as u64,
+                elapsed_us = start.elapsed().as_micros(),
                 ?e,
                 "forward_json_request_failed"
             );
@@ -2258,7 +2342,7 @@ impl<T: ClusterTransport> NodeController<T> {
             node = node_id,
             partition = partition.get(),
             primary = primary.get(),
-            elapsed_us = start.elapsed().as_micros() as u64,
+            elapsed_us = start.elapsed().as_micros(),
             ?op,
             entity,
             "forward_json_request_sent"
@@ -2282,6 +2366,7 @@ impl<T: ClusterTransport> NodeController<T> {
             response_topic: String::new(),
             correlation_data: None,
             sender: None,
+            client_id: None,
         };
         let (result, _) = self
             .handle_json_update_local(entity, id, payload, &request, self.node_id)

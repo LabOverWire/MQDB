@@ -145,6 +145,7 @@ impl ClusteredAgent {
         let (transport, transport_inbox_rx) = Self::build_transport(node_id, &config);
         let transport_config = TransportConfig::default();
         let ownership_arc = Arc::new(config.ownership.clone());
+        let scope_config_arc = Arc::new(config.scope_config.clone());
         let vault_key_store = Arc::new(mqdb_vault::VaultKeyStore::new());
         let mut controller = NodeController::new_with_storage(
             node_id,
@@ -155,6 +156,7 @@ impl ClusteredAgent {
             tx_raft_events.clone(),
         );
         controller.set_ownership(Arc::clone(&ownership_arc));
+        controller.set_scope_config(Arc::clone(&scope_config_arc));
         controller.set_presence(config.presence);
         controller.set_vault_key_store(Arc::clone(&vault_key_store));
         #[cfg(feature = "http-api")]
@@ -245,7 +247,7 @@ impl ClusteredAgent {
             #[cfg(feature = "http-api")]
             http_config: config.http_config,
             ownership: ownership_arc,
-            scope_config: Arc::new(config.scope_config),
+            scope_config: scope_config_arc,
             presence: config.presence,
             retained_echoes: Arc::new(RetainedEchoes::new()),
             max_retained_message_size: config.max_retained_message_size,

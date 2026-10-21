@@ -135,6 +135,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 response_topic: scatter_response_topic.clone(),
                 correlation_data: None,
                 sender: None,
+                client_id: None,
             };
 
             let msg = ClusterMessage::JsonDbRequest {

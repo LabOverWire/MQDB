@@ -14,6 +14,8 @@ use serde_json::{Value, json};
 use std::collections::{HashSet, VecDeque};
 
 #[cfg(feature = "http-api")]
+use super::db_ops::EventOrigin;
+#[cfg(feature = "http-api")]
 use super::protocol::{JsonDbOp, JsonDbRequest};
 #[cfg(feature = "http-api")]
 use super::{ClusterMessage, NodeId, PartitionId, PendingScatterRequest, ShareResolveContinuation};
@@ -518,6 +520,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 response_topic: scatter_response_topic.clone(),
                 correlation_data: None,
                 sender: None,
+                client_id: None,
             };
             let msg = ClusterMessage::JsonDbRequest {
                 partition: PartitionId::ZERO,
@@ -630,7 +633,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 &payload,
                 &cont.response_topic,
                 cont.correlation_data.as_deref(),
-                Some(cont.granted_by.as_str()),
+                EventOrigin::new(Some(cont.granted_by.as_str()), None),
             )
             .await;
         }

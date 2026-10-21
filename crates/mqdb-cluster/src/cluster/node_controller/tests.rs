@@ -839,6 +839,8 @@ async fn fk_then_unique_defers_reserve_to_async_completion() {
         data: serde_json::json!({ "id": "u1", "email": "a@x.com" }),
         partition: crate::cluster::db::data_partition("users", "u1"),
         request_id: "req-1".to_string(),
+        sender: None,
+        client_id: None,
         response_topic: "resp/t".to_string(),
         correlation_data: None,
     };
@@ -2438,6 +2440,7 @@ fn delete_post_request(sender: Option<&str>) -> crate::cluster::protocol::JsonDb
         response_topic: String::new(),
         correlation_data: None,
         sender: sender.map(String::from),
+        client_id: None,
     }
 }
 
@@ -2491,7 +2494,7 @@ async fn cascade_delete_fan_out_propagates_sender_to_remote_primary() {
             "comments",
             "comment-carol",
             &[],
-            Some("alice"),
+            EventOrigin::new(Some("alice"), None),
         )
         .await;
 
@@ -2784,7 +2787,7 @@ async fn forwarded_write_without_a_response_topic_keeps_no_vault_decrypt() {
             update,
             "",
             None,
-            Some("alice"),
+            EventOrigin::new(Some("alice"), None),
         )
         .await
     );
@@ -2799,7 +2802,7 @@ async fn forwarded_write_without_a_response_topic_keeps_no_vault_decrypt() {
             update,
             "resp/t",
             None,
-            Some("alice"),
+            EventOrigin::new(Some("alice"), None),
         )
         .await
     );
@@ -2913,4 +2916,265 @@ async fn followers_adopt_the_unique_voters_the_leader_founds() {
 
     assert_eq!(follower.unique_voter_group(), [node1, node2, node3]);
     assert_eq!(follower.unique_majority(), 2);
+}
+
+struct RoutedEvent {
+    topic: String,
+    user_properties: Vec<(String, String)>,
+    event: serde_json::Value,
+}
+
+fn routed_change_events(ctrl: &NodeController<MockTransport>) -> Vec<RoutedEvent> {
+    ctrl.transport
+        .queued_publishes()
+        .into_iter()
+        .filter_map(|publish| match publish {
+            QueuedPublish::Routed(routed) => Some(RoutedEvent {
+                topic: routed.topic,
+                user_properties: routed.user_properties,
+                event: serde_json::from_slice(&routed.payload).unwrap(),
+            }),
+            QueuedPublish::Plain(..) => None,
+        })
+        .collect()
+}
+
+fn assert_written_by_editor(events: &[RoutedEvent]) {
+    for routed in events {
+        let topic = &routed.topic;
+        assert_eq!(
+            routed.user_properties,
+            [("x-origin-client-id".to_string(), "editor-1".to_string())],
+            "{topic}"
+        );
+        assert_eq!(routed.event["sender"], "alice", "{topic}");
+        assert_eq!(routed.event["client_id"], "editor-1", "{topic}");
+    }
+}
+
+fn forwarded_request(
+    op: crate::cluster::protocol::JsonDbOp,
+    entity: &str,
+    id: Option<&str>,
+    payload: &serde_json::Value,
+) -> crate::cluster::protocol::JsonDbRequest {
+    let request = crate::cluster::protocol::JsonDbRequest {
+        request_id: 1,
+        op,
+        entity: entity.to_string(),
+        id: id.map(String::from),
+        payload: serde_json::to_vec(payload).unwrap(),
+        response_topic: "resp/t".to_string(),
+        correlation_data: None,
+        sender: Some("alice".to_string()),
+        client_id: Some("editor-1".to_string()),
+    };
+    crate::cluster::protocol::JsonDbRequest::from_bytes(&request.to_bytes().unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn forwarded_writes_publish_events_with_the_writers_origin_and_scope() {
+    use crate::cluster::protocol::JsonDbOp;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    make_all_primary(&mut ctrl, node1);
+    ctrl.set_scope_config(Arc::new(
+        mqdb_core::types::ScopeConfig::parse("room=roomId").unwrap(),
+    ));
+    let partition = crate::cluster::db::data_partition("msg", "m1");
+
+    for request in [
+        forwarded_request(
+            JsonDbOp::Create,
+            "msg",
+            None,
+            &serde_json::json!({"id": "m1", "roomId": "r1", "n": 0}),
+        ),
+        forwarded_request(
+            JsonDbOp::Update,
+            "msg",
+            Some("m1"),
+            &serde_json::json!({"n": 1}),
+        ),
+        forwarded_request(JsonDbOp::Delete, "msg", Some("m1"), &serde_json::json!({})),
+    ] {
+        ctrl.handle_json_db_request(node2, partition, &request)
+            .await;
+    }
+
+    let events = routed_change_events(&ctrl);
+    let topics: Vec<&str> = events.iter().map(|routed| routed.topic.as_str()).collect();
+    assert_eq!(
+        topics,
+        [
+            "$DB/room/r1/msg/events/created",
+            "$DB/room/r1/msg/events/updated",
+            "$DB/room/r1/msg/events/deleted",
+        ]
+    );
+    assert_written_by_editor(&events);
+}
+
+#[tokio::test]
+async fn scope_records_with_a_generated_id_publish_on_their_own_scope() {
+    use crate::cluster::db_handler::{DbRequestHandler, MqttRequestContext};
+    use crate::cluster::protocol::JsonDbOp;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    make_all_primary(&mut ctrl, node1);
+    ctrl.set_scope_config(Arc::new(
+        mqdb_core::types::ScopeConfig::parse("room=roomId").unwrap(),
+    ));
+
+    let forwarded = forwarded_request(
+        JsonDbOp::Create,
+        "room",
+        None,
+        &serde_json::json!({"name": "forwarded"}),
+    );
+    ctrl.handle_json_db_request(node2, PartitionId::new(7).unwrap(), &forwarded)
+        .await;
+    DbRequestHandler::new(node1)
+        .handle_publish(
+            &mut ctrl,
+            "$DB/room/create",
+            br#"{"name":"local"}"#,
+            &MqttRequestContext {
+                response_topic: Some("resp/t"),
+                correlation_data: None,
+                sender: Some("alice"),
+                client_id: Some("editor-1"),
+            },
+        )
+        .await;
+
+    let events = routed_change_events(&ctrl);
+    let names: Vec<&str> = events
+        .iter()
+        .map(|routed| routed.event["data"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["forwarded", "local"]);
+    for routed in &events {
+        let id = routed.event["id"].as_str().unwrap();
+        assert_eq!(routed.topic, format!("$DB/room/{id}/events/created"));
+    }
+    assert_written_by_editor(&events);
+}
+
+#[tokio::test]
+async fn forwarded_writes_completed_after_a_unique_check_publish_their_events() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    make_all_primary(&mut ctrl, node1);
+    let partition = crate::cluster::db::data_partition("users", "u1");
+    let data = serde_json::json!({"id": "u1", "email": "a@x"});
+    let merged_data = serde_json::json!({"id": "u1", "email": "b@x"});
+
+    ctrl.complete_pending_unique_work(
+        Vec::new(),
+        Ok(Vec::new()),
+        UniqueCheckContinuation::CreateFromNodeController {
+            from: node2,
+            entity: "users".to_string(),
+            id: "u1".to_string(),
+            data_bytes: serde_json::to_vec(&data).unwrap(),
+            data,
+            partition,
+            request_id: "req-1".to_string(),
+            now_ms: 1000,
+            sender: Some("alice".to_string()),
+            client_id: Some("editor-1".to_string()),
+            response_topic: "resp/t".to_string(),
+            correlation_data: None,
+        },
+    )
+    .await;
+    ctrl.complete_pending_unique_work(
+        Vec::new(),
+        Ok(Vec::new()),
+        UniqueCheckContinuation::UpdateFromNodeController {
+            from: node2,
+            entity: "users".to_string(),
+            id: "u1".to_string(),
+            data_bytes: serde_json::to_vec(&merged_data).unwrap(),
+            merged_data,
+            partition,
+            request_id: "req-2".to_string(),
+            now_ms: 2000,
+            new_diff: serde_json::json!({"email": "b@x"}),
+            old_diff: serde_json::json!({"email": "a@x"}),
+            sender: Some("alice".to_string()),
+            client_id: Some("editor-1".to_string()),
+            response_topic: "resp/t".to_string(),
+            correlation_data: None,
+        },
+    )
+    .await;
+
+    let events = routed_change_events(&ctrl);
+    let summary: Vec<(&str, &str)> = events
+        .iter()
+        .map(|routed| {
+            (
+                routed.topic.as_str(),
+                routed.event["data"]["email"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("$DB/users/events/u1", "a@x"),
+            ("$DB/users/events/u1", "b@x"),
+        ]
+    );
+    assert_eq!(events[0].event["operation"], "Create");
+    assert_eq!(events[1].event["operation"], "Update");
+    assert_written_by_editor(&events);
+}
+
+#[tokio::test]
+async fn forwarded_delete_cascade_events_carry_the_deleters_origin() {
+    use crate::cluster::protocol::JsonDbOp;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    setup_post_with_owned_and_cross_owned_comments(&mut ctrl, node1).await;
+    let partition = crate::cluster::db::data_partition("posts", "post-alice");
+
+    let request = forwarded_request(
+        JsonDbOp::Delete,
+        "posts",
+        Some("post-alice"),
+        &serde_json::json!({}),
+    );
+    ctrl.handle_json_db_request(node2, partition, &request)
+        .await;
+
+    let events = routed_change_events(&ctrl);
+    let mut changes: Vec<(String, String)> = events
+        .iter()
+        .map(|routed| {
+            (
+                routed.event["id"].as_str().unwrap().to_string(),
+                routed.event["operation"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    changes.sort();
+    assert_eq!(
+        changes,
+        [
+            ("comment-alice".to_string(), "Delete".to_string()),
+            ("comment-carol".to_string(), "Update".to_string()),
+            ("post-alice".to_string(), "Delete".to_string()),
+        ]
+    );
+    assert_written_by_editor(&events);
 }

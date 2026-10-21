@@ -43,8 +43,10 @@ use super::transport::{
 };
 use super::write_log::PartitionWriteLog;
 use super::{Epoch, NodeId, PartitionId, PartitionMap, PartitionMapExt};
+use db_ops::EventOrigin;
+use mqdb_core::events::ChangeEvent;
 use mqdb_core::storage::StorageBackend;
-use mqdb_core::types::{MAX_LIST_RESULTS, OwnershipConfig};
+use mqdb_core::types::{MAX_LIST_RESULTS, OwnershipConfig, ScopeConfig};
 use mqdb_vault::VaultKeyStore;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -267,6 +269,7 @@ pub enum FkDeleteContinuation {
         entity: String,
         id: String,
         sender: Option<String>,
+        client_id: Option<String>,
         response_topic: String,
         correlation_data: Option<Vec<u8>>,
     },
@@ -328,6 +331,8 @@ pub enum FkCheckContinuation {
         data: serde_json::Value,
         partition: PartitionId,
         request_id: String,
+        sender: Option<String>,
+        client_id: Option<String>,
         response_topic: String,
         correlation_data: Option<Vec<u8>>,
     },
@@ -340,6 +345,8 @@ pub enum FkCheckContinuation {
         request_id: String,
         new_diff: serde_json::Value,
         old_diff: serde_json::Value,
+        sender: Option<String>,
+        client_id: Option<String>,
         response_topic: String,
         correlation_data: Option<Vec<u8>>,
     },
@@ -384,6 +391,8 @@ pub enum UniqueCheckContinuation {
         partition: PartitionId,
         request_id: String,
         now_ms: u64,
+        sender: Option<String>,
+        client_id: Option<String>,
         response_topic: String,
         correlation_data: Option<Vec<u8>>,
     },
@@ -398,6 +407,8 @@ pub enum UniqueCheckContinuation {
         now_ms: u64,
         new_diff: serde_json::Value,
         old_diff: serde_json::Value,
+        sender: Option<String>,
+        client_id: Option<String>,
         response_topic: String,
         correlation_data: Option<Vec<u8>>,
     },
@@ -460,6 +471,7 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) pending_vault_decrypts: HashMap<u64, PendingVaultDecrypt>,
     pub(super) pending_constraints: Arc<pending::PendingConstraintState>,
     pub(super) ownership: Arc<OwnershipConfig>,
+    pub(super) scope_config: Arc<ScopeConfig>,
     pub(super) presence: bool,
     pub(super) vault_key_store: Arc<VaultKeyStore>,
     #[cfg(feature = "http-api")]
@@ -535,6 +547,7 @@ impl<T: ClusterTransport> NodeController<T> {
             pending_vault_decrypts: HashMap::new(),
             pending_constraints: Arc::new(pending::PendingConstraintState::new()),
             ownership: Arc::new(OwnershipConfig::default()),
+            scope_config: Arc::new(ScopeConfig::default()),
             presence: false,
             vault_key_store: Arc::new(VaultKeyStore::new()),
             #[cfg(feature = "http-api")]
@@ -544,6 +557,10 @@ impl<T: ClusterTransport> NodeController<T> {
 
     pub fn set_ownership(&mut self, ownership: Arc<OwnershipConfig>) {
         self.ownership = ownership;
+    }
+
+    pub fn set_scope_config(&mut self, scope_config: Arc<ScopeConfig>) {
+        self.scope_config = scope_config;
     }
 
     pub fn set_presence(&mut self, enabled: bool) {
@@ -1588,9 +1605,12 @@ impl<T: ClusterTransport> NodeController<T> {
                 partition,
                 request_id,
                 now_ms,
+                sender,
+                client_id,
                 response_topic,
                 correlation_data,
             } => {
+                let origin = EventOrigin::new(sender.as_deref(), client_id.as_deref());
                 let response_payload = match remote_results {
                     Err((failure, confirmed)) => {
                         self.release_unique_check_reservations(
@@ -1603,8 +1623,13 @@ impl<T: ClusterTransport> NodeController<T> {
                         Self::json_error(failure.http_code(), &failure.message())
                     }
                     Ok(confirmed_remotes) => {
-                        match self.db_create(&entity, &id, &data_bytes, now_ms).await {
-                            Ok(db_entity) => {
+                        match self.db_create_prepare(&entity, &id, &data_bytes, now_ms) {
+                            Ok((db_entity, write)) => {
+                                let event = self.change_event(
+                                    ChangeEvent::create(entity.clone(), id.clone(), data.clone()),
+                                    origin,
+                                );
+                                self.commit_with_change_event(write, event).await;
                                 self.commit_unique_constraints(
                                     &entity,
                                     &id,
@@ -1661,9 +1686,12 @@ impl<T: ClusterTransport> NodeController<T> {
                 now_ms,
                 new_diff,
                 old_diff,
+                sender,
+                client_id,
                 response_topic,
                 correlation_data,
             } => {
+                let origin = EventOrigin::new(sender.as_deref(), client_id.as_deref());
                 let response_payload = match remote_results {
                     Err((failure, confirmed)) => {
                         self.release_unique_check_reservations(
@@ -1676,8 +1704,17 @@ impl<T: ClusterTransport> NodeController<T> {
                         Self::json_error(failure.http_code(), &failure.message())
                     }
                     Ok(confirmed_remotes) => {
-                        match self.db_update(&entity, &id, &data_bytes, now_ms).await {
-                            Ok(db_entity) => {
+                        match self.db_update_prepare(&entity, &id, &data_bytes, now_ms) {
+                            Ok((db_entity, write)) => {
+                                let event = self.change_event(
+                                    ChangeEvent::update(
+                                        entity.clone(),
+                                        id.clone(),
+                                        merged_data.clone(),
+                                    ),
+                                    origin,
+                                );
+                                self.commit_with_change_event(write, event).await;
                                 self.commit_unique_constraints(
                                     &entity,
                                     &id,
