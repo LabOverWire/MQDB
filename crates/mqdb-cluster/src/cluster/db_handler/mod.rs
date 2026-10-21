@@ -128,9 +128,6 @@ impl DbRequestHandler {
                 }
             }
             ref op => {
-                if ctx.response_topic.is_none() {
-                    return DbPublishResult::NoResponse;
-                }
                 match self
                     .handle_json_operation(controller, op, payload, ctx)
                     .await

@@ -402,6 +402,9 @@ impl QuicDirectTransport {
     }
 
     fn enqueue_local_publish(&self, request: LocalPublishRequest) {
+        if request.topic.is_empty() {
+            return;
+        }
         let queue_len = self.local_publish_tx.len();
         if queue_len > 1000 && queue_len.is_multiple_of(1000) {
             warn!(topic = %request.topic, queue_len, "local_publish queue growing");
@@ -1023,6 +1026,25 @@ mod tests {
         assert!(!transport.local_publish_rx.is_disconnected());
         assert_eq!(transport.inbox_rx.capacity(), Some(INBOX_CHANNEL_CAPACITY));
         assert_eq!(transport.local_publish_rx.capacity(), Some(100_000));
+    }
+
+    #[tokio::test]
+    async fn local_publish_without_a_topic_is_dropped() {
+        let transport = QuicDirectTransport::new(NodeId::validated(1).unwrap());
+
+        transport
+            .queue_local_publish(String::new(), b"reply".to_vec(), 0)
+            .await;
+        transport
+            .queue_local_publish("resp/t".to_string(), b"reply".to_vec(), 0)
+            .await;
+
+        let queued: Vec<String> = transport
+            .local_publish_rx
+            .drain()
+            .map(|request| request.topic)
+            .collect();
+        assert_eq!(queued, ["resp/t"]);
     }
 
     #[test]
