@@ -53,7 +53,7 @@ fn replication_write_roundtrip() {
         b"{\"name\":\"Alice\"}".to_vec(),
     );
 
-    let bytes = write.to_bytes();
+    let bytes = write.to_bytes().unwrap();
     let decoded = ReplicationWrite::from_bytes(&bytes).unwrap();
 
     assert_eq!(decoded.partition, partition);
@@ -63,6 +63,80 @@ fn replication_write_roundtrip() {
     assert_eq!(decoded.entity, "users");
     assert_eq!(decoded.id, "123");
     assert_eq!(decoded.data, b"{\"name\":\"Alice\"}");
+}
+
+fn write_with(entity_len: usize, id_len: usize) -> ReplicationWrite {
+    ReplicationWrite::new(
+        PartitionId::new(7).unwrap(),
+        Operation::Update,
+        Epoch::new(3),
+        42,
+        "e".repeat(entity_len),
+        "k".repeat(id_len),
+        b"{\"v\":1}".to_vec(),
+    )
+}
+
+#[test]
+fn replication_write_with_long_entity_or_id_round_trips() {
+    for (entity_len, id_len, version) in [
+        (8, 255, ReplicationWrite::VERSION),
+        (8, 256, ReplicationWrite::WIDE_VERSION),
+        (8, 300, ReplicationWrite::WIDE_VERSION),
+        (300, 8, ReplicationWrite::WIDE_VERSION),
+        (8, 70_000, ReplicationWrite::WIDE_VERSION),
+    ] {
+        let write = write_with(entity_len, id_len);
+        let bytes = write.to_bytes().unwrap();
+        assert_eq!(bytes[0], version, "entity {entity_len} id {id_len}");
+
+        let decoded = ReplicationWrite::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.partition, write.partition);
+        assert_eq!(decoded.operation, Operation::Update);
+        assert_eq!(decoded.epoch, write.epoch);
+        assert_eq!(decoded.sequence, 42);
+        assert_eq!(decoded.entity, write.entity);
+        assert_eq!(decoded.id, write.id);
+        assert_eq!(decoded.data, write.data);
+    }
+}
+
+#[test]
+fn short_replication_write_keeps_the_version_1_layout() {
+    let bytes = write_with(5, 3).to_bytes().unwrap();
+    assert_eq!(bytes[0], 1);
+    assert_eq!(&bytes[16..18], &[5, 3]);
+    assert_eq!(&bytes[18..22], &7u32.to_be_bytes());
+    assert_eq!(&bytes[22..30], b"eeeeekkk");
+    assert_eq!(bytes.len(), 37);
+}
+
+#[test]
+fn truncated_replication_write_is_rejected() {
+    for write in [write_with(5, 3), write_with(8, 300)] {
+        let bytes = write.to_bytes().unwrap();
+        for len in 0..bytes.len() {
+            assert!(
+                ReplicationWrite::from_bytes(&bytes[..len]).is_none(),
+                "prefix of {len} bytes decoded"
+            );
+        }
+    }
+}
+
+#[test]
+fn catchup_response_with_long_ids_round_trips() {
+    let partition = PartitionId::new(7).unwrap();
+    let responder = NodeId::validated(2).unwrap();
+    let writes = vec![write_with(8, 300), write_with(5, 3)];
+    let bytes = CatchupResponse::create(partition, responder, writes)
+        .to_bytes()
+        .unwrap();
+
+    let decoded = CatchupResponse::from_bytes(&bytes).unwrap();
+    assert_eq!(decoded.writes.len(), 2);
+    assert_eq!(decoded.writes[0].id, "k".repeat(300));
+    assert_eq!(decoded.writes[1].id, "kkk");
 }
 
 #[test]
@@ -147,7 +221,7 @@ fn catchup_response_roundtrip() {
     ];
 
     let resp = CatchupResponse::create(partition, responder, writes);
-    let bytes = resp.to_bytes();
+    let bytes = resp.to_bytes().unwrap();
     let decoded = CatchupResponse::from_bytes(&bytes).unwrap();
 
     assert_eq!(decoded.partition, partition);
@@ -165,7 +239,7 @@ fn catchup_response_empty() {
     let responder = NodeId::validated(1).unwrap();
 
     let resp = CatchupResponse::empty(partition, responder);
-    let bytes = resp.to_bytes();
+    let bytes = resp.to_bytes().unwrap();
     let decoded = CatchupResponse::from_bytes(&bytes).unwrap();
 
     assert!(decoded.writes.is_empty());

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::types::{AckStatus, Operation};
+use super::wire::WireReader;
 use crate::cluster::{Epoch, NodeId, PartitionId};
 use bebytes::BeBytes;
 
@@ -18,6 +19,7 @@ pub struct ReplicationWrite {
 
 impl ReplicationWrite {
     pub const VERSION: u8 = 1;
+    pub const WIDE_VERSION: u8 = 2;
 
     #[must_use]
     pub fn new(
@@ -41,70 +43,70 @@ impl ReplicationWrite {
     }
 
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let entity_bytes = self.entity.as_bytes();
-        let id_bytes = self.id.as_bytes();
+    pub fn to_bytes(&self) -> Option<Vec<u8>> {
+        let entity = self.entity.as_bytes();
+        let id = self.id.as_bytes();
+        let narrow_lengths = u8::try_from(entity.len())
+            .ok()
+            .zip(u8::try_from(id.len()).ok());
 
-        let mut buf =
-            Vec::with_capacity(20 + entity_bytes.len() + id_bytes.len() + self.data.len());
-
-        buf.push(Self::VERSION);
+        let mut buf = Vec::with_capacity(30 + entity.len() + id.len() + self.data.len());
+        buf.push(if narrow_lengths.is_some() {
+            Self::VERSION
+        } else {
+            Self::WIDE_VERSION
+        });
         buf.extend_from_slice(&self.partition.get().to_be_bytes());
         buf.push(self.operation as u8);
-        buf.extend_from_slice(&(self.epoch.get() as u32).to_be_bytes());
+        buf.extend_from_slice(&u32::try_from(self.epoch.get()).ok()?.to_be_bytes());
         buf.extend_from_slice(&self.sequence.to_be_bytes());
-        buf.push(entity_bytes.len() as u8);
-        buf.push(id_bytes.len() as u8);
-        buf.extend_from_slice(&(self.data.len() as u32).to_be_bytes());
-        buf.extend_from_slice(entity_bytes);
-        buf.extend_from_slice(id_bytes);
+        match narrow_lengths {
+            Some((entity_len, id_len)) => buf.extend_from_slice(&[entity_len, id_len]),
+            None => {
+                buf.extend_from_slice(&u32::try_from(entity.len()).ok()?.to_be_bytes());
+                buf.extend_from_slice(&u32::try_from(id.len()).ok()?.to_be_bytes());
+            }
+        }
+        buf.extend_from_slice(&u32::try_from(self.data.len()).ok()?.to_be_bytes());
+        buf.extend_from_slice(entity);
+        buf.extend_from_slice(id);
         buf.extend_from_slice(&self.data);
 
-        buf
+        Some(buf)
     }
 
     #[must_use]
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 20 {
+        let mut reader = WireReader::new(bytes);
+        let version = reader.u8()?;
+        if version != Self::VERSION && version != Self::WIDE_VERSION {
             return None;
         }
+        let wide = version == Self::WIDE_VERSION;
 
-        let version = bytes[0];
-        if version != Self::VERSION {
-            return None;
-        }
-        let partition = u16::from_be_bytes([bytes[1], bytes[2]]);
-        let operation = Operation::from_u8(bytes[3])?;
-        let epoch = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
-        let sequence = u64::from_be_bytes([
-            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
-        ]);
-        let entity_len = bytes[16] as usize;
-        let id_len = bytes[17] as usize;
-        let data_len = u32::from_be_bytes([bytes[18], bytes[19], bytes[20], bytes[21]]) as usize;
-
-        let header_len = 22;
-        if bytes.len() < header_len + entity_len + id_len + data_len {
-            return None;
-        }
-
-        let entity_start = header_len;
-        let id_start = entity_start + entity_len;
-        let data_start = id_start + id_len;
-
-        let entity = String::from_utf8(bytes[entity_start..id_start].to_vec()).ok()?;
-        let id = String::from_utf8(bytes[id_start..data_start].to_vec()).ok()?;
-        let data = bytes[data_start..data_start + data_len].to_vec();
+        let partition = PartitionId::new(reader.u16()?)?;
+        let operation = Operation::from_u8(reader.u8()?)?;
+        let epoch = Epoch::new(u64::from(reader.u32()?));
+        let sequence = reader.u64()?;
+        let mut field_length = || {
+            if wide {
+                usize::try_from(reader.u32()?).ok()
+            } else {
+                reader.u8().map(usize::from)
+            }
+        };
+        let entity_len = field_length()?;
+        let id_len = field_length()?;
+        let data_len = usize::try_from(reader.u32()?).ok()?;
 
         Some(Self {
-            partition: PartitionId::new(partition)?,
+            partition,
             operation,
-            epoch: Epoch::new(u64::from(epoch)),
+            epoch,
             sequence,
-            entity,
-            id,
-            data,
+            entity: reader.text(entity_len)?,
+            id: reader.text(id_len)?,
+            data: reader.take(data_len)?.to_vec(),
         })
     }
 }
@@ -123,26 +125,24 @@ impl ReplicationAck {
     pub const VERSION: u8 = 1;
 
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn ok(partition: PartitionId, epoch: Epoch, sequence: u64, node_id: NodeId) -> Self {
         Self {
             version: Self::VERSION,
             partition: partition.get(),
             status: AckStatus::Ok as u8,
-            epoch: epoch.get() as u32,
+            epoch: wire_epoch(epoch),
             sequence,
             node_id: node_id.get(),
         }
     }
 
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn stale_epoch(partition: PartitionId, current_epoch: Epoch, node_id: NodeId) -> Self {
         Self {
             version: Self::VERSION,
             partition: partition.get(),
             status: AckStatus::StaleEpoch as u8,
-            epoch: current_epoch.get() as u32,
+            epoch: wire_epoch(current_epoch),
             sequence: 0,
             node_id: node_id.get(),
         }
@@ -161,7 +161,6 @@ impl ReplicationAck {
     }
 
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn sequence_gap(
         partition: PartitionId,
         epoch: Epoch,
@@ -172,7 +171,7 @@ impl ReplicationAck {
             version: Self::VERSION,
             partition: partition.get(),
             status: AckStatus::SequenceGap as u8,
-            epoch: epoch.get() as u32,
+            epoch: wire_epoch(epoch),
             sequence: expected_seq,
             node_id: node_id.get(),
         }
@@ -207,6 +206,10 @@ impl ReplicationAck {
     pub fn node_id(&self) -> u16 {
         self.node_id
     }
+}
+
+fn wire_epoch(epoch: Epoch) -> u32 {
+    u32::try_from(epoch.get()).unwrap_or(u32::MAX)
 }
 
 #[derive(Debug, Clone, BeBytes)]
@@ -286,67 +289,48 @@ impl CatchupResponse {
     }
 
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let write_bytes: Vec<Vec<u8>> =
-            self.writes.iter().map(ReplicationWrite::to_bytes).collect();
-        let total_write_len: usize = write_bytes.iter().map(Vec::len).sum();
+    pub fn to_bytes(&self) -> Option<Vec<u8>> {
+        let write_bytes = self
+            .writes
+            .iter()
+            .map(ReplicationWrite::to_bytes)
+            .collect::<Option<Vec<_>>>()?;
+        let total_write_len: usize = write_bytes.iter().map(|wb| 4 + wb.len()).sum();
 
         let mut buf = Vec::with_capacity(9 + total_write_len);
         buf.push(Self::VERSION);
         buf.extend_from_slice(&self.partition.get().to_be_bytes());
         buf.extend_from_slice(&self.responder_id.get().to_be_bytes());
-        buf.extend_from_slice(&(self.writes.len() as u32).to_be_bytes());
+        buf.extend_from_slice(&u32::try_from(write_bytes.len()).ok()?.to_be_bytes());
 
         for wb in write_bytes {
-            buf.extend_from_slice(&(wb.len() as u32).to_be_bytes());
+            buf.extend_from_slice(&u32::try_from(wb.len()).ok()?.to_be_bytes());
             buf.extend_from_slice(&wb);
         }
 
-        buf
+        Some(buf)
     }
 
     #[must_use]
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 9 {
+        let mut reader = WireReader::new(bytes);
+        if reader.u8()? != Self::VERSION {
             return None;
         }
 
-        let version = bytes[0];
-        if version != Self::VERSION {
-            return None;
-        }
-
-        let partition = u16::from_be_bytes([bytes[1], bytes[2]]);
-        let responder = u16::from_be_bytes([bytes[3], bytes[4]]);
-        let write_count = u32::from_be_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]) as usize;
-
-        let mut offset = 9;
-        let mut writes = Vec::with_capacity(write_count);
-
-        for _ in 0..write_count {
-            if offset + 4 > bytes.len() {
-                return None;
-            }
-            let write_len = u32::from_be_bytes([
-                bytes[offset],
-                bytes[offset + 1],
-                bytes[offset + 2],
-                bytes[offset + 3],
-            ]) as usize;
-            offset += 4;
-
-            if offset + write_len > bytes.len() {
-                return None;
-            }
-            let write = ReplicationWrite::from_bytes(&bytes[offset..offset + write_len])?;
-            writes.push(write);
-            offset += write_len;
-        }
+        let partition = PartitionId::new(reader.u16()?)?;
+        let responder_id = NodeId::validated(reader.u16()?)?;
+        let write_count = reader.u32()?;
+        let writes = (0..write_count)
+            .map(|_| {
+                let write_len = usize::try_from(reader.u32()?).ok()?;
+                ReplicationWrite::from_bytes(reader.take(write_len)?)
+            })
+            .collect::<Option<Vec<_>>>()?;
 
         Some(Self {
-            partition: PartitionId::new(partition)?,
-            responder_id: NodeId::validated(responder)?,
+            partition,
+            responder_id,
             writes,
         })
     }

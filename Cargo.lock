@@ -200,9 +200,9 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "bebytes"
-version = "3.0.2"
+version = "3.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0744ac5eda5faeefe357188ae1bd09fd66e0cebb9f0efce6b75a0a3b07e64b7"
+checksum = "e6ef7d61c77ae6911fc3d332674777db7e98e4ad4b4102b7ccdc0326e104304d"
 dependencies = [
  "bebytes_derive",
  "bytes",
@@ -210,9 +210,9 @@ dependencies = [
 
 [[package]]
 name = "bebytes_derive"
-version = "3.0.2"
+version = "3.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "acaaf2736dbed61ad3df2fb005cbbea3962dac4898788c90db4ef687fed13cda"
+checksum = "a7bba4883b38ba7b8c2a4629375d0f4ebdb9169c6552dc55a42a81efba5cf916"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1530,7 +1530,7 @@ dependencies = [
 
 [[package]]
 name = "mqdb-cli"
-version = "0.8.59"
+version = "0.8.60"
 dependencies = [
  "base64 0.22.1",
  "bebytes",
@@ -1557,7 +1557,7 @@ dependencies = [
 
 [[package]]
 name = "mqdb-cluster"
-version = "0.4.31"
+version = "0.4.32"
 dependencies = [
  "arc-swap",
  "bebytes",

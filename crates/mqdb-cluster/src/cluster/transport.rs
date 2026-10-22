@@ -195,7 +195,14 @@ impl ClusterMessage {
     pub fn encode_payload(&self, buf: &mut Vec<u8>) {
         match self {
             Self::Heartbeat(hb) => buf.extend_from_slice(&hb.to_be_bytes()),
-            Self::Write(w) | Self::WriteRequest(w) => buf.extend_from_slice(&w.to_bytes()),
+            Self::Write(w) | Self::WriteRequest(w) => match w.to_bytes() {
+                Some(bytes) => buf.extend_from_slice(&bytes),
+                None => tracing::warn!(
+                    entity = w.entity,
+                    sequence = w.sequence,
+                    "replication write too long to encode"
+                ),
+            },
             Self::Ack(ack) => buf.extend_from_slice(&ack.to_be_bytes()),
             Self::DeathNotice { node_id } | Self::DrainNotification { node_id } => {
                 buf.extend_from_slice(&node_id.get().to_be_bytes());
@@ -206,7 +213,13 @@ impl ClusterMessage {
             Self::AppendEntriesResponse(resp) => buf.extend_from_slice(&resp.to_be_bytes()),
             Self::InstallSnapshot(req) => buf.extend_from_slice(&req.to_bytes()),
             Self::CatchupRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
-            Self::CatchupResponse(resp) => buf.extend_from_slice(&resp.to_bytes()),
+            Self::CatchupResponse(resp) => match resp.to_bytes() {
+                Some(bytes) => buf.extend_from_slice(&bytes),
+                None => tracing::warn!(
+                    partition = resp.partition.get(),
+                    "catchup response too long to encode"
+                ),
+            },
             Self::ForwardedPublish(fwd) => buf.extend_from_slice(&fwd.to_bytes()),
             Self::SnapshotRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
             Self::SnapshotChunk(chunk) => buf.extend_from_slice(&chunk.to_bytes()),
@@ -249,7 +262,14 @@ impl ClusterMessage {
             Self::UniqueReassertRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
             Self::UniqueReplicate { request_id, write } => {
                 buf.extend_from_slice(&request_id.to_be_bytes());
-                buf.extend_from_slice(&write.to_bytes());
+                match write.to_bytes() {
+                    Some(bytes) => buf.extend_from_slice(&bytes),
+                    None => tracing::warn!(
+                        request_id,
+                        entity = write.entity,
+                        "unique replicate write too long to encode"
+                    ),
+                }
             }
             Self::UniqueReplicateAck(ack) => buf.extend_from_slice(&ack.to_be_bytes()),
             Self::UniqueSealRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
@@ -490,10 +510,9 @@ impl InboundMessage {
         let data = &payload[3..];
         let message = ClusterMessage::decode_from_wire(msg_type, data)?;
 
-        #[allow(clippy::cast_possible_truncation)]
         let received_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64);
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
 
         Some(Self {
             from,
@@ -629,6 +648,8 @@ impl Default for TransportConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cluster::Epoch;
+    use crate::cluster::protocol::Operation;
 
     #[test]
     fn transport_error_display() {
@@ -637,6 +658,44 @@ mod tests {
 
         let err = TransportError::NetworkPartitioned;
         assert_eq!(err.to_string(), "network partitioned");
+    }
+
+    #[test]
+    fn replicated_record_with_a_long_id_arrives_intact() {
+        let id = "k".repeat(300);
+        let record = crate::cluster::db::DbEntity::create("item", &id, b"{\"v\":1}", 1000);
+        let write = ReplicationWrite::new(
+            record.partition(),
+            Operation::Insert,
+            Epoch::new(1),
+            9,
+            crate::cluster::entity::DB_DATA.to_string(),
+            record.key(),
+            crate::cluster::db::DbDataStore::serialize(&record),
+        );
+        let message = ClusterMessage::Write(write);
+        let mut payload = NodeId::validated(1).unwrap().get().to_be_bytes().to_vec();
+        payload.push(message.message_type());
+        message.encode_payload(&mut payload);
+
+        let inbound = InboundMessage::parse_from_payload(&payload, NodeId::validated(2).unwrap())
+            .expect("write decodes");
+        let ClusterMessage::Write(received) = inbound.message else {
+            panic!("expected a write");
+        };
+        assert_eq!(received.id, format!("item/{id}"));
+        let replicated =
+            crate::cluster::db::DbDataStore::deserialize(&received.data).expect("record decodes");
+        assert_eq!(replicated.id_str(), id);
+        assert_eq!(replicated.data, b"{\"v\":1}");
+    }
+
+    #[test]
+    fn record_with_a_length_past_its_end_is_rejected_without_panicking() {
+        let record = crate::cluster::db::DbEntity::create("item", "abc", b"{\"v\":1}", 1000);
+        let mut bytes = crate::cluster::db::DbDataStore::serialize(&record);
+        bytes[1..3].copy_from_slice(&u16::MAX.to_be_bytes());
+        assert!(crate::cluster::db::DbDataStore::deserialize(&bytes).is_none());
     }
 
     #[test]
