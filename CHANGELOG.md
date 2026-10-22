@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-22 — mqdb-cluster 0.4.32, mqdb-cli 0.8.60
+
+### Security
+
+- **A long record id or unique value no longer crashes the nodes that replicate it** (#207). A replication write stored the length of its entity and id in one byte each. A record id longer than 255 bytes, or a unique value long enough to push its index key past 255 bytes, was misread on the receiving node, which then panicked while decoding the record. Any user allowed to create a record could take down other nodes of the cluster. On 3- and 5-node clusters, 2 of 12 and 5 of 20 creates with a 300-byte id succeeded before the other nodes exited, and none of 12 and 20 creates with a 300-byte unique value did; now all of them succeed, every node reads the records back, they are still read after node 1 is killed, and a second create with the same unique value is refused. A write whose entity or id is longer than 255 bytes uses a wider format that older nodes cannot read; shorter writes are sent exactly as before. During a rolling upgrade, a node still on an older version that misses such a write also cannot read the catchup that would replace it, so it stops applying writes for that partition until it is upgraded.
+- A record or index entry whose length fields point past its end is now rejected instead of panicking the node that decodes it (bebytes 3.0.3).
+
 ## 2026-10-21 — mqdb-cluster 0.4.31, mqdb-cli 0.8.59
 
 ### Security

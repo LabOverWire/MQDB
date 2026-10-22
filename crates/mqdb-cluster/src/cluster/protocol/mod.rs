@@ -10,6 +10,7 @@ mod query;
 mod replication;
 mod types;
 mod unique;
+mod wire;
 
 #[cfg(test)]
 mod tests;
