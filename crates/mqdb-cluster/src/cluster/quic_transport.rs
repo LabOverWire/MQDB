@@ -18,7 +18,6 @@ use tokio::sync::{Notify, RwLock};
 use tracing::{debug, error, info, trace, warn};
 
 const INBOX_CHANNEL_CAPACITY: usize = 16384;
-const LOCAL_DELIVERY_TIMEOUT: Duration = Duration::from_secs(1);
 const PEER_CONTROL_QUEUE_CAPACITY: usize = 256;
 const PEER_BULK_QUEUE_CAPACITY: usize = 1024;
 const REDIAL_DIAL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -534,19 +533,14 @@ impl ClusterTransport for QuicDirectTransport {
             user_properties: publish.user_properties,
             order_key: publish.order_key,
         };
-        match tokio::time::timeout(
-            LOCAL_DELIVERY_TIMEOUT,
-            self.local_publish_tx.send_async(request),
-        )
-        .await
-        {
-            Ok(Ok(())) => true,
-            Ok(Err(e)) => {
-                warn!(topic = %e.0.topic, "local_publish queue closed, change event not delivered");
+        match self.local_publish_tx.try_send(request) {
+            Ok(()) => true,
+            Err(flume::TrySendError::Full(request)) => {
+                warn!(topic = %request.topic, "local_publish queue full, change event will be retried");
                 false
             }
-            Err(_) => {
-                warn!("local_publish queue full, change event will be retried");
+            Err(flume::TrySendError::Disconnected(request)) => {
+                warn!(topic = %request.topic, "local_publish queue closed, change event not delivered");
                 false
             }
         }

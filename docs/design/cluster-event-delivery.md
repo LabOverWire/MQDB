@@ -18,10 +18,10 @@ The model in `specs/ClusterEventDelivery.tla` (config `current_*`) finds three f
 
 Every event is identified by the `(epoch, sequence)` of the record write it belongs to.
 
-1. **The event rides with the write.** `ReplicationWrite` gets an optional trailer with the event (topic, payload, user properties, order key). The primary stores the event under `_evt/{partition}/{epoch}/{sequence}` in the same batch as the record. A replica stores it in the same batch as its copy of the record. A node that is not primary and forwards a `WriteRequest` attaches the event, and the primary takes it over.
+1. **The event rides with the write.** `ReplicationWrite` gets an optional trailer with the event (topic, payload, user properties, order key). The primary stores the event under `_evt/{partition}/{epoch}/{sequence}` in the same batch as the record. A replica stores it in the same batch as its copy of the record. A node that is not primary and forwards a `WriteRequest` attaches the event, and the primary takes it over. If the primary it forwards to is not alive, or the send fails, the forwarding node publishes the event itself, untracked, as before this change.
 2. **Only the primary sends, in order, and waits for acks.** Each pending event holds the nodes that still need it: the nodes with a matching subscription when the primary takes the event on. Per partition and target node, the primary sends the oldest event that target still needs as a new `ChangeEvent` message, and sends the next one only after that target's `ChangeEventAck`. An unacked event is resent after a timeout.
-3. **The receiver filters on the original id.** Each node keeps, per partition, the highest `(epoch, sequence)` it has delivered. It delivers a `ChangeEvent` only if its id is higher, and acks either way. The local subscribers of the primary go through the same check. Delivery waits for space in the local queue instead of dropping.
-4. **Pruning.** When the oldest events no longer need any target, the primary deletes them and sends `ChangeEventPrune` with the highest pruned id to its replicas. Pruning is cumulative, so a lost prune is covered by the next one.
+3. **The receiver filters on the original id.** Each node keeps, per partition, the highest `(epoch, sequence)` it has delivered. It delivers a `ChangeEvent` only if its id is higher, and acks it once it is delivered or already was. The local subscribers of the primary go through the same check. An event that does not fit in a full local queue is not acked, so it is sent again instead of dropped.
+4. **Pruning.** When the oldest events no longer need any target, the primary deletes them and sends `ChangeEventPrune` with the highest pruned id to its replicas. Pruning is cumulative, so a lost prune is covered by the next one, and the latest prune is sent again every 10 s so a replica of a partition that has gone quiet still gets it.
 5. **Role changes.** On `become_primary` a node loads the partition's pending events, works out their targets afresh, and starts sending from the oldest. Duplicates are filtered by the receivers. A node that stops being primary for a partition stops sending for it and keeps its pending events as a replica copy (a demoted primary becomes a replica without a new snapshot, so this copy is the only one it has). The new primary's prunes compare ids across epochs, so they remove those entries too, including any for writes the failover discarded. A node that restarts sends nothing until it is primary again. A node that is no longer a replica of a partition deletes its copy.
 6. **Snapshots** carry the partition's pending events, so a replica built from a snapshot can take over delivery.
 
@@ -41,8 +41,8 @@ The model checks this design in full with crashes, promotion, restarts, one or t
 ## Bounds
 
 - At most 4096 pending events per partition. Past that, the oldest is dropped, with an error log naming the partition and the nodes that miss it. A node that heartbeats mark dead is removed from every pending event's targets.
-- Resend after 500 ms without an ack. Prunes go out at most every 250 ms.
-- The local queue is waited on for at most 1 s; a receiver that could not queue an event does not ack it, and the primary retries its own local subscribers the same way.
+- Resend after 500 ms without an ack. Prunes go out at most every 250 ms, and an unchanged prune again every 10 s.
+- Nothing waits on a full local queue: a receiver that could not queue an event does not ack it and gets it again on the next resend, and the primary retries its own local subscribers the same way.
 - The receiver's high-water marks are a fixed array of 256 entries.
 
 ## Not covered
@@ -50,7 +50,8 @@ The model checks this design in full with crashes, promotion, restarts, one or t
 - Writes an old primary makes after it has been cut off are lost by async replication, and their events may already have been delivered.
 - A receiving node that restarts forgets its marks; its subscribers may see an event again.
 - When nodes disagree about who is primary, a write can reach a node without the primary role, which drops it. That node publishes the event untracked, as before this change, so subscribers still see it.
-- One event in flight per partition and target costs a round trip per event. Throughput is measured against main with watchers on every node and a burst of writes through every node.
+- One event in flight per partition and target costs a round trip per event. A single partition that takes writes faster than one per round trip, with a watcher on another node, builds a backlog, and past 4096 pending events the oldest are dropped. With writes spread over the 256 partitions, about 200 writes per second across a 3-node cluster, made through every node, took as long as on main.
+- The event, which holds the record data, travels inside the replication write, so replication and catchup send each record twice and the write log keeps both copies.
 
 ## Tests
 

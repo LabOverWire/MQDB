@@ -93,7 +93,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 return;
             };
 
-            self.forget_change_events(partition);
+            let saved_events = self.set_aside_change_events(partition);
             match self.stores.import_partition(&data) {
                 Ok(count) => {
                     tracing::info!(
@@ -147,6 +147,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 }
                 Err(e) => {
                     tracing::error!(?partition, ?e, "failed to import snapshot");
+                    self.restore_change_events(partition, &saved_events);
                     self.requested_snapshots.remove(&partition);
                     let complete = SnapshotComplete::failed(partition);
                     let _ = self

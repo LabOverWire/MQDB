@@ -448,6 +448,35 @@ async fn a_forwarding_node_publishes_the_event_itself_for_an_older_primary() {
 }
 
 #[tokio::test]
+async fn a_forwarding_node_publishes_the_event_itself_when_the_primary_is_dead() {
+    let mut ctrl = controller(1);
+    assign(&mut ctrl, node(2), &[]);
+    upgraded(&mut ctrl, node(2));
+    ctrl.apply_dead_nodes(&[node(2)]);
+
+    commit(&mut ctrl, 1).await;
+
+    let writes = replication_writes_sent(&ctrl);
+    let ClusterMessage::WriteRequest(write) = &writes[0].1 else {
+        panic!("expected a write request, got {:?}", writes[0].1);
+    };
+    assert!(write.event.is_none());
+    assert_eq!(delivered_locally(&ctrl).len(), 1);
+}
+
+#[tokio::test]
+async fn a_forwarding_node_publishes_the_event_itself_when_the_hand_off_fails() {
+    let mut ctrl = controller(1);
+    assign(&mut ctrl, node(2), &[]);
+    upgraded(&mut ctrl, node(2));
+    ctrl.transport.refuse_sends.store(true, Ordering::SeqCst);
+
+    commit(&mut ctrl, 1).await;
+
+    assert_eq!(delivered_locally(&ctrl).len(), 1);
+}
+
+#[tokio::test]
 async fn the_primary_takes_on_the_event_of_a_forwarded_write() {
     let mut forwarder = controller(1);
     let partition = assign(&mut forwarder, node(2), &[]);
@@ -575,6 +604,45 @@ async fn a_prune_removes_the_replica_copy_from_memory_and_storage() {
     replica.process_messages().await;
     assert_eq!(replica.pending_change_events(partition), 0);
     assert_eq!(stored(&replica), 0);
+}
+
+#[tokio::test]
+async fn a_failed_snapshot_import_keeps_the_replica_copy() {
+    let mut primary = controller(1);
+    let partition = primary_with(&mut primary, &[node(2)]);
+    commit(&mut primary, 1).await;
+    let writes = replication_writes_sent(&primary);
+
+    let backend: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
+    let mut replica = controller_with_storage(2, &backend);
+    assign(&mut replica, node(1), &[node(2)]);
+    replica.become_replica(partition, Epoch::new(1), 0);
+    for (_, message) in writes {
+        replica.transport.inject_message(node(1), message);
+    }
+    replica.process_messages().await;
+
+    let section = crate::cluster::entity::CHANGE_EVENTS.as_bytes();
+    let mut malformed = vec![1, u8::try_from(section.len()).unwrap()];
+    malformed.extend_from_slice(section);
+    malformed.extend_from_slice(&2u32.to_be_bytes());
+    malformed.extend_from_slice(&[0, 0]);
+    let chunk = crate::cluster::snapshot::SnapshotSender::new(partition, malformed, 0)
+        .next_chunk()
+        .unwrap();
+    replica
+        .transport
+        .inject_message(node(1), ClusterMessage::SnapshotChunk(chunk));
+    replica.process_messages().await;
+
+    assert_eq!(replica.pending_change_events(partition), 1);
+    let stored = replica
+        .stores()
+        .cluster_outbox()
+        .unwrap()
+        .stored_change_events_for(partition)
+        .unwrap();
+    assert_eq!(stored.len(), 1);
 }
 
 #[tokio::test]

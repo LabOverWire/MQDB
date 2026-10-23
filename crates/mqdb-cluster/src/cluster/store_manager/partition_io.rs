@@ -204,6 +204,9 @@ impl StoreManager {
         let Some(outbox) = self.cluster_outbox.as_ref() else {
             return Ok(0);
         };
+        if data.is_empty() {
+            return Ok(0);
+        }
         let events =
             ClusterOutbox::decode_change_events(data).ok_or(StoreApplyError::ChangeEventError)?;
         outbox
@@ -258,6 +261,22 @@ mod tests {
             .get("notes", "n1")
             .expect("n1 must exist on destination after snapshot import");
         assert_eq!(note.data, b"{\"title\":\"hello\"}");
+    }
+
+    #[test]
+    fn a_snapshot_without_change_events_imports_into_a_node_that_keeps_them() {
+        let src = StoreManager::new(node(1));
+        let dst = StoreManager::new_with_storage(
+            node(2),
+            Some(std::sync::Arc::new(mqdb_core::storage::MemoryBackend::new())),
+        );
+        src.db_data.create("notes", "n1", b"{}", 1000).unwrap();
+        let partition = src.db_data.get("notes", "n1").unwrap().partition();
+
+        let payload = src.export_partition(partition);
+
+        dst.import_partition(&payload).expect("import");
+        assert!(dst.db_data.get("notes", "n1").is_some());
     }
 
     #[test]

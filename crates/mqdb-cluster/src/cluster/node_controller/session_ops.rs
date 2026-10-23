@@ -127,9 +127,29 @@ impl<T: ClusterTransport> NodeController<T> {
             .await
     }
 
+    fn apply_primary_write(
+        &self,
+        write_msg: &ReplicationWrite,
+        change_event: Option<&super::change_events::WriteChangeEvent>,
+        extra_outbox: &[(Vec<u8>, Vec<u8>)],
+    ) {
+        let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(extra_outbox.len() + 1);
+        if let Some(event) = change_event {
+            entries.push(event.storage_entry.clone());
+        }
+        entries.extend_from_slice(extra_outbox);
+
+        if entries.is_empty() {
+            let _ = self.stores.apply_write(write_msg);
+        } else {
+            let _ = self
+                .stores
+                .apply_write_with_outbox_entries(write_msg, &entries);
+        }
+    }
+
     /// # Errors
     /// Returns an error if this node is not the primary for the partition.
-    #[allow(clippy::too_many_lines)]
     pub async fn replicate_write_async_with_extra(
         &mut self,
         write: ReplicationWrite,
@@ -168,20 +188,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let t_writelog = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
         let change_event = Self::change_event_entry(&write_msg);
-        let mut all_outbox_entries: Vec<(Vec<u8>, Vec<u8>)> =
-            Vec::with_capacity(extra_outbox.len() + 1);
-        if let Some(event) = &change_event {
-            all_outbox_entries.push(event.storage_entry.clone());
-        }
-        all_outbox_entries.extend_from_slice(extra_outbox);
-
-        if all_outbox_entries.is_empty() {
-            let _ = self.stores.apply_write(&write_msg);
-        } else {
-            let _ = self
-                .stores
-                .apply_write_with_outbox_entries(&write_msg, &all_outbox_entries);
-        }
+        self.apply_primary_write(&write_msg, change_event.as_ref(), extra_outbox);
         let t_apply = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
         for &replica in replicas {

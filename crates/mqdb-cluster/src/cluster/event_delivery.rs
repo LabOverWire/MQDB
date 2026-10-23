@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 pub(crate) const MAX_PENDING_EVENTS: usize = 4096;
 pub(crate) const RESEND_AFTER_MS: u64 = 500;
 pub(crate) const PRUNE_EVERY_MS: u64 = 250;
+pub(crate) const PRUNE_REPEAT_MS: u64 = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TargetKind {
@@ -49,6 +50,7 @@ struct PartitionEvents {
     in_flight: HashMap<NodeId, InFlight>,
     removed_through: Option<EventId>,
     prune_announced: Option<EventId>,
+    prune_announced_at_ms: u64,
 }
 
 impl PartitionEvents {
@@ -86,70 +88,53 @@ impl PartitionEvents {
         }
     }
 
-    fn first_for(&self, target: NodeId) -> Option<(EventId, &PendingEvent)> {
-        self.events
-            .iter()
-            .find(|(_, event)| event.targets.contains(&target))
-            .map(|(&id, event)| (id, event))
-    }
-
     fn complete(&mut self, target: NodeId, id: EventId) {
         if let Some(event) = self.events.get_mut(&id) {
             event.targets.retain(|&t| t != target);
         }
     }
 
-    fn targets(&self) -> Vec<NodeId> {
-        let mut targets: Vec<NodeId> = self
-            .events
-            .values()
-            .flat_map(|event| event.targets.iter().copied())
-            .collect();
-        targets.sort_unstable();
-        targets.dedup();
-        targets
-    }
-
     fn shipments(&mut self, now_ms: u64, kind_of: &impl Fn(NodeId) -> TargetKind) -> Vec<Shipment> {
         let mut shipments = Vec::new();
-        for target in self.targets() {
-            let kind = kind_of(target);
-            match kind {
-                TargetKind::Legacy => {
-                    while let Some((id, event)) = self.first_for(target) {
-                        shipments.push(Shipment {
-                            target,
-                            kind,
-                            id,
-                            record: event.record.clone(),
-                        });
-                        self.complete(target, id);
-                    }
+        let mut waiting: Vec<NodeId> = Vec::new();
+        let in_flight = &mut self.in_flight;
+        for (&id, event) in &mut self.events {
+            let record = &event.record;
+            event.targets.retain(|&target| {
+                if waiting.contains(&target) {
+                    return true;
                 }
-                TargetKind::Local | TargetKind::Acked => {
-                    let due = self.in_flight.get(&target).is_none_or(|flight| {
-                        now_ms.saturating_sub(flight.sent_at_ms) >= RESEND_AFTER_MS
+                let kind = kind_of(target);
+                if kind == TargetKind::Legacy {
+                    shipments.push(Shipment {
+                        target,
+                        kind,
+                        id,
+                        record: record.clone(),
                     });
-                    if !due {
-                        continue;
-                    }
-                    if let Some((id, event)) = self.first_for(target) {
-                        shipments.push(Shipment {
-                            target,
-                            kind,
-                            id,
-                            record: event.record.clone(),
-                        });
-                        self.in_flight.insert(
-                            target,
-                            InFlight {
-                                id,
-                                sent_at_ms: now_ms,
-                            },
-                        );
-                    }
+                    return false;
                 }
-            }
+                waiting.push(target);
+                let due = in_flight.get(&target).is_none_or(|flight| {
+                    now_ms.saturating_sub(flight.sent_at_ms) >= RESEND_AFTER_MS
+                });
+                if due {
+                    shipments.push(Shipment {
+                        target,
+                        kind,
+                        id,
+                        record: record.clone(),
+                    });
+                    in_flight.insert(
+                        target,
+                        InFlight {
+                            id,
+                            sent_at_ms: now_ms,
+                        },
+                    );
+                }
+                true
+            });
         }
         self.remove_completed_front();
         shipments
@@ -212,6 +197,9 @@ impl EventDelivery {
         targets_for: impl Fn(&ChangeEventRecord) -> Vec<NodeId>,
     ) {
         let events = self.partitions.entry(partition.get()).or_default();
+        if events.sending {
+            return;
+        }
         events.sending = true;
         events.in_flight.clear();
         for event in events.events.values_mut() {
@@ -304,10 +292,13 @@ impl EventDelivery {
             .filter(|(_, events)| events.sending)
             .filter_map(|(&p, events)| {
                 let through = events.removed_through?;
-                if events.prune_announced.is_some_and(|sent| sent >= through) {
+                let repeat_due =
+                    now_ms.saturating_sub(events.prune_announced_at_ms) >= PRUNE_REPEAT_MS;
+                if events.prune_announced.is_some_and(|sent| sent >= through) && !repeat_due {
                     return None;
                 }
                 events.prune_announced = Some(through);
+                events.prune_announced_at_ms = now_ms;
                 Some((PartitionId::new(p)?, through))
             })
             .collect()
@@ -485,6 +476,65 @@ mod tests {
         assert_eq!(
             delivery.prunes_due(2 * PRUNE_EVERY_MS),
             vec![(p, EventId::new(1, 2))]
+        );
+    }
+
+    #[test]
+    fn an_unchanged_prune_is_announced_again_after_the_repeat_interval() {
+        let mut delivery = EventDelivery::default();
+        let p = partition(1);
+        delivery.activate(p, |_| Vec::new());
+        delivery.take_on(p, EventId::new(1, 1), record("a"), vec![node(4)]);
+        delivery.shipments(p, 0, |_| TargetKind::Legacy);
+        assert_eq!(
+            delivery.prunes_due(PRUNE_EVERY_MS),
+            vec![(p, EventId::new(1, 1))]
+        );
+
+        assert!(delivery.prunes_due(PRUNE_REPEAT_MS).is_empty());
+        assert_eq!(
+            delivery.prunes_due(PRUNE_EVERY_MS + PRUNE_REPEAT_MS),
+            vec![(p, EventId::new(1, 1))]
+        );
+    }
+
+    #[test]
+    fn activating_a_partition_that_is_already_sending_keeps_acked_targets_done() {
+        let mut delivery = EventDelivery::default();
+        let p = partition(7);
+        delivery.activate(p, |_| Vec::new());
+        delivery.take_on(p, EventId::new(1, 1), record("a"), vec![node(2), node(3)]);
+        delivery.shipments(p, 0, acked_everywhere);
+        assert!(delivery.acked(p, node(2), EventId::new(1, 1)));
+
+        delivery.activate(p, |_| vec![node(2), node(3)]);
+
+        assert!(delivery.shipments(p, 10, acked_everywhere).is_empty());
+    }
+
+    #[test]
+    fn a_legacy_target_gets_every_pending_event_in_one_pass_while_an_acked_one_waits() {
+        let mut delivery = EventDelivery::default();
+        let p = partition(7);
+        delivery.activate(p, |_| Vec::new());
+        delivery.take_on(p, EventId::new(1, 1), record("a"), vec![node(2), node(3)]);
+        delivery.take_on(p, EventId::new(1, 2), record("b"), vec![node(2), node(3)]);
+
+        let shipments = delivery.shipments(p, 0, |target| {
+            if target == node(2) {
+                TargetKind::Legacy
+            } else {
+                TargetKind::Acked
+            }
+        });
+
+        assert_eq!(
+            shipped(&shipments),
+            vec![
+                (2, EventId::new(1, 1)),
+                (3, EventId::new(1, 1)),
+                (2, EventId::new(1, 2))
+            ]
         );
     }
 

@@ -9,14 +9,8 @@ use super::super::protocol::{
 use super::super::store_manager::StoreApplyError;
 use super::super::store_manager::outbox::{ClusterOutbox, StoredChangeEvent};
 use super::super::transport::{ClusterMessage, ClusterTransport};
-use super::super::{NodeId, PartitionId, PublishRouter, RoutedPublish};
+use super::super::{NodeId, NodeStatus, PartitionId, PublishRouter, RoutedPublish};
 use super::NodeController;
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-}
 
 fn routed(record: ChangeEventRecord) -> RoutedPublish {
     RoutedPublish {
@@ -110,6 +104,14 @@ impl<T: ClusterTransport> NodeController<T> {
         record: ChangeEventRecord,
     ) {
         let targets = self.change_event_targets(&record);
+        tracing::debug!(
+            partition = partition.get(),
+            epoch = id.epoch,
+            sequence = id.sequence,
+            ?targets,
+            sending = self.event_delivery.is_sending(partition),
+            "change event taken on"
+        );
         if let Some(dropped) = self.event_delivery.take_on(partition, id, record, targets) {
             tracing::error!(
                 partition = partition.get(),
@@ -119,7 +121,8 @@ impl<T: ClusterTransport> NodeController<T> {
                 "too many undelivered change events, dropping the oldest"
             );
         }
-        self.ship_change_events(partition, now_ms()).await;
+        self.ship_change_events(partition, Self::current_time_ms())
+            .await;
     }
 
     async fn ship_change_events(&mut self, partition: PartitionId, now: u64) {
@@ -199,11 +202,23 @@ impl<T: ClusterTransport> NodeController<T> {
         record: ChangeEventRecord,
     ) -> bool {
         if !self.event_delivery.is_new(partition, id) {
+            tracing::debug!(
+                partition = partition.get(),
+                epoch = id.epoch,
+                sequence = id.sequence,
+                "change event already delivered here"
+            );
             return true;
         }
         if !self.transport.deliver_routed_publish(routed(record)).await {
             return false;
         }
+        tracing::debug!(
+            partition = partition.get(),
+            epoch = id.epoch,
+            sequence = id.sequence,
+            "change event delivered here"
+        );
         self.event_delivery.mark_delivered(partition, id);
         true
     }
@@ -235,7 +250,8 @@ impl<T: ClusterTransport> NodeController<T> {
 
     pub(super) async fn handle_change_event_ack(&mut self, from: NodeId, mark: ChangeEventMark) {
         if self.event_delivery.acked(mark.partition, from, mark.id) {
-            self.ship_change_events(mark.partition, now_ms()).await;
+            self.ship_change_events(mark.partition, Self::current_time_ms())
+                .await;
         }
     }
 
@@ -279,22 +295,59 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     pub(super) fn start_sending_change_events(&mut self, partition: PartitionId) {
+        tracing::debug!(partition = partition.get(), "start sending change events");
         let mut delivery = std::mem::take(&mut self.event_delivery);
         delivery.activate(partition, |record| self.change_event_targets(record));
         self.event_delivery = delivery;
     }
 
     pub(super) fn stop_sending_change_events(&mut self, partition: PartitionId) {
+        tracing::debug!(partition = partition.get(), "stop sending change events");
         self.event_delivery.deactivate(partition);
     }
 
     pub fn forget_change_events(&mut self, partition: PartitionId) {
+        tracing::debug!(partition = partition.get(), "forget change events");
         self.event_delivery.forget(partition);
         if let Some(outbox) = self.stores.cluster_outbox()
             && let Err(e) = outbox.remove_change_events(partition)
         {
             tracing::warn!(partition = partition.get(), error = %e, "failed to remove change events");
         }
+    }
+
+    pub(super) fn set_aside_change_events(
+        &mut self,
+        partition: PartitionId,
+    ) -> Vec<StoredChangeEvent> {
+        let saved = match self.stores.cluster_outbox() {
+            Some(outbox) => match outbox.stored_change_events_for(partition) {
+                Ok(events) => events,
+                Err(e) => {
+                    tracing::warn!(partition = partition.get(), error = %e, "failed to read change events before snapshot import");
+                    return Vec::new();
+                }
+            },
+            None => Vec::new(),
+        };
+        self.forget_change_events(partition);
+        saved
+    }
+
+    pub(super) fn restore_change_events(
+        &mut self,
+        partition: PartitionId,
+        saved: &[StoredChangeEvent],
+    ) {
+        if let Some(outbox) = self.stores.cluster_outbox() {
+            if let Err(e) = outbox.remove_change_events(partition) {
+                tracing::warn!(partition = partition.get(), error = %e, "failed to clear change events after a failed snapshot import");
+            }
+            if let Err(e) = outbox.store_change_events(saved) {
+                tracing::error!(partition = partition.get(), error = %e, "failed to restore change events after a failed snapshot import");
+            }
+        }
+        self.reload_change_events(partition);
     }
 
     pub(super) fn change_events_node_gone(&mut self, node: NodeId) {
@@ -342,18 +395,31 @@ impl<T: ClusterTransport> NodeController<T> {
         write: ReplicationWrite,
         event: Option<ChangeEventRecord>,
     ) {
-        let (write, fallback) = match event {
-            Some(record) if self.heartbeat.delivers_acked_events(primary) => {
-                (write.with_event(Some(record)), None)
+        let write_partition = write.partition;
+        let hand_off = self.heartbeat.delivers_acked_events(primary)
+            && self.heartbeat.node_status(primary) == NodeStatus::Alive;
+        match event {
+            Some(record) if hand_off => {
+                let attached = write.with_event(Some(record.clone()));
+                if self
+                    .transport
+                    .send(primary, ClusterMessage::WriteRequest(attached))
+                    .await
+                    .is_err()
+                {
+                    self.publish_unowned_change_event(write_partition, record)
+                        .await;
+                }
             }
-            other => (write, other),
-        };
-        let _ = self
-            .transport
-            .send(primary, ClusterMessage::WriteRequest(write))
-            .await;
-        if let Some(record) = fallback {
-            self.deliver_change_event(routed(record)).await;
+            other => {
+                let _ = self
+                    .transport
+                    .send(primary, ClusterMessage::WriteRequest(write))
+                    .await;
+                if let Some(record) = other {
+                    self.deliver_change_event(routed(record)).await;
+                }
+            }
         }
     }
 

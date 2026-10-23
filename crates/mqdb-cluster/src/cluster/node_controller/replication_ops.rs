@@ -328,7 +328,27 @@ impl<T: ClusterTransport> NodeController<T> {
             .await;
     }
 
-    #[allow(clippy::too_many_lines)]
+    async fn broadcast_write(&self, write: &ReplicationWrite) {
+        let _ = self.stores.apply_write(write);
+        let alive = self.heartbeat.alive_nodes();
+        let targets: Vec<_> = alive.iter().filter(|&n| *n != self.node_id).collect();
+        tracing::debug!(
+            entity = write.entity,
+            id = write.id,
+            alive_count = alive.len(),
+            target_count = targets.len(),
+            targets = ?targets.iter().map(|n| n.get()).collect::<Vec<_>>(),
+            "write_or_forward: broadcasting to alive nodes"
+        );
+        for node in targets {
+            WRITE_REQUEST_SENT.fetch_add(1, AtomicOrdering::Relaxed);
+            let _ = self
+                .transport
+                .send(*node, ClusterMessage::WriteRequest(write.clone()))
+                .await;
+        }
+    }
+
     async fn write_or_forward_impl(
         &mut self,
         write: ReplicationWrite,
@@ -362,24 +382,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
 
         if is_broadcast_entity {
-            let _ = self.stores.apply_write(&write);
-            let alive = self.heartbeat.alive_nodes();
-            let targets: Vec<_> = alive.iter().filter(|&n| *n != self.node_id).collect();
-            tracing::debug!(
-                entity = write.entity,
-                id = write.id,
-                alive_count = alive.len(),
-                target_count = targets.len(),
-                targets = ?targets.iter().map(|n| n.get()).collect::<Vec<_>>(),
-                "write_or_forward: broadcasting to alive nodes"
-            );
-            for node in targets {
-                WRITE_REQUEST_SENT.fetch_add(1, AtomicOrdering::Relaxed);
-                let _ = self
-                    .transport
-                    .send(*node, ClusterMessage::WriteRequest(write.clone()))
-                    .await;
-            }
+            self.broadcast_write(&write).await;
             return;
         }
 

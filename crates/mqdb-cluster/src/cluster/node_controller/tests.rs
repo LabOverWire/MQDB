@@ -66,6 +66,7 @@ struct MockTransport {
     linked: Arc<Mutex<Option<Vec<NodeId>>>>,
     queued_publishes: Arc<Mutex<Vec<QueuedPublish>>>,
     refuse_local_delivery: Arc<std::sync::atomic::AtomicBool>,
+    refuse_sends: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MockTransport {
@@ -77,6 +78,7 @@ impl MockTransport {
             linked: Arc::new(Mutex::new(None)),
             queued_publishes: Arc::new(Mutex::new(Vec::new())),
             refuse_local_delivery: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            refuse_sends: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -107,6 +109,9 @@ impl ClusterTransport for MockTransport {
         to: NodeId,
         message: ClusterMessage,
     ) -> Result<(), super::super::transport::TransportError> {
+        if self.refuse_sends.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(super::super::transport::TransportError::NotConnected);
+        }
         self.outbox.lock().unwrap().push((to, message));
         Ok(())
     }
