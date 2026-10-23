@@ -132,6 +132,7 @@ impl ClusteredAgent {
         let _ = (service_username, service_password);
 
         self.recover_pending_lwts().await;
+        self.controller.write().await.load_stored_change_events();
         self.recover_pending_outbox().await;
 
         loop {
@@ -240,6 +241,8 @@ impl ClusteredAgent {
                             )
                             .await;
                         }
+                    } else {
+                        ctrl.forget_change_events(partition);
                     }
                     changes += 1;
                     if changes.is_multiple_of(8) {
@@ -273,6 +276,7 @@ impl ClusteredAgent {
         ctrl.sweep_unique_quorum(now).await;
         ctrl.sweep_unique_seals(now);
         ctrl.drain_pending_seals().await;
+        ctrl.drive_change_events(now).await;
     }
 
     async fn handle_processing_batch(&self, batch: ProcessingBatch) {

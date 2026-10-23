@@ -788,8 +788,7 @@ impl DbRequestHandler {
                         ),
                         EventOrigin::new(sender, client_id),
                     );
-                    let outbox = Self::build_outbox(&event);
-                    controller.db_commit(write, outbox.clone()).await;
+                    controller.db_commit(write, &event).await;
                     controller
                         .commit_unique_constraints(
                             entity,
@@ -799,8 +798,6 @@ impl DbRequestHandler {
                             request_id,
                             now_ms,
                         )
-                        .await;
-                    self.publish_change_event_and_deliver(controller, event, &outbox.operation_id)
                         .await;
                     helpers::json_ok_with_id(db_entity.id_str(), data)
                 }
@@ -1149,8 +1146,7 @@ impl DbRequestHandler {
                         ),
                         EventOrigin::new(sender, client_id),
                     );
-                    let outbox = Self::build_outbox(&event);
-                    controller.db_commit(write, outbox.clone()).await;
+                    controller.db_commit(write, &event).await;
                     if has_unique_changes {
                         controller
                             .commit_unique_constraints(
@@ -1161,8 +1157,6 @@ impl DbRequestHandler {
                             .release_unique_constraints(entity, id, old_diff, partition, id, now_ms)
                             .await;
                     }
-                    self.publish_change_event_and_deliver(controller, event, &outbox.operation_id)
-                        .await;
                     helpers::json_ok_with_id(db_entity.id_str(), merged_data)
                 }
                 Err(db::DbDataStoreError::NotFound) => {
@@ -1323,18 +1317,13 @@ impl DbRequestHandler {
                     ChangeEvent::delete(entity.to_string(), id.to_string(), data.clone()),
                     EventOrigin::new(sender, client_id),
                 );
-                let outbox = Self::build_outbox(&event);
                 if let Some(cas) = cascade {
-                    controller
-                        .db_commit_with_cascade(write, outbox.clone(), cas)
-                        .await;
+                    controller.db_commit_with_cascade(write, &event, cas).await;
                 } else {
-                    controller.db_commit(write, outbox.clone()).await;
+                    controller.db_commit(write, &event).await;
                 }
                 controller
                     .release_unique_for_deleted_record(entity, id, &data)
-                    .await;
-                self.publish_change_event_and_deliver(controller, event, &outbox.operation_id)
                     .await;
                 if self.ownership.owner_field(entity).is_some() {
                     controller.clear_all_resource_grants(entity, id).await;
@@ -1617,8 +1606,7 @@ impl DbRequestHandler {
                                     ),
                                     EventOrigin::new(sender.as_deref(), client_id.as_deref()),
                                 );
-                                let outbox = Self::build_outbox(&event);
-                                controller.db_commit(write, outbox.clone()).await;
+                                controller.db_commit(write, &event).await;
                                 controller
                                     .commit_unique_constraints(
                                         &entity,
@@ -1629,12 +1617,6 @@ impl DbRequestHandler {
                                         now_ms,
                                     )
                                     .await;
-                                self.publish_change_event_and_deliver(
-                                    controller,
-                                    event,
-                                    &outbox.operation_id,
-                                )
-                                .await;
                                 helpers::json_ok_with_id(db_entity.id_str(), &data)
                             }
                             Err(db::DbDataStoreError::AlreadyExists) => {
@@ -1725,8 +1707,7 @@ impl DbRequestHandler {
                                     ),
                                     EventOrigin::new(sender.as_deref(), client_id.as_deref()),
                                 );
-                                let outbox = Self::build_outbox(&event);
-                                controller.db_commit(write, outbox.clone()).await;
+                                controller.db_commit(write, &event).await;
                                 controller
                                     .commit_unique_constraints(
                                         &entity,
@@ -1742,12 +1723,6 @@ impl DbRequestHandler {
                                         &entity, &id, &old_diff, partition, &id, now_ms,
                                     )
                                     .await;
-                                self.publish_change_event_and_deliver(
-                                    controller,
-                                    event,
-                                    &outbox.operation_id,
-                                )
-                                .await;
                                 helpers::json_ok_with_id(db_entity.id_str(), &merged_data)
                             }
                             Err(db::DbDataStoreError::NotFound) => {
@@ -2093,20 +2068,5 @@ impl DbRequestHandler {
         let skip = mqdb_vault::transform::build_vault_skip_fields(entity, &self.ownership);
         mqdb_vault::transform::vault_encrypt_fields(&crypto, entity, id, &mut delta, &skip);
         serde_json::to_vec(&delta).unwrap_or_else(|_| payload.to_vec())
-    }
-
-    fn build_outbox(event: &ChangeEvent) -> crate::cluster::store_manager::outbox::OutboxPayload {
-        crate::cluster::node_controller::db_ops::build_change_event_outbox(event)
-    }
-
-    async fn publish_change_event_and_deliver<T: ClusterTransport>(
-        &self,
-        controller: &NodeController<T>,
-        event: ChangeEvent,
-        operation_id: &str,
-    ) {
-        controller
-            .publish_and_deliver_change_event(event, operation_id)
-            .await;
     }
 }

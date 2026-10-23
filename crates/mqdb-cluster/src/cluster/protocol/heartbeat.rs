@@ -1,6 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use super::wire::WireReader;
 use crate::cluster::{NUM_PARTITIONS, NodeId, PartitionId};
 
 const BITMAP_WORDS: usize = (NUM_PARTITIONS as usize).div_ceil(64);
@@ -18,7 +19,7 @@ pub struct Heartbeat {
 }
 
 impl Heartbeat {
-    pub const VERSION: u8 = 3;
+    pub const VERSION: u8 = 4;
 
     const FIXED_HEADER_SIZE: usize = 1 + 2 + 8;
     const BITMAP_END: usize = Self::FIXED_HEADER_SIZE + BITMAP_WORDS * 8 * 2;
@@ -92,6 +93,11 @@ impl Heartbeat {
     }
 
     #[must_use]
+    pub fn delivers_acked_events(&self) -> bool {
+        self.version >= 4
+    }
+
+    #[must_use]
     pub fn voter_term(&self) -> u64 {
         self.voter_term
     }
@@ -111,81 +117,54 @@ impl Heartbeat {
 
     #[must_use]
     pub fn to_be_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(Self::V2_SIZE + 18 + self.voters.len() * 2);
+        let voter_count = u16::try_from(self.voters.len()).unwrap_or(u16::MAX);
+        let mut buf = Vec::with_capacity(Self::V2_SIZE + 18 + usize::from(voter_count) * 2);
         buf.push(self.version);
         buf.extend_from_slice(&self.node_id.to_be_bytes());
         buf.extend_from_slice(&self.timestamp_ms.to_be_bytes());
-        for word in &self.primary_bitmap {
-            buf.extend_from_slice(&word.to_be_bytes());
-        }
-        for word in &self.replica_bitmap {
+        for word in self.primary_bitmap.iter().chain(&self.replica_bitmap) {
             buf.extend_from_slice(&word.to_be_bytes());
         }
         buf.extend_from_slice(&self.voter_term.to_be_bytes());
         buf.extend_from_slice(&self.voter_seq.to_be_bytes());
-        #[allow(clippy::cast_possible_truncation)]
-        let count = self.voters.len() as u16;
-        buf.extend_from_slice(&count.to_be_bytes());
-        for &node in &self.voters {
+        buf.extend_from_slice(&voter_count.to_be_bytes());
+        for &node in self.voters.iter().take(usize::from(voter_count)) {
             buf.extend_from_slice(&node.to_be_bytes());
         }
         buf
     }
 
-    #[allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
+    /// # Errors
+    /// Returns an error if `data` is shorter than a version-2 heartbeat.
     pub fn try_from_be_bytes(data: &[u8]) -> std::result::Result<(Self, usize), String> {
-        if data.len() < Self::V2_SIZE {
-            return Err(format!(
-                "heartbeat too short: {} < {}",
-                data.len(),
-                Self::V2_SIZE
-            ));
-        }
-
-        let version = data[0];
-        let node_id = u16::from_be_bytes([data[1], data[2]]);
-        let timestamp_ms = u64::from_be_bytes(data[3..11].try_into().unwrap());
-
-        let mut primary_bitmap = [0u64; BITMAP_WORDS];
-        let mut replica_bitmap = [0u64; BITMAP_WORDS];
-
-        let bitmap_start = Self::FIXED_HEADER_SIZE;
-        for (i, word) in primary_bitmap.iter_mut().enumerate() {
-            let offset = bitmap_start + i * 8;
-            *word = u64::from_be_bytes(data[offset..offset + 8].try_into().unwrap());
-        }
-
-        let replica_start = bitmap_start + BITMAP_WORDS * 8;
-        for (i, word) in replica_bitmap.iter_mut().enumerate() {
-            let offset = replica_start + i * 8;
-            *word = u64::from_be_bytes(data[offset..offset + 8].try_into().unwrap());
-        }
+        let too_short = || format!("heartbeat too short: {} < {}", data.len(), Self::V2_SIZE);
+        let mut reader = WireReader::new(data);
+        let version = reader.u8().ok_or_else(too_short)?;
+        let node_id = reader.u16().ok_or_else(too_short)?;
+        let timestamp_ms = reader.u64().ok_or_else(too_short)?;
+        let mut read_bitmap = || {
+            let mut bitmap = [0u64; BITMAP_WORDS];
+            for word in &mut bitmap {
+                *word = reader.u64()?;
+            }
+            Some(bitmap)
+        };
+        let primary_bitmap = read_bitmap().ok_or_else(too_short)?;
+        let replica_bitmap = read_bitmap().ok_or_else(too_short)?;
 
         let mut voter_term = 0u64;
         let mut voter_seq = 0u64;
         let mut voters = Vec::new();
         let mut consumed = Self::V2_SIZE;
 
-        if version >= 3 && data.len() >= Self::V2_SIZE + 18 {
-            voter_term =
-                u64::from_be_bytes(data[Self::V2_SIZE..Self::V2_SIZE + 8].try_into().unwrap());
-            voter_seq = u64::from_be_bytes(
-                data[Self::V2_SIZE + 8..Self::V2_SIZE + 16]
-                    .try_into()
-                    .unwrap(),
-            );
-            let count = u16::from_be_bytes(
-                data[Self::V2_SIZE + 16..Self::V2_SIZE + 18]
-                    .try_into()
-                    .unwrap(),
-            ) as usize;
-            let list_start = Self::V2_SIZE + 18;
-            if data.len() >= list_start + count * 2 {
-                for i in 0..count {
-                    let off = list_start + i * 2;
-                    voters.push(u16::from_be_bytes([data[off], data[off + 1]]));
-                }
-                consumed = list_start + count * 2;
+        if version >= 3
+            && let (Some(term), Some(seq), Some(count)) = (reader.u64(), reader.u64(), reader.u16())
+        {
+            voter_term = term;
+            voter_seq = seq;
+            if let Some(list) = (0..count).map(|_| reader.u16()).collect::<Option<Vec<_>>>() {
+                voters = list;
+                consumed = Self::V2_SIZE + 18 + usize::from(count) * 2;
             }
         }
 

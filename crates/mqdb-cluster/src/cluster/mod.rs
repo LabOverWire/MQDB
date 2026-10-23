@@ -9,6 +9,7 @@ pub mod db_protocol;
 mod db_topic;
 mod dedicated_executor;
 pub mod entity;
+mod event_delivery;
 mod event_handler;
 mod heartbeat;
 mod idempotency_store;

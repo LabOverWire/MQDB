@@ -182,6 +182,16 @@ impl ClusterTransport for ClusterTransportKind {
         }
     }
 
+    async fn deliver_routed_publish(&self, publish: RoutedPublish) -> bool {
+        match self.as_quic() {
+            Some(t) => t.deliver_routed_publish(publish).await,
+            None => {
+                self.queue_routed_publish(publish).await;
+                true
+            }
+        }
+    }
+
     async fn queue_local_publish_retained(&self, topic: String, payload: Vec<u8>, qos: u8) {
         match self {
             #[cfg(feature = "mqtt-bridge")]

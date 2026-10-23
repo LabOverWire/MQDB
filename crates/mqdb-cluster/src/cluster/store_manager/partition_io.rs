@@ -1,6 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use super::outbox::ClusterOutbox;
 use super::{StoreApplyError, StoreManager};
 use crate::cluster::{PartitionId, entity};
 
@@ -59,6 +60,7 @@ impl StoreManager {
             ),
             (entity::DB_FK, self.db_fk.export_for_partition(partition)),
             (entity::DB_CONSTRAINT, self.db_constraints.export_all()),
+            (entity::CHANGE_EVENTS, self.export_change_events(partition)),
         ];
 
         buf.extend_from_slice(&(store_data.len() as u8).to_be_bytes());
@@ -178,6 +180,7 @@ impl StoreManager {
                     .db_constraints
                     .import_constraints(store_data)
                     .map_err(|_| StoreApplyError::DbConstraintError)?,
+                entity::CHANGE_EVENTS => self.import_change_events(store_data)?,
                 _ => continue,
             };
 
@@ -187,6 +190,26 @@ impl StoreManager {
         self.rebuild_fk_indexes_after_import();
 
         Ok(total_imported)
+    }
+
+    fn export_change_events(&self, partition: PartitionId) -> Vec<u8> {
+        self.cluster_outbox
+            .as_ref()
+            .and_then(|outbox| outbox.stored_change_events_for(partition).ok())
+            .and_then(|events| ClusterOutbox::encode_change_events(&events))
+            .unwrap_or_default()
+    }
+
+    fn import_change_events(&self, data: &[u8]) -> Result<usize, StoreApplyError> {
+        let Some(outbox) = self.cluster_outbox.as_ref() else {
+            return Ok(0);
+        };
+        let events =
+            ClusterOutbox::decode_change_events(data).ok_or(StoreApplyError::ChangeEventError)?;
+        outbox
+            .store_change_events(&events)
+            .map_err(|_| StoreApplyError::PersistenceError)?;
+        Ok(events.len())
     }
 
     fn rebuild_fk_indexes_after_import(&self) {

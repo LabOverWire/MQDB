@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 mod broadcast;
+mod change_event;
 mod db_messages;
 mod fk;
 mod heartbeat;
@@ -16,6 +17,7 @@ mod wire;
 mod tests;
 
 pub use broadcast::{PresenceBroadcast, TopicSubscriptionBroadcast, WildcardBroadcast, WildcardOp};
+pub use change_event::{ChangeEventDelivery, ChangeEventMark, ChangeEventRecord, EventId};
 pub use db_messages::{JsonDbRequest, JsonDbResponse};
 pub use fk::{FkCheckRequest, FkCheckResponse, FkReverseLookupRequest, FkReverseLookupResponse};
 pub use heartbeat::Heartbeat;

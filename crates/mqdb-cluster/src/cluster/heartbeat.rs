@@ -19,6 +19,7 @@ struct NodeState {
     last_heartbeat: u64,
     status: NodeStatus,
     missed_count: u32,
+    delivers_acked_events: bool,
 }
 
 #[derive(Debug)]
@@ -88,6 +89,7 @@ impl HeartbeatManager {
                     last_heartbeat: 0,
                     status: NodeStatus::Unknown,
                     missed_count: 0,
+                    delivers_acked_events: false,
                 },
             );
         }
@@ -158,6 +160,7 @@ impl HeartbeatManager {
             state.last_heartbeat = received_at;
             state.status = NodeStatus::Alive;
             state.missed_count = 0;
+            state.delivers_acked_events = heartbeat.delivers_acked_events();
             if !was_alive {
                 tracing::debug!(node_id, received_at, "node revived by heartbeat");
             }
@@ -169,6 +172,7 @@ impl HeartbeatManager {
                     last_heartbeat: received_at,
                     status: NodeStatus::Alive,
                     missed_count: 0,
+                    delivers_acked_events: heartbeat.delivers_acked_events(),
                 },
             );
         }
@@ -270,6 +274,13 @@ impl HeartbeatManager {
         self.nodes
             .get(&node_id.get())
             .map_or(NodeStatus::Unknown, |s| s.status)
+    }
+
+    #[must_use]
+    pub fn delivers_acked_events(&self, node_id: NodeId) -> bool {
+        self.nodes
+            .get(&node_id.get())
+            .is_some_and(|s| s.delivers_acked_events)
     }
 
     #[must_use]

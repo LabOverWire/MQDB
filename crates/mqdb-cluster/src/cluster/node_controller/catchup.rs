@@ -125,7 +125,7 @@ impl<T: ClusterTransport> NodeController<T> {
             if let Some(state) = self.replicas.get_mut(&partition.get()) {
                 let ack = state.handle_write(write);
                 if ack.is_ok() {
-                    if let Err(e) = self.stores.apply_write(write) {
+                    if let Err(e) = self.apply_replicated_write(write) {
                         tracing::error!(?partition, ?e, "failed to apply catchup write to stores");
                     } else {
                         self.sync_retained_to_broker(write).await;

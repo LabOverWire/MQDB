@@ -18,6 +18,7 @@ use tokio::sync::{Notify, RwLock};
 use tracing::{debug, error, info, trace, warn};
 
 const INBOX_CHANNEL_CAPACITY: usize = 16384;
+const LOCAL_DELIVERY_TIMEOUT: Duration = Duration::from_secs(1);
 const PEER_CONTROL_QUEUE_CAPACITY: usize = 256;
 const PEER_BULK_QUEUE_CAPACITY: usize = 1024;
 const REDIAL_DIAL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -522,6 +523,33 @@ impl ClusterTransport for QuicDirectTransport {
             user_properties: publish.user_properties,
             order_key: publish.order_key,
         });
+    }
+
+    async fn deliver_routed_publish(&self, publish: RoutedPublish) -> bool {
+        let request = LocalPublishRequest {
+            topic: publish.topic,
+            payload: publish.payload,
+            qos: publish.qos,
+            kind: LocalPublishKind::Routed,
+            user_properties: publish.user_properties,
+            order_key: publish.order_key,
+        };
+        match tokio::time::timeout(
+            LOCAL_DELIVERY_TIMEOUT,
+            self.local_publish_tx.send_async(request),
+        )
+        .await
+        {
+            Ok(Ok(())) => true,
+            Ok(Err(e)) => {
+                warn!(topic = %e.0.topic, "local_publish queue closed, change event not delivered");
+                false
+            }
+            Err(_) => {
+                warn!("local_publish queue full, change event will be retried");
+                false
+            }
+        }
     }
 
     async fn queue_local_publish_retained(&self, topic: String, payload: Vec<u8>, qos: u8) {

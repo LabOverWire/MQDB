@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::super::migration::MigrationPhase;
+use super::super::replication::ReplicaRole;
 use super::super::snapshot::{
     SnapshotBuilder, SnapshotChunk, SnapshotComplete, SnapshotRequest, SnapshotSender,
 };
@@ -92,6 +93,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 return;
             };
 
+            self.forget_change_events(partition);
             match self.stores.import_partition(&data) {
                 Ok(count) => {
                     tracing::info!(
@@ -128,6 +130,11 @@ impl<T: ClusterTransport> NodeController<T> {
                                 "replica now active after snapshot import"
                             );
                         }
+                    }
+
+                    self.reload_change_events(partition);
+                    if self.role(partition) == ReplicaRole::Primary {
+                        self.start_sending_change_events(partition);
                     }
 
                     self.requested_snapshots.remove(&partition);

@@ -1,6 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use super::change_event::ChangeEventRecord;
 use super::types::{AckStatus, Operation};
 use super::wire::WireReader;
 use crate::cluster::{Epoch, NodeId, PartitionId};
@@ -15,11 +16,13 @@ pub struct ReplicationWrite {
     pub entity: String,
     pub id: String,
     pub data: Vec<u8>,
+    pub event: Option<ChangeEventRecord>,
 }
 
 impl ReplicationWrite {
     pub const VERSION: u8 = 1;
     pub const WIDE_VERSION: u8 = 2;
+    const EVENT_TRAILER: u8 = 1;
 
     #[must_use]
     pub fn new(
@@ -39,7 +42,14 @@ impl ReplicationWrite {
             entity,
             id,
             data,
+            event: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_event(mut self, event: Option<ChangeEventRecord>) -> Self {
+        self.event = event;
+        self
     }
 
     #[must_use]
@@ -71,6 +81,12 @@ impl ReplicationWrite {
         buf.extend_from_slice(entity);
         buf.extend_from_slice(id);
         buf.extend_from_slice(&self.data);
+        if let Some(event) = &self.event {
+            let event_bytes = event.to_bytes()?;
+            buf.push(Self::EVENT_TRAILER);
+            buf.extend_from_slice(&u32::try_from(event_bytes.len()).ok()?.to_be_bytes());
+            buf.extend_from_slice(&event_bytes);
+        }
 
         Some(buf)
     }
@@ -98,15 +114,25 @@ impl ReplicationWrite {
         let entity_len = field_length()?;
         let id_len = field_length()?;
         let data_len = usize::try_from(reader.u32()?).ok()?;
+        let entity = reader.text(entity_len)?;
+        let id = reader.text(id_len)?;
+        let data = reader.take(data_len)?.to_vec();
+        let event = if !reader.is_exhausted() && reader.u8()? == Self::EVENT_TRAILER {
+            let event_len = usize::try_from(reader.u32()?).ok()?;
+            Some(ChangeEventRecord::from_bytes(reader.take(event_len)?)?)
+        } else {
+            None
+        };
 
         Some(Self {
             partition,
             operation,
             epoch,
             sequence,
-            entity: reader.text(entity_len)?,
-            id: reader.text(id_len)?,
-            data: reader.take(data_len)?.to_vec(),
+            entity,
+            id,
+            data,
+            event,
         })
     }
 }

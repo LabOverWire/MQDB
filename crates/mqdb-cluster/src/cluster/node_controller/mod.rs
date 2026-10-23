@@ -3,6 +3,7 @@
 
 mod broadcast;
 mod catchup;
+mod change_events;
 pub(crate) mod db_ops;
 pub(crate) mod fk;
 pub(crate) mod pending;
@@ -457,6 +458,7 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) write_log: PartitionWriteLog,
     pub(super) forward_dedup: HashSet<u64>,
     pub(super) forward_dedup_order: VecDeque<u64>,
+    pub(super) event_delivery: super::event_delivery::EventDelivery,
     pub(super) tx_raft_messages: flume::Sender<RaftMessage>,
     pub(super) tx_raft_events: flume::Sender<RaftEvent>,
     pub(super) dead_nodes_for_session_update: VecDeque<NodeId>,
@@ -533,6 +535,7 @@ impl<T: ClusterTransport> NodeController<T> {
             write_log: PartitionWriteLog::new(),
             forward_dedup: HashSet::with_capacity(FORWARD_DEDUP_CAPACITY),
             forward_dedup_order: VecDeque::with_capacity(FORWARD_DEDUP_CAPACITY),
+            event_delivery: super::event_delivery::EventDelivery::default(),
             tx_raft_messages,
             tx_raft_events,
             dead_nodes_for_session_update: VecDeque::new(),
@@ -706,6 +709,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
         state.become_primary(epoch);
         self.seal_or_queue_unique(partition, epoch);
+        self.start_sending_change_events(partition);
     }
 
     pub fn become_replica(&mut self, partition: PartitionId, epoch: Epoch, sequence: u64) {
@@ -714,6 +718,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .entry(partition.get())
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
         state.become_replica(epoch, sequence);
+        self.stop_sending_change_events(partition);
     }
 
     pub async fn become_replica_with_snapshot(
@@ -728,6 +733,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
 
         state.become_awaiting_snapshot(epoch);
+        self.stop_sending_change_events(partition);
 
         tracing::info!(
             ?partition,
@@ -743,6 +749,7 @@ impl<T: ClusterTransport> NodeController<T> {
         if let Some(state) = self.replicas.get_mut(&partition.get()) {
             state.step_down();
         }
+        self.stop_sending_change_events(partition);
     }
 
     #[must_use]
@@ -993,6 +1000,7 @@ impl<T: ClusterTransport> NodeController<T> {
         tracing::warn!(?dead_node, "node death detected");
         let _ = self.tx_raft_events.try_send(RaftEvent::NodeDead(dead_node));
         self.dead_nodes_for_session_update.push_back(dead_node);
+        self.change_events_node_gone(dead_node);
 
         for partition in super::PartitionId::all() {
             let assignment = self.partition_map.get(partition);
@@ -1174,6 +1182,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 }
             } else {
                 self.step_down(partition);
+                self.forget_change_events(partition);
             }
         }
 
@@ -1340,6 +1349,15 @@ impl<T: ClusterTransport> NodeController<T> {
         message: &ClusterMessage,
     ) -> Option<PendingConstraintWork> {
         match message {
+            ClusterMessage::ChangeEvent(delivery) => {
+                self.handle_change_event(from, delivery.clone()).await;
+            }
+            ClusterMessage::ChangeEventAck(mark) => {
+                self.handle_change_event_ack(from, *mark).await;
+            }
+            ClusterMessage::ChangeEventPrune(mark) => {
+                self.handle_change_event_prune(*mark);
+            }
             ClusterMessage::SnapshotRequest(req) => {
                 self.handle_snapshot_request(from, req).await;
             }
