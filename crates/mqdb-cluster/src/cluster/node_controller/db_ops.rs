@@ -7,9 +7,10 @@ use super::{
     PendingFkWork, PendingUniqueWork, ReplicationWrite, UniqueCheckContinuation,
     UniqueReservationParams, entity,
 };
+use crate::cluster::protocol::ChangeEventRecord;
 use crate::cluster::protocol::{ForwardTarget, ForwardedPublish};
 use crate::cluster::replication::ReplicaState;
-use crate::cluster::store_manager::outbox::{CascadeOutboxPayload, CascadeRemoteOp, OutboxPayload};
+use crate::cluster::store_manager::outbox::{CascadeOutboxPayload, CascadeRemoteOp};
 use crate::cluster::{PublishRouter, RoutedPublish};
 use mqdb_core::events::ChangeEvent;
 use mqdb_core::types::{AccessLevel, MAX_LIST_RESULTS, OwnershipDecision};
@@ -100,12 +101,13 @@ impl<'a> EventOrigin<'a> {
     }
 }
 
-pub(crate) fn build_change_event_outbox(event: &ChangeEvent) -> OutboxPayload {
-    let topic = event.event_topic(0);
-    let user_properties = change_event_user_properties(event);
-    let payload = serde_json::to_vec(event).unwrap_or_default();
-    let operation_id = uuid::Uuid::new_v4().to_string();
-    OutboxPayload::new(operation_id, &topic, &payload, &user_properties)
+pub(crate) fn change_event_record(event: &ChangeEvent) -> ChangeEventRecord {
+    ChangeEventRecord {
+        topic: event.event_topic(0),
+        payload: serde_json::to_vec(event).unwrap_or_default(),
+        user_properties: change_event_user_properties(event),
+        order_key: format!("{}/{}", event.entity, event.id),
+    }
 }
 
 pub(crate) enum CascadeSideEffect {
@@ -255,12 +257,9 @@ impl<T: ClusterTransport> NodeController<T> {
         Ok(db_entity)
     }
 
-    pub async fn db_commit(
-        &mut self,
-        write: ReplicationWrite,
-        outbox: super::super::store_manager::outbox::OutboxPayload,
-    ) {
-        self.write_or_forward_with_outbox(write, outbox).await;
+    pub async fn db_commit(&mut self, write: ReplicationWrite, event: &ChangeEvent) {
+        self.write_or_forward_with_event(write, change_event_record(event), &[])
+            .await;
     }
 
     pub(crate) async fn commit_with_change_event(
@@ -268,10 +267,7 @@ impl<T: ClusterTransport> NodeController<T> {
         write: ReplicationWrite,
         event: ChangeEvent,
     ) {
-        let outbox = build_change_event_outbox(&event);
-        self.db_commit(write, outbox.clone()).await;
-        self.publish_and_deliver_change_event(event, &outbox.operation_id)
-            .await;
+        self.db_commit(write, &event).await;
     }
 
     pub(crate) async fn commit_delete_with_change_event(
@@ -281,29 +277,23 @@ impl<T: ClusterTransport> NodeController<T> {
         data: &Value,
         cascade: Option<&CascadeOutboxPayload>,
     ) {
-        let outbox = build_change_event_outbox(&event);
         match cascade {
-            Some(cascade) => {
-                self.db_commit_with_cascade(write, outbox.clone(), cascade)
-                    .await;
-            }
-            None => self.db_commit(write, outbox.clone()).await,
+            Some(cascade) => self.db_commit_with_cascade(write, &event, cascade).await,
+            None => self.db_commit(write, &event).await,
         }
         self.release_unique_for_deleted_record(&event.entity, &event.id, data)
-            .await;
-        self.publish_and_deliver_change_event(event, &outbox.operation_id)
             .await;
     }
 
     pub(crate) async fn db_commit_with_cascade(
         &mut self,
         write: ReplicationWrite,
-        outbox: OutboxPayload,
+        event: &ChangeEvent,
         cascade: &CascadeOutboxPayload,
     ) {
-        self.write_or_forward_with_outbox_entries(
+        self.write_or_forward_with_event(
             write,
-            outbox,
+            change_event_record(event),
             &[(cascade.key.clone(), cascade.value.clone())],
         )
         .await;
@@ -1497,26 +1487,6 @@ impl<T: ClusterTransport> NodeController<T> {
             .with_sender(origin.sender.map(str::to_string))
             .with_client_id(origin.client_id.map(str::to_string))
             .with_scope(scope)
-    }
-
-    pub(crate) async fn publish_and_deliver_change_event(
-        &self,
-        event: ChangeEvent,
-        operation_id: &str,
-    ) {
-        if let Ok(payload) = serde_json::to_vec(&event) {
-            self.deliver_change_event(RoutedPublish {
-                topic: event.event_topic(0),
-                payload,
-                qos: 1,
-                user_properties: change_event_user_properties(&event),
-                order_key: Some(format!("{}/{}", event.entity, event.id)),
-            })
-            .await;
-        }
-        if let Some(outbox) = self.stores.cluster_outbox() {
-            let _ = outbox.mark_delivered(operation_id);
-        }
     }
 
     pub(crate) async fn deliver_change_event(&self, publish: RoutedPublish) {

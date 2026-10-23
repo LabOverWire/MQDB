@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::super::migration::MigrationPhase;
+use super::super::replication::ReplicaRole;
 use super::super::snapshot::{
     SnapshotBuilder, SnapshotChunk, SnapshotComplete, SnapshotRequest, SnapshotSender,
 };
@@ -92,6 +93,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 return;
             };
 
+            let saved_events = self.set_aside_change_events(partition);
             match self.stores.import_partition(&data) {
                 Ok(count) => {
                     tracing::info!(
@@ -130,6 +132,11 @@ impl<T: ClusterTransport> NodeController<T> {
                         }
                     }
 
+                    self.reload_change_events(partition);
+                    if self.role(partition) == ReplicaRole::Primary {
+                        self.start_sending_change_events(partition);
+                    }
+
                     self.requested_snapshots.remove(&partition);
 
                     let complete = SnapshotComplete::ok(partition, sequence);
@@ -140,6 +147,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 }
                 Err(e) => {
                     tracing::error!(?partition, ?e, "failed to import snapshot");
+                    self.restore_change_events(partition, &saved_events);
                     self.requested_snapshots.remove(&partition);
                     let complete = SnapshotComplete::failed(partition);
                     let _ = self

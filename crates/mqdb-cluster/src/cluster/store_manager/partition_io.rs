@@ -1,6 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use super::outbox::ClusterOutbox;
 use super::{StoreApplyError, StoreManager};
 use crate::cluster::{PartitionId, entity};
 
@@ -59,6 +60,7 @@ impl StoreManager {
             ),
             (entity::DB_FK, self.db_fk.export_for_partition(partition)),
             (entity::DB_CONSTRAINT, self.db_constraints.export_all()),
+            (entity::CHANGE_EVENTS, self.export_change_events(partition)),
         ];
 
         buf.extend_from_slice(&(store_data.len() as u8).to_be_bytes());
@@ -178,6 +180,7 @@ impl StoreManager {
                     .db_constraints
                     .import_constraints(store_data)
                     .map_err(|_| StoreApplyError::DbConstraintError)?,
+                entity::CHANGE_EVENTS => self.import_change_events(store_data)?,
                 _ => continue,
             };
 
@@ -187,6 +190,29 @@ impl StoreManager {
         self.rebuild_fk_indexes_after_import();
 
         Ok(total_imported)
+    }
+
+    fn export_change_events(&self, partition: PartitionId) -> Vec<u8> {
+        self.cluster_outbox
+            .as_ref()
+            .and_then(|outbox| outbox.stored_change_events_for(partition).ok())
+            .and_then(|events| ClusterOutbox::encode_change_events(&events))
+            .unwrap_or_default()
+    }
+
+    fn import_change_events(&self, data: &[u8]) -> Result<usize, StoreApplyError> {
+        let Some(outbox) = self.cluster_outbox.as_ref() else {
+            return Ok(0);
+        };
+        if data.is_empty() {
+            return Ok(0);
+        }
+        let events =
+            ClusterOutbox::decode_change_events(data).ok_or(StoreApplyError::ChangeEventError)?;
+        outbox
+            .store_change_events(&events)
+            .map_err(|_| StoreApplyError::PersistenceError)?;
+        Ok(events.len())
     }
 
     fn rebuild_fk_indexes_after_import(&self) {
@@ -235,6 +261,22 @@ mod tests {
             .get("notes", "n1")
             .expect("n1 must exist on destination after snapshot import");
         assert_eq!(note.data, b"{\"title\":\"hello\"}");
+    }
+
+    #[test]
+    fn a_snapshot_without_change_events_imports_into_a_node_that_keeps_them() {
+        let src = StoreManager::new(node(1));
+        let dst = StoreManager::new_with_storage(
+            node(2),
+            Some(std::sync::Arc::new(mqdb_core::storage::MemoryBackend::new())),
+        );
+        src.db_data.create("notes", "n1", b"{}", 1000).unwrap();
+        let partition = src.db_data.get("notes", "n1").unwrap().partition();
+
+        let payload = src.export_partition(partition);
+
+        dst.import_partition(&payload).expect("import");
+        assert!(dst.db_data.get("notes", "n1").is_some());
     }
 
     #[test]

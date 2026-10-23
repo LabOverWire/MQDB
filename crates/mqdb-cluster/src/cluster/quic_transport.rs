@@ -524,6 +524,28 @@ impl ClusterTransport for QuicDirectTransport {
         });
     }
 
+    async fn deliver_routed_publish(&self, publish: RoutedPublish) -> bool {
+        let request = LocalPublishRequest {
+            topic: publish.topic,
+            payload: publish.payload,
+            qos: publish.qos,
+            kind: LocalPublishKind::Routed,
+            user_properties: publish.user_properties,
+            order_key: publish.order_key,
+        };
+        match self.local_publish_tx.try_send(request) {
+            Ok(()) => true,
+            Err(flume::TrySendError::Full(request)) => {
+                warn!(topic = %request.topic, "local_publish queue full, change event will be retried");
+                false
+            }
+            Err(flume::TrySendError::Disconnected(request)) => {
+                warn!(topic = %request.topic, "local_publish queue closed, change event not delivered");
+                false
+            }
+        }
+    }
+
     async fn queue_local_publish_retained(&self, topic: String, payload: Vec<u8>, qos: u8) {
         self.enqueue_local_publish(LocalPublishRequest {
             topic,

@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-23 — mqdb-cluster 0.4.33, mqdb-cli 0.8.61
+
+### Fixed
+
+- **Cluster change events survive a primary crash and are no longer dropped under load** (#199). A change event was kept only on the record's primary and removed as soon as it was queued. A primary that crashed after its replica had the record, but before the event left, lost the event for good. A full local queue, a failed forward or a full peer inbox also dropped events. On restart, a node replayed its saved events before knowing which partitions it held, which could deliver an older event after a newer one, or an event for a write the failover had discarded. Now the event travels with the replication write and is stored on the replica in the same batch as the record. Only the primary sends it, in order, to each node with a matching subscriber, and sends the next one only after that node acks. A receiving node delivers each event once. A promoted replica sends what the old primary had not. Snapshots carry the pending events. Design in `docs/design/cluster-event-delivery.md`.
+- Mixed-version clusters keep working. Nodes advertise the new delivery in heartbeat version 4; older nodes get events the old way, and their replicas keep no copy, as before.
+
+### Known limitations
+
+- A node that restarts forgets which events it delivered, so its subscribers may see an event again.
+- Each partition has one event in flight per subscriber node. A single partition written faster than one event per round trip builds a backlog, and past 4096 pending events the oldest are dropped with an error log.
+- Replication writes now carry the event, so record data is sent to replicas twice.
+- When nodes disagree about which one is primary for a partition, a write sent to that partition can be dropped while the client is told it succeeded; its event is still published, untracked. The disagreement itself is a separate bug.
+
 ## 2026-10-22 — mqdb-cluster 0.4.32, mqdb-cli 0.8.60
 
 ### Security

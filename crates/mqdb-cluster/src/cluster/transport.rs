@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::protocol::{
-    BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, FkCheckRequest,
-    FkCheckResponse, FkReverseLookupRequest, FkReverseLookupResponse, ForwardedPublish, Heartbeat,
-    JsonDbRequest, JsonDbResponse, PresenceBroadcast, QueryRequest, QueryResponse, ReplicationAck,
-    ReplicationWrite, TopicSubscriptionBroadcast, UniqueCommitRequest, UniqueCommitResponse,
-    UniqueReassertRequest, UniqueReleaseRequest, UniqueReleaseResponse, UniqueReplicateAck,
-    UniqueReserveRequest, UniqueReserveResponse, UniqueSealRequest, UniqueSealResponse,
-    WildcardBroadcast,
+    BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ChangeEventDelivery,
+    ChangeEventMark, FkCheckRequest, FkCheckResponse, FkReverseLookupRequest,
+    FkReverseLookupResponse, ForwardedPublish, Heartbeat, JsonDbRequest, JsonDbResponse,
+    PresenceBroadcast, QueryRequest, QueryResponse, ReplicationAck, ReplicationWrite,
+    TopicSubscriptionBroadcast, UniqueCommitRequest, UniqueCommitResponse, UniqueReassertRequest,
+    UniqueReleaseRequest, UniqueReleaseResponse, UniqueReplicateAck, UniqueReserveRequest,
+    UniqueReserveResponse, UniqueSealRequest, UniqueSealResponse, WildcardBroadcast,
 };
 use super::raft::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, PartitionUpdate,
@@ -39,6 +39,9 @@ pub enum ClusterMessage {
     CatchupRequest(CatchupRequest),
     CatchupResponse(CatchupResponse),
     ForwardedPublish(ForwardedPublish),
+    ChangeEvent(ChangeEventDelivery),
+    ChangeEventAck(ChangeEventMark),
+    ChangeEventPrune(ChangeEventMark),
     SnapshotRequest(SnapshotRequest),
     SnapshotChunk(SnapshotChunk),
     SnapshotComplete(SnapshotComplete),
@@ -112,6 +115,9 @@ impl ClusterMessage {
             Self::CatchupRequest(_) => 12,
             Self::CatchupResponse(_) => 13,
             Self::ForwardedPublish(_) => 30,
+            Self::ChangeEvent(_) => 31,
+            Self::ChangeEventAck(_) => 32,
+            Self::ChangeEventPrune(_) => 33,
             Self::SnapshotRequest(_) => 40,
             Self::SnapshotChunk(_) => 41,
             Self::SnapshotComplete(_) => 42,
@@ -160,6 +166,9 @@ impl ClusterMessage {
             Self::CatchupRequest(_) => "CatchupRequest",
             Self::CatchupResponse(_) => "CatchupResponse",
             Self::ForwardedPublish(_) => "ForwardedPublish",
+            Self::ChangeEvent(_) => "ChangeEvent",
+            Self::ChangeEventAck(_) => "ChangeEventAck",
+            Self::ChangeEventPrune(_) => "ChangeEventPrune",
             Self::SnapshotRequest(_) => "SnapshotRequest",
             Self::SnapshotChunk(_) => "SnapshotChunk",
             Self::SnapshotComplete(_) => "SnapshotComplete",
@@ -221,6 +230,17 @@ impl ClusterMessage {
                 ),
             },
             Self::ForwardedPublish(fwd) => buf.extend_from_slice(&fwd.to_bytes()),
+            Self::ChangeEvent(delivery) => match delivery.to_bytes() {
+                Some(bytes) => buf.extend_from_slice(&bytes),
+                None => tracing::warn!(
+                    partition = delivery.partition.get(),
+                    topic = %delivery.record.topic,
+                    "change event too long to encode"
+                ),
+            },
+            Self::ChangeEventAck(mark) | Self::ChangeEventPrune(mark) => {
+                buf.extend_from_slice(&mark.to_bytes());
+            }
             Self::SnapshotRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
             Self::SnapshotChunk(chunk) => buf.extend_from_slice(&chunk.to_bytes()),
             Self::SnapshotComplete(complete) => buf.extend_from_slice(&complete.to_be_bytes()),
@@ -321,6 +341,9 @@ impl ClusterMessage {
                 InstallSnapshotRequest::from_bytes(data)?,
             ))),
             30 => Some(Self::ForwardedPublish(ForwardedPublish::from_bytes(data)?)),
+            31 => Some(Self::ChangeEvent(ChangeEventDelivery::from_bytes(data)?)),
+            32 => Some(Self::ChangeEventAck(ChangeEventMark::from_bytes(data)?)),
+            33 => Some(Self::ChangeEventPrune(ChangeEventMark::from_bytes(data)?)),
             40 => {
                 let (req, _) = SnapshotRequest::try_from_be_bytes(data).ok()?;
                 Some(Self::SnapshotRequest(req))
@@ -580,6 +603,16 @@ pub trait ClusterTransport: Send + Sync + Debug + Clone {
             publish.qos,
             publish.user_properties,
         )
+    }
+
+    fn deliver_routed_publish(
+        &self,
+        publish: RoutedPublish,
+    ) -> impl std::future::Future<Output = bool> + Send {
+        async {
+            self.queue_routed_publish(publish).await;
+            true
+        }
     }
 
     fn queue_local_publish_retained(

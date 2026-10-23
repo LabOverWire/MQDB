@@ -710,3 +710,114 @@ fn unique_reassert_request_decode_compat_reads_v1() {
         "a v1 sender is treated as unfenced"
     );
 }
+
+fn sample_event() -> ChangeEventRecord {
+    ChangeEventRecord {
+        topic: "$DB/item/events/k".to_string(),
+        payload: b"{\"id\":\"k\"}".to_vec(),
+        user_properties: vec![("x-origin-client-id".to_string(), "editor-1".to_string())],
+        order_key: "item/k".to_string(),
+    }
+}
+
+#[test]
+fn replication_write_carries_its_change_event() {
+    for id_len in [8, 300] {
+        let write = write_with(8, id_len).with_event(Some(sample_event()));
+        let decoded = ReplicationWrite::from_bytes(&write.to_bytes().unwrap()).unwrap();
+        assert_eq!(decoded.event, Some(sample_event()));
+        assert_eq!(decoded.data, write.data);
+    }
+}
+
+#[test]
+fn the_change_event_trailer_leaves_the_bytes_older_nodes_read_unchanged() {
+    for id_len in [8, 300] {
+        let plain = write_with(8, id_len).to_bytes().unwrap();
+        let with_event = write_with(8, id_len)
+            .with_event(Some(sample_event()))
+            .to_bytes()
+            .unwrap();
+        assert!(with_event.len() > plain.len());
+        assert_eq!(&with_event[..plain.len()], plain.as_slice());
+        assert!(
+            ReplicationWrite::from_bytes(&plain)
+                .unwrap()
+                .event
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn a_truncated_change_event_trailer_is_rejected() {
+    let bytes = write_with(8, 8)
+        .with_event(Some(sample_event()))
+        .to_bytes()
+        .unwrap();
+    assert!(ReplicationWrite::from_bytes(&bytes[..bytes.len() - 1]).is_none());
+}
+
+#[test]
+fn catchup_response_carries_change_events() {
+    let writes = vec![
+        write_with(8, 8).with_event(Some(sample_event())),
+        write_with(8, 300),
+    ];
+    let response = CatchupResponse::create(
+        PartitionId::new(7).unwrap(),
+        NodeId::validated(2).unwrap(),
+        writes,
+    );
+    let decoded = CatchupResponse::from_bytes(&response.to_bytes().unwrap()).unwrap();
+    assert_eq!(decoded.writes[0].event, Some(sample_event()));
+    assert!(decoded.writes[1].event.is_none());
+}
+
+#[test]
+fn change_event_messages_round_trip_and_reject_trailing_bytes() {
+    let delivery = ChangeEventDelivery {
+        partition: PartitionId::new(9).unwrap(),
+        id: EventId::new(2, 77),
+        record: sample_event(),
+    };
+    let bytes = delivery.to_bytes().unwrap();
+    assert_eq!(ChangeEventDelivery::from_bytes(&bytes), Some(delivery));
+    let mut longer = bytes.clone();
+    longer.push(0);
+    assert!(ChangeEventDelivery::from_bytes(&longer).is_none());
+    assert!(ChangeEventDelivery::from_bytes(&bytes[..bytes.len() - 1]).is_none());
+
+    let mark = ChangeEventMark::new(PartitionId::new(9).unwrap(), EventId::new(2, 77));
+    let bytes = mark.to_bytes();
+    assert_eq!(ChangeEventMark::from_bytes(&bytes), Some(mark));
+    assert!(ChangeEventMark::from_bytes(&bytes[..bytes.len() - 1]).is_none());
+}
+
+#[test]
+fn a_version_4_heartbeat_advertises_acked_events_and_keeps_its_voters() {
+    let node = NodeId::validated(3).unwrap();
+    let mut hb = Heartbeat::create(node, 1000);
+    hb.set_primary(PartitionId::new(200).unwrap());
+    hb.set_voters(5, 9, &[NodeId::validated(1).unwrap(), node]);
+
+    let (decoded, consumed) = Heartbeat::try_from_be_bytes(&hb.to_be_bytes()).unwrap();
+    assert!(decoded.delivers_acked_events());
+    assert!(decoded.carries_voters());
+    assert!(decoded.is_primary(PartitionId::new(200).unwrap()));
+    assert_eq!((decoded.voter_term(), decoded.voter_seq()), (5, 9));
+    assert_eq!(decoded.voters(), vec![NodeId::validated(1).unwrap(), node]);
+    assert_eq!(consumed, hb.to_be_bytes().len());
+
+    let mut older = hb.to_be_bytes();
+    older[0] = 3;
+    let (decoded, _) = Heartbeat::try_from_be_bytes(&older).unwrap();
+    assert!(!decoded.delivers_acked_events());
+    assert_eq!(decoded.voters().len(), 2);
+}
+
+#[test]
+fn a_heartbeat_shorter_than_version_2_is_rejected() {
+    let bytes = Heartbeat::create(NodeId::validated(3).unwrap(), 1).to_be_bytes();
+    assert!(Heartbeat::try_from_be_bytes(&bytes[..10]).is_err());
+}

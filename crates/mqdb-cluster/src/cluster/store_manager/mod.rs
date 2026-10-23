@@ -125,6 +125,7 @@ pub enum StoreApplyError {
     DbFkError,
     DbConstraintError,
     ClientLocationError,
+    ChangeEventError,
     PersistenceError,
 }
 
@@ -148,6 +149,7 @@ impl std::fmt::Display for StoreApplyError {
             Self::DbFkError => write!(f, "db fk store error"),
             Self::DbConstraintError => write!(f, "db constraint store error"),
             Self::ClientLocationError => write!(f, "client location store error"),
+            Self::ChangeEventError => write!(f, "change event store error"),
             Self::PersistenceError => write!(f, "persistence error"),
         }
     }

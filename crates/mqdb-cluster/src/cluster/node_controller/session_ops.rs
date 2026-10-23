@@ -3,7 +3,7 @@
 
 use super::super::idempotency_store::{IdempotencyCheck, IdempotencyError};
 use super::super::offset_store::ConsumerOffset;
-use super::super::protocol::ReplicationWrite;
+use super::super::protocol::{ChangeEventRecord, ReplicationWrite};
 use super::super::quorum::{QuorumResult, QuorumTracker};
 use super::super::replication::ReplicaRole;
 use super::super::session::session_partition;
@@ -121,20 +121,40 @@ impl<T: ClusterTransport> NodeController<T> {
         &mut self,
         write: ReplicationWrite,
         replicas: &[NodeId],
-        outbox: Option<super::super::store_manager::outbox::OutboxPayload>,
+        event: Option<ChangeEventRecord>,
     ) -> Result<u64, ReplicationError> {
-        self.replicate_write_async_with_extra(write, replicas, outbox, &[])
+        self.replicate_write_async_with_extra(write, replicas, event, &[])
             .await
+    }
+
+    fn apply_primary_write(
+        &self,
+        write_msg: &ReplicationWrite,
+        change_event: Option<&super::change_events::WriteChangeEvent>,
+        extra_outbox: &[(Vec<u8>, Vec<u8>)],
+    ) {
+        let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(extra_outbox.len() + 1);
+        if let Some(event) = change_event {
+            entries.push(event.storage_entry.clone());
+        }
+        entries.extend_from_slice(extra_outbox);
+
+        if entries.is_empty() {
+            let _ = self.stores.apply_write(write_msg);
+        } else {
+            let _ = self
+                .stores
+                .apply_write_with_outbox_entries(write_msg, &entries);
+        }
     }
 
     /// # Errors
     /// Returns an error if this node is not the primary for the partition.
-    #[allow(clippy::too_many_lines)]
     pub async fn replicate_write_async_with_extra(
         &mut self,
         write: ReplicationWrite,
         replicas: &[NodeId],
-        outbox: Option<super::super::store_manager::outbox::OutboxPayload>,
+        event: Option<ChangeEventRecord>,
         extra_outbox: &[(Vec<u8>, Vec<u8>)],
     ) -> Result<u64, ReplicationError> {
         let start = std::time::Instant::now();
@@ -160,25 +180,15 @@ impl<T: ClusterTransport> NodeController<T> {
             write.entity,
             write.id,
             write.data,
-        );
+        )
+        .with_event(event);
 
         self.write_log
             .append(partition, sequence, write_msg.clone());
         let t_writelog = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
-        let mut all_outbox_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-        if let Some(ob) = outbox {
-            all_outbox_entries.push((ob.key, ob.value));
-        }
-        all_outbox_entries.extend_from_slice(extra_outbox);
-
-        if all_outbox_entries.is_empty() {
-            let _ = self.stores.apply_write(&write_msg);
-        } else {
-            let _ = self
-                .stores
-                .apply_write_with_outbox_entries(&write_msg, &all_outbox_entries);
-        }
+        let change_event = Self::change_event_entry(&write_msg);
+        self.apply_primary_write(&write_msg, change_event.as_ref(), extra_outbox);
         let t_apply = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
         for &replica in replicas {
@@ -198,6 +208,11 @@ impl<T: ClusterTransport> NodeController<T> {
             replica_count = replicas.len(),
             "replicate_write_async_timing"
         );
+
+        if let Some(event) = change_event {
+            self.take_on_change_event(partition, event.id, event.record)
+                .await;
+        }
 
         Ok(sequence)
     }
