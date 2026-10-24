@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::cluster::raft::node::RaftConfig;
+use crate::cluster::raft::rpc::RequestVoteRequest;
 use crate::cluster::raft::state::RaftCommand;
 use crate::cluster::transport::{ClusterMessage, ClusterTransport, InboundMessage, TransportError};
 use crate::cluster::{Epoch, NodeId, PartitionId};
@@ -426,7 +427,7 @@ async fn snapshot_install_clears_pending_partition_proposals() {
     let node2 = NodeId::validated(2).unwrap();
     let mut coord = RaftCoordinator::new(node2, MockTransport::new(node2), test_config());
     coord.add_peer(node1);
-    coord.set_pending_partition_proposals(7);
+    coord.pending_partition_proposals = 7;
 
     let request = crate::cluster::raft::InstallSnapshotRequest {
         term: 1,
@@ -441,4 +442,126 @@ async fn snapshot_install_clears_pending_partition_proposals() {
     let response = coord.handle_install_snapshot(node1, request, 100).await;
     assert!(response.is_success());
     assert_eq!(coord.pending_partition_proposals, 0);
+}
+
+fn vote_request_from(coord: &RaftCoordinator<MockTransport>) -> RequestVoteRequest {
+    coord
+        .transport
+        .sent_messages()
+        .iter()
+        .find_map(|(_, msg)| match msg {
+            ClusterMessage::RequestVote(req) => Some(*req),
+            _ => None,
+        })
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_fresh_leader_initializes_partitions_once_after_catching_up() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let mut leader = RaftCoordinator::new(node1, MockTransport::new(node1), test_config());
+    let mut follower = RaftCoordinator::new(node2, MockTransport::new(node2), test_config());
+    leader.add_peer(node2);
+    follower.add_peer(node1);
+
+    leader.tick(0).await;
+    leader.tick(1000).await;
+    let response = follower
+        .handle_request_vote(node1, vote_request_from(&leader), 1000)
+        .await;
+    leader.handle_request_vote_response(node2, response).await;
+    assert!(leader.is_leader());
+
+    leader.tick(1001).await;
+    assert_eq!(
+        leader.last_log_index(),
+        1,
+        "a leader must not initialize before it has applied its own term"
+    );
+
+    for round in 0..6 {
+        replicate_round(&mut leader, &mut follower, 1100 + round * 100).await;
+    }
+
+    assert_eq!(
+        leader.last_log_index(),
+        1 + u64::from(crate::cluster::NUM_PARTITIONS)
+    );
+    assert!(PartitionId::all().all(|p| leader.partition_map().primary(p).is_some()));
+    assert!(same_assignments(
+        follower.partition_map(),
+        leader.partition_map()
+    ));
+}
+
+#[tokio::test]
+async fn a_new_leader_that_has_not_applied_the_log_does_not_initialize_again() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let mut old_leader = RaftCoordinator::new(node1, MockTransport::new(node1), test_config());
+    let mut new_leader = RaftCoordinator::new(node2, MockTransport::new(node2), test_config());
+    let mut voter = RaftCoordinator::new(node3, MockTransport::new(node3), test_config());
+    old_leader.add_peer(node2);
+    old_leader.add_peer(node3);
+    new_leader.add_peer(node1);
+    new_leader.add_peer(node3);
+    voter.add_peer(node1);
+    voter.add_peer(node2);
+
+    old_leader.tick(0).await;
+    old_leader.tick(1000).await;
+    let response = new_leader
+        .handle_request_vote(node1, vote_request_from(&old_leader), 1000)
+        .await;
+    old_leader
+        .handle_request_vote_response(node2, response)
+        .await;
+    assert!(old_leader.is_leader());
+
+    let partition = PartitionId::new(5).unwrap();
+    let cmd = RaftCommand::update_partition(partition, node1, &[node2], Epoch::new(1));
+    old_leader.propose_partition_update(cmd).await.unwrap();
+    old_leader.transport.clear();
+    old_leader.tick(1100).await;
+    let append = old_leader
+        .transport
+        .sent_messages()
+        .into_iter()
+        .find_map(|(to, msg)| match msg {
+            ClusterMessage::AppendEntries(req) if to == node2 => Some(req),
+            _ => None,
+        })
+        .unwrap();
+    let response = new_leader.handle_append_entries(node1, append, 1100).await;
+    old_leader
+        .handle_append_entries_response(node2, response)
+        .await;
+    assert_eq!(old_leader.commit_index(), 2);
+    assert!(new_leader.partition_map().primary(partition).is_none());
+
+    new_leader.transport.clear();
+    new_leader.tick(5000).await;
+    let response = voter
+        .handle_request_vote(node2, vote_request_from(&new_leader), 5000)
+        .await;
+    new_leader
+        .handle_request_vote_response(node3, response)
+        .await;
+    assert!(new_leader.is_leader());
+
+    new_leader.tick(5001).await;
+    assert_eq!(new_leader.last_log_index(), 3);
+
+    for round in 0..6 {
+        replicate_round(&mut new_leader, &mut voter, 5100 + round * 100).await;
+    }
+
+    assert_eq!(new_leader.partition_map().primary(partition), Some(node1));
+    assert_eq!(
+        new_leader.last_log_index(),
+        3,
+        "a leader that inherits partition assignments must not initialize them again"
+    );
 }

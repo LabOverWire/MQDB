@@ -314,6 +314,46 @@ impl<T: ClusterTransport> NodeController<T> {
         &self.partition_map
     }
 
+    pub async fn apply_raft_partition_map(&mut self, raft_map: PartitionMap) -> bool {
+        if self.partition_map == raft_map {
+            return false;
+        }
+        let current_map = self.partition_map.clone();
+        let mut became_primary = false;
+        let mut changes = 0u32;
+        for partition in PartitionId::all() {
+            let new_assignment = raft_map.get(partition);
+            let old_assignment = current_map.get(partition);
+            if new_assignment == old_assignment {
+                continue;
+            }
+            if new_assignment.primary == Some(self.node_id) {
+                self.become_primary(partition, new_assignment.epoch);
+                became_primary |= old_assignment.primary != Some(self.node_id);
+            } else if new_assignment.replicas.contains(&self.node_id) {
+                if matches!(
+                    self.role(partition),
+                    ReplicaRole::Primary | ReplicaRole::Replica
+                ) {
+                    let sequence = self.sequence(partition).unwrap_or(0);
+                    self.become_replica(partition, new_assignment.epoch, sequence);
+                } else if let Some(primary) = new_assignment.primary {
+                    self.become_replica_with_snapshot(partition, new_assignment.epoch, primary)
+                        .await;
+                }
+            } else {
+                self.step_down(partition);
+                self.forget_change_events(partition);
+            }
+            changes += 1;
+            if changes.is_multiple_of(8) {
+                tokio::task::yield_now().await;
+            }
+        }
+        self.update_partition_map(raft_map);
+        became_primary
+    }
+
     pub async fn write_or_forward(&mut self, write: ReplicationWrite) {
         self.write_or_forward_impl(write, None, &[]).await;
     }

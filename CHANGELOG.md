@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-24 — mqdb-cluster 0.4.34, mqdb-cli 0.8.62
+
+### Fixed
+
+- **Cluster nodes no longer disagree about which node is primary for a partition** (#216). Every node re-sent each partition assignment it applied from the Raft log to its peers, and a node applied whichever copy reached it last. Copies of two assignments with the same epoch could arrive in opposite orders on different nodes, and a copy lost on the way could leave a node on an older assignment, so two nodes could each send a partition's writes to the other. Those writes were refused with "not primary" and still acked to the client. On main, 1 in 4 runs that restarted a node and then killed another ended with a split map and lost 21 of the 120 records whose writes were acked. Now each node takes its assignments only from its own applied Raft log, in log order, and ignores the copies older nodes still send. Modelled in `specs/ClusterPartitionMapOrder.tla`.
+- **A new Raft leader no longer re-proposes the initial partition layout.** Every leader, including one elected after a restart or a failover, proposed the default assignment for all 256 partitions at epoch 1 when it took over, and a fresh cluster proposed it twice through two paths. Every main run had 2 to 3 initial layouts in its log. Now a leader acts only after it has applied the log up to its own term, and proposes the initial layout only when no partition is assigned; every run has exactly one. Dead-node, drain and rebalance proposals wait for the same point, so a leader never reassigns from an older map. Modelled in `specs/ClusterPartitionInit.tla`.
+- The Raft leader now sends new entries as soon as it proposes them, and sends the new commit index as soon as it advances, instead of waiting for the next 500 ms heartbeat. Followers apply a reassignment about one round trip after the leader. With node 1 killed 1 s into a write load on 3- and 5-node clusters, main lost 6 acked writes over 6 runs; now none are lost over 8 runs.
+- A node that is primary for a partition and is left out of the partition's new assignment steps down instead of keeping its primary role.
+
+### Known limitations
+
+- A write refused with "not primary" is still acked to the client. Nodes now disagree only for about one round trip after a reassignment, but a write that lands in that window is lost.
+- In a mixed-version cluster, older nodes still apply copies sent by other older nodes.
+
 ## 2026-10-23 — mqdb-cluster 0.4.33, mqdb-cli 0.8.61
 
 ### Fixed

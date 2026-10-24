@@ -260,17 +260,6 @@ impl ClusteredAgent {
     pub(super) async fn setup_and_spawn_raft(
         &mut self,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let all_nodes: Vec<NodeId> = {
-            let mut nodes: Vec<NodeId> = self
-                .peers
-                .iter()
-                .filter_map(|p| NodeId::validated(p.node_id))
-                .collect();
-            nodes.push(self.node_id);
-            nodes.sort_by_key(|n| n.get());
-            nodes
-        };
-
         let mut raft = self
             .raft
             .take()
@@ -311,8 +300,6 @@ impl ClusteredAgent {
             shutdown_rx: self.shutdown_tx.subscribe(),
             shutdown_tx: self.shutdown_tx.clone(),
             fatal_error: Arc::clone(&self.fatal_error),
-            all_nodes,
-            partitions_initialized: false,
         };
         tokio::spawn(async move {
             Box::pin(raft_task.run()).await;

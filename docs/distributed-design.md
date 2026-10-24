@@ -1035,7 +1035,7 @@ All cluster messages follow this format (`crates/mqdb-cluster/src/cluster/mqtt_t
 | 55 | `JsonDbResponse` | JSON database operation response |
 | 60 | `WildcardBroadcast` | Wildcard subscription broadcast |
 | 61 | `TopicSubscriptionBroadcast` | Individual topic subscription broadcast |
-| 70 | `PartitionUpdate` | Partition assignment change |
+| 70 | `PartitionUpdate` | Copy of an applied assignment; no longer sent, ignored when an older node sends it |
 | 80 | `UniqueReserveRequest` | Reserve unique constraint value |
 | 81 | `UniqueReserveResponse` | Unique reservation response |
 | 82 | `UniqueCommitRequest` | Commit reserved unique value |
@@ -1453,9 +1453,10 @@ struct PartitionUpdate {
 
 When first node starts:
 1. Becomes Raft leader (single-node cluster)
-2. Proposes UpdatePartition for all 256 partitions
-3. Assigns itself as primary for all partitions
-4. Waits for other nodes to join
+2. Once it has applied every committed entry, including the entry that opens its own term, and finds no partition assigned, proposes UpdatePartition for all 256 partitions across the cluster members it knows
+3. Waits for other nodes to join
+
+A leader decides nothing (initialization, rebalancing, dead or draining nodes) until it has applied the log up to its own term, so it never acts on an older map. Each node takes its partition roles from its own applied Raft log, in log order; nodes do not apply copies of updates from each other. Since followers learn assignments only through Raft, the leader sends AppendEntries right after it proposes and again as soon as its commit index advances, instead of waiting for the next heartbeat, so followers apply a new assignment about one round trip after the leader does.
 
 ---
 

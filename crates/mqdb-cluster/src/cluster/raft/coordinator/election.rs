@@ -16,24 +16,27 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         let outputs = self.node.tick(now_ms);
         self.process_outputs(outputs).await;
 
-        let is_leader = self.is_leader();
-        let just_became_leader = is_leader && !self.was_leader;
-        self.was_leader = is_leader;
+        let ready = self.leader_ready();
+        let just_became_ready = ready && !self.was_ready;
+        self.was_ready = ready;
 
-        if just_became_leader {
+        if just_became_ready {
             self.last_balance_check = now_ms;
-            tracing::info!("became Raft leader, processing pending nodes");
+            self.pending_partition_proposals = 0;
+            tracing::info!("Raft leader caught up, processing pending nodes");
             let mut indices = self.process_pending_dead_nodes().await;
             indices.extend(self.process_pending_draining_nodes().await);
             if self.partitions_initialized() {
                 indices.extend(self.process_pending_new_nodes().await);
-            } else {
-                indices.extend(self.trigger_rebalance_internal().await);
             }
             return indices;
         }
 
-        if is_leader
+        if self.ready_to_initialize() {
+            return self.initialize_partitions().await;
+        }
+
+        if ready
             && self.pending_partition_proposals == 0
             && !self.pending_new_nodes.is_empty()
             && self.partitions_initialized()
@@ -45,7 +48,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             return self.process_pending_new_nodes().await;
         }
 
-        if is_leader
+        if ready
             && self.pending_partition_proposals == 0
             && now_ms.saturating_sub(self.last_balance_check) > 30_000
             && self.partitions_initialized()
@@ -138,6 +141,11 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         let (index, outputs) = self.node.propose(command);
         self.process_outputs(outputs).await;
         index.ok_or(CoordinatorError::ProposeFailed)
+    }
+
+    pub async fn replicate_due(&mut self) {
+        let outputs = self.node.take_due_replication();
+        self.process_outputs(outputs).await;
     }
 
     pub async fn handle_request_vote(

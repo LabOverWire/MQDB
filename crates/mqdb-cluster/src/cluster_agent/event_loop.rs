@@ -5,8 +5,8 @@ use super::{AdminRequest, ClusteredAgent, MESH_CHECK_INTERVAL_SECS, RunningBroke
 use crate::cluster::node_controller::db_ops::EventOrigin;
 use crate::cluster::{
     ClusterMessage, ClusterTransport, LocalPublishKind, LocalPublishRequest, LocalRetainedWriter,
-    NodeController, NodeId, PartitionId, ProcessingBatch, RoutedDeliveryLanes,
-    TopicSubscriptionBroadcast, WildcardBroadcast,
+    NodeController, NodeId, ProcessingBatch, RoutedDeliveryLanes, TopicSubscriptionBroadcast,
+    WildcardBroadcast,
 };
 use mqtt5::broker::router::MessageRouter;
 use mqtt5::time::Duration;
@@ -205,53 +205,7 @@ impl ClusteredAgent {
         let raft_partition_map = self.rx_partition_map.borrow().clone();
 
         let mut ctrl = self.controller.write().await;
-        let current_map = ctrl.partition_map().clone();
-        let mut became_primary = false;
-        if current_map != raft_partition_map {
-            let mut changes = 0u32;
-            for partition in PartitionId::all() {
-                let new_assignment = raft_partition_map.get(partition);
-                let old_assignment = current_map.get(partition);
-
-                if new_assignment != old_assignment {
-                    let is_primary = new_assignment.primary == Some(self.node_id);
-                    let is_replica = new_assignment.replicas.contains(&self.node_id);
-                    let was_primary = old_assignment.primary == Some(self.node_id);
-
-                    if is_primary {
-                        ctrl.become_primary(partition, new_assignment.epoch);
-                        if !was_primary {
-                            became_primary = true;
-                        }
-                    } else if is_replica {
-                        let role = ctrl.role(partition);
-                        let had_data = matches!(
-                            role,
-                            crate::cluster::ReplicaRole::Primary
-                                | crate::cluster::ReplicaRole::Replica
-                        );
-                        if had_data {
-                            let seq = ctrl.sequence(partition).unwrap_or(0);
-                            ctrl.become_replica(partition, new_assignment.epoch, seq);
-                        } else if let Some(primary) = new_assignment.primary {
-                            ctrl.become_replica_with_snapshot(
-                                partition,
-                                new_assignment.epoch,
-                                primary,
-                            )
-                            .await;
-                        }
-                    } else {
-                        ctrl.forget_change_events(partition);
-                    }
-                    changes += 1;
-                    if changes.is_multiple_of(8) {
-                        tokio::task::yield_now().await;
-                    }
-                }
-            }
-            ctrl.update_partition_map(raft_partition_map);
-        }
+        let became_primary = ctrl.apply_raft_partition_map(raft_partition_map).await;
         if became_primary {
             let stores = ctrl.stores();
             let result =
