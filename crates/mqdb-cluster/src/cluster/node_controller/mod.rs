@@ -43,7 +43,7 @@ use super::transport::{
     ClusterMessage, ClusterTransport, InboundMessage, RoutedPublish, TransportConfig,
 };
 use super::write_log::PartitionWriteLog;
-use super::{Epoch, NodeId, PartitionId, PartitionMap, PartitionMapExt};
+use super::{Epoch, NodeId, PartitionId, PartitionMap};
 use db_ops::EventOrigin;
 use mqdb_core::events::ChangeEvent;
 use mqdb_core::storage::StorageBackend;
@@ -637,6 +637,7 @@ impl<T: ClusterTransport> NodeController<T> {
         self.partition_map
             .replicas(partition)
             .contains(&self.node_id)
+            && self.role(partition) == ReplicaRole::Replica
     }
 
     /// Pick a local partition for creating new entities (round-robin).
@@ -1158,46 +1159,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    async fn handle_partition_update_received(&mut self, update: &super::raft::PartitionUpdate) {
-        if let (Some(partition), Some(primary)) = (
-            PartitionId::new(u16::from(update.partition)),
-            NodeId::validated(update.primary),
-        ) {
-            let epoch = Epoch::new(u64::from(update.epoch));
-
-            if primary == self.node_id {
-                self.become_primary(partition, epoch);
-            } else if NodeId::validated(update.replica1) == Some(self.node_id)
-                || NodeId::validated(update.replica2) == Some(self.node_id)
-            {
-                let dominated = self.replicas.get(&partition.get()).is_some_and(|s| {
-                    matches!(
-                        s.role(),
-                        ReplicaRole::Replica | ReplicaRole::AwaitingSnapshot
-                    ) && s.epoch() >= epoch
-                });
-                if !dominated {
-                    self.become_replica_with_snapshot(partition, epoch, primary)
-                        .await;
-                }
-            } else {
-                self.step_down(partition);
-                self.forget_change_events(partition);
-            }
-        }
-
-        self.partition_map.apply_update(update);
-        self.heartbeat.partition_map_mut().apply_update(update);
-        let _ = self
-            .tx_raft_events
-            .try_send(RaftEvent::ExternalUpdate(*update));
-        tracing::info!(
-            partition = update.partition,
-            primary = update.primary,
-            "received partition update from cluster"
-        );
-    }
-
     fn handle_query_response_received(&mut self, response: &QueryResponse) {
         if self
             .pending_retained_queries
@@ -1387,7 +1348,11 @@ impl<T: ClusterTransport> NodeController<T> {
                 self.handle_topic_subscription_broadcast(from, broadcast);
             }
             ClusterMessage::PartitionUpdate(update) => {
-                self.handle_partition_update_received(update).await;
+                tracing::debug!(
+                    from = from.get(),
+                    partition = update.partition,
+                    "ignoring partition update copy, the raft log is applied locally"
+                );
             }
             ClusterMessage::JsonDbRequest { partition, request } => {
                 return self.handle_json_db_request(from, *partition, request).await;

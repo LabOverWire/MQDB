@@ -7,9 +7,8 @@ mod replication;
 mod tests;
 
 use super::node::{RaftConfig, RaftNode, RaftOutput};
-use super::state::PartitionUpdate;
 use crate::cluster::transport::{ClusterMessage, ClusterTransport, TransportError};
-use crate::cluster::{NodeId, PartitionId, PartitionMap, PartitionMapExt};
+use crate::cluster::{NodeId, PartitionId, PartitionMap};
 use mqdb_core::storage::StorageBackend;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -25,7 +24,7 @@ pub struct RaftCoordinator<T: ClusterTransport> {
     pub(super) processed_draining_nodes: HashSet<NodeId>,
     pub(super) pending_new_nodes: HashSet<NodeId>,
     pub(super) processed_new_nodes: HashSet<NodeId>,
-    pub(super) was_leader: bool,
+    pub(super) was_ready: bool,
     pub(super) pending_partition_proposals: usize,
     pub(super) last_balance_check: u64,
 }
@@ -43,7 +42,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             processed_draining_nodes: HashSet::new(),
             pending_new_nodes: HashSet::new(),
             processed_new_nodes: HashSet::new(),
-            was_leader: false,
+            was_ready: false,
             pending_partition_proposals: 0,
             last_balance_check: 0,
         }
@@ -70,7 +69,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             processed_draining_nodes: HashSet::new(),
             pending_new_nodes: HashSet::new(),
             processed_new_nodes: HashSet::new(),
-            was_leader: false,
+            was_ready: false,
             pending_partition_proposals: 0,
             last_balance_check: 0,
         };
@@ -131,10 +130,6 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         self.node.log_len()
     }
 
-    pub fn apply_external_update(&mut self, update: &PartitionUpdate) {
-        self.partition_map.apply_update(update);
-    }
-
     pub fn add_peer(&mut self, peer: NodeId) {
         self.node.add_peer(peer);
         if !self.cluster_members.contains(&peer) {
@@ -146,10 +141,6 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         &self.cluster_members
     }
 
-    pub fn set_pending_partition_proposals(&mut self, count: usize) {
-        self.pending_partition_proposals = count;
-    }
-
     /// # Errors
     /// Returns `TransportError` if the message cannot be sent.
     pub async fn send(&self, to: NodeId, message: ClusterMessage) -> Result<(), TransportError> {
@@ -158,6 +149,16 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
 
     pub fn partitions_initialized(&self) -> bool {
         PartitionId::all().any(|p| self.partition_map.primary(p).is_some())
+    }
+
+    pub(super) fn leader_ready(&self) -> bool {
+        self.is_leader() && self.node.applied_own_term()
+    }
+
+    fn ready_to_initialize(&self) -> bool {
+        self.leader_ready()
+            && self.pending_partition_proposals == 0
+            && !self.partitions_initialized()
     }
 }
 

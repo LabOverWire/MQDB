@@ -1,9 +1,9 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use crate::cluster::raft::{RaftCommand, RaftCoordinator};
+use crate::cluster::raft::RaftCoordinator;
 use crate::cluster::transport::ClusterTransport;
-use crate::cluster::{ClusterMessage, Epoch, NUM_PARTITIONS, NodeId, PartitionId, PartitionMap};
+use crate::cluster::{ClusterMessage, NodeId, PartitionMap};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{broadcast, oneshot, watch};
@@ -11,7 +11,6 @@ use tokio::time::interval;
 use tracing::{error, info};
 
 use super::node_controller::RaftMessage;
-use super::raft::PartitionUpdate;
 
 #[allow(clippy::cast_possible_truncation)]
 fn current_time_ms() -> u64 {
@@ -36,7 +35,6 @@ pub enum RaftEvent {
     NodeAlive(NodeId),
     NodeDead(NodeId),
     DrainNotification(NodeId),
-    ExternalUpdate(PartitionUpdate),
 }
 
 pub enum RaftAdminCommand {
@@ -53,8 +51,6 @@ pub struct RaftTask<T: ClusterTransport> {
     pub(crate) shutdown_rx: broadcast::Receiver<()>,
     pub(crate) shutdown_tx: broadcast::Sender<()>,
     pub(crate) fatal_error: Arc<std::sync::OnceLock<String>>,
-    pub(crate) all_nodes: Vec<NodeId>,
-    pub(crate) partitions_initialized: bool,
 }
 
 impl<T: ClusterTransport> RaftTask<T> {
@@ -82,6 +78,8 @@ impl<T: ClusterTransport> RaftTask<T> {
                     self.handle_admin_command(cmd).await;
                 }
             }
+            self.raft.replicate_due().await;
+            self.publish_partition_map();
             if let Some(reason) = self.raft.storage_failure() {
                 error!(%reason, "stopping node after a raft storage failure");
                 let _ = self.fatal_error.set(reason.to_string());
@@ -107,10 +105,6 @@ impl<T: ClusterTransport> RaftTask<T> {
     async fn handle_tick(&mut self) {
         let now = current_time_ms();
 
-        if self.raft.is_leader() && !self.partitions_initialized {
-            self.initialize_partitions().await;
-        }
-
         let leader_proposals = self.raft.tick(now).await;
         if !leader_proposals.is_empty() {
             info!(
@@ -119,9 +113,7 @@ impl<T: ClusterTransport> RaftTask<T> {
             );
         }
 
-        let _ = self
-            .tx_partition_map
-            .send(self.raft.partition_map().clone());
+        self.publish_partition_map();
         let _ = self.tx_status.send(RaftStatus {
             is_leader: self.raft.is_leader(),
             current_term: self.raft.current_term(),
@@ -130,6 +122,18 @@ impl<T: ClusterTransport> RaftTask<T> {
             commit_index: self.raft.commit_index(),
             last_applied: self.raft.last_applied(),
             last_log_index: self.raft.last_log_index(),
+        });
+    }
+
+    fn publish_partition_map(&self) {
+        let map = self.raft.partition_map();
+        self.tx_partition_map.send_if_modified(|published| {
+            if published == map {
+                false
+            } else {
+                published.clone_from(map);
+                true
+            }
         });
     }
 
@@ -206,61 +210,14 @@ impl<T: ClusterTransport> RaftTask<T> {
                     );
                 }
             }
-            RaftEvent::ExternalUpdate(update) => {
-                self.raft.apply_external_update(&update);
-            }
         }
-    }
-
-    async fn initialize_partitions(&mut self) {
-        const BATCH_SIZE: usize = 8;
-
-        let mut cluster_nodes: Vec<NodeId> = self.raft.cluster_members().to_vec();
-        cluster_nodes.sort_by_key(|n| n.get());
-
-        let min_nodes = self.all_nodes.len().max(2);
-        if cluster_nodes.len() < min_nodes {
-            return;
-        }
-
-        info!(
-            ?cluster_nodes,
-            "Raft leader initializing partition assignments"
-        );
-        let node_count = cluster_nodes.len();
-        let mut proposal_count = 0usize;
-
-        for partition in PartitionId::all() {
-            let partition_num = partition.get() as usize;
-            let primary_idx = partition_num % node_count;
-            let replica_idx = (partition_num + 1) % node_count;
-
-            let primary = cluster_nodes[primary_idx];
-            let replicas = if node_count > 1 {
-                vec![cluster_nodes[replica_idx]]
-            } else {
-                vec![]
-            };
-
-            let cmd = RaftCommand::update_partition(partition, primary, &replicas, Epoch::new(1));
-            let _ = self.raft.propose_partition_update(cmd).await;
-            proposal_count += 1;
-
-            if proposal_count.is_multiple_of(BATCH_SIZE) {
-                let _ = self.raft.tick(current_time_ms()).await;
-                tokio::task::yield_now().await;
-            }
-        }
-
-        self.raft
-            .set_pending_partition_proposals(NUM_PARTITIONS as usize);
-        self.partitions_initialized = true;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cluster::PartitionId;
     use crate::cluster::raft::RaftConfig;
     use crate::cluster::raft::RequestVoteRequest;
     use crate::cluster::raft::test_support::FlushFailingBackend;
@@ -358,8 +315,6 @@ mod tests {
             shutdown_rx,
             shutdown_tx,
             fatal_error: Arc::clone(&fatal_error),
-            all_nodes: vec![node1, node2],
-            partitions_initialized: false,
         };
         let handle = tokio::spawn(task.run());
 

@@ -65,6 +65,7 @@ pub struct RaftNode {
     startup_time: Option<u64>,
     restored_snapshot: Option<RaftSnapshot>,
     storage_failure: Option<String>,
+    replication_due: bool,
 }
 
 impl RaftNode {
@@ -82,6 +83,7 @@ impl RaftNode {
             startup_time: None,
             restored_snapshot: None,
             storage_failure: None,
+            replication_due: false,
         }
     }
 
@@ -140,6 +142,7 @@ impl RaftNode {
             startup_time: None,
             restored_snapshot,
             storage_failure: None,
+            replication_due: false,
         })
     }
 
@@ -194,6 +197,13 @@ impl RaftNode {
     #[must_use]
     pub fn last_log_index(&self) -> u64 {
         self.state.last_log_index()
+    }
+
+    #[must_use]
+    pub fn applied_own_term(&self) -> bool {
+        let commit_index = self.state.commit_index();
+        self.state.last_applied() == commit_index
+            && self.state.log_term_at(commit_index) == Some(self.state.current_term())
     }
 
     #[must_use]
@@ -661,8 +671,10 @@ impl RaftNode {
         }
 
         if response.is_success() {
+            let committed_before = self.state.commit_index();
             self.state.record_match(from, response.match_index);
             self.state.try_advance_commit_index();
+            self.replication_due |= self.state.commit_index() > committed_before;
             outputs.extend(self.apply_committed());
         } else if response.match_index > 0 {
             self.state.update_next_index(from, response.match_index + 1);
@@ -684,8 +696,16 @@ impl RaftNode {
             return (None, vec![]);
         }
         self.state.try_advance_commit_index();
+        self.replication_due = true;
         let outputs = self.apply_committed();
         (Some(index), outputs)
+    }
+
+    pub fn take_due_replication(&mut self) -> Vec<RaftOutput> {
+        if !std::mem::take(&mut self.replication_due) || !self.is_leader() {
+            return Vec::new();
+        }
+        self.send_heartbeats()
     }
 }
 
@@ -1226,6 +1246,67 @@ mod tests {
                 .iter()
                 .any(|o| matches!(o, RaftOutput::ApplyCommand(_)))
         );
+    }
+
+    fn append_entries_to(outputs: &[RaftOutput], peer: NodeId) -> Option<AppendEntriesRequest> {
+        outputs.iter().find_map(|o| match o {
+            RaftOutput::SendAppendEntries { to, request } if *to == peer => Some(request.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_proposal_and_its_commit_reach_followers_without_waiting_for_a_heartbeat() {
+        let mut leader = make_node(1);
+        let mut follower = make_node(2);
+        let mut lagging = make_node(3);
+        let peer1 = NodeId::validated(1).unwrap();
+        let peer2 = NodeId::validated(2).unwrap();
+        let peer3 = NodeId::validated(3).unwrap();
+        leader.add_peer(peer2);
+        leader.add_peer(peer3);
+        follower.add_peer(peer1);
+        lagging.add_peer(peer1);
+
+        leader.tick(0);
+        leader.tick(1000);
+        leader.handle_request_vote_response(peer2, RequestVoteResponse::granted(1));
+        let election_round = leader.tick(1100);
+        for (peer, node) in [(peer2, &mut follower), (peer3, &mut lagging)] {
+            let append = append_entries_to(&election_round, peer).unwrap();
+            let (response, _) = node.handle_append_entries(peer1, append, 1100);
+            leader.handle_append_entries_response(peer, response);
+        }
+        leader.take_due_replication();
+        assert!(leader.take_due_replication().is_empty());
+
+        let (index, _) = leader.propose(RaftCommand::Noop);
+        let index = index.unwrap();
+        let proposal_round = leader.take_due_replication();
+        assert!(leader.take_due_replication().is_empty());
+        let append = append_entries_to(&proposal_round, peer2).unwrap();
+        assert_eq!(append.entries.last().map(|e| e.index), Some(index));
+        let (response, _) = follower.handle_append_entries(peer1, append, 1110);
+        lagging.handle_append_entries(
+            peer1,
+            append_entries_to(&proposal_round, peer3).unwrap(),
+            1110,
+        );
+        leader.handle_append_entries_response(peer2, response);
+        assert_eq!(leader.commit_index(), index);
+
+        let commit_round = leader.take_due_replication();
+        for (peer, node) in [(peer2, &mut follower), (peer3, &mut lagging)] {
+            let commit = append_entries_to(&commit_round, peer).unwrap();
+            assert_eq!(commit.leader_commit, index);
+            node.handle_append_entries(peer1, commit, 1120);
+            assert_eq!(
+                node.commit_index(),
+                index,
+                "node {} did not commit",
+                peer.get()
+            );
+        }
     }
 
     #[test]

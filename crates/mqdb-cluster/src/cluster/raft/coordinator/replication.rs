@@ -67,7 +67,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             }
             RaftOutput::ApplyCommand(cmd) => {
                 tracing::info!(?cmd, "applying Raft command");
-                self.apply_command(cmd).await;
+                self.apply_command(&cmd);
             }
             RaftOutput::BecameLeader => {
                 tracing::info!(node = self.node.node_id().get(), "became Raft leader");
@@ -113,14 +113,9 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         }
     }
 
-    async fn apply_command(&mut self, command: RaftCommand) {
-        self.apply_command_local(&command);
-        if let RaftCommand::UpdatePartition(update) = command {
-            let _ = self
-                .transport
-                .broadcast(ClusterMessage::PartitionUpdate(update))
-                .await;
-
+    fn apply_command(&mut self, command: &RaftCommand) {
+        self.apply_command_local(command);
+        if matches!(command, RaftCommand::UpdatePartition(_)) {
             self.pending_partition_proposals = self.pending_partition_proposals.saturating_sub(1);
         }
     }
@@ -128,7 +123,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
     pub async fn handle_node_death(&mut self, dead_node: NodeId) -> Vec<u64> {
         self.cluster_members.retain(|&n| n != dead_node);
 
-        if !self.is_leader() {
+        if !self.leader_ready() {
             tracing::info!(
                 ?dead_node,
                 "not leader, queuing dead node for later processing"
@@ -174,7 +169,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
 
         let needs_rebalance = !node_has_partitions && partitions_initialized && not_yet_processed;
 
-        if !self.is_leader() {
+        if !self.leader_ready() {
             if needs_rebalance {
                 tracing::info!(?node, "not leader, queuing node for later rebalance");
                 self.pending_new_nodes.insert(node);
@@ -201,7 +196,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
     }
 
     pub async fn handle_drain_notification(&mut self, draining_node: NodeId) -> Vec<u64> {
-        if !self.is_leader() {
+        if !self.leader_ready() {
             tracing::info!(
                 ?draining_node,
                 "not leader, queuing draining node for later processing"
@@ -232,31 +227,47 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         self.trigger_rebalance_internal().await
     }
 
-    pub(super) async fn trigger_rebalance_internal(&mut self) -> Vec<u64> {
-        let config = RebalanceConfig::default();
-
-        let reassignments = if self.partitions_initialized() {
-            compute_incremental_assignments(&self.partition_map, &self.cluster_members, &config)
-        } else {
-            tracing::info!("initializing partitions for fresh cluster");
-            let new_map = compute_balanced_assignments(&self.cluster_members, &config, Epoch::ZERO);
-            PartitionId::all()
-                .filter_map(|p| {
-                    let assignment = new_map.get(p);
-                    assignment.primary.map(|primary| {
-                        crate::cluster::rebalancer::PartitionReassignment {
-                            partition: p,
-                            old_primary: None,
-                            new_primary: primary,
-                            old_replicas: Vec::new(),
-                            new_replicas: assignment.replicas.clone(),
-                            new_epoch: assignment.epoch,
-                        }
-                    })
+    pub(super) async fn initialize_partitions(&mut self) -> Vec<u64> {
+        let mut members = self.cluster_members.clone();
+        members.sort_by_key(|n| n.get());
+        tracing::info!(?members, "initializing partitions for fresh cluster");
+        let new_map =
+            compute_balanced_assignments(&members, &RebalanceConfig::default(), Epoch::ZERO);
+        let reassignments = PartitionId::all()
+            .filter_map(|p| {
+                let assignment = new_map.get(p);
+                assignment.primary.map(|primary| {
+                    crate::cluster::rebalancer::PartitionReassignment {
+                        partition: p,
+                        old_primary: None,
+                        new_primary: primary,
+                        old_replicas: Vec::new(),
+                        new_replicas: assignment.replicas.clone(),
+                        new_epoch: assignment.epoch,
+                    }
                 })
-                .collect()
-        };
+            })
+            .collect();
+        self.propose_reassignments(reassignments).await
+    }
 
+    pub(super) async fn trigger_rebalance_internal(&mut self) -> Vec<u64> {
+        if !self.partitions_initialized() {
+            tracing::debug!("partitions not initialized, nothing to rebalance");
+            return Vec::new();
+        }
+        let reassignments = compute_incremental_assignments(
+            &self.partition_map,
+            &self.cluster_members,
+            &RebalanceConfig::default(),
+        );
+        self.propose_reassignments(reassignments).await
+    }
+
+    async fn propose_reassignments(
+        &mut self,
+        reassignments: Vec<crate::cluster::rebalancer::PartitionReassignment>,
+    ) -> Vec<u64> {
         if reassignments.is_empty() {
             tracing::debug!("no partition reassignments needed");
             return Vec::new();
@@ -281,7 +292,6 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             }
         }
 
-        self.pending_partition_proposals = proposed_indices.len();
         if self.pending_partition_proposals > 0 {
             tracing::debug!(
                 count = self.pending_partition_proposals,
@@ -293,8 +303,8 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
     }
 
     pub async fn force_rebalance(&mut self) -> Vec<u64> {
-        if !self.is_leader() {
-            tracing::warn!("cannot force rebalance - not the Raft leader");
+        if !self.leader_ready() {
+            tracing::warn!("cannot force rebalance - not a caught-up Raft leader");
             return Vec::new();
         }
 
