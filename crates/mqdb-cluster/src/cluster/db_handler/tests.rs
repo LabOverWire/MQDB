@@ -3575,3 +3575,142 @@ async fn forwarded_write_without_a_response_topic_is_applied_without_a_reply() {
             .any(|(_, message)| matches!(message, ClusterMessage::JsonDbResponse(_)))
     );
 }
+
+#[tokio::test]
+async fn a_forwarded_create_on_a_node_that_lost_the_partition_is_refused() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let outbox = Arc::new(Mutex::new(Vec::new()));
+    let transport = MockTransport {
+        node_id: node1,
+        inbox: Arc::new(Mutex::new(VecDeque::new())),
+        outbox: Arc::clone(&outbox),
+        retained_publishes: Arc::new(Mutex::new(Vec::new())),
+        retained_refreshes: Arc::new(Mutex::new(Vec::new())),
+    };
+    let mut ctrl = create_test_controller(node1, transport);
+    let partition = data_partition("nr", "r1");
+    let mut map = PartitionMap::default();
+    map.set(
+        partition,
+        crate::cluster::PartitionAssignment {
+            primary: Some(node3),
+            replicas: vec![node1],
+            epoch: Epoch::new(2),
+        },
+    );
+    ctrl.update_partition_map(map);
+
+    let request = super::super::protocol::JsonDbRequest {
+        request_id: 1,
+        op: super::super::protocol::JsonDbOp::Create,
+        entity: "nr".to_string(),
+        id: None,
+        payload: br#"{"id":"r1","n":1}"#.to_vec(),
+        response_topic: "resp/create".to_string(),
+        correlation_data: None,
+        sender: None,
+        client_id: None,
+    };
+    ctrl.handle_json_db_request(node2, partition, &request)
+        .await;
+
+    assert!(ctrl.db_get("nr", "r1").is_none());
+    let sent = outbox.lock().unwrap();
+    assert!(
+        !sent
+            .iter()
+            .any(|(_, message)| matches!(message, ClusterMessage::WriteRequest(_)))
+    );
+    let replies: Vec<(NodeId, serde_json::Value)> = sent
+        .iter()
+        .filter_map(|(to, message)| match message {
+            ClusterMessage::JsonDbResponse(response) => {
+                Some((*to, serde_json::from_slice(&response.payload).unwrap()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0].0, node2);
+    assert_eq!(replies[0].1["status"], "error");
+    assert_eq!(replies[0].1["code"], 503);
+}
+
+#[tokio::test]
+async fn a_create_whose_primary_moves_during_its_unique_check_is_refused() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let outbox = Arc::new(Mutex::new(Vec::new()));
+    let transport = MockTransport {
+        node_id: node1,
+        inbox: Arc::new(Mutex::new(VecDeque::new())),
+        outbox: Arc::clone(&outbox),
+        retained_publishes: Arc::new(Mutex::new(Vec::new())),
+        retained_refreshes: Arc::new(Mutex::new(Vec::new())),
+    };
+    let mut ctrl = create_test_controller(node1, transport);
+    let partition = data_partition("nr", "r1");
+    let mut map = PartitionMap::default();
+    map.set(
+        partition,
+        crate::cluster::PartitionAssignment {
+            primary: Some(node1),
+            replicas: vec![node3],
+            epoch: Epoch::new(1),
+        },
+    );
+    ctrl.apply_raft_partition_map(map.clone()).await;
+    map.set(
+        partition,
+        crate::cluster::PartitionAssignment {
+            primary: Some(node3),
+            replicas: vec![node1],
+            epoch: Epoch::new(2),
+        },
+    );
+    ctrl.apply_raft_partition_map(map).await;
+    outbox.lock().unwrap().clear();
+
+    let data = serde_json::json!({"id": "r1", "n": 1});
+    ctrl.complete_pending_unique_work(
+        Vec::new(),
+        Ok(Vec::new()),
+        super::super::node_controller::UniqueCheckContinuation::CreateFromNodeController {
+            from: node2,
+            entity: "nr".to_string(),
+            id: "r1".to_string(),
+            data_bytes: serde_json::to_vec(&data).unwrap(),
+            data,
+            partition,
+            request_id: "req-1".to_string(),
+            now_ms: 1000,
+            sender: None,
+            client_id: None,
+            response_topic: "resp/create".to_string(),
+            correlation_data: None,
+        },
+    )
+    .await;
+
+    assert!(ctrl.db_get("nr", "r1").is_none());
+    let sent = outbox.lock().unwrap();
+    assert!(
+        !sent
+            .iter()
+            .any(|(_, message)| matches!(message, ClusterMessage::WriteRequest(_)))
+    );
+    let replies: Vec<serde_json::Value> = sent
+        .iter()
+        .filter_map(|(to, message)| match message {
+            ClusterMessage::JsonDbResponse(response) if *to == node2 => {
+                Some(serde_json::from_slice(&response.payload).unwrap())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0]["code"], 503);
+}

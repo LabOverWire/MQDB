@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::DbRequestHandler;
+use crate::cluster::db::DbDataStoreError;
 use serde_json::{Value, json};
 
 impl DbRequestHandler {
@@ -21,6 +22,13 @@ impl DbRequestHandler {
                 .map_or(0, |d| d.as_millis()),
         )
         .unwrap_or(u64::MAX)
+    }
+}
+
+pub(crate) fn json_write_failure(error: DbDataStoreError) -> Vec<u8> {
+    match error {
+        DbDataStoreError::NotPrimary => DbRequestHandler::json_error(503, &error.to_string()),
+        _ => DbRequestHandler::json_error(500, "internal error"),
     }
 }
 

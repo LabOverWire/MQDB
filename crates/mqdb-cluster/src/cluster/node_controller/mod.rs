@@ -1637,7 +1637,7 @@ impl<T: ClusterTransport> NodeController<T> {
                                 .await;
                                 Self::json_error(409, "entity already exists")
                             }
-                            Err(_) => {
+                            Err(error) => {
                                 self.release_unique_check_reservations(
                                     &entity,
                                     &request_id,
@@ -1645,7 +1645,7 @@ impl<T: ClusterTransport> NodeController<T> {
                                     &confirmed_remotes,
                                 )
                                 .await;
-                                Self::json_error(500, "internal error")
+                                crate::cluster::db_handler::helpers::json_write_failure(error)
                             }
                         }
                     }
@@ -1729,7 +1729,7 @@ impl<T: ClusterTransport> NodeController<T> {
                                     &format!("entity not found: {entity} id={id}"),
                                 )
                             }
-                            Err(_) => {
+                            Err(error) => {
                                 self.release_unique_check_reservations(
                                     &entity,
                                     &request_id,
@@ -1737,7 +1737,7 @@ impl<T: ClusterTransport> NodeController<T> {
                                     &confirmed_remotes,
                                 )
                                 .await;
-                                Self::json_error(500, "internal error")
+                                crate::cluster::db_handler::helpers::json_write_failure(error)
                             }
                         }
                     }

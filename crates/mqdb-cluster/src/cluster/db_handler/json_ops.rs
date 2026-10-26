@@ -814,7 +814,7 @@ impl DbRequestHandler {
                         .await;
                     Self::json_error(409, "entity already exists")
                 }
-                Err(_) => {
+                Err(error) => {
                     controller
                         .release_unique_constraints(
                             entity,
@@ -825,7 +825,7 @@ impl DbRequestHandler {
                             now_ms,
                         )
                         .await;
-                    Self::json_error(500, "internal error")
+                    helpers::json_write_failure(error)
                 }
             },
         )
@@ -1169,7 +1169,7 @@ impl DbRequestHandler {
                     }
                     Self::json_error(404, &format!("entity not found: {entity} id={id}"))
                 }
-                Err(_) => {
+                Err(error) => {
                     if has_unique_changes {
                         controller
                             .release_unique_constraints(
@@ -1177,7 +1177,7 @@ impl DbRequestHandler {
                             )
                             .await;
                     }
-                    Self::json_error(500, "internal error")
+                    helpers::json_write_failure(error)
                 }
             },
         )
@@ -1345,7 +1345,7 @@ impl DbRequestHandler {
             Err(db::DbDataStoreError::NotFound) => {
                 Self::json_error(404, &format!("entity not found: {entity} id={id}"))
             }
-            Err(_) => Self::json_error(500, "internal error"),
+            Err(error) => helpers::json_write_failure(error),
         }
     }
 
@@ -1630,7 +1630,7 @@ impl DbRequestHandler {
                                     .await;
                                 Self::json_error(409, "entity already exists")
                             }
-                            Err(_) => {
+                            Err(error) => {
                                 controller
                                     .release_unique_check_reservations(
                                         &entity,
@@ -1639,7 +1639,7 @@ impl DbRequestHandler {
                                         &confirmed_remotes,
                                     )
                                     .await;
-                                Self::json_error(500, "internal error")
+                                helpers::json_write_failure(error)
                             }
                         }
                     }
@@ -1739,7 +1739,7 @@ impl DbRequestHandler {
                                     &format!("entity not found: {entity} id={id}"),
                                 )
                             }
-                            Err(_) => {
+                            Err(error) => {
                                 controller
                                     .release_unique_check_reservations(
                                         &entity,
@@ -1748,7 +1748,7 @@ impl DbRequestHandler {
                                         &confirmed_remotes,
                                     )
                                     .await;
-                                Self::json_error(500, "internal error")
+                                helpers::json_write_failure(error)
                             }
                         }
                     }

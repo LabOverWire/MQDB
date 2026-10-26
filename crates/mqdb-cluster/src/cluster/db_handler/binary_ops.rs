@@ -81,6 +81,9 @@ impl DbRequestHandler {
             Err(db::DbDataStoreError::AlreadyExists) => {
                 DbResponse::error(DbStatus::AlreadyExists).to_be_bytes()
             }
+            Err(db::DbDataStoreError::NotPrimary) => {
+                DbResponse::error(DbStatus::InvalidPartition).to_be_bytes()
+            }
             Err(_) => DbResponse::error(DbStatus::Error).to_be_bytes(),
         }
     }
@@ -141,6 +144,9 @@ impl DbRequestHandler {
             Err(db::DbDataStoreError::NotFound) => {
                 DbResponse::error(DbStatus::NotFound).to_be_bytes()
             }
+            Err(db::DbDataStoreError::NotPrimary) => {
+                DbResponse::error(DbStatus::InvalidPartition).to_be_bytes()
+            }
             Err(_) => DbResponse::error(DbStatus::Error).to_be_bytes(),
         }
     }
@@ -171,6 +177,9 @@ impl DbRequestHandler {
             }
             Err(db::DbDataStoreError::NotFound) => {
                 DbResponse::error(DbStatus::NotFound).to_be_bytes()
+            }
+            Err(db::DbDataStoreError::NotPrimary) => {
+                DbResponse::error(DbStatus::InvalidPartition).to_be_bytes()
             }
             Err(_) => DbResponse::error(DbStatus::Error).to_be_bytes(),
         }

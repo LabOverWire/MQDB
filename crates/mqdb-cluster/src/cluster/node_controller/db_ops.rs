@@ -9,7 +9,7 @@ use super::{
 };
 use crate::cluster::protocol::ChangeEventRecord;
 use crate::cluster::protocol::{ForwardTarget, ForwardedPublish};
-use crate::cluster::replication::ReplicaState;
+use crate::cluster::replication::{ReplicaRole, ReplicaState};
 use crate::cluster::store_manager::outbox::{CascadeOutboxPayload, CascadeRemoteOp};
 use crate::cluster::{PublishRouter, RoutedPublish};
 use mqdb_core::events::ChangeEvent;
@@ -169,6 +169,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
     /// # Errors
     /// Returns `DbDataStoreError::AlreadyExists` if an entity with the given ID already exists.
+    /// Returns `DbDataStoreError::NotPrimary` if this node does not hold the primary role.
     pub fn db_create_prepare(
         &mut self,
         entity_type: &str,
@@ -176,12 +177,27 @@ impl<T: ClusterTransport> NodeController<T> {
         data: &[u8],
         timestamp_ms: u64,
     ) -> Result<(super::db::DbEntity, ReplicationWrite), super::db::DbDataStoreError> {
+        self.require_primary_role(entity_type, id)?;
         self.stores
             .db_create_replicated(entity_type, id, data, timestamp_ms)
     }
 
+    fn require_primary_role(
+        &self,
+        entity_type: &str,
+        id: &str,
+    ) -> Result<(), super::db::DbDataStoreError> {
+        let partition = super::db::data_partition(entity_type, id);
+        if self.role(partition) == ReplicaRole::Primary {
+            Ok(())
+        } else {
+            Err(super::db::DbDataStoreError::NotPrimary)
+        }
+    }
+
     /// # Errors
     /// Returns `DbDataStoreError::AlreadyExists` if an entity with the given ID already exists.
+    /// Returns `DbDataStoreError::NotPrimary` if this node does not hold the primary role.
     pub async fn db_create(
         &mut self,
         entity_type: &str,
@@ -196,6 +212,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
     /// # Errors
     /// Returns `DbDataStoreError::NotFound` if the entity does not exist.
+    /// Returns `DbDataStoreError::NotPrimary` if this node does not hold the primary role.
     pub fn db_update_prepare(
         &mut self,
         entity_type: &str,
@@ -203,12 +220,14 @@ impl<T: ClusterTransport> NodeController<T> {
         data: &[u8],
         timestamp_ms: u64,
     ) -> Result<(super::db::DbEntity, ReplicationWrite), super::db::DbDataStoreError> {
+        self.require_primary_role(entity_type, id)?;
         self.stores
             .db_update_replicated(entity_type, id, data, timestamp_ms)
     }
 
     /// # Errors
     /// Returns `DbDataStoreError::NotFound` if the entity does not exist.
+    /// Returns `DbDataStoreError::NotPrimary` if this node does not hold the primary role.
     pub async fn db_update(
         &mut self,
         entity_type: &str,
@@ -237,16 +256,19 @@ impl<T: ClusterTransport> NodeController<T> {
 
     /// # Errors
     /// Returns `DbDataStoreError::NotFound` if the entity does not exist.
+    /// Returns `DbDataStoreError::NotPrimary` if this node does not hold the primary role.
     pub fn db_delete_prepare(
         &mut self,
         entity_type: &str,
         id: &str,
     ) -> Result<(super::db::DbEntity, ReplicationWrite), super::db::DbDataStoreError> {
+        self.require_primary_role(entity_type, id)?;
         self.stores.db_delete_replicated(entity_type, id)
     }
 
     /// # Errors
     /// Returns `DbDataStoreError::NotFound` if the entity does not exist.
+    /// Returns `DbDataStoreError::NotPrimary` if this node does not hold the primary role.
     pub async fn db_delete(
         &mut self,
         entity_type: &str,
@@ -936,7 +958,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 }
                 Self::json_error(404, &format!("entity not found: {entity} id={id}"))
             }
-            Err(_) => {
+            Err(error) => {
                 if has_unique_changes {
                     self.release_unique_constraints(
                         entity,
@@ -948,7 +970,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     )
                     .await;
                 }
-                Self::json_error(500, "internal error")
+                crate::cluster::db_handler::helpers::json_write_failure(error)
             }
         };
 
@@ -1057,7 +1079,7 @@ impl<T: ClusterTransport> NodeController<T> {
             Err(super::db::DbDataStoreError::NotFound) => {
                 Self::json_error(404, &format!("entity not found: {entity} id={id}"))
             }
-            Err(_) => Self::json_error(500, "internal error"),
+            Err(error) => crate::cluster::db_handler::helpers::json_write_failure(error),
         }
     }
 
@@ -1759,7 +1781,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 .await;
                 Self::json_error(409, "entity already exists")
             }
-            Err(_) => {
+            Err(error) => {
                 self.release_all_reservations(
                     entity,
                     &request_id,
@@ -1767,7 +1789,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     &remote_reserved,
                 )
                 .await;
-                Self::json_error(500, "internal error")
+                crate::cluster::db_handler::helpers::json_write_failure(error)
             }
         };
 
