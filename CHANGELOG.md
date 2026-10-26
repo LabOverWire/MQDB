@@ -12,6 +12,7 @@ Each entry lists the date and the crate versions that were released.
 - **A new Raft leader no longer re-proposes the initial partition layout.** Every leader, including one elected after a restart or a failover, proposed the default assignment for all 256 partitions at epoch 1 when it took over, and a fresh cluster proposed it twice through two paths. Every main run had 2 to 3 initial layouts in its log. Now a leader acts only after it has applied the log up to its own term, and proposes the initial layout only when no partition is assigned; every run has exactly one. Dead-node, drain and rebalance proposals wait for the same point, so a leader never reassigns from an older map. Modelled in `specs/ClusterPartitionInit.tla`.
 - The Raft leader now sends new entries as soon as it proposes them, and sends the new commit index as soon as it advances, instead of waiting for the next 500 ms heartbeat. Followers apply a reassignment about one round trip after the leader. With node 1 killed 1 s into a write load on 3- and 5-node clusters, main lost 6 acked writes over 6 runs; now none are lost over 8 runs.
 - A node that is primary for a partition and is left out of the partition's new assignment steps down instead of keeping its primary role.
+- A node newly assigned as a partition's replica no longer answers reads before the partition's snapshot arrives. It answered from its empty store and returned "not found" for records the primary held; it now forwards those reads to the primary.
 
 ### Known limitations
 

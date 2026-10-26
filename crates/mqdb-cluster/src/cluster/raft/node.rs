@@ -1248,9 +1248,9 @@ mod tests {
         );
     }
 
-    fn append_entries_to(outputs: Vec<RaftOutput>, peer: NodeId) -> Option<AppendEntriesRequest> {
-        outputs.into_iter().find_map(|o| match o {
-            RaftOutput::SendAppendEntries { to, request } if to == peer => Some(request),
+    fn append_entries_to(outputs: &[RaftOutput], peer: NodeId) -> Option<AppendEntriesRequest> {
+        outputs.iter().find_map(|o| match o {
+            RaftOutput::SendAppendEntries { to, request } if *to == peer => Some(request.clone()),
             _ => None,
         })
     }
@@ -1259,34 +1259,54 @@ mod tests {
     fn a_proposal_and_its_commit_reach_followers_without_waiting_for_a_heartbeat() {
         let mut leader = make_node(1);
         let mut follower = make_node(2);
+        let mut lagging = make_node(3);
         let peer1 = NodeId::validated(1).unwrap();
         let peer2 = NodeId::validated(2).unwrap();
+        let peer3 = NodeId::validated(3).unwrap();
         leader.add_peer(peer2);
+        leader.add_peer(peer3);
         follower.add_peer(peer1);
+        lagging.add_peer(peer1);
 
         leader.tick(0);
         leader.tick(1000);
         leader.handle_request_vote_response(peer2, RequestVoteResponse::granted(1));
-        let election_append = append_entries_to(leader.tick(1100), peer2).unwrap();
-        let (response, _) = follower.handle_append_entries(peer1, election_append, 1100);
-        leader.handle_append_entries_response(peer2, response);
+        let election_round = leader.tick(1100);
+        for (peer, node) in [(peer2, &mut follower), (peer3, &mut lagging)] {
+            let append = append_entries_to(&election_round, peer).unwrap();
+            let (response, _) = node.handle_append_entries(peer1, append, 1100);
+            leader.handle_append_entries_response(peer, response);
+        }
         leader.take_due_replication();
         assert!(leader.take_due_replication().is_empty());
 
         let (index, _) = leader.propose(RaftCommand::Noop);
         let index = index.unwrap();
-        let append = append_entries_to(leader.take_due_replication(), peer2).unwrap();
-        assert_eq!(append.entries.last().map(|e| e.index), Some(index));
+        let proposal_round = leader.take_due_replication();
         assert!(leader.take_due_replication().is_empty());
-
+        let append = append_entries_to(&proposal_round, peer2).unwrap();
+        assert_eq!(append.entries.last().map(|e| e.index), Some(index));
         let (response, _) = follower.handle_append_entries(peer1, append, 1110);
+        lagging.handle_append_entries(
+            peer1,
+            append_entries_to(&proposal_round, peer3).unwrap(),
+            1110,
+        );
         leader.handle_append_entries_response(peer2, response);
         assert_eq!(leader.commit_index(), index);
 
-        let commit = append_entries_to(leader.take_due_replication(), peer2).unwrap();
-        assert_eq!(commit.leader_commit, index);
-        follower.handle_append_entries(peer1, commit, 1120);
-        assert_eq!(follower.commit_index(), index);
+        let commit_round = leader.take_due_replication();
+        for (peer, node) in [(peer2, &mut follower), (peer3, &mut lagging)] {
+            let commit = append_entries_to(&commit_round, peer).unwrap();
+            assert_eq!(commit.leader_commit, index);
+            node.handle_append_entries(peer1, commit, 1120);
+            assert_eq!(
+                node.commit_index(),
+                index,
+                "node {} did not commit",
+                peer.get()
+            );
+        }
     }
 
     #[test]

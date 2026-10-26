@@ -278,7 +278,6 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             "proposing partition reassignments"
         );
 
-        self.pending_partition_proposals = reassignments.len();
         let mut proposed_indices = Vec::new();
         for reassignment in reassignments {
             let cmd = RaftCommand::update_partition(
@@ -288,12 +287,8 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
                 reassignment.new_epoch,
             );
 
-            match self.propose_partition_update(cmd).await {
-                Ok(idx) => proposed_indices.push(idx),
-                Err(_) => {
-                    self.pending_partition_proposals =
-                        self.pending_partition_proposals.saturating_sub(1);
-                }
+            if let Ok(idx) = self.propose_partition_update(cmd).await {
+                proposed_indices.push(idx);
             }
         }
 

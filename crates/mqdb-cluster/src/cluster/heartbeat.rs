@@ -104,10 +104,6 @@ impl HeartbeatManager {
         &self.partition_map
     }
 
-    pub fn partition_map_mut(&mut self) -> &mut PartitionMap {
-        &mut self.partition_map
-    }
-
     #[must_use]
     pub fn should_send(&self, now: u64) -> bool {
         let has_partitions = self.partition_map.has_any_assignment(self.local_node);

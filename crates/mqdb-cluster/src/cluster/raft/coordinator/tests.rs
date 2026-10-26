@@ -496,6 +496,45 @@ async fn a_fresh_leader_initializes_partitions_once_after_catching_up() {
 }
 
 #[tokio::test]
+async fn proposals_from_every_path_are_counted_until_applied() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let mut leader = RaftCoordinator::new(node1, MockTransport::new(node1), test_config());
+    let mut follower = RaftCoordinator::new(node2, MockTransport::new(node2), test_config());
+    leader.add_peer(node2);
+    leader.add_peer(node3);
+    follower.add_peer(node1);
+    follower.add_peer(node3);
+
+    leader.tick(0).await;
+    leader.tick(1000).await;
+    let response = follower
+        .handle_request_vote(node1, vote_request_from(&leader), 1000)
+        .await;
+    leader.handle_request_vote_response(node2, response).await;
+    for round in 0..6 {
+        replicate_round(&mut leader, &mut follower, 1100 + round * 100).await;
+    }
+    assert!(leader.partitions_initialized());
+    assert_eq!(leader.pending_partition_proposals, 0);
+
+    let dead = leader.handle_node_death(node3).await;
+    let drained = leader.handle_drain_notification(node2).await;
+    assert!(!dead.is_empty());
+    assert!(!drained.is_empty());
+    assert_eq!(
+        leader.pending_partition_proposals,
+        dead.len() + drained.len()
+    );
+
+    for round in 0..6 {
+        replicate_round(&mut leader, &mut follower, 2000 + round * 100).await;
+    }
+    assert_eq!(leader.pending_partition_proposals, 0);
+}
+
+#[tokio::test]
 async fn a_new_leader_that_has_not_applied_the_log_does_not_initialize_again() {
     let node1 = NodeId::validated(1).unwrap();
     let node2 = NodeId::validated(2).unwrap();

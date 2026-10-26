@@ -637,6 +637,7 @@ impl<T: ClusterTransport> NodeController<T> {
         self.partition_map
             .replicas(partition)
             .contains(&self.node_id)
+            && self.role(partition) == ReplicaRole::Replica
     }
 
     /// Pick a local partition for creating new entities (round-robin).

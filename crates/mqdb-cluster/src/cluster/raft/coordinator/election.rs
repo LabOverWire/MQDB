@@ -138,9 +138,19 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             return Err(CoordinatorError::NotLeader(self.leader_id()));
         }
 
+        let counted = matches!(command, RaftCommand::UpdatePartition(_));
+        if counted {
+            self.pending_partition_proposals += 1;
+        }
         let (index, outputs) = self.node.propose(command);
+        if index.is_none() && counted {
+            self.pending_partition_proposals = self.pending_partition_proposals.saturating_sub(1);
+        }
         self.process_outputs(outputs).await;
-        index.ok_or(CoordinatorError::ProposeFailed)
+        index.ok_or_else(|| {
+            tracing::warn!("raft proposal was not appended to the log");
+            CoordinatorError::ProposeFailed
+        })
     }
 
     pub async fn replicate_due(&mut self) {

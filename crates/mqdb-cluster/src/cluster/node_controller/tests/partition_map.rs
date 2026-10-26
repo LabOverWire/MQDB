@@ -69,3 +69,17 @@ async fn a_primary_left_out_of_the_raft_map_steps_down() {
     assert_eq!(ctrl.partition_map().primary(partition), Some(node(2)));
     assert_eq!(ctrl.role(partition), ReplicaRole::None);
 }
+
+#[tokio::test]
+async fn a_replica_serves_reads_only_after_its_snapshot_arrives() {
+    let partition = PartitionId::new(201).unwrap();
+    let mut ctrl = controller(2);
+    ctrl.apply_raft_partition_map(map_with(partition, node(1), &[node(2)], 1))
+        .await;
+    assert_eq!(ctrl.role(partition), ReplicaRole::AwaitingSnapshot);
+    assert!(!ctrl.can_serve_reads(partition));
+
+    ctrl.become_replica(partition, Epoch::new(1), 0);
+
+    assert!(ctrl.can_serve_reads(partition));
+}

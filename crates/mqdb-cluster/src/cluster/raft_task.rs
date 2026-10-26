@@ -70,7 +70,6 @@ impl<T: ClusterTransport> RaftTask<T> {
                 }
                 Ok(msg) = self.rx_messages.recv_async() => {
                     self.handle_raft_message(msg).await;
-                    self.publish_partition_map();
                 }
                 Ok(event) = self.rx_events.recv_async() => {
                     self.handle_event(event).await;
@@ -80,6 +79,7 @@ impl<T: ClusterTransport> RaftTask<T> {
                 }
             }
             self.raft.replicate_due().await;
+            self.publish_partition_map();
             if let Some(reason) = self.raft.storage_failure() {
                 error!(%reason, "stopping node after a raft storage failure");
                 let _ = self.fatal_error.set(reason.to_string());
