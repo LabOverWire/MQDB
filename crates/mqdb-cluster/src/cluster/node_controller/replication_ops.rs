@@ -11,7 +11,8 @@ use super::super::store_manager::StoreManager;
 use super::super::transport::{ClusterMessage, ClusterTransport};
 use super::super::{Epoch, NodeId, PartitionId, PartitionMap};
 use super::{
-    NodeController, NodeStatus, ReplicationError, WRITE_COUNTER, WRITE_RECEIVED, WRITE_REQUEST_SENT,
+    HELD_WRITE_CAPACITY, HELD_WRITE_TIMEOUT, HeldWrite, NodeController, NodeStatus,
+    ReplicationError, WRITE_COUNTER, WRITE_RECEIVED, WRITE_REQUEST_SENT,
 };
 use std::sync::atomic::Ordering as AtomicOrdering;
 
@@ -77,7 +78,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let _ = self.transport.send(from, ClusterMessage::Ack(ack)).await;
     }
 
-    pub(crate) async fn handle_write_request(&mut self, from: NodeId, mut write: ReplicationWrite) {
+    pub(crate) async fn handle_write_request(&mut self, from: NodeId, write: ReplicationWrite) {
         WRITE_RECEIVED.fetch_add(1, AtomicOrdering::Relaxed);
         let partition = write.partition;
         let is_broadcast = write.entity == entity::TOPIC_INDEX
@@ -94,25 +95,109 @@ impl<T: ClusterTransport> NodeController<T> {
             "received write request"
         );
 
-        if is_broadcast && let Err(e) = self.stores.apply_write(&write) {
-            tracing::error!(?partition, ?e, "failed to apply broadcast write to stores");
-        }
-
-        if !self.is_primary_for_partition(partition) {
-            if !is_broadcast {
-                tracing::warn!(
-                    ?partition,
-                    from = from.get(),
-                    "received write request but not primary"
-                );
+        if is_broadcast {
+            if let Err(e) = self.stores.apply_write(&write) {
+                tracing::error!(?partition, ?e, "failed to apply broadcast write to stores");
             }
-            if let Some(record) = write.event {
+            if self.is_primary_for_partition(partition) {
+                self.apply_write_request(write, true).await;
+            } else if let Some(record) = write.event {
                 self.publish_unowned_change_event(partition, record).await;
             }
             return;
         }
 
-        if !is_broadcast && let Err(e) = self.stores.apply_write(&write) {
+        self.route_write_request(from, write).await;
+    }
+
+    async fn route_write_request(&mut self, from: NodeId, mut write: ReplicationWrite) {
+        let partition = write.partition;
+        if self.is_primary_for_partition(partition) {
+            self.apply_write_request(write, false).await;
+            return;
+        }
+
+        let assignment = self.partition_map.get(partition);
+        match (write.epoch.cmp(&assignment.epoch), assignment.primary) {
+            (std::cmp::Ordering::Greater, _) => self.hold_write_request(from, write).await,
+            (std::cmp::Ordering::Less, Some(primary)) => {
+                tracing::debug!(
+                    ?partition,
+                    from = from.get(),
+                    primary = primary.get(),
+                    "write request for an older assignment, sending on to primary"
+                );
+                write.epoch = assignment.epoch;
+                let event = write.event.take();
+                self.forward_write_with_change_event(primary, write, event)
+                    .await;
+            }
+            _ => {
+                tracing::warn!(
+                    ?partition,
+                    from = from.get(),
+                    "received write request but not primary"
+                );
+                if let Some(record) = write.event {
+                    self.publish_unowned_change_event(partition, record).await;
+                }
+            }
+        }
+    }
+
+    async fn hold_write_request(&mut self, from: NodeId, write: ReplicationWrite) {
+        if self.held_writes.len() >= HELD_WRITE_CAPACITY
+            && let Some(dropped) = self.held_writes.pop_front()
+        {
+            tracing::warn!(
+                partition = ?dropped.write.partition,
+                from = dropped.from.get(),
+                "held write request dropped: too many held"
+            );
+            if let Some(record) = dropped.write.event {
+                self.publish_unowned_change_event(dropped.write.partition, record)
+                    .await;
+            }
+        }
+        tracing::debug!(
+            partition = ?write.partition,
+            from = from.get(),
+            epoch = ?write.epoch,
+            "holding write request until the assignment is applied"
+        );
+        self.held_writes.push_back(HeldWrite {
+            from,
+            write,
+            since: std::time::Instant::now(),
+        });
+    }
+
+    async fn release_held_writes(&mut self) {
+        let held = std::mem::take(&mut self.held_writes);
+        for entry in held {
+            let assignment_epoch = self.partition_map.get(entry.write.partition).epoch;
+            if entry.write.epoch <= assignment_epoch {
+                self.route_write_request(entry.from, entry.write).await;
+            } else if entry.since.elapsed() >= HELD_WRITE_TIMEOUT {
+                tracing::warn!(
+                    partition = ?entry.write.partition,
+                    from = entry.from.get(),
+                    epoch = ?entry.write.epoch,
+                    "held write request dropped: assignment never applied"
+                );
+                if let Some(record) = entry.write.event {
+                    self.publish_unowned_change_event(entry.write.partition, record)
+                        .await;
+                }
+            } else {
+                self.held_writes.push_back(entry);
+            }
+        }
+    }
+
+    async fn apply_write_request(&mut self, mut write: ReplicationWrite, store_applied: bool) {
+        let partition = write.partition;
+        if !store_applied && let Err(e) = self.stores.apply_write(&write) {
             tracing::error!(?partition, ?e, "failed to apply write request to stores");
             return;
         }
@@ -316,6 +401,9 @@ impl<T: ClusterTransport> NodeController<T> {
 
     pub async fn apply_raft_partition_map(&mut self, raft_map: PartitionMap) -> bool {
         if self.partition_map == raft_map {
+            if !self.held_writes.is_empty() {
+                self.release_held_writes().await;
+            }
             return false;
         }
         let current_map = self.partition_map.clone();
@@ -351,6 +439,7 @@ impl<T: ClusterTransport> NodeController<T> {
             }
         }
         self.update_partition_map(raft_map);
+        self.release_held_writes().await;
         became_primary
     }
 
@@ -389,9 +478,20 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
+    fn believed_primary(&self, partition: PartitionId) -> Option<(NodeId, Epoch)> {
+        [&self.partition_map, self.heartbeat.partition_map()]
+            .into_iter()
+            .map(|map| map.get(partition))
+            .find_map(|assignment| {
+                assignment
+                    .primary
+                    .map(|primary| (primary, assignment.epoch))
+            })
+    }
+
     async fn write_or_forward_impl(
         &mut self,
-        write: ReplicationWrite,
+        mut write: ReplicationWrite,
         event: Option<ChangeEventRecord>,
         extra_outbox: &[(Vec<u8>, Vec<u8>)],
     ) {
@@ -452,11 +552,8 @@ impl<T: ClusterTransport> NodeController<T> {
                 t_replicate,
                 "write_or_forward_timing"
             );
-        } else if let Some(primary) = self
-            .partition_map
-            .primary(partition)
-            .or_else(|| self.heartbeat.partition_map().primary(partition))
-        {
+        } else if let Some((primary, epoch)) = self.believed_primary(partition) {
+            write.epoch = epoch;
             tracing::debug!(
                 ?partition,
                 primary = primary.get(),

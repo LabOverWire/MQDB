@@ -67,6 +67,14 @@ static WRITE_REQUEST_SENT: AtomicU64 = AtomicU64::new(0);
 static WRITE_RECEIVED: AtomicU64 = AtomicU64::new(0);
 
 const FORWARD_DEDUP_CAPACITY: usize = 1000;
+const HELD_WRITE_CAPACITY: usize = 1024;
+const HELD_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+pub(super) struct HeldWrite {
+    pub(super) from: NodeId,
+    pub(super) write: ReplicationWrite,
+    pub(super) since: std::time::Instant,
+}
 
 #[derive(Default)]
 pub struct TickOutput {
@@ -459,6 +467,7 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) write_log: PartitionWriteLog,
     pub(super) forward_dedup: HashSet<u64>,
     pub(super) forward_dedup_order: VecDeque<u64>,
+    pub(super) held_writes: VecDeque<HeldWrite>,
     pub(super) event_delivery: super::event_delivery::EventDelivery,
     pub(super) tx_raft_messages: flume::Sender<RaftMessage>,
     pub(super) tx_raft_events: flume::Sender<RaftEvent>,
@@ -536,6 +545,7 @@ impl<T: ClusterTransport> NodeController<T> {
             write_log: PartitionWriteLog::new(),
             forward_dedup: HashSet::with_capacity(FORWARD_DEDUP_CAPACITY),
             forward_dedup_order: VecDeque::with_capacity(FORWARD_DEDUP_CAPACITY),
+            held_writes: VecDeque::with_capacity(HELD_WRITE_CAPACITY),
             event_delivery: super::event_delivery::EventDelivery::default(),
             tx_raft_messages,
             tx_raft_events,
