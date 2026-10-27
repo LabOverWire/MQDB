@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-27 — mqdb-agent 0.8.39, mqdb-cluster 0.4.36, mqdb-cli 0.8.64
+
+### Fixed
+
+- **The ACL now applies to JWT and SCRAM clients** (#222). With `--jwt-algorithm` or `--scram-file` and `--acl`, agent and cluster asked only the JWT or SCRAM provider whether a client could publish or subscribe, and it allowed everything, so the ACL was never consulted. A client the ACL denied a topic, JWT clients and password users alike, could still publish to it. Now both the provider and the ACL must allow. Federated JWT already checked the ACL with the roles from each token and is unchanged. Without an ACL file nothing changes.
+- **An internal write forwarded to a node that has not yet applied the partition's assignment is held instead of dropped** (#221). Session and subscription records from client connects were lost when the receiving node lagged the sender, during the initial partition layout and after a node failure. A forwarded write now carries the epoch of the sender's assignment; a receiver behind that epoch holds it, up to 1024 writes for up to 30 s, and applies it once it reaches that epoch. Held writes are never sent on to another node, so writes for one key reach the primary in order. Modelled in `specs/ClusterForwardedWrite.tla`.
+- The JWT connection example in the auth testing guide signed tokens with the base64-decoded key file, and the broker refused them.
+
+### Known limitations
+
+- An internal write forwarded by a node whose partition map is behind the receiver's is still dropped, and a held write is dropped if more than 1024 are held, if the receiver does not reach its epoch within 30 s, or if the receiver restarts.
+- With JWT or SCRAM enabled, valid password logins count as failed attempts for the auth rate limiter, and a client is locked out after a few connections per IP (#224). `--no-rate-limit` avoids it.
+- ACL rules changed at runtime through `$DB/_admin/acl/*` do not apply to federated JWT clients until restart (#225).
+- The primary writes each forwarded internal write to its store twice, and a node the map names primary but that is not in the primary role stores the write without replicating it (#227).
+
 ## 2026-10-26 — mqdb-cluster 0.4.35, mqdb-cli 0.8.63
 
 ### Fixed
