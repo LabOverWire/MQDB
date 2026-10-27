@@ -87,8 +87,15 @@ When a write is generated, the node must decide its role:
 
 1. **Am I the primary?** Check `partition_map.primary(partition) == my_node_id`
 2. **If primary**: Apply locally, replicate to replicas
-3. **If not primary**: Forward `WriteRequest` to the partition's primary node
+3. **If not primary**: Forward `WriteRequest` to the partition's primary node, stamped with the epoch of the assignment that named it
 4. **Special case**: Broadcast entities apply locally first, then follow normal routing
+
+Each node applies the Raft partition map on its own tick, so the receiver of a forwarded write may not have reached the sender's assignment yet. The receiver compares the write's epoch with its own assignment's epoch:
+
+- **Newer than its own**: holds the write, even if it is primary at its current epoch (up to 1024 writes, for up to 30 s), and routes it again in the same step that applies a newer map
+- **Equal or older**: applies it if primary, drops it otherwise (`received write request but not primary` or `received write request for an older assignment`)
+
+A write is never sent on a second hop: it could reach the primary after a newer write the sender sent there directly. This recovers writes sent to a receiver that lags behind the sender; a write from a sender that is behind the receiver is still dropped. Modelled in `specs/ClusterForwardedWrite.tla`.
 
 This creates a two-phase pattern for non-primary nodes: the write eventually reaches the primary, which applies and replicates it, and the write returns to the originating node as a replicated write.
 
@@ -1346,10 +1353,10 @@ pub fn write_or_forward(&mut self, write: ReplicationWrite) {
         // We're primary - replicate to replicas
         let replicas = self.partition_map.replicas(partition).to_vec();
         self.replicate_write_async(write, &replicas);
-    } else if let Some(primary) = self.partition_map.primary(partition)
-        .or_else(|| self.heartbeat.partition_map().primary(partition))
-    {
-        // Forward to primary (check heartbeat map as fallback)
+    } else if let Some((primary, epoch)) = self.believed_primary(partition) {
+        // Forward to primary (heartbeat map as fallback), stamped with the
+        // epoch of the assignment that named it; see A2.2 for the receiver
+        write.epoch = epoch;
         self.transport.send(primary, ClusterMessage::WriteRequest(write));
     } else {
         // No primary known - log warning
