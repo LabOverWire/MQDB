@@ -141,17 +141,68 @@ pub async fn configure_broker_auth(
 
 #[must_use]
 pub fn enhanced_auth_with_fallback(
+    auth_method: AuthMethod,
     enhanced: Arc<dyn AuthProvider>,
     fallback: Arc<dyn AuthProvider>,
 ) -> CompositeAuthProvider {
-    CompositeAuthProvider::new(enhanced, fallback).with_authorization_mode(AuthorizationMode::And)
+    let mode = match auth_method {
+        AuthMethod::JwtFederated => AuthorizationMode::PrimaryOnly,
+        _ => AuthorizationMode::And,
+    };
+    CompositeAuthProvider::new(enhanced, fallback).with_authorization_mode(mode)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mqtt5::broker::acl::FederatedRoleEntry;
     use mqtt5::broker::auth::{AllowAllAuthProvider, ComprehensiveAuthProvider};
+    use mqtt5::broker::auth_mechanisms::FederatedJwtAuthProvider;
+    use mqtt5::broker::config::FederatedAuthMode;
     use mqtt5::broker::{AclManager, PasswordAuthProvider};
+
+    #[tokio::test]
+    async fn federated_clients_keep_the_roles_from_their_token() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let acl_path = dir.path().join("acl");
+        std::fs::write(
+            &acl_path,
+            "role writer topic sensors/# permission readwrite\n",
+        )
+        .unwrap();
+        let federated_acl = AclManager::from_file(&acl_path).await.unwrap();
+        federated_acl
+            .set_federated_roles(
+                "idp:alice",
+                FederatedRoleEntry::new(
+                    HashSet::from(["writer".to_string()]),
+                    "idp".to_string(),
+                    FederatedAuthMode::TrustedRoles,
+                    true,
+                ),
+            )
+            .await;
+        let federated = FederatedJwtAuthProvider::new(Vec::new())
+            .unwrap()
+            .with_acl_manager(Arc::new(tokio::sync::RwLock::new(federated_acl)));
+        let fallback = Arc::new(ComprehensiveAuthProvider::with_providers(
+            PasswordAuthProvider::new(),
+            AclManager::from_file(&acl_path).await.unwrap(),
+        ));
+        let provider =
+            enhanced_auth_with_fallback(AuthMethod::JwtFederated, Arc::new(federated), fallback);
+
+        assert!(
+            provider
+                .authorize_publish("c1", Some("idp:alice"), "sensors/t1")
+                .await
+        );
+        assert!(
+            !provider
+                .authorize_publish("c2", Some("idp:bob"), "sensors/t1")
+                .await
+        );
+    }
 
     #[tokio::test]
     async fn the_acl_fallback_still_authorizes_enhanced_auth_clients() {
@@ -171,7 +222,8 @@ mod tests {
             PasswordAuthProvider::new(),
             acl,
         ));
-        let provider = enhanced_auth_with_fallback(Arc::new(AllowAllAuthProvider), fallback);
+        let provider =
+            enhanced_auth_with_fallback(AuthMethod::Jwt, Arc::new(AllowAllAuthProvider), fallback);
 
         assert!(
             !provider

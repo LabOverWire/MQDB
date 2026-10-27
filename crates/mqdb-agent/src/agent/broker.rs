@@ -13,7 +13,8 @@ use crate::sparkplug::{CERTIFICATES_PREFIX, CertificateStore};
 use crate::topic_protection::TopicProtectionAuthProvider;
 use mqtt5::broker::auth::ComprehensiveAuthProvider;
 use mqtt5::broker::config::{
-    ChangeOnlyDeliveryConfig, QuicConfig, StorageBackend, StorageConfig, WebSocketConfig,
+    AuthMethod, ChangeOnlyDeliveryConfig, QuicConfig, StorageBackend, StorageConfig,
+    WebSocketConfig,
 };
 use mqtt5::broker::events::{
     BrokerEventHandler, ClientConnectEvent, ClientDisconnectEvent, ClientPublishEvent,
@@ -29,6 +30,7 @@ use tracing::{info, warn};
 
 pub(super) struct AuthProviderConfig<'a> {
     pub needs_composite: bool,
+    pub auth_method: AuthMethod,
     pub service_username: Option<&'a String>,
     pub service_password: Option<&'a String>,
     pub password_file: Option<&'a std::path::Path>,
@@ -280,9 +282,9 @@ impl MqdbAgent {
                     fallback.add_user(svc_user.clone(), svc_pass)?;
                     Arc::new(fallback)
                 };
-            let composite = enhanced_auth_with_fallback(primary, fallback);
+            let composite = enhanced_auth_with_fallback(config.auth_method, primary, fallback);
             broker = broker.with_auth_provider(Arc::new(composite));
-            info!("composite auth provider configured (password file + service account)");
+            info!(auth_method = ?config.auth_method, "enhanced auth configured with password and acl fallback");
         } else if let Some(ref comprehensive) = auth_providers {
             broker = broker.with_auth_provider(comprehensive.clone());
         }
