@@ -104,6 +104,27 @@ mqdb agent start --db /tmp/mqdb-jwt \
 - [ ] Agent starts with JWT auth configured
 - [ ] JWT clock skew setting applied
 
+### JWT Auth with an ACL
+```bash
+cat > /tmp/acl-jwt.txt <<'EOF'
+user * topic # permission readwrite
+user * topic $DB/# permission readwrite
+user * topic $DB/sale/create permission deny
+user paysvc topic $DB/sale/# permission readwrite
+EOF
+for u in admin paysvc mallory; do mqdb passwd $u -b $u -f /tmp/passwd-jwt.txt; done
+
+mqdb agent start --db /tmp/mqdb-jwt-acl --passwd /tmp/passwd-jwt.txt --admin-users admin \
+    --jwt-algorithm hs256 --jwt-key /tmp/jwt-secret.key --acl /tmp/acl-jwt.txt --no-rate-limit
+
+mqdb create sale --user mallory --pass mallory -d '{"seatId":"s1"}'
+mqdb create sale --user paysvc --pass paysvc -d '{"seatId":"s2"}'
+mqdb list sale --user mallory --pass mallory
+```
+- [ ] mallory's create is refused (no record written); the same applies to a JWT client
+- [ ] paysvc's create succeeds
+- [ ] mallory can still list sales
+
 ### Rate Limiting
 ```bash
 # Start with default rate limits (enabled with any auth)

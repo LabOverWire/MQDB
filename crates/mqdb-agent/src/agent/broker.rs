@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::MqdbAgent;
+use crate::auth_config::enhanced_auth_with_fallback;
 use crate::broker_defaults::{
     BROKER_MAX_CLIENTS, BROKER_MAX_PACKET_SIZE, BROKER_SYS_RETAINED_TOPICS, SESSION_EXPIRY_SECS,
 };
@@ -10,7 +11,7 @@ use crate::presence::{
 };
 use crate::sparkplug::{CERTIFICATES_PREFIX, CertificateStore};
 use crate::topic_protection::TopicProtectionAuthProvider;
-use mqtt5::broker::auth::{CompositeAuthProvider, ComprehensiveAuthProvider};
+use mqtt5::broker::auth::ComprehensiveAuthProvider;
 use mqtt5::broker::config::{
     ChangeOnlyDeliveryConfig, QuicConfig, StorageBackend, StorageConfig, WebSocketConfig,
 };
@@ -279,7 +280,7 @@ impl MqdbAgent {
                     fallback.add_user(svc_user.clone(), svc_pass)?;
                     Arc::new(fallback)
                 };
-            let composite = CompositeAuthProvider::new(primary, fallback);
+            let composite = enhanced_auth_with_fallback(primary, fallback);
             broker = broker.with_auth_provider(Arc::new(composite));
             info!("composite auth provider configured (password file + service account)");
         } else if let Some(ref comprehensive) = auth_providers {

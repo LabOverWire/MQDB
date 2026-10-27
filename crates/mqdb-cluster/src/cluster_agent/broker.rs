@@ -3,9 +3,10 @@
 
 use super::{AdminRequest, ClusterTransportKind, ClusteredAgent, RunningBroker};
 use crate::cluster::{ClusterEventHandler, DedicatedExecutor, NodeId, QuicDirectTransport};
+use mqdb_agent::auth_config::enhanced_auth_with_fallback;
 use mqdb_agent::topic_protection::TopicProtectionAuthProvider;
 use mqtt5::QoS;
-use mqtt5::broker::auth::{CompositeAuthProvider, ComprehensiveAuthProvider};
+use mqtt5::broker::auth::ComprehensiveAuthProvider;
 use mqtt5::broker::bridge::{BridgeConfig, BridgeDirection, BridgeManager, BridgeProtocol};
 use mqtt5::broker::config::{
     ChangeOnlyDeliveryConfig, ClusterListenerConfig, QuicConfig as BrokerQuicConfig,
@@ -288,7 +289,7 @@ impl ClusteredAgent {
                         .map_err(|e| format!("failed to create service account: {e}"))?;
                     Arc::new(fallback)
                 };
-            let composite = CompositeAuthProvider::new(primary, fallback);
+            let composite = enhanced_auth_with_fallback(primary, fallback);
             broker = broker.with_auth_provider(Arc::new(composite));
             info!("composite auth provider configured (password file + service account)");
         } else if let Some(ref comprehensive) = auth_providers {
