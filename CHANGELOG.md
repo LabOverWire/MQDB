@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-26 — mqdb-cluster 0.4.35, mqdb-cli 0.8.63
+
+### Fixed
+
+- **A write sent to a node that is no longer a partition's primary is refused instead of acked** (#218). A node that had lost the primary role applied a forwarded create, update or delete to its own store, sent it on to the node it believed was primary without waiting for a reply, and told the client it succeeded. Now creates, updates, deletes, shares and unshares check the local primary role before they touch the store, and a node without it answers 503 so the client can retry. Binary writes answer "invalid partition". A forwarded create with unique fields is refused before it reserves its values.
+- An FK delete on a node without the parent's primary role no longer deletes or nulls the children before refusing the parent delete.
+- A cascade delete or set-null that cannot be applied stays in the cascade outbox and is retried. A child whose partition the node did not hold, a 503 from the node that received the cascade, and an op refused during outbox replay after a restart were all marked delivered, leaving the child pointing at a deleted parent.
+- An unshare on a node that had lost the resource's partition answered "unshared" and left the grant in place; a share there answered 500. Both now answer 503.
+
+### Known limitations
+
+- Internal writes forwarded to a node that has not yet applied a partition's assignment are still dropped without notice (#221). It was seen only during the initial partition layout.
+
 ## 2026-10-25 — mqdb-cluster 0.4.34, mqdb-cli 0.8.62
 
 ### Fixed
