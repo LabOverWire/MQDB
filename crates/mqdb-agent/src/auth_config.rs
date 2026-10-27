@@ -1,11 +1,13 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use mqtt5::broker::auth::{AuthProvider, AuthorizationMode, CompositeAuthProvider};
 use mqtt5::broker::config::{
     AuthConfig, AuthMethod, FederatedJwtConfig, JwtConfig, RateLimitConfig,
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tracing::info;
 
 pub struct AuthSetupConfig {
@@ -137,9 +139,113 @@ pub async fn configure_broker_auth(
     })
 }
 
+#[must_use]
+pub fn enhanced_auth_with_fallback(
+    auth_method: AuthMethod,
+    enhanced: Arc<dyn AuthProvider>,
+    fallback: Arc<dyn AuthProvider>,
+) -> CompositeAuthProvider {
+    let mode = match auth_method {
+        AuthMethod::JwtFederated => AuthorizationMode::PrimaryOnly,
+        _ => AuthorizationMode::And,
+    };
+    CompositeAuthProvider::new(enhanced, fallback).with_authorization_mode(mode)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mqtt5::broker::acl::FederatedRoleEntry;
+    use mqtt5::broker::auth::{AllowAllAuthProvider, ComprehensiveAuthProvider};
+    use mqtt5::broker::auth_mechanisms::FederatedJwtAuthProvider;
+    use mqtt5::broker::config::FederatedAuthMode;
+    use mqtt5::broker::{AclManager, PasswordAuthProvider};
+
+    #[tokio::test]
+    async fn federated_clients_keep_the_roles_from_their_token() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let acl_path = dir.path().join("acl");
+        std::fs::write(
+            &acl_path,
+            "role writer topic sensors/# permission readwrite\n",
+        )
+        .unwrap();
+        let federated_acl = AclManager::from_file(&acl_path).await.unwrap();
+        federated_acl
+            .set_federated_roles(
+                "idp:alice",
+                FederatedRoleEntry::new(
+                    HashSet::from(["writer".to_string()]),
+                    "idp".to_string(),
+                    FederatedAuthMode::TrustedRoles,
+                    true,
+                ),
+            )
+            .await;
+        let federated = FederatedJwtAuthProvider::new(Vec::new())
+            .unwrap()
+            .with_acl_manager(Arc::new(tokio::sync::RwLock::new(federated_acl)));
+        let fallback = Arc::new(ComprehensiveAuthProvider::with_providers(
+            PasswordAuthProvider::new(),
+            AclManager::from_file(&acl_path).await.unwrap(),
+        ));
+        let provider =
+            enhanced_auth_with_fallback(AuthMethod::JwtFederated, Arc::new(federated), fallback);
+
+        assert!(
+            provider
+                .authorize_publish("c1", Some("idp:alice"), "sensors/t1")
+                .await
+        );
+        assert!(
+            !provider
+                .authorize_publish("c2", Some("idp:bob"), "sensors/t1")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn the_acl_fallback_still_authorizes_enhanced_auth_clients() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let acl_path = dir.path().join("acl");
+        std::fs::write(
+            &acl_path,
+            "user * topic # permission readwrite\n\
+             user * topic $DB/# permission readwrite\n\
+             user * topic $DB/sale/create permission deny\n\
+             user * topic secret/# permission deny\n\
+             user paysvc topic $DB/sale/# permission readwrite\n",
+        )
+        .unwrap();
+        let acl = AclManager::from_file(&acl_path).await.unwrap();
+        let fallback = Arc::new(ComprehensiveAuthProvider::with_providers(
+            PasswordAuthProvider::new(),
+            acl,
+        ));
+        let provider =
+            enhanced_auth_with_fallback(AuthMethod::Jwt, Arc::new(AllowAllAuthProvider), fallback);
+
+        assert!(
+            !provider
+                .authorize_publish("c1", Some("mallory"), "$DB/sale/create")
+                .await
+        );
+        assert!(
+            !provider
+                .authorize_subscribe("c1", Some("mallory"), "secret/plans")
+                .await
+        );
+        assert!(
+            provider
+                .authorize_publish("c1", Some("mallory"), "$DB/sale/list")
+                .await
+        );
+        assert!(
+            provider
+                .authorize_publish("c2", Some("paysvc"), "$DB/sale/create")
+                .await
+        );
+    }
 
     #[tokio::test]
     async fn password_mode_leaves_the_password_file_unchanged() {

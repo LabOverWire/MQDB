@@ -104,6 +104,44 @@ mqdb agent start --db /tmp/mqdb-jwt \
 - [ ] Agent starts with JWT auth configured
 - [ ] JWT clock skew setting applied
 
+### JWT Auth with an ACL
+```bash
+cat > /tmp/acl-jwt.txt <<'EOF'
+user * topic # permission readwrite
+user * topic $DB/# permission readwrite
+user * topic $DB/sale/create permission deny
+user paysvc topic $DB/sale/# permission readwrite
+EOF
+for u in admin paysvc mallory; do mqdb passwd $u -b $u -f /tmp/passwd-jwt.txt; done
+
+mqdb agent start --db /tmp/mqdb-jwt-acl --passwd /tmp/passwd-jwt.txt --admin-users admin \
+    --jwt-algorithm hs256 --jwt-key /tmp/jwt-secret.key --acl /tmp/acl-jwt.txt --no-rate-limit
+
+mqdb create sale --user mallory --pass mallory -d '{"seatId":"s1"}'
+mqdb create sale --user paysvc --pass paysvc -d '{"seatId":"s2"}'
+mqdb list sale --user mallory --pass mallory
+
+TOKEN=$(python3 -c "
+import json, hmac, hashlib, base64, time
+key = open('/tmp/jwt-secret.key','rb').read().strip()
+b64 = lambda d: base64.urlsafe_b64encode(d).rstrip(b'=')
+msg = b64(json.dumps({'alg':'HS256','typ':'JWT'}).encode()) + b'.' + b64(json.dumps({
+    'sub':'jwtclient','exp':int(time.time())+3600,'iat':int(time.time())
+}).encode())
+print((msg + b'.' + b64(hmac.new(key,msg,hashlib.sha256).digest())).decode())
+")
+mqttv5 pub --non-interactive --auth-method jwt --jwt-token "$TOKEN" -q 1 \
+    -t '$DB/sale/create' -m '{"id":"j1","seatId":"s3"}'
+mqttv5 pub --non-interactive --auth-method jwt --jwt-token "$TOKEN" -q 1 \
+    -t '$DB/item/create' -m '{"id":"k1"}'
+mqdb read sale j1 --user paysvc --pass paysvc
+mqdb read item k1 --user paysvc --pass paysvc
+```
+- [ ] mallory's create is refused (no record written)
+- [ ] the JWT client's sale is not stored (`read sale j1` finds nothing) while its item `k1` is
+- [ ] paysvc's create succeeds
+- [ ] mallory can still list sales
+
 ### Rate Limiting
 ```bash
 # Start with default rate limits (enabled with any auth)
@@ -720,7 +758,7 @@ payload = base64.urlsafe_b64encode(json.dumps({
     'exp':int(time.time())+3600,'iat':int(time.time())
 }).encode()).rstrip(b'=')
 msg = header + b'.' + payload
-sig = base64.urlsafe_b64encode(hmac.new(base64.b64decode(key),msg,hashlib.sha256).digest()).rstrip(b'=')
+sig = base64.urlsafe_b64encode(hmac.new(key,msg,hashlib.sha256).digest()).rstrip(b'=')
 print((msg + b'.' + sig).decode())
 " > /tmp/jwt-flow/token.txt
 

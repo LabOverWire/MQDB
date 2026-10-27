@@ -293,11 +293,13 @@ impl MqdbAgent {
         self.apply_transport_config(&mut config);
         let (presence_rx, certificates) = self.apply_event_handlers(&mut config);
 
+        let auth_method = config.auth_config.auth_method;
         let broker = mqtt5::broker::MqttBroker::with_config(config).await?;
         let (mut broker, auth_providers) = Self::apply_auth_providers(
             broker,
             broker::AuthProviderConfig {
                 needs_composite,
+                auth_method,
                 service_username: service_username.as_ref(),
                 service_password: service_password.as_ref(),
                 password_file: self.auth_setup.password_file.as_deref(),
@@ -395,11 +397,13 @@ impl MqdbAgent {
         self.apply_transport_config(&mut config);
         let (presence_rx, certificates) = self.apply_event_handlers(&mut config);
 
+        let auth_method = config.auth_config.auth_method;
         let broker = mqtt5::broker::MqttBroker::with_config(config).await?;
         let (mut broker, auth_providers) = Self::apply_auth_providers(
             broker,
             broker::AuthProviderConfig {
                 needs_composite,
+                auth_method,
                 service_username: service_username.as_ref(),
                 service_password: service_password.as_ref(),
                 password_file: self.auth_setup.password_file.as_deref(),
