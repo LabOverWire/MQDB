@@ -115,9 +115,15 @@ async fn commit(ctrl: &mut NodeController<MockTransport>, n: u64) -> ChangeEvent
     let data = serde_json::json!({"id": ID, "n": n});
     let bytes = serde_json::to_vec(&data).unwrap();
     let write = if n == 1 {
-        ctrl.db_create_prepare(ENTITY, ID, &bytes, 0).unwrap().1
+        ctrl.stores
+            .db_create_replicated(ENTITY, ID, &bytes, 0)
+            .unwrap()
+            .1
     } else {
-        ctrl.db_update_prepare(ENTITY, ID, &bytes, 0).unwrap().1
+        ctrl.stores
+            .db_update_replicated(ENTITY, ID, &bytes, 0)
+            .unwrap()
+            .1
     };
     let event = record_event(n);
     ctrl.commit_with_change_event(write, event.clone()).await;

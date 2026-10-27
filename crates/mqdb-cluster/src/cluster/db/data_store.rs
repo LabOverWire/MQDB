@@ -73,6 +73,7 @@ pub enum DbDataStoreError {
     NotFound,
     AlreadyExists,
     SerializationError,
+    NotPrimary,
 }
 
 impl std::fmt::Display for DbDataStoreError {
@@ -81,6 +82,7 @@ impl std::fmt::Display for DbDataStoreError {
             Self::NotFound => write!(f, "entity not found"),
             Self::AlreadyExists => write!(f, "entity already exists"),
             Self::SerializationError => write!(f, "serialization error"),
+            Self::NotPrimary => write!(f, "this node is not the partition primary"),
         }
     }
 }

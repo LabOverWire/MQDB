@@ -3575,3 +3575,496 @@ async fn forwarded_write_without_a_response_topic_is_applied_without_a_reply() {
             .any(|(_, message)| matches!(message, ClusterMessage::JsonDbResponse(_)))
     );
 }
+
+#[tokio::test]
+async fn a_forwarded_create_on_a_node_that_lost_the_partition_is_refused() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let outbox = Arc::new(Mutex::new(Vec::new()));
+    let transport = MockTransport {
+        node_id: node1,
+        inbox: Arc::new(Mutex::new(VecDeque::new())),
+        outbox: Arc::clone(&outbox),
+        retained_publishes: Arc::new(Mutex::new(Vec::new())),
+        retained_refreshes: Arc::new(Mutex::new(Vec::new())),
+    };
+    let mut ctrl = create_test_controller(node1, transport);
+    let partition = data_partition("nr", "r1");
+    let mut map = PartitionMap::default();
+    map.set(
+        partition,
+        crate::cluster::PartitionAssignment {
+            primary: Some(node3),
+            replicas: vec![node1],
+            epoch: Epoch::new(2),
+        },
+    );
+    ctrl.update_partition_map(map);
+
+    let request = super::super::protocol::JsonDbRequest {
+        request_id: 1,
+        op: super::super::protocol::JsonDbOp::Create,
+        entity: "nr".to_string(),
+        id: None,
+        payload: br#"{"id":"r1","n":1}"#.to_vec(),
+        response_topic: "resp/create".to_string(),
+        correlation_data: None,
+        sender: None,
+        client_id: None,
+    };
+    ctrl.handle_json_db_request(node2, partition, &request)
+        .await;
+
+    assert!(ctrl.db_get("nr", "r1").is_none());
+    let sent = outbox.lock().unwrap();
+    assert!(
+        !sent
+            .iter()
+            .any(|(_, message)| matches!(message, ClusterMessage::WriteRequest(_)))
+    );
+    let replies: Vec<(NodeId, serde_json::Value)> = sent
+        .iter()
+        .filter_map(|(to, message)| match message {
+            ClusterMessage::JsonDbResponse(response) => {
+                Some((*to, serde_json::from_slice(&response.payload).unwrap()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0].0, node2);
+    assert_eq!(replies[0].1["status"], "error");
+    assert_eq!(replies[0].1["code"], 503);
+}
+
+#[tokio::test]
+async fn a_create_whose_primary_moves_during_its_unique_check_is_refused() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let outbox = Arc::new(Mutex::new(Vec::new()));
+    let transport = MockTransport {
+        node_id: node1,
+        inbox: Arc::new(Mutex::new(VecDeque::new())),
+        outbox: Arc::clone(&outbox),
+        retained_publishes: Arc::new(Mutex::new(Vec::new())),
+        retained_refreshes: Arc::new(Mutex::new(Vec::new())),
+    };
+    let mut ctrl = create_test_controller(node1, transport);
+    let partition = data_partition("nr", "r1");
+    let mut map = PartitionMap::default();
+    map.set(
+        partition,
+        crate::cluster::PartitionAssignment {
+            primary: Some(node1),
+            replicas: vec![node3],
+            epoch: Epoch::new(1),
+        },
+    );
+    ctrl.apply_raft_partition_map(map.clone()).await;
+    map.set(
+        partition,
+        crate::cluster::PartitionAssignment {
+            primary: Some(node3),
+            replicas: vec![node1],
+            epoch: Epoch::new(2),
+        },
+    );
+    ctrl.apply_raft_partition_map(map).await;
+    outbox.lock().unwrap().clear();
+
+    let data = serde_json::json!({"id": "r1", "n": 1});
+    ctrl.complete_pending_unique_work(
+        Vec::new(),
+        Ok(Vec::new()),
+        super::super::node_controller::UniqueCheckContinuation::CreateFromNodeController {
+            from: node2,
+            entity: "nr".to_string(),
+            id: "r1".to_string(),
+            data_bytes: serde_json::to_vec(&data).unwrap(),
+            data,
+            partition,
+            request_id: "req-1".to_string(),
+            now_ms: 1000,
+            sender: None,
+            client_id: None,
+            response_topic: "resp/create".to_string(),
+            correlation_data: None,
+        },
+    )
+    .await;
+
+    assert!(ctrl.db_get("nr", "r1").is_none());
+    let sent = outbox.lock().unwrap();
+    assert!(
+        !sent
+            .iter()
+            .any(|(_, message)| matches!(message, ClusterMessage::WriteRequest(_)))
+    );
+    let replies: Vec<serde_json::Value> = sent
+        .iter()
+        .filter_map(|(to, message)| match message {
+            ClusterMessage::JsonDbResponse(response) if *to == node2 => {
+                Some(serde_json::from_slice(&response.payload).unwrap())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0]["code"], 503);
+}
+
+fn lose_primary_role(
+    ctrl: &mut NodeController<MockTransport>,
+    lost: PartitionId,
+    named_primary: NodeId,
+) {
+    let node1 = NodeId::validated(1).unwrap();
+    ctrl.step_down(lost);
+    let mut map = PartitionMap::default();
+    for i in 0..NUM_PARTITIONS {
+        let partition = PartitionId::new(i).unwrap();
+        let primary = if partition == lost {
+            named_primary
+        } else {
+            node1
+        };
+        map.set(
+            partition,
+            crate::cluster::PartitionAssignment {
+                primary: Some(primary),
+                replicas: if primary == node1 {
+                    vec![]
+                } else {
+                    vec![node1]
+                },
+                epoch: Epoch::new(2),
+            },
+        );
+    }
+    ctrl.update_partition_map(map);
+    ctrl.transport().outbox.lock().unwrap().clear();
+}
+
+fn sent_json_replies(ctrl: &NodeController<MockTransport>) -> Vec<serde_json::Value> {
+    ctrl.transport()
+        .outbox
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|(_, message)| match message {
+            ClusterMessage::JsonDbResponse(response) => {
+                Some(serde_json::from_slice(&response.payload).unwrap())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn forwarded_request(
+    op: super::super::protocol::JsonDbOp,
+    entity: &str,
+    id: Option<&str>,
+    payload: &[u8],
+    sender: Option<&str>,
+) -> super::super::protocol::JsonDbRequest {
+    super::super::protocol::JsonDbRequest {
+        request_id: 1,
+        op,
+        entity: entity.to_string(),
+        id: id.map(str::to_string),
+        payload: payload.to_vec(),
+        response_topic: "resp/forwarded".to_string(),
+        correlation_data: None,
+        sender: sender.map(str::to_string),
+        client_id: None,
+    }
+}
+
+fn grants_for(ctrl: &NodeController<MockTransport>, grantee: &str) -> usize {
+    ctrl.db_list(mqdb_core::types::SHARES_ENTITY)
+        .into_iter()
+        .filter(|record| {
+            serde_json::from_slice::<serde_json::Value>(&record.data)
+                .is_ok_and(|value| value["grantee_key"] == grantee)
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn a_forwarded_unshare_on_a_node_that_lost_the_partition_is_refused() {
+    let (handler, mut ctrl, _ownership) = share_setup().await;
+    resp_json(
+        &handler,
+        &mut ctrl,
+        "$DB/diagrams/d1/share",
+        &grant_payload("bob", "view"),
+        "alice",
+    )
+    .await;
+    let partition = data_partition("diagrams", "d1");
+    lose_primary_role(&mut ctrl, partition, NodeId::validated(3).unwrap());
+
+    let request = forwarded_request(
+        super::super::protocol::JsonDbOp::Unshare,
+        "diagrams",
+        Some("d1"),
+        br#"{"grantee":"bob"}"#,
+        Some("alice"),
+    );
+    ctrl.handle_json_db_request(NodeId::validated(2).unwrap(), partition, &request)
+        .await;
+
+    let replies = sent_json_replies(&ctrl);
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0]["code"], 503);
+    assert_eq!(grants_for(&ctrl, "bob"), 1);
+}
+
+#[tokio::test]
+async fn a_forwarded_share_on_a_node_that_lost_the_partition_is_refused() {
+    let (_handler, mut ctrl, _ownership) = share_setup().await;
+    let partition = data_partition("diagrams", "d1");
+    lose_primary_role(&mut ctrl, partition, NodeId::validated(3).unwrap());
+
+    let request = forwarded_request(
+        super::super::protocol::JsonDbOp::Share,
+        "diagrams",
+        Some("d1"),
+        &grant_payload("carol", "view"),
+        Some("alice"),
+    );
+    ctrl.handle_json_db_request(NodeId::validated(2).unwrap(), partition, &request)
+        .await;
+
+    let replies = sent_json_replies(&ctrl);
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0]["code"], 503);
+    assert_eq!(grants_for(&ctrl, "carol"), 0);
+}
+
+async fn author_with_post(ctrl: &mut NodeController<MockTransport>) {
+    use super::super::db::{ClusterConstraint, OnDeleteAction};
+    let user = serde_json::to_vec(&serde_json::json!({"name": "Alice"})).unwrap();
+    ctrl.db_create("users", "u1", &user, 1000).await.unwrap();
+    let post = serde_json::to_vec(&serde_json::json!({"title": "P1", "author_id": "u1"})).unwrap();
+    ctrl.db_create("posts", "p1", &post, 1000).await.unwrap();
+    let fk = ClusterConstraint::foreign_key(
+        "posts",
+        "posts_author_fk",
+        "author_id",
+        "users",
+        "id",
+        OnDeleteAction::Cascade,
+    );
+    ctrl.constraint_add(&fk).await.unwrap();
+    assert_ne!(data_partition("users", "u1"), data_partition("posts", "p1"));
+}
+
+async fn delete_author(ctrl: &mut NodeController<MockTransport>) -> serde_json::Value {
+    let handler = DbRequestHandler::new(NodeId::validated(1).unwrap());
+    let response = handler
+        .handle_publish(
+            ctrl,
+            "$DB/users/u1/delete",
+            &[],
+            &MqttRequestContext {
+                response_topic: Some("resp/t"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
+        )
+        .await;
+    parse_json_response(&response.unwrap().payload)
+}
+
+#[tokio::test]
+async fn a_forwarded_delete_on_a_node_that_lost_the_parent_keeps_its_children() {
+    let mut ctrl = setup_controller_all_partitions();
+    author_with_post(&mut ctrl).await;
+    let partition = data_partition("users", "u1");
+    lose_primary_role(&mut ctrl, partition, NodeId::validated(3).unwrap());
+
+    let request = forwarded_request(
+        super::super::protocol::JsonDbOp::Delete,
+        "users",
+        Some("u1"),
+        &[],
+        None,
+    );
+    ctrl.handle_json_db_request(NodeId::validated(2).unwrap(), partition, &request)
+        .await;
+
+    let replies = sent_json_replies(&ctrl);
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0]["code"], 503);
+    assert!(ctrl.db_get("users", "u1").is_some());
+    assert!(ctrl.db_get("posts", "p1").is_some());
+}
+
+#[tokio::test]
+async fn a_client_delete_without_the_parent_role_keeps_its_children() {
+    let mut ctrl = setup_controller_all_partitions();
+    author_with_post(&mut ctrl).await;
+    lose_primary_role(
+        &mut ctrl,
+        data_partition("users", "u1"),
+        NodeId::validated(1).unwrap(),
+    );
+
+    let json = delete_author(&mut ctrl).await;
+
+    assert_eq!(json["code"], 503);
+    assert!(ctrl.db_get("users", "u1").is_some());
+    assert!(ctrl.db_get("posts", "p1").is_some());
+}
+
+fn memory_backend() -> Arc<dyn mqdb_core::storage::StorageBackend> {
+    Arc::new(mqdb_core::storage::MemoryBackend::new())
+}
+
+fn controller_all_partitions_with_storage(
+    backend: &Arc<dyn mqdb_core::storage::StorageBackend>,
+) -> NodeController<MockTransport> {
+    let node1 = NodeId::validated(1).unwrap();
+    let (tx_raft_messages, _rx_raft_messages) = flume::unbounded();
+    let (tx_raft_events, _rx_raft_events) = flume::unbounded();
+    let mut ctrl = NodeController::new_with_storage(
+        node1,
+        MockTransport::new(node1),
+        TransportConfig::default(),
+        Some(Arc::clone(backend)),
+        tx_raft_messages,
+        tx_raft_events,
+    );
+    let mut map = PartitionMap::default();
+    for i in 0..NUM_PARTITIONS {
+        let partition = PartitionId::new(i).unwrap();
+        ctrl.become_primary(partition, Epoch::new(1));
+        map.set(
+            partition,
+            crate::cluster::PartitionAssignment {
+                primary: Some(node1),
+                replicas: vec![],
+                epoch: Epoch::new(1),
+            },
+        );
+    }
+    ctrl.update_partition_map(map);
+    ctrl
+}
+
+fn pending_cascades(
+    ctrl: &NodeController<MockTransport>,
+) -> Vec<crate::cluster::CascadePendingEntry> {
+    ctrl.stores()
+        .cluster_outbox()
+        .unwrap()
+        .pending_cascade_ops()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_cascade_child_without_the_primary_role_stays_pending_until_it_can_be_deleted() {
+    let mut ctrl = controller_all_partitions_with_storage(&memory_backend());
+    author_with_post(&mut ctrl).await;
+    let child_partition = data_partition("posts", "p1");
+    lose_primary_role(&mut ctrl, child_partition, NodeId::validated(1).unwrap());
+
+    let json = delete_author(&mut ctrl).await;
+    tokio::task::yield_now().await;
+
+    assert_eq!(json["status"], "ok");
+    assert!(ctrl.db_get("users", "u1").is_none());
+    assert!(ctrl.db_get("posts", "p1").is_some());
+    let pending = pending_cascades(&ctrl);
+    assert_eq!(pending.len(), 1);
+
+    ctrl.become_primary(child_partition, Epoch::new(3));
+    ctrl.replay_cascade_entries(&pending).await;
+
+    assert!(ctrl.db_get("posts", "p1").is_none());
+    assert!(pending_cascades(&ctrl).is_empty());
+}
+
+#[tokio::test]
+async fn a_replayed_cascade_without_the_child_role_stays_pending() {
+    let backend = memory_backend();
+    let mut ctrl = controller_all_partitions_with_storage(&backend);
+    author_with_post(&mut ctrl).await;
+    let ops = [crate::cluster::CascadeRemoteOp::Delete {
+        entity: "posts".to_string(),
+        id: "p1".to_string(),
+        sender: None,
+    }];
+    let (key, value) = crate::cluster::ClusterOutbox::build_cascade_entry("op-1", &ops);
+    backend.insert(&key, &value).unwrap();
+    let child_partition = data_partition("posts", "p1");
+    lose_primary_role(&mut ctrl, child_partition, NodeId::validated(1).unwrap());
+
+    let pending = pending_cascades(&ctrl);
+    ctrl.replay_cascade_entries(&pending).await;
+    tokio::task::yield_now().await;
+
+    assert!(ctrl.db_get("posts", "p1").is_some());
+    assert_eq!(pending_cascades(&ctrl).len(), 1);
+
+    ctrl.become_primary(child_partition, Epoch::new(3));
+    ctrl.replay_cascade_entries(&pending).await;
+
+    assert!(ctrl.db_get("posts", "p1").is_none());
+    assert!(pending_cascades(&ctrl).is_empty());
+}
+
+#[tokio::test]
+async fn a_cascade_refused_by_its_receiver_is_not_acked() {
+    let ctrl_node = NodeId::validated(1).unwrap();
+    let mut ctrl = create_test_controller(ctrl_node, MockTransport::new(ctrl_node));
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    ctrl.pending_constraints().insert_cascade_ack(42, tx);
+
+    let response = super::super::protocol::JsonDbResponse::new(
+        0,
+        serde_json::to_vec(&serde_json::json!({
+            "status": "error",
+            "code": 503,
+            "message": "this node is not the partition primary"
+        }))
+        .unwrap(),
+        "_mqdb/cascade_ack/1/42".to_string(),
+        None,
+    );
+    ctrl.handle_json_db_response(&response).await;
+
+    assert!(!rx.await.unwrap());
+}
+
+#[tokio::test]
+async fn a_forwarded_unique_create_on_a_node_that_lost_the_partition_is_refused_before_reserving() {
+    use super::super::db::ClusterConstraint;
+    let mut ctrl = setup_controller_all_partitions();
+    ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_email", "email"))
+        .await
+        .unwrap();
+    let partition = data_partition("users", "r9");
+    lose_primary_role(&mut ctrl, partition, NodeId::validated(3).unwrap());
+
+    let request = forwarded_request(
+        super::super::protocol::JsonDbOp::Create,
+        "users",
+        None,
+        br#"{"id":"r9","email":"x@y"}"#,
+        None,
+    );
+    let pending = ctrl
+        .handle_json_db_request(NodeId::validated(2).unwrap(), partition, &request)
+        .await;
+
+    assert!(pending.is_none());
+    let replies = sent_json_replies(&ctrl);
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0]["code"], 503);
+    assert_eq!(ctrl.transport().outbox.lock().unwrap().len(), 1);
+}

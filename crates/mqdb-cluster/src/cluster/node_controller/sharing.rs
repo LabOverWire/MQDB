@@ -8,7 +8,8 @@
 //! grant scans and access checks run on the resource's primary.
 
 use super::{ClusterTransport, NodeController};
-use crate::cluster::db::{data_partition, generate_id_for_partition};
+use crate::cluster::db::{DbDataStoreError, data_partition, generate_id_for_partition};
+use crate::cluster::db_handler::helpers::json_write_failure;
 use mqdb_core::types::{AccessLevel, SHARES_ENTITY};
 use serde_json::{Value, json};
 use std::collections::{HashSet, VecDeque};
@@ -258,7 +259,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 if !visited.insert(child.clone()) {
                     continue;
                 }
-                if self.is_primary_for_partition(data_partition(entity, &child)) {
+                if self.holds_primary_role(data_partition(entity, &child)) {
                     let existing = self.existing_grant_level(entity, &child, grant.grantee_key);
                     if existing.is_none_or(|current| current < grant.level) {
                         let _ = self.write_grant(entity, &child, grant).await;
@@ -292,6 +293,9 @@ impl<T: ClusterTransport> NodeController<T> {
         payload: &[u8],
         sender: Option<&str>,
     ) -> Vec<u8> {
+        if !self.holds_primary_role(data_partition(entity, id)) {
+            return json_write_failure(DbDataStoreError::NotPrimary);
+        }
         let payload: Value = match serde_json::from_slice(payload) {
             Ok(v) => v,
             Err(_) => return Self::json_error(400, "invalid JSON payload"),
@@ -376,6 +380,9 @@ impl<T: ClusterTransport> NodeController<T> {
         payload: &[u8],
         sender: Option<&str>,
     ) -> Vec<u8> {
+        if !self.holds_primary_role(data_partition(entity, id)) {
+            return json_write_failure(DbDataStoreError::NotPrimary);
+        }
         let payload: Value = match serde_json::from_slice(payload) {
             Ok(v) => v,
             Err(_) => return Self::json_error(400, "invalid JSON payload"),

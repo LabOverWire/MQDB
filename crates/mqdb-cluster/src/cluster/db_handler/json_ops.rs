@@ -814,7 +814,7 @@ impl DbRequestHandler {
                         .await;
                     Self::json_error(409, "entity already exists")
                 }
-                Err(_) => {
+                Err(error) => {
                     controller
                         .release_unique_constraints(
                             entity,
@@ -825,7 +825,7 @@ impl DbRequestHandler {
                             now_ms,
                         )
                         .await;
-                    Self::json_error(500, "internal error")
+                    helpers::json_write_failure(error)
                 }
             },
         )
@@ -1169,7 +1169,7 @@ impl DbRequestHandler {
                     }
                     Self::json_error(404, &format!("entity not found: {entity} id={id}"))
                 }
-                Err(_) => {
+                Err(error) => {
                     if has_unique_changes {
                         controller
                             .release_unique_constraints(
@@ -1177,7 +1177,7 @@ impl DbRequestHandler {
                             )
                             .await;
                     }
-                    Self::json_error(500, "internal error")
+                    helpers::json_write_failure(error)
                 }
             },
         )
@@ -1276,13 +1276,18 @@ impl DbRequestHandler {
             Ok(results) => results,
             Err(msg) => return JsonOpResult::Response(Self::json_error(409, &msg)),
         };
-        let effects = match controller.prepare_fk_side_effects(&all_results) {
-            Ok(effects) => effects,
-            Err(msg) => return JsonOpResult::Response(Self::json_error(409, &msg)),
+        let (cascade, ack_receivers) = match controller
+            .apply_fk_delete_side_effects(
+                entity,
+                id,
+                &all_results,
+                EventOrigin::new(sender, client_id),
+            )
+            .await
+        {
+            Ok(pair) => pair,
+            Err(payload) => return JsonOpResult::Response(payload),
         };
-        let (cascade, ack_receivers) = controller
-            .execute_fk_side_effects(&effects, EventOrigin::new(sender, client_id))
-            .await;
         let ctx = JsonOpContext {
             entity,
             id: Some(id),
@@ -1345,7 +1350,7 @@ impl DbRequestHandler {
             Err(db::DbDataStoreError::NotFound) => {
                 Self::json_error(404, &format!("entity not found: {entity} id={id}"))
             }
-            Err(_) => Self::json_error(500, "internal error"),
+            Err(error) => helpers::json_write_failure(error),
         }
     }
 
@@ -1630,7 +1635,7 @@ impl DbRequestHandler {
                                     .await;
                                 Self::json_error(409, "entity already exists")
                             }
-                            Err(_) => {
+                            Err(error) => {
                                 controller
                                     .release_unique_check_reservations(
                                         &entity,
@@ -1639,7 +1644,7 @@ impl DbRequestHandler {
                                         &confirmed_remotes,
                                     )
                                     .await;
-                                Self::json_error(500, "internal error")
+                                helpers::json_write_failure(error)
                             }
                         }
                     }
@@ -1739,7 +1744,7 @@ impl DbRequestHandler {
                                     &format!("entity not found: {entity} id={id}"),
                                 )
                             }
-                            Err(_) => {
+                            Err(error) => {
                                 controller
                                     .release_unique_check_reservations(
                                         &entity,
@@ -1748,7 +1753,7 @@ impl DbRequestHandler {
                                         &confirmed_remotes,
                                     )
                                     .await;
-                                Self::json_error(500, "internal error")
+                                helpers::json_write_failure(error)
                             }
                         }
                     }
@@ -1806,22 +1811,24 @@ impl DbRequestHandler {
                 response_topic,
                 correlation_data,
             } => {
-                let effects = match controller.prepare_fk_side_effects(&side_effects) {
-                    Ok(effects) => effects,
-                    Err(msg) => {
+                let (cascade, ack_receivers) = match controller
+                    .apply_fk_delete_side_effects(
+                        &entity,
+                        &id,
+                        &side_effects,
+                        EventOrigin::new(sender.as_deref(), client_id.as_deref()),
+                    )
+                    .await
+                {
+                    Ok(pair) => pair,
+                    Err(payload) => {
                         return Some(super::DbPublishResponse {
                             topic: response_topic,
-                            payload: Self::json_error(409, &msg),
+                            payload,
                             correlation_data,
                         });
                     }
                 };
-                let (cascade, ack_receivers) = controller
-                    .execute_fk_side_effects(
-                        &effects,
-                        EventOrigin::new(sender.as_deref(), client_id.as_deref()),
-                    )
-                    .await;
                 let ctx = JsonOpContext {
                     entity: &entity,
                     id: Some(&id),
