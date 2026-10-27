@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::{AdminRequest, ClusteredAgent, MESH_CHECK_INTERVAL_SECS, RunningBroker};
-use crate::cluster::node_controller::db_ops::EventOrigin;
 use crate::cluster::{
     ClusterMessage, ClusterTransport, LocalPublishKind, LocalPublishRequest, LocalRetainedWriter,
     NodeController, NodeId, ProcessingBatch, RoutedDeliveryLanes, TopicSubscriptionBroadcast,
@@ -720,11 +719,12 @@ impl ClusteredAgent {
             count = cascade_entries.len(),
             "replaying pending cascade operations"
         );
-        let local_work = send_cascade_operations(&ctrl, outbox, &cascade_entries).await;
         drop(ctrl);
-        if !local_work.is_empty() {
-            execute_local_cascade_work(&self.controller, local_work).await;
-        }
+        self.controller
+            .write()
+            .await
+            .replay_cascade_entries(&cascade_entries)
+            .await;
     }
 
     async fn retry_pending_cascades(&self) {
@@ -742,11 +742,12 @@ impl ClusteredAgent {
             count = cascade_entries.len(),
             "retrying pending cascade operations"
         );
-        let local_work = send_cascade_operations(&ctrl, outbox, &cascade_entries).await;
         drop(ctrl);
-        if !local_work.is_empty() {
-            execute_local_cascade_work(&self.controller, local_work).await;
-        }
+        self.controller
+            .write()
+            .await
+            .replay_cascade_entries(&cascade_entries)
+            .await;
     }
 
     async fn recover_pending_lwts(&self) {
@@ -802,134 +803,6 @@ impl ClusteredAgent {
             } else {
                 info!(client_id = %lwt.client_id, topic = %lwt.topic, "recovered and published pending LWT");
             }
-        }
-    }
-}
-
-struct LocalCascadeWork {
-    operation_id: String,
-    ops: Vec<crate::cluster::CascadeRemoteOp>,
-}
-
-async fn send_cascade_operations<T: ClusterTransport>(
-    ctrl: &NodeController<T>,
-    outbox: &crate::cluster::ClusterOutbox,
-    entries: &[crate::cluster::CascadePendingEntry],
-) -> Vec<LocalCascadeWork> {
-    let mut local_work = Vec::new();
-    for cascade in entries {
-        let mut ack_receivers = Vec::new();
-        let mut local_ops = Vec::new();
-        for op in &cascade.operations {
-            let partition = match op {
-                crate::cluster::CascadeRemoteOp::Delete { entity, id, .. }
-                | crate::cluster::CascadeRemoteOp::SetNull { entity, id, .. } => {
-                    crate::cluster::data_partition(entity, id)
-                }
-            };
-            if ctrl.is_primary_for_partition(partition) {
-                local_ops.push(op.clone());
-                continue;
-            }
-            match op {
-                crate::cluster::CascadeRemoteOp::Delete { entity, id, sender } => {
-                    if let Some(rx) = ctrl
-                        .send_cascade_request(
-                            partition,
-                            crate::cluster::JsonDbOp::Delete,
-                            entity,
-                            id,
-                            &[],
-                            EventOrigin::new(sender.as_deref(), None),
-                        )
-                        .await
-                    {
-                        ack_receivers.push(rx);
-                    }
-                }
-                crate::cluster::CascadeRemoteOp::SetNull {
-                    entity,
-                    id,
-                    field,
-                    expected_value,
-                } => {
-                    if let Some(rx) = ctrl
-                        .send_cascade_set_null_request(
-                            partition,
-                            entity,
-                            id,
-                            field,
-                            expected_value,
-                            None,
-                        )
-                        .await
-                    {
-                        ack_receivers.push(rx);
-                    }
-                }
-            }
-        }
-        if !local_ops.is_empty() {
-            local_work.push(LocalCascadeWork {
-                operation_id: cascade.operation_id.clone(),
-                ops: local_ops,
-            });
-        }
-        crate::cluster::node_controller::db_ops::spawn_cascade_ack_waiter(
-            Some(outbox.clone()),
-            cascade.operation_id.clone(),
-            ack_receivers,
-            false,
-        );
-    }
-    local_work
-}
-
-async fn execute_local_cascade_work(
-    controller: &Arc<tokio::sync::RwLock<NodeController<super::ClusterTransportKind>>>,
-    work: Vec<LocalCascadeWork>,
-) {
-    let mut ctrl = controller.write().await;
-    let now_ms = current_time_ms();
-    for item in &work {
-        for op in &item.ops {
-            match op {
-                crate::cluster::CascadeRemoteOp::Delete { entity, id, sender } => {
-                    if let Ok((db_entity, write)) = ctrl.db_delete_prepare(entity, id) {
-                        let data: serde_json::Value = serde_json::from_slice(&db_entity.data)
-                            .unwrap_or(serde_json::Value::Null);
-                        let event = ctrl.change_event(
-                            mqdb_core::events::ChangeEvent::delete(
-                                entity.clone(),
-                                id.clone(),
-                                data.clone(),
-                            ),
-                            EventOrigin::new(sender.as_deref(), None),
-                        );
-                        ctrl.commit_delete_with_change_event(write, event, &data, None)
-                            .await;
-                    }
-                }
-                crate::cluster::CascadeRemoteOp::SetNull {
-                    entity,
-                    id,
-                    field,
-                    expected_value,
-                } => {
-                    ctrl.execute_local_cascade_set_null(
-                        entity,
-                        id,
-                        field,
-                        expected_value,
-                        now_ms,
-                        EventOrigin::default(),
-                    )
-                    .await;
-                }
-            }
-        }
-        if let Some(outbox) = ctrl.stores().cluster_outbox() {
-            let _ = outbox.mark_cascade_delivered(&item.operation_id);
         }
     }
 }

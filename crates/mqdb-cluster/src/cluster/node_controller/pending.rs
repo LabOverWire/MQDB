@@ -88,9 +88,9 @@ impl PendingConstraintState {
         self.cascade_acks.lock().unwrap().insert(id, tx);
     }
 
-    pub fn resolve_cascade_ack(&self, request_id: u64) {
+    pub fn resolve_cascade_ack(&self, request_id: u64, delivered: bool) {
         if let Some(tx) = self.cascade_acks.lock().unwrap().remove(&request_id) {
-            let _ = tx.send(true);
+            let _ = tx.send(delivered);
         }
     }
 
