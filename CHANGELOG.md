@@ -15,7 +15,7 @@ Each entry lists the date and the crate versions that were released.
 
 ### Known limitations
 
-- Internal writes forwarded to a node that has not yet applied a partition's assignment are still dropped without notice (#221). It was seen only during the initial partition layout.
+- Internal writes forwarded to a node that has not yet applied a partition's assignment are still dropped without notice (#221). The dropped writes are session and subscription records from client connects, seen during the initial partition layout and after a node failure.
 
 ## 2026-10-25 — mqdb-cluster 0.4.34, mqdb-cli 0.8.62
 
