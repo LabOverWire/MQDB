@@ -3,139 +3,118 @@
 (* FORWARDED INTERNAL WRITES across partition reassignments (gh #221).     *)
 (*                                                                          *)
 (* The Raft log assigns one partition's primary, epoch by epoch. Each node *)
-(* applies the log on its own tick, so at any moment nodes can be at       *)
-(* different epochs. A node that issues an internal write (session, mqtt   *)
-(* subscription) applies it when its map names itself as primary, and      *)
-(* otherwise sends it, without waiting for a reply, to the node its map    *)
-(* names.                                                                   *)
+(* applies the log on its own tick, so nodes can be at different epochs,   *)
+(* and a node can apply several epochs at once. Origin issues writes for   *)
+(* one key in order: it applies each when its map names itself primary,    *)
+(* and otherwise sends it to the node its map names. Each pair of nodes    *)
+(* has one ordered channel (one QUIC stream per peer).                     *)
 (*                                                                          *)
 (* VERIFIED FACTS MODELLED (Design = "current"):                            *)
 (*  - write_or_forward_impl forwards to partition_map.primary with no ack  *)
-(*    (replication_ops.rs, change_events.rs forward_write_with_change_event)*)
-(*  - handle_write_request drops a write when the receiver's map does not  *)
-(*    name it primary ("received write request but not primary")           *)
+(*  - handle_write_request drops a write when the receiver is not primary  *)
 (*  - the event loop applies the Raft map only on its tick                 *)
-(*    (event_loop.rs handle_tick, apply_raft_partition_map)                *)
 (*                                                                          *)
-(* Design = "fixed": the forwarder stamps the epoch of its map on the      *)
-(* write. A receiver that is not primary holds the write while its own     *)
-(* epoch is older than the stamp, and otherwise forwards it to the node    *)
-(* its map names, stamped with its own epoch. A write whose stamp equals   *)
-(* the receiver's epoch is never received by a node that is not primary:   *)
-(* the CASE has no arm for it, so TLC reports an error if it happens.      *)
+(* Design = "hold": the forwarder stamps the epoch of its map on the       *)
+(* write. A receiver holds a write stamped newer than its own epoch, even  *)
+(* if it is primary now, and routes it again in the same step that applies *)
+(* the newer map: applied if primary, dropped otherwise. A write stamped   *)
+(* at or below the receiver's epoch is applied if it is primary and        *)
+(* dropped otherwise; it is never sent on, since a second hop could land   *)
+(* after a newer write Origin sent straight to the primary.                *)
 (*                                                                          *)
-(* NoLoss: once every write is issued, every node has applied the whole    *)
-(* log, nothing is in flight and nothing is held, every write is stored.   *)
+(* Ordered: every node applies Origin's writes in issue order.             *)
+(* Delivered: with Lagging, Origin issues only when its map is at least as *)
+(* new as every node's, and a node applies one epoch at a time and never  *)
+(* past the stamp of a write already on its way to it: the receiver lags.  *)
+(* Every write is then applied somewhere. The current design drops writes  *)
+(* there; the hold design does not. A write that reaches a node already    *)
+(* past its stamp (the sender was behind) is still dropped by both.        *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
-CONSTANTS Assign, Writes, Design
+CONSTANTS Assign, K, Origin, Design, Lagging
 
 Nodes == {1, 2, 3}
 None == 0
 MaxEpoch == Len(Assign)
 
-VARIABLES applied, issued, msgs, held, stored
+VARIABLES applied, issued, chan, held, stored
 
-vars == <<applied, issued, msgs, held, stored>>
-
-Quiescent ==
-    /\ issued = Writes
-    /\ \A n \in Nodes : applied[n] = MaxEpoch
-    /\ msgs = {}
-    /\ \A n \in Nodes : held[n] = {}
+vars == <<applied, issued, chan, held, stored>>
 
 PrimaryAt(e) == IF e = 0 THEN None ELSE Assign[e]
 Believed(n) == PrimaryAt(applied[n])
 
-Msg == [w : Writes, to : Nodes, ep : 0..MaxEpoch]
-
-TypeOK ==
-    /\ applied \in [Nodes -> 0..MaxEpoch]
-    /\ issued \subseteq Writes
-    /\ msgs \subseteq Msg
-    /\ held \in [Nodes -> SUBSET [w : Writes, ep : 0..MaxEpoch]]
-    /\ stored \subseteq Writes
+Quiescent ==
+    /\ issued = K
+    /\ \A n \in Nodes : applied[n] = MaxEpoch
+    /\ \A a, b \in Nodes : chan[<<a, b>>] = <<>>
+    /\ \A n \in Nodes : held[n] = <<>>
 
 Init ==
     /\ applied = [n \in Nodes |-> 0]
-    /\ issued = {}
-    /\ msgs = {}
-    /\ held = [n \in Nodes |-> {}]
-    /\ stored = {}
+    /\ issued = 0
+    /\ chan = [p \in Nodes \X Nodes |-> <<>>]
+    /\ held = [n \in Nodes |-> <<>>]
+    /\ stored = [n \in Nodes |-> <<>>]
 
-Route(n, w) ==
-    IF Believed(n) = n
-    THEN /\ stored' = stored \cup {w}
-         /\ UNCHANGED msgs
-    ELSE /\ msgs' = msgs \cup {[w |-> w, to |-> Believed(n), ep |-> applied[n]]}
-         /\ UNCHANGED stored
+Store(n, ws) == stored' = [stored EXCEPT ![n] = @ \o ws]
 
-Advance(n) ==
-    /\ applied[n] < MaxEpoch
-    /\ applied' = [applied EXCEPT ![n] = @ + 1]
-    /\ UNCHANGED <<issued, msgs, held, stored>>
+Advance(n, e) ==
+    LET ready == SelectSeq(held[n], LAMBDA h : h.ep <= e)
+    IN /\ applied[n] < e
+       /\ Lagging =>
+             /\ e = applied[n] + 1
+             /\ \A f \in Nodes : \A i \in DOMAIN chan[<<f, n>>] : chan[<<f, n>>][i].ep >= e
+       /\ applied' = [applied EXCEPT ![n] = e]
+       /\ held' = [held EXCEPT ![n] = SelectSeq(@, LAMBDA h : h.ep > e)]
+       /\ IF PrimaryAt(e) = n
+          THEN Store(n, [i \in 1..Len(ready) |-> ready[i].w])
+          ELSE UNCHANGED stored
+       /\ UNCHANGED <<issued, chan>>
 
-Issue(n, w) ==
-    /\ w \notin issued
-    /\ Believed(n) # None
-    /\ issued' = issued \cup {w}
-    /\ Route(n, w)
+Issue ==
+    /\ issued < K
+    /\ Believed(Origin) # None
+    /\ Lagging => \A n \in Nodes : applied[n] <= applied[Origin]
+    /\ issued' = issued + 1
+    /\ IF Believed(Origin) = Origin
+       THEN /\ Store(Origin, <<issued + 1>>)
+            /\ UNCHANGED chan
+       ELSE /\ chan' = [chan EXCEPT ![<<Origin, Believed(Origin)>>] =
+                  Append(@, [w |-> issued + 1, ep |-> applied[Origin]])]
+            /\ UNCHANGED stored
     /\ UNCHANGED <<applied, held>>
 
-Receive(m) ==
-    LET n == m.to IN
-    /\ m \in msgs
-    /\ CASE Believed(n) = n ->
-                /\ stored' = stored \cup {m.w}
-                /\ msgs' = msgs \ {m}
-                /\ UNCHANGED held
-         [] Design = "current" ->
-                /\ msgs' = msgs \ {m}
-                /\ UNCHANGED <<held, stored>>
-         [] m.ep > applied[n] ->
-                /\ held' = [held EXCEPT ![n] = @ \cup {[w |-> m.w, ep |-> m.ep]}]
-                /\ msgs' = msgs \ {m}
-                /\ UNCHANGED stored
-         [] m.ep < applied[n] ->
-                /\ msgs' = (msgs \ {m}) \cup
-                       {[w |-> m.w, to |-> Believed(n), ep |-> applied[n]]}
-                /\ UNCHANGED <<held, stored>>
-    /\ UNCHANGED <<applied, issued>>
-
-Release(n, h) ==
-    /\ h \in held[n]
-    /\ h.ep <= applied[n]
-    /\ held' = [held EXCEPT ![n] = @ \ {h}]
-    /\ IF Believed(n) = n
-       THEN /\ stored' = stored \cup {h.w}
-            /\ UNCHANGED msgs
-       ELSE /\ msgs' = msgs \cup {[w |-> h.w, to |-> Believed(n), ep |-> applied[n]]}
-            /\ UNCHANGED stored
+Receive(from, n) ==
+    /\ chan[<<from, n>>] # <<>>
+    /\ LET m == Head(chan[<<from, n>>])
+       IN /\ chan' = [chan EXCEPT ![<<from, n>>] = Tail(@)]
+          /\ CASE Design = "hold" /\ m.ep > applied[n] ->
+                    /\ held' = [held EXCEPT ![n] = Append(@, m)]
+                    /\ UNCHANGED stored
+             [] Believed(n) = n ->
+                    /\ Store(n, <<m.w>>)
+                    /\ UNCHANGED held
+             [] OTHER ->
+                    UNCHANGED <<held, stored>>
     /\ UNCHANGED <<applied, issued>>
 
 Done == Quiescent /\ UNCHANGED vars
 
 Next ==
     \/ Done
-    \/ \E n \in Nodes : Advance(n)
-    \/ \E n \in Nodes, w \in Writes : Issue(n, w)
-    \/ \E m \in msgs : Receive(m)
-    \/ \E n \in Nodes : \E h \in held[n] : Release(n, h)
+    \/ \E n \in Nodes, e \in 1..MaxEpoch : Advance(n, e)
+    \/ Issue
+    \/ \E a, b \in Nodes : Receive(a, b)
 
-Fairness ==
-    /\ \A n \in Nodes : WF_vars(Advance(n))
-    /\ \A n \in Nodes, w \in Writes : WF_vars(Issue(n, w))
-    /\ \A m \in Msg : WF_vars(Receive(m))
-    /\ \A n \in Nodes : \A e \in 0..MaxEpoch, w \in Writes :
-           WF_vars(Release(n, [w |-> w, ep |-> e]))
+Spec == Init /\ [][Next]_vars
 
-Spec == Init /\ [][Next]_vars /\ Fairness
+Ordered ==
+    \A n \in Nodes : \A i, j \in DOMAIN stored[n] :
+        i < j => stored[n][i] < stored[n][j]
 
-EventuallyQuiescent == <>[]Quiescent
-
-NoLoss == Quiescent => stored = Writes
-
-HeldBounded == \A n \in Nodes : Cardinality(held[n]) <= Cardinality(Writes)
+Delivered ==
+    Quiescent => \A w \in 1..K : \E n \in Nodes, i \in DOMAIN stored[n] : stored[n][i] = w
 
 =============================================================================

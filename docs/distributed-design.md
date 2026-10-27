@@ -90,13 +90,12 @@ When a write is generated, the node must decide its role:
 3. **If not primary**: Forward `WriteRequest` to the partition's primary node, stamped with the epoch of the assignment that named it
 4. **Special case**: Broadcast entities apply locally first, then follow normal routing
 
-Each node applies the Raft partition map on its own tick, so the receiver of a forwarded write may not have reached the sender's assignment yet. A receiver that is not primary compares the write's epoch with its own assignment's epoch:
+Each node applies the Raft partition map on its own tick, so the receiver of a forwarded write may not have reached the sender's assignment yet. The receiver compares the write's epoch with its own assignment's epoch:
 
-- **Newer than its own**: holds the write (up to 1024 writes, for up to 30 s) and routes it again once it applies that assignment
-- **Older than its own**: forwards it to the primary its own map names, stamped with its own epoch
-- **Equal**: drops it with `received write request but not primary`; both nodes applied the same assignment and disagree, which the Raft map rules out
+- **Newer than its own**: holds the write, even if it is primary at its current epoch (up to 1024 writes, for up to 30 s), and routes it again in the same step that applies a newer map
+- **Equal or older**: applies it if primary, drops it otherwise (`received write request but not primary` or `received write request for an older assignment`)
 
-Each forward raises the epoch, so a write cannot loop. Modelled in `specs/ClusterForwardedWrite.tla`.
+A write is never sent on a second hop: it could reach the primary after a newer write the sender sent there directly. This recovers writes sent to a receiver that lags behind the sender; a write from a sender that is behind the receiver is still dropped. Modelled in `specs/ClusterForwardedWrite.tla`.
 
 This creates a two-phase pattern for non-primary nodes: the write eventually reaches the primary, which applies and replicates it, and the write returns to the originating node as a replicated write.
 

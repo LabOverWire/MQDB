@@ -80,7 +80,7 @@ async fn a_write_for_a_newer_assignment_is_applied_once_the_receiver_catches_up(
 }
 
 #[tokio::test]
-async fn a_write_for_an_older_assignment_is_sent_on_to_the_current_primary() {
+async fn a_write_for_an_older_assignment_is_not_sent_on() {
     let partition = session_partition("c1");
     let mut ctrl = controller(2);
     ctrl.apply_raft_partition_map(map_with(partition, node(3), &[node(2)], 2))
@@ -92,11 +92,29 @@ async fn a_write_for_an_older_assignment_is_sent_on_to_the_current_primary() {
     );
     ctrl.process_messages().await;
 
-    assert_eq!(
-        forwarded(&ctrl),
-        [(node(3), "c1".to_string(), Epoch::new(2))]
-    );
+    assert!(forwarded(&ctrl).is_empty());
     assert!(ctrl.stores().sessions.get("c1").is_none());
+}
+
+#[tokio::test]
+async fn a_write_for_a_newer_assignment_waits_even_on_the_current_primary() {
+    let partition = session_partition("c1");
+    let mut ctrl = controller(2);
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
+        .await;
+
+    ctrl.transport.inject_message(
+        node(1),
+        ClusterMessage::WriteRequest(session_write("c1", 3)),
+    );
+    ctrl.process_messages().await;
+    assert!(ctrl.stores().sessions.get("c1").is_none());
+
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 3))
+        .await;
+
+    assert!(ctrl.stores().sessions.get("c1").is_some());
+    assert_eq!(replicated_ids(&ctrl, node(3)), ["c1"]);
 }
 
 #[tokio::test]

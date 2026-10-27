@@ -16,6 +16,17 @@ use super::{
 };
 use std::sync::atomic::Ordering as AtomicOrdering;
 
+fn is_broadcast_entity(entity_name: &str) -> bool {
+    [
+        entity::TOPIC_INDEX,
+        entity::WILDCARDS,
+        entity::CLIENT_LOCATIONS,
+        entity::DB_SCHEMA,
+        entity::DB_CONSTRAINT,
+    ]
+    .contains(&entity_name)
+}
+
 impl<T: ClusterTransport> NodeController<T> {
     pub(crate) async fn handle_write(&mut self, from: NodeId, write: &ReplicationWrite) {
         let start = std::time::Instant::now();
@@ -81,11 +92,7 @@ impl<T: ClusterTransport> NodeController<T> {
     pub(crate) async fn handle_write_request(&mut self, from: NodeId, write: ReplicationWrite) {
         WRITE_RECEIVED.fetch_add(1, AtomicOrdering::Relaxed);
         let partition = write.partition;
-        let is_broadcast = write.entity == entity::TOPIC_INDEX
-            || write.entity == entity::WILDCARDS
-            || write.entity == entity::CLIENT_LOCATIONS
-            || write.entity == entity::DB_SCHEMA
-            || write.entity == entity::DB_CONSTRAINT;
+        let is_broadcast = is_broadcast_entity(&write.entity);
 
         tracing::debug!(
             ?partition,
@@ -110,38 +117,34 @@ impl<T: ClusterTransport> NodeController<T> {
         self.route_write_request(from, write).await;
     }
 
-    async fn route_write_request(&mut self, from: NodeId, mut write: ReplicationWrite) {
+    async fn route_write_request(&mut self, from: NodeId, write: ReplicationWrite) {
         let partition = write.partition;
+        let assignment_epoch = self.partition_map.get(partition).epoch;
+        if write.epoch > assignment_epoch {
+            self.hold_write_request(from, write).await;
+            return;
+        }
         if self.is_primary_for_partition(partition) {
             self.apply_write_request(write, false).await;
             return;
         }
 
-        let assignment = self.partition_map.get(partition);
-        match (write.epoch.cmp(&assignment.epoch), assignment.primary) {
-            (std::cmp::Ordering::Greater, _) => self.hold_write_request(from, write).await,
-            (std::cmp::Ordering::Less, Some(primary)) => {
-                tracing::debug!(
-                    ?partition,
-                    from = from.get(),
-                    primary = primary.get(),
-                    "write request for an older assignment, sending on to primary"
-                );
-                write.epoch = assignment.epoch;
-                let event = write.event.take();
-                self.forward_write_with_change_event(primary, write, event)
-                    .await;
-            }
-            _ => {
-                tracing::warn!(
-                    ?partition,
-                    from = from.get(),
-                    "received write request but not primary"
-                );
-                if let Some(record) = write.event {
-                    self.publish_unowned_change_event(partition, record).await;
-                }
-            }
+        if write.epoch < assignment_epoch {
+            tracing::warn!(
+                ?partition,
+                from = from.get(),
+                epoch = ?write.epoch,
+                "received write request for an older assignment"
+            );
+        } else {
+            tracing::warn!(
+                ?partition,
+                from = from.get(),
+                "received write request but not primary"
+            );
+        }
+        if let Some(record) = write.event {
+            self.publish_unowned_change_event(partition, record).await;
         }
     }
 
@@ -401,9 +404,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
     pub async fn apply_raft_partition_map(&mut self, raft_map: PartitionMap) -> bool {
         if self.partition_map == raft_map {
-            if !self.held_writes.is_empty() {
-                self.release_held_writes().await;
-            }
+            self.release_held_writes().await;
             return false;
         }
         let current_map = self.partition_map.clone();
@@ -511,17 +512,12 @@ impl<T: ClusterTransport> NodeController<T> {
         let start = std::time::Instant::now();
         let partition = write.partition;
 
-        let is_broadcast_entity = write.entity == entity::TOPIC_INDEX
-            || write.entity == entity::WILDCARDS
-            || write.entity == entity::CLIENT_LOCATIONS
-            || write.entity == entity::DB_SCHEMA
-            || write.entity == entity::DB_CONSTRAINT;
         if write.entity == entity::DB_UNIQUE {
             self.replicate_unique_to_group(write).await;
             return;
         }
 
-        if is_broadcast_entity {
+        if is_broadcast_entity(&write.entity) {
             self.broadcast_write(&write).await;
             return;
         }
