@@ -103,12 +103,14 @@ impl<T: ClusterTransport> NodeController<T> {
         );
 
         if is_broadcast {
+            if self.role(partition) == ReplicaRole::Primary {
+                self.apply_write_request(write).await;
+                return;
+            }
             if let Err(e) = self.stores.apply_write(&write) {
                 tracing::error!(?partition, ?e, "failed to apply broadcast write to stores");
             }
-            if self.is_primary_for_partition(partition) {
-                self.apply_write_request(write, true).await;
-            } else if let Some(record) = write.event {
+            if let Some(record) = write.event {
                 self.publish_unowned_change_event(partition, record).await;
             }
             return;
@@ -125,7 +127,7 @@ impl<T: ClusterTransport> NodeController<T> {
             return;
         }
         if self.is_primary_for_partition(partition) {
-            self.apply_write_request(write, false).await;
+            self.apply_write_request(write).await;
             return;
         }
 
@@ -198,25 +200,12 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    async fn apply_write_request(&mut self, mut write: ReplicationWrite, store_applied: bool) {
+    async fn apply_write_request(&mut self, mut write: ReplicationWrite) {
         let partition = write.partition;
-        if !store_applied && let Err(e) = self.stores.apply_write(&write) {
-            tracing::error!(?partition, ?e, "failed to apply write request to stores");
-            return;
-        }
-
-        tracing::debug!(
-            ?partition,
-            entity = ?write.entity,
-            id = ?write.id,
-            "applied write request to stores"
-        );
-        self.sync_retained_to_broker(&write).await;
-
         if self.role(partition) != ReplicaRole::Primary {
             tracing::warn!(
                 ?partition,
-                "failed to replicate write request: not in the primary role"
+                "write request dropped: primary in the map but not in the primary role"
             );
             if let Some(record) = write.event {
                 self.publish_unowned_change_event(partition, record).await;
@@ -224,10 +213,15 @@ impl<T: ClusterTransport> NodeController<T> {
             return;
         }
 
+        let retained_topic = (write.entity == entity::RETAINED).then(|| write.id.clone());
         let replicas: Vec<NodeId> = self.partition_map.replicas(partition).to_vec();
         let event = write.event.take();
         if let Err(e) = self.replicate_write_async(write, &replicas, event).await {
             tracing::warn!(?partition, ?e, "failed to replicate write request");
+            return;
+        }
+        if let Some(topic) = retained_topic {
+            self.transport.queue_retained_refresh(topic).await;
         }
     }
 

@@ -220,7 +220,7 @@ mod tests {
     use crate::cluster::PartitionId;
     use crate::cluster::raft::RaftConfig;
     use crate::cluster::raft::RequestVoteRequest;
-    use crate::cluster::raft::test_support::FlushFailingBackend;
+    use crate::cluster::test_support::FaultyBackend;
     use crate::cluster::transport::{InboundMessage, TransportError};
     use std::sync::Mutex;
 
@@ -281,7 +281,7 @@ mod tests {
     async fn storage_failure_stops_the_task_and_the_node() {
         let node1 = NodeId::validated(1).unwrap();
         let node2 = NodeId::validated(2).unwrap();
-        let backend = FlushFailingBackend::shared();
+        let backend = FaultyBackend::shared();
         let transport = RecordingTransport {
             node_id: node2,
             sent: Arc::new(Mutex::new(Vec::new())),
