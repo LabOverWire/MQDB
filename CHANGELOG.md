@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-28 — mqdb-agent 0.9.0, mqdb-cluster 0.4.37, mqdb-vault 0.1.9, mqdb-cli 0.8.65
+
+### Fixed
+
+- **`--no-rate-limit` now also lifts the `/auth/ticket` limit** (#228). Every other HTTP auth limiter was lifted, but tickets stayed at `--ticket-rate-limit` (default 10 per minute per IP), so the 11th ticket in a minute still got `429`. Browser clients mint a ticket on every MQTT-over-WebSocket connect, so local test suites sharing 127.0.0.1 failed to connect. Applies to agent and cluster. `--ticket-rate-limit` is ignored with `--no-rate-limit`.
+- With `--no-rate-limit`, the HTTP auth limiters and the vault unlock limiter still recorded every request and scanned them under the limiter's lock, so the cost of each request and the memory used grew with traffic. From one IP, a request took about 2.4 µs on average over the first 10k requests and about 87 µs after 190k. An unlimited limiter now records nothing.
+
+### Breaking changes
+
+- `mqdb-agent` 0.8.39 → **0.9.0**: `HttpServerConfig.auth_rate_limit: u32` is replaced by `no_rate_limit: bool`. The old field was only ever compared to `u32::MAX`; set `no_rate_limit: true` where you set `auth_rate_limit: u32::MAX`, and `false` otherwise.
+
+### Known limitations
+
+- An internal write forwarded by a node whose partition map is behind the receiver's is still dropped, and a held write is dropped if more than 1024 are held, if the receiver does not reach its epoch within 30 s, or if the receiver restarts.
+- With JWT or SCRAM enabled, valid password logins count as failed attempts for the auth rate limiter, and a client is locked out after a few connections per IP (#224). `--no-rate-limit` avoids it.
+- ACL rules changed at runtime through `$DB/_admin/acl/*` do not apply to federated JWT clients until restart (#225).
+- The primary writes each forwarded internal write to its store twice, and a node the map names primary but that is not in the primary role stores the write without replicating it (#227).
+
 ## 2026-10-27 — mqdb-agent 0.8.39, mqdb-cluster 0.4.36, mqdb-cli 0.8.64
 
 ### Fixed
