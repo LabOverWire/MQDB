@@ -88,7 +88,7 @@ Expected: `{"expires_in":30,"ticket":"<jwt>"}`
 The ticket JWT has `"ticket": true` in claims and expires quickly (default 30s,
 configurable via `--ticket-expiry-secs`).
 
-Rate limited: `--ticket-rate-limit` requests per minute per IP (default: 10).
+Rate limited: `--ticket-rate-limit` requests per minute per IP (default: 10). `--no-rate-limit` lifts this limit too.
 
 ### Logout
 
@@ -139,7 +139,7 @@ Use `--cors-origin http://localhost:8000` to enable credentialed CORS for:
 | `--ticket-expiry-secs` | Ticket JWT lifetime (default: 30) |
 | `--cookie-secure` | Set `Secure` flag on session cookies (requires HTTPS) |
 | `--cors-origin` | CORS allowed origin for auth endpoints |
-| `--ticket-rate-limit` | Max ticket requests per minute per IP (default: 10) |
+| `--ticket-rate-limit` | Max ticket requests per minute per IP (default: 10; ignored with `--no-rate-limit`) |
 | `--trust-proxy` | Trust `X-Forwarded-For` for client IP (behind reverse proxy) |
 | `--identity-key-file` | Path to 32-byte identity encryption key (auto-generated if omitted) |
 

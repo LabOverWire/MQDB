@@ -451,7 +451,11 @@ pub(crate) fn build_http_config(
         ticket_expiry_secs: oauth.ticket_expiry_secs,
         cookie_secure: oauth.cookie_secure,
         cors_origin: oauth.cors_origin.clone(),
-        ticket_rate_limit: oauth.ticket_rate_limit,
+        ticket_rate_limit: if auth.no_rate_limit {
+            u32::MAX
+        } else {
+            oauth.ticket_rate_limit
+        },
         trust_proxy: oauth.trust_proxy,
         identity_crypto,
         ownership_config,
@@ -575,4 +579,47 @@ fn deserialize_key_material(data: &[u8]) -> Result<(&[u8], &[u8]), String> {
     let salt = &data[4..4 + salt_len];
     let wrapped_key = &data[4 + salt_len..];
     Ok((salt, wrapped_key))
+}
+
+#[cfg(all(test, feature = "http-api"))]
+mod tests {
+    use super::build_http_config;
+    use crate::cli_types::{AgentAction, Cli, Commands};
+    use clap::Parser;
+
+    fn ticket_rate_limit(extra: &[&str]) -> u32 {
+        let args = [
+            "mqdb",
+            "agent",
+            "start",
+            "--memory-backend",
+            "--jwt-key-data",
+            "0123456789abcdef0123456789abcdef",
+            "--email-auth",
+        ];
+        let cli = Cli::try_parse_from(args.iter().chain(extra)).expect("agent start args parse");
+        let Commands::Agent {
+            action: AgentAction::Start(fields),
+        } = cli.command
+        else {
+            panic!("expected agent start");
+        };
+        let config = build_http_config(
+            "127.0.0.1:0".parse().expect("socket address"),
+            &fields.auth,
+            &fields.oauth,
+            None,
+            std::sync::Arc::new(mqdb_core::types::OwnershipConfig::default()),
+            std::path::Path::new("."),
+        )
+        .expect("http config builds");
+        config.ticket_rate_limit
+    }
+
+    #[test]
+    fn no_rate_limit_lifts_the_ticket_limit() {
+        assert_eq!(ticket_rate_limit(&[]), 10);
+        assert_eq!(ticket_rate_limit(&["--ticket-rate-limit", "50"]), 50);
+        assert_eq!(ticket_rate_limit(&["--no-rate-limit"]), u32::MAX);
+    }
 }
