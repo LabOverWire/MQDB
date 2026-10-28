@@ -675,3 +675,43 @@ async fn a_partition_snapshot_carries_the_pending_events() {
     assert_eq!(events[0].id, EventId::new(1, 1));
     assert_eq!(events[0].record.order_key, "ev/r1");
 }
+
+fn primary_with_failing_store(
+    id: u16,
+) -> (
+    NodeController<MockTransport>,
+    Arc<crate::cluster::test_support::FaultyBackend>,
+) {
+    let backend = crate::cluster::test_support::FaultyBackend::shared();
+    let storage: Arc<dyn StorageBackend> = backend.clone();
+    (controller_with_storage(id, &storage), backend)
+}
+
+#[tokio::test]
+async fn a_forwarded_write_the_primary_cannot_store_publishes_its_event_untracked() {
+    let (partition, writes) = forwarded_writes(node(2)).await;
+    let (mut primary, backend) = primary_with_failing_store(2);
+    assign(&mut primary, node(2), &[]);
+    primary.become_primary(partition, Epoch::new(1));
+    backend.fail_writes(true);
+    for (_, message) in writes {
+        primary.transport.inject_message(node(1), message);
+    }
+    primary.process_messages().await;
+
+    assert_eq!(delivered_locally(&primary).len(), 1);
+    assert!(replication_writes_sent(&primary).is_empty());
+}
+
+#[tokio::test]
+async fn a_write_with_an_event_the_primary_cannot_store_publishes_its_event_untracked() {
+    let (mut primary, backend) = primary_with_failing_store(1);
+    primary_with(&mut primary, &[node(2)]);
+    backend.fail_writes(true);
+
+    commit(&mut primary, 1).await;
+
+    assert_eq!(delivered_locally(&primary).len(), 1);
+    assert!(replication_writes_sent(&primary).is_empty());
+    assert_eq!(backend.keys_containing(ID).unwrap(), 0);
+}

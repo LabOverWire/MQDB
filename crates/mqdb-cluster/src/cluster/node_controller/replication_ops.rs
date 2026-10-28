@@ -213,15 +213,15 @@ impl<T: ClusterTransport> NodeController<T> {
             return;
         }
 
-        let retained = (write.entity == entity::RETAINED).then(|| write.clone());
+        let retained_topic = (write.entity == entity::RETAINED).then(|| write.id.clone());
         let replicas: Vec<NodeId> = self.partition_map.replicas(partition).to_vec();
         let event = write.event.take();
         if let Err(e) = self.replicate_write_async(write, &replicas, event).await {
             tracing::warn!(?partition, ?e, "failed to replicate write request");
             return;
         }
-        if let Some(write) = retained {
-            self.sync_retained_to_broker(&write).await;
+        if let Some(topic) = retained_topic {
+            self.transport.queue_retained_refresh(topic).await;
         }
     }
 

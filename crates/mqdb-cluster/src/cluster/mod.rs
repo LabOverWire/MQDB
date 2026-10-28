@@ -41,6 +41,8 @@ mod snapshot;
 mod store_manager;
 pub(crate) mod store_utils;
 mod subscription_cache;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod topic_index;
 mod topic_trie;
 mod transport;

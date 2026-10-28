@@ -711,8 +711,8 @@ impl RaftNode {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::FlushFailingBackend;
     use super::*;
+    use crate::cluster::test_support::FaultyBackend;
 
     fn test_config() -> RaftConfig {
         RaftConfig {
@@ -918,7 +918,7 @@ mod tests {
 
     #[test]
     fn snapshot_that_cannot_be_persisted_is_not_acknowledged() {
-        let backend = FlushFailingBackend::shared();
+        let backend = FaultyBackend::shared();
         let peer1 = NodeId::validated(1).unwrap();
         let mut follower = RaftNode::create_with_storage(
             NodeId::validated(2).unwrap(),
@@ -953,7 +953,7 @@ mod tests {
 
     #[test]
     fn entries_that_cannot_be_persisted_are_not_acknowledged() {
-        let backend = FlushFailingBackend::shared();
+        let backend = FaultyBackend::shared();
         let peer1 = NodeId::validated(1).unwrap();
         let mut follower = RaftNode::create_with_storage(
             NodeId::validated(2).unwrap(),
@@ -1025,7 +1025,7 @@ mod tests {
 
     #[test]
     fn vote_that_cannot_be_persisted_is_not_granted() {
-        let backend = FlushFailingBackend::shared();
+        let backend = FaultyBackend::shared();
         let mut node = RaftNode::create_with_storage(
             NodeId::validated(2).unwrap(),
             test_config(),
@@ -1046,7 +1046,7 @@ mod tests {
 
     #[test]
     fn same_term_vote_that_cannot_be_persisted_is_not_granted() {
-        let backend = FlushFailingBackend::shared();
+        let backend = FaultyBackend::shared();
         let peer1 = NodeId::validated(1).unwrap();
         let peer3 = NodeId::validated(3).unwrap();
         let mut node = RaftNode::create_with_storage(
@@ -1071,7 +1071,7 @@ mod tests {
 
     #[test]
     fn election_whose_term_cannot_be_persisted_sends_no_requests() {
-        let backend = FlushFailingBackend::shared();
+        let backend = FaultyBackend::shared();
         let mut node = RaftNode::create_with_storage(
             NodeId::validated(2).unwrap(),
             test_config(),
@@ -1093,7 +1093,7 @@ mod tests {
 
     #[test]
     fn leader_entry_that_cannot_be_persisted_is_not_committed() {
-        let backend = FlushFailingBackend::shared();
+        let backend = FaultyBackend::shared();
         let mut leader = RaftNode::create_with_storage(
             NodeId::validated(1).unwrap(),
             test_config(),
