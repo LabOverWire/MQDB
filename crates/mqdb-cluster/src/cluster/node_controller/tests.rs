@@ -1147,18 +1147,13 @@ async fn replicate_write_async_sends_without_tracking() {
     let transport = MockTransport::new(node1);
     let mut ctrl = create_test_controller(node1, transport);
 
-    let partition = PartitionId::ZERO;
+    let partition = session_partition("tracked-client");
     ctrl.become_primary(partition, Epoch::new(1));
 
-    let write = ReplicationWrite::new(
-        partition,
-        Operation::Insert,
-        Epoch::new(1),
-        0,
-        "test".to_string(),
-        "1".to_string(),
-        vec![1, 2, 3],
-    );
+    let (_, write) = ctrl
+        .stores()
+        .create_session_replicated("tracked-client")
+        .unwrap();
 
     let seq = ctrl
         .replicate_write_async(write, &[node2, node3], None)

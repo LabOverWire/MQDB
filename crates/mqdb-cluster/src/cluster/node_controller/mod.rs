@@ -1773,6 +1773,7 @@ pub enum ReplicationError {
     TooManyPending,
     QuorumFailed,
     Timeout,
+    StoreFailed,
 }
 
 impl std::fmt::Display for ReplicationError {
@@ -1782,6 +1783,7 @@ impl std::fmt::Display for ReplicationError {
             Self::TooManyPending => write!(f, "too many pending writes"),
             Self::QuorumFailed => write!(f, "quorum failed"),
             Self::Timeout => write!(f, "replication timeout"),
+            Self::StoreFailed => write!(f, "failed to apply write to the local store"),
         }
     }
 }

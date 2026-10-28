@@ -2,7 +2,81 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::*;
+use crate::cluster::protocol::CatchupResponse;
 use crate::cluster::{PartitionAssignment, PartitionMap};
+use mqdb_core::error::Result;
+use mqdb_core::storage::{BatchOperations, MemoryBackend};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+#[derive(Default)]
+struct CountingBackend {
+    inner: MemoryBackend,
+    inserts: AtomicUsize,
+    fail_inserts: AtomicBool,
+}
+
+impl CountingBackend {
+    fn inserts(&self) -> usize {
+        self.inserts.load(Ordering::SeqCst)
+    }
+
+    fn fail_inserts(&self) {
+        self.fail_inserts.store(true, Ordering::SeqCst);
+    }
+}
+
+impl StorageBackend for CountingBackend {
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.inner.get(key)
+    }
+
+    fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        if self.fail_inserts.load(Ordering::SeqCst) {
+            return Err(mqdb_core::error::Error::StorageGeneric(
+                "insert failed".into(),
+            ));
+        }
+        self.inserts.fetch_add(1, Ordering::SeqCst);
+        self.inner.insert(key, value)
+    }
+
+    fn remove(&self, key: &[u8]) -> Result<()> {
+        self.inner.remove(key)
+    }
+
+    fn prefix_scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.inner.prefix_scan(prefix)
+    }
+
+    fn prefix_count(&self, prefix: &[u8]) -> Result<usize> {
+        self.inner.prefix_count(prefix)
+    }
+
+    fn prefix_scan_keys(&self, prefix: &[u8]) -> Result<Vec<Vec<u8>>> {
+        self.inner.prefix_scan_keys(prefix)
+    }
+
+    fn prefix_scan_batch(
+        &self,
+        prefix: &[u8],
+        batch_size: usize,
+        after_key: Option<&[u8]>,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.inner.prefix_scan_batch(prefix, batch_size, after_key)
+    }
+
+    fn range_scan(&self, start: &[u8], end: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        self.inner.range_scan(start, end)
+    }
+
+    fn batch(&self) -> Box<dyn BatchOperations> {
+        self.inner.batch()
+    }
+
+    fn flush(&self) -> Result<()> {
+        self.inner.flush()
+    }
+}
 
 fn node(id: u16) -> NodeId {
     NodeId::validated(id).unwrap()
@@ -10,6 +84,23 @@ fn node(id: u16) -> NodeId {
 
 fn controller(id: u16) -> NodeController<MockTransport> {
     create_test_controller(node(id), MockTransport::new(node(id)))
+}
+
+fn controller_with_storage(
+    id: u16,
+    backend: &Arc<CountingBackend>,
+) -> NodeController<MockTransport> {
+    let (tx_raft_messages, _rx_raft_messages) = flume::unbounded();
+    let (tx_raft_events, _rx_raft_events) = flume::unbounded();
+    let storage: Arc<dyn StorageBackend> = backend.clone();
+    NodeController::new_with_storage(
+        node(id),
+        MockTransport::new(node(id)),
+        TransportConfig::default(),
+        Some(storage),
+        tx_raft_messages,
+        tx_raft_events,
+    )
 }
 
 fn map_with(
@@ -146,4 +237,101 @@ async fn a_forwarded_write_carries_the_epoch_of_the_sender_map() {
         forwarded(&ctrl),
         [(node(2), "c1".to_string(), Epoch::new(5))]
     );
+}
+
+#[tokio::test]
+async fn a_forwarded_write_is_stored_once_by_the_primary() {
+    let partition = session_partition("c1");
+    let backend = Arc::new(CountingBackend::default());
+    let mut ctrl = controller_with_storage(2, &backend);
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
+        .await;
+    let before = backend.inserts();
+
+    ctrl.transport.inject_message(
+        node(1),
+        ClusterMessage::WriteRequest(session_write("c1", 1)),
+    );
+    ctrl.process_messages().await;
+
+    assert_eq!(backend.inserts() - before, 1);
+    assert!(ctrl.stores().sessions.get("c1").is_some());
+    assert_eq!(replicated_ids(&ctrl, node(3)), ["c1"]);
+}
+
+#[tokio::test]
+async fn a_forwarded_write_is_not_stored_by_a_primary_outside_the_primary_role() {
+    let partition = session_partition("c1");
+    let mut ctrl = controller(2);
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
+        .await;
+    let mut far_ahead = session_write("c1", 1);
+    far_ahead.sequence = 5000;
+    ctrl.transport.inject_message(
+        node(3),
+        ClusterMessage::CatchupResponse(CatchupResponse::create(
+            partition,
+            node(3),
+            vec![far_ahead],
+        )),
+    );
+    ctrl.process_messages().await;
+    assert_eq!(ctrl.role(partition), ReplicaRole::AwaitingSnapshot);
+    assert!(ctrl.is_primary_for_partition(partition));
+
+    ctrl.transport.inject_message(
+        node(1),
+        ClusterMessage::WriteRequest(session_write("c1", 1)),
+    );
+    ctrl.process_messages().await;
+
+    assert!(ctrl.stores().sessions.get("c1").is_none());
+    assert!(replicated_ids(&ctrl, node(3)).is_empty());
+}
+
+#[tokio::test]
+async fn a_forwarded_write_the_primary_cannot_store_is_not_replicated() {
+    let partition = session_partition("c1");
+    let backend = Arc::new(CountingBackend::default());
+    let mut ctrl = controller_with_storage(2, &backend);
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
+        .await;
+    backend.fail_inserts();
+
+    ctrl.transport.inject_message(
+        node(1),
+        ClusterMessage::WriteRequest(session_write("c1", 1)),
+    );
+    ctrl.process_messages().await;
+
+    assert!(replicated_ids(&ctrl, node(3)).is_empty());
+    assert_eq!(ctrl.write_log().entry_count(partition), 0);
+    assert_eq!(ctrl.sequence(partition), Some(0));
+}
+
+#[tokio::test]
+async fn a_write_the_primary_cannot_store_is_not_replicated() {
+    let partition = session_partition("c1");
+    let backend = Arc::new(CountingBackend::default());
+    let mut ctrl = controller_with_storage(2, &backend);
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
+        .await;
+    backend.fail_inserts();
+
+    let result = ctrl
+        .replicate_write_async(session_write("c1", 1), &[node(3)], None)
+        .await;
+
+    assert_eq!(result, Err(ReplicationError::StoreFailed));
+    assert!(replicated_ids(&ctrl, node(3)).is_empty());
+    assert_eq!(ctrl.write_log().entry_count(partition), 0);
+    assert_eq!(ctrl.sequence(partition), Some(0));
+
+    backend.fail_inserts.store(false, Ordering::SeqCst);
+    let result = ctrl
+        .replicate_write_async(session_write("c1", 1), &[node(3)], None)
+        .await;
+
+    assert_eq!(result, Ok(1));
+    assert_eq!(replicated_ids(&ctrl, node(3)), ["c1"]);
 }

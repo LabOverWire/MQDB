@@ -132,24 +132,33 @@ impl<T: ClusterTransport> NodeController<T> {
         write_msg: &ReplicationWrite,
         change_event: Option<&super::change_events::WriteChangeEvent>,
         extra_outbox: &[(Vec<u8>, Vec<u8>)],
-    ) {
+    ) -> Result<(), ReplicationError> {
         let mut entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(extra_outbox.len() + 1);
         if let Some(event) = change_event {
             entries.push(event.storage_entry.clone());
         }
         entries.extend_from_slice(extra_outbox);
 
-        if entries.is_empty() {
-            let _ = self.stores.apply_write(write_msg);
+        let applied = if entries.is_empty() {
+            self.stores.apply_write(write_msg)
         } else {
-            let _ = self
-                .stores
-                .apply_write_with_outbox_entries(write_msg, &entries);
-        }
+            self.stores
+                .apply_write_with_outbox_entries(write_msg, &entries)
+        };
+        applied.map_err(|e| {
+            tracing::error!(
+                partition = ?write_msg.partition,
+                entity = %write_msg.entity,
+                ?e,
+                "failed to apply primary write to stores"
+            );
+            ReplicationError::StoreFailed
+        })
     }
 
     /// # Errors
-    /// Returns an error if this node is not the primary for the partition.
+    /// Returns an error if this node is not the primary for the partition, or if the write
+    /// cannot be applied to the local store, in which case nothing is logged or replicated.
     pub async fn replicate_write_async_with_extra(
         &mut self,
         write: ReplicationWrite,
@@ -162,16 +171,14 @@ impl<T: ClusterTransport> NodeController<T> {
 
         let state = self
             .replicas
-            .get_mut(&partition.get())
+            .get(&partition.get())
             .ok_or(ReplicationError::NotPrimary)?;
 
         if state.role() != ReplicaRole::Primary {
             return Err(ReplicationError::NotPrimary);
         }
 
-        let sequence = state.advance_sequence();
-        let t_state = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
-
+        let sequence = state.sequence() + 1;
         let write_msg = ReplicationWrite::new(
             partition,
             write.operation,
@@ -182,14 +189,18 @@ impl<T: ClusterTransport> NodeController<T> {
             write.data,
         )
         .with_event(event);
+        let t_state = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
+        let change_event = Self::change_event_entry(&write_msg);
+        self.apply_primary_write(&write_msg, change_event.as_ref(), extra_outbox)?;
+        let t_apply = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+
+        if let Some(state) = self.replicas.get_mut(&partition.get()) {
+            state.advance_sequence();
+        }
         self.write_log
             .append(partition, sequence, write_msg.clone());
         let t_writelog = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
-
-        let change_event = Self::change_event_entry(&write_msg);
-        self.apply_primary_write(&write_msg, change_event.as_ref(), extra_outbox);
-        let t_apply = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
         for &replica in replicas {
             let _ = self
@@ -202,8 +213,8 @@ impl<T: ClusterTransport> NodeController<T> {
         tracing::trace!(
             node = self.node_id.get(),
             t_state,
-            t_writelog,
             t_apply,
+            t_writelog,
             t_send,
             replica_count = replicas.len(),
             "replicate_write_async_timing"
