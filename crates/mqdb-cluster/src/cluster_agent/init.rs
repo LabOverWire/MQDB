@@ -335,7 +335,7 @@ impl ClusteredAgent {
             ));
         http_config.db_access = db_access;
 
-        let unlock_rate_limit = if http_config.auth_rate_limit == u32::MAX {
+        let unlock_rate_limit = if http_config.no_rate_limit {
             u32::MAX
         } else {
             5

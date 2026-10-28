@@ -457,7 +457,7 @@ pub(crate) fn build_http_config(
         ownership_config,
         db_access: std::sync::Arc::new(mqdb_agent::vault_backend::NoopDbAccess),
         vault_backend: None,
-        auth_rate_limit: if auth.no_rate_limit { u32::MAX } else { 5 },
+        no_rate_limit: auth.no_rate_limit,
         email_auth: oauth.email_auth,
         session_store: std::sync::Arc::new(mqdb_agent::http::SessionStore::new()),
         jti_revocation: std::sync::Arc::new(mqdb_agent::http::JtiRevocationStore::new()),
@@ -575,4 +575,56 @@ fn deserialize_key_material(data: &[u8]) -> Result<(&[u8], &[u8]), String> {
     let salt = &data[4..4 + salt_len];
     let wrapped_key = &data[4 + salt_len..];
     Ok((salt, wrapped_key))
+}
+
+#[cfg(all(test, feature = "http-api"))]
+mod tests {
+    use super::build_http_config;
+    use crate::cli_types::{AgentAction, Cli, Commands};
+    use clap::{CommandFactory, FromArgMatches};
+    use std::error::Error;
+
+    fn http_config(extra: &[&str]) -> Result<mqdb_agent::http::HttpServerConfig, Box<dyn Error>> {
+        let args = [
+            "mqdb",
+            "agent",
+            "start",
+            "--memory-backend",
+            "--jwt-key-data",
+            "0123456789abcdef0123456789abcdef",
+            "--email-auth",
+        ];
+        let command = Cli::command().mut_subcommand("agent", |agent| {
+            agent.mut_subcommand("start", |start| start.mut_args(|arg| arg.env(None)))
+        });
+        let matches = command.try_get_matches_from(args.iter().chain(extra))?;
+        let Commands::Agent {
+            action: AgentAction::Start(fields),
+        } = Cli::from_arg_matches(&matches)?.command
+        else {
+            return Err("expected agent start".into());
+        };
+        let db = tempfile::tempdir()?;
+        build_http_config(
+            "127.0.0.1:0".parse()?,
+            &fields.auth,
+            &fields.oauth,
+            None,
+            std::sync::Arc::new(mqdb_core::types::OwnershipConfig::default()),
+            db.path(),
+        )
+    }
+
+    #[test]
+    fn rate_limit_flags_reach_the_http_config() -> Result<(), Box<dyn Error>> {
+        let default = http_config(&[])?;
+        assert!(!default.no_rate_limit);
+        assert_eq!(default.ticket_rate_limit, 10);
+        assert_eq!(
+            http_config(&["--ticket-rate-limit", "50"])?.ticket_rate_limit,
+            50
+        );
+        assert!(http_config(&["--no-rate-limit"])?.no_rate_limit);
+        Ok(())
+    }
 }

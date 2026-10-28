@@ -890,7 +890,7 @@ Every CLI flag can be set via environment variable. This is the primary configur
 | `MQDB_CERT_AUTH_FILE` | Path to certificate auth file | — |
 | `MQDB_CERT_AUTH` | Certificate auth content (inline) | — |
 | `MQDB_ADMIN_USERS` | Comma-separated admin usernames | — |
-| `MQDB_NO_RATE_LIMIT` | Disable auth rate limiting | `false` |
+| `MQDB_NO_RATE_LIMIT` | Disable auth rate limiting, including the HTTP `/auth/ticket` limit | `false` |
 
 **Encryption and licensing:**
 
@@ -924,6 +924,7 @@ Every CLI flag can be set via environment variable. This is the primary configur
 | `MQDB_OAUTH_FRONTEND_REDIRECT` | Browser redirect after OAuth | — |
 | `MQDB_COOKIE_SECURE` | Secure flag on session cookies | `false` |
 | `MQDB_CORS_ORIGIN` | CORS allowed origin | — |
+| `MQDB_TICKET_RATE_LIMIT` | Max `/auth/ticket` requests per minute per IP (ignored with `MQDB_NO_RATE_LIMIT`) | `10` |
 | `MQDB_IDENTITY_KEY_FILE` | Path to identity encryption key | auto |
 | `MQDB_IDENTITY_KEY` | Identity encryption key (inline) | auto |
 | `MQDB_EMAIL_AUTH` | Enable email/password registration and login | `false` |

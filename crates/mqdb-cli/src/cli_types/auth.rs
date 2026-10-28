@@ -161,7 +161,7 @@ pub(crate) struct OAuthArgs {
         long,
         env = "MQDB_TICKET_RATE_LIMIT",
         default_value = "10",
-        help = "Max ticket requests per minute per IP"
+        help = "Max ticket requests per minute per IP (ignored with --no-rate-limit)"
     )]
     pub(crate) ticket_rate_limit: u32,
     #[arg(

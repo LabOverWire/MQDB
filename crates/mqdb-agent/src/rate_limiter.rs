@@ -29,6 +29,10 @@ impl RateLimiter {
     }
 
     pub fn check_and_record(&self, key: &str) -> bool {
+        if self.max_requests == u32::MAX {
+            return true;
+        }
+
         let now = Instant::now();
         let Some(cutoff) = now.checked_sub(self.window) else {
             return true;
@@ -79,6 +83,16 @@ mod tests {
         assert!(!limiter.check_and_record("user1"));
         assert!(limiter.check_and_record("user2"));
         assert!(limiter.check_and_record("user2"));
+    }
+
+    #[test]
+    fn test_unlimited_records_nothing() {
+        let limiter = RateLimiter::new(u32::MAX);
+        for _ in 0..100 {
+            assert!(limiter.check_and_record("test"));
+        }
+        let cache = limiter.requests.read().unwrap();
+        assert_eq!(cache.len(), 0);
     }
 
     #[test]

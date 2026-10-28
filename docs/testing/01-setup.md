@@ -167,7 +167,7 @@ All options can be set via `MQDB_*` environment variables. File-path options hav
 | `--ticket-expiry-secs` | `MQDB_TICKET_EXPIRY_SECS` | Ticket JWT expiry (seconds) | `30` |
 | `--cookie-secure` | `MQDB_COOKIE_SECURE` | Secure flag on session cookies | `false` |
 | `--cors-origin` | `MQDB_CORS_ORIGIN` | CORS allowed origin | (none) |
-| `--ticket-rate-limit` | `MQDB_TICKET_RATE_LIMIT` | Max ticket requests/min/IP | `10` |
+| `--ticket-rate-limit` | `MQDB_TICKET_RATE_LIMIT` | Max ticket requests/min/IP (ignored with `--no-rate-limit`) | `10` |
 | `--trust-proxy` | `MQDB_TRUST_PROXY` | Trust X-Forwarded-For header | `false` |
 | `--identity-key-file` | `MQDB_IDENTITY_KEY_FILE` / `MQDB_IDENTITY_KEY` | Identity encryption key | (auto) |
 

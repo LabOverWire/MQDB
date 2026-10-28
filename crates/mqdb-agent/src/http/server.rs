@@ -37,10 +37,20 @@ pub struct HttpServerConfig {
     pub ownership_config: Arc<OwnershipConfig>,
     pub db_access: Arc<dyn DbAccess>,
     pub vault_backend: Option<Arc<dyn VaultBackend>>,
-    pub auth_rate_limit: u32,
+    pub no_rate_limit: bool,
     pub email_auth: bool,
     pub session_store: Arc<SessionStore>,
     pub jti_revocation: Arc<JtiRevocationStore>,
+}
+
+impl HttpServerConfig {
+    fn ticket_limit(&self) -> u32 {
+        if self.no_rate_limit {
+            u32::MAX
+        } else {
+            self.ticket_rate_limit
+        }
+    }
 }
 
 pub struct HttpServer {
@@ -69,11 +79,12 @@ impl HttpServer {
         let listener = TcpListener::bind(self.config.bind_address).await?;
         info!(addr = %self.config.bind_address, "HTTP server listening");
 
+        let no_rate_limit = self.config.no_rate_limit;
+        let ticket_limit = self.config.ticket_limit();
         let vault_backend = self
             .config
             .vault_backend
             .unwrap_or_else(|| Arc::new(NoopVaultBackend));
-        let no_rate_limit = self.config.auth_rate_limit == u32::MAX;
         let state = Arc::new(ServerState {
             provider_registry: self.config.provider_registry,
             jwt_config: self.config.jwt_config,
@@ -85,7 +96,7 @@ impl HttpServer {
             ticket_expiry_secs: self.config.ticket_expiry_secs,
             cookie_secure: self.config.cookie_secure,
             cors_origin: self.config.cors_origin,
-            ticket_rate_limiter: RateLimiter::new(self.config.ticket_rate_limit),
+            ticket_rate_limiter: RateLimiter::new(ticket_limit),
             login_rate_limiter: RateLimiter::new(if no_rate_limit { u32::MAX } else { 10 }),
             register_rate_limiter: RateLimiter::new(if no_rate_limit { u32::MAX } else { 5 }),
             jti_revocation: self.config.jti_revocation,
@@ -503,5 +514,46 @@ async fn publish_unique_constraint(state: &ServerState, entity: &str, field: &st
         _ => {
             warn!(entity, "timeout waiting for constraint init response");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::http::jwt_signer::JwtSigningAlgorithm;
+    use crate::vault_backend::NoopDbAccess;
+
+    fn config(no_rate_limit: bool, ticket_rate_limit: u32) -> HttpServerConfig {
+        HttpServerConfig {
+            bind_address: SocketAddr::from(([127, 0, 0, 1], 0)),
+            provider_registry: ProviderRegistry::new(),
+            jwt_config: JwtSigningConfig {
+                algorithm: JwtSigningAlgorithm::HS256,
+                key_bytes: vec![0; 32],
+                issuer: "mqdb".to_string(),
+                audience: None,
+                expiry_secs: 3600,
+            },
+            frontend_redirect_uri: None,
+            ticket_expiry_secs: 30,
+            cookie_secure: false,
+            cors_origin: None,
+            ticket_rate_limit,
+            trust_proxy: false,
+            identity_crypto: None,
+            ownership_config: Arc::new(OwnershipConfig::default()),
+            db_access: Arc::new(NoopDbAccess),
+            vault_backend: None,
+            no_rate_limit,
+            email_auth: false,
+            session_store: Arc::new(SessionStore::new()),
+            jti_revocation: Arc::new(JtiRevocationStore::new()),
+        }
+    }
+
+    #[test]
+    fn no_rate_limit_lifts_the_ticket_limit() {
+        assert_eq!(config(false, 10).ticket_limit(), 10);
+        assert_eq!(config(true, 10).ticket_limit(), u32::MAX);
     }
 }
