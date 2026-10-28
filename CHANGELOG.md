@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-28 — mqdb-cluster 0.4.38, mqdb-cli 0.8.66
+
+### Fixed
+
+- **A primary stores a forwarded internal write once** (#227). It wrote the record when the request arrived and again while replicating it.
+- **A node the map names primary but that is not in the primary role no longer stores forwarded writes.** It stored the record without replicating it. It now drops the write and publishes its change event untracked, as it already did for its own writes.
+- **A primary that fails to persist a write no longer replicates it.** It still advanced the sequence, logged the write and sent it to replicas, so replicas held a record the primary's storage did not. The write's change event is now published untracked. A write that is persisted but fails the in-memory apply is still replicated.
+
+### Known limitations
+
+- An internal write forwarded by a node whose partition map is behind the receiver's is still dropped, and a held write is dropped if more than 1024 are held, if the receiver does not reach its epoch within 30 s, or if the receiver restarts.
+- With JWT or SCRAM enabled, valid password logins count as failed attempts for the auth rate limiter, and a client is locked out after a few connections per IP (#224). `--no-rate-limit` avoids it.
+- ACL rules changed at runtime through `$DB/_admin/acl/*` do not apply to federated JWT clients until restart (#225).
+- A client is told a DB write succeeded when the primary fails to persist it; the record stays only in the primary's memory (#231).
+
 ## 2026-10-28 — mqdb-agent 0.9.0, mqdb-cluster 0.4.37, mqdb-vault 0.1.9, mqdb-cli 0.8.65
 
 ### Fixed
