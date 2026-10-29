@@ -351,21 +351,27 @@ async fn test_cli_update_and_delete() {
 #[tokio::test]
 async fn test_cli_connect_timeout_against_silent_listener() {
     use std::net::TcpListener;
-    use std::time::Instant;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind silent listener");
-    let port = listener.local_addr().unwrap().port();
+    let port = listener
+        .local_addr()
+        .expect("silent listener address")
+        .port();
 
-    let silent_hold = std::time::Duration::from_secs(30);
-    let _detached = std::thread::spawn(move || {
+    let silent_hold = Duration::from_secs(30);
+    let (accepted_tx, accepted_rx) = mpsc::channel();
+    std::thread::spawn(move || {
         if let Ok((stream, _)) = listener.accept() {
-            std::thread::sleep(silent_hold);
+            if accepted_tx.send(Instant::now()).is_ok() {
+                std::thread::sleep(silent_hold);
+            }
             drop(stream);
         }
     });
-    let max_wall = std::time::Duration::from_secs(10);
+    let max_wall = Duration::from_secs(10);
 
-    let start = Instant::now();
     let (success, stdout, stderr) = run_mqdb(&[
         "list",
         "users",
@@ -379,7 +385,10 @@ async fn test_cli_connect_timeout_against_silent_listener() {
         "2",
     ])
     .await;
-    let elapsed = start.elapsed();
+    let elapsed = accepted_rx
+        .try_recv()
+        .expect("the CLI must connect to the silent listener")
+        .elapsed();
 
     assert!(
         !success,
@@ -392,9 +401,9 @@ async fn test_cli_connect_timeout_against_silent_listener() {
     );
     assert!(
         elapsed < max_wall,
-        "the 2s connect timeout must abort well within {max_wall:?} (generous over harness \
-         process overhead, far below the {silent_hold:?} silent hold); {elapsed:?} means \
-         --timeout was ignored or regressed",
+        "the 2s connect timeout must abort within {max_wall:?} of the connection being \
+         accepted (far below the {silent_hold:?} silent hold); {elapsed:?} means --timeout \
+         was ignored or regressed",
     );
 }
 
