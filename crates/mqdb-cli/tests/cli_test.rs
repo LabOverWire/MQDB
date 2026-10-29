@@ -7,40 +7,67 @@ use common::next_test_port;
 use mqdb_agent::{Database, MqdbAgent};
 use serde_json::Value;
 use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::process::Command;
 
-async fn start_agent_background(port: u16) -> (TempDir, tokio::task::JoinHandle<()>) {
-    let tmp = TempDir::new().unwrap();
-    let db = Database::open(tmp.path()).await.unwrap();
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let agent = MqdbAgent::new(db)
-        .with_bind_address(addr)
-        .with_anonymous(true);
-
-    let (handle, mut ready_rx, _shutdown) = agent.start().await.unwrap();
-    let _ = ready_rx.changed().await;
-
-    (tmp, handle)
+struct TestAgent {
+    dir: TempDir,
+    handle: tokio::task::JoinHandle<()>,
+    shutdown: tokio::sync::broadcast::Sender<()>,
 }
 
-async fn start_agent_with_ownership(
-    port: u16,
-    passwd: &std::path::Path,
-) -> (TempDir, tokio::task::JoinHandle<()>) {
-    let tmp = TempDir::new().unwrap();
-    let db = Database::open(tmp.path()).await.unwrap();
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let ownership = mqdb_core::types::OwnershipConfig::parse("diagrams=userId").unwrap();
+impl TestAgent {
+    async fn start(agent: MqdbAgent, dir: TempDir) -> Self {
+        let (handle, mut ready_rx, shutdown) = agent.start().await.expect("the agent starts");
+        ready_rx
+            .changed()
+            .await
+            .expect("the agent signals readiness");
+        Self {
+            dir,
+            handle,
+            shutdown,
+        }
+    }
+
+    async fn stop(self) {
+        self.shutdown
+            .send(())
+            .expect("the agent listens for shutdown until it stops");
+        tokio::time::timeout(Duration::from_secs(10), self.handle)
+            .await
+            .expect("the agent should stop after shutdown")
+            .expect("the agent task should not panic");
+        drop(self.dir);
+    }
+}
+
+async fn open_db() -> (TempDir, Database) {
+    let dir = TempDir::new().expect("agent database dir");
+    let db = Database::open(dir.path())
+        .await
+        .expect("open agent database");
+    (dir, db)
+}
+
+async fn start_agent_background(port: u16) -> TestAgent {
+    let (dir, db) = open_db().await;
     let agent = MqdbAgent::new(db)
-        .with_bind_address(addr)
+        .with_bind_address(SocketAddr::from(([127, 0, 0, 1], port)))
+        .with_anonymous(true);
+    TestAgent::start(agent, dir).await
+}
+
+async fn start_agent_with_ownership(port: u16, passwd: &std::path::Path) -> TestAgent {
+    let (dir, db) = open_db().await;
+    let ownership = mqdb_core::types::OwnershipConfig::parse("diagrams=userId")
+        .expect("valid ownership config");
+    let agent = MqdbAgent::new(db)
+        .with_bind_address(SocketAddr::from(([127, 0, 0, 1], port)))
         .with_password_file(passwd.to_path_buf())
         .with_ownership_config(ownership);
-
-    let (handle, mut ready_rx, _shutdown) = agent.start().await.unwrap();
-    let _ = ready_rx.changed().await;
-
-    (tmp, handle)
+    TestAgent::start(agent, dir).await
 }
 
 fn mqdb_bin() -> String {
@@ -73,13 +100,14 @@ fn parse_json(stdout: &str, stderr: &str) -> Value {
 #[tokio::test]
 async fn test_cli_share_lifecycle() {
     let port = next_test_port();
-    let pw_dir = TempDir::new().unwrap();
+    let pw_dir = TempDir::new().expect("password file dir");
     let pw_path = pw_dir.path().join("passwd");
-    let pw_str = pw_path.to_str().unwrap().to_string();
+    let pw_str = pw_path.to_str().expect("utf-8 password file path");
     for (user, pass) in [("alice", "alice"), ("bob", "bob")] {
-        run_mqdb(&["passwd", user, "-b", pass, "-f", &pw_str]).await;
+        let (added, out, err) = run_mqdb(&["passwd", user, "-b", pass, "-f", pw_str]).await;
+        assert!(added, "passwd {user} should succeed: {out}{err}");
     }
-    let (_tmp, handle) = start_agent_with_ownership(port, &pw_path).await;
+    let agent = start_agent_with_ownership(port, &pw_path).await;
     let broker = format!("127.0.0.1:{port}");
 
     let (created, create_out, create_err) = run_mqdb(&[
@@ -184,13 +212,13 @@ async fn test_cli_share_lifecycle() {
     .await;
     assert!(!after_revoke, "bob must not read after revoke");
 
-    handle.abort();
+    agent.stop().await;
 }
 
 #[tokio::test]
 async fn test_cli_create_and_read() {
     let port = next_test_port();
-    let (_tmp, handle) = start_agent_background(port).await;
+    let agent = start_agent_background(port).await;
 
     let (success, stdout, stderr) = run_mqdb(&[
         "create",
@@ -233,13 +261,13 @@ async fn test_cli_create_and_read() {
     let data = read.get("data").expect("should have data");
     assert_eq!(data.get("name").and_then(|v| v.as_str()), Some("Alice"));
 
-    handle.abort();
+    agent.stop().await;
 }
 
 #[tokio::test]
 async fn test_cli_list() {
     let port = next_test_port();
-    let (_tmp, handle) = start_agent_background(port).await;
+    let agent = start_agent_background(port).await;
 
     for i in 1..=3 {
         let data = format!(r#"{{"name":"User{i}","status":"active"}}"#);
@@ -272,13 +300,13 @@ async fn test_cli_list() {
     let items = data.as_array().expect("data should be array");
     assert_eq!(items.len(), 3);
 
-    handle.abort();
+    agent.stop().await;
 }
 
 #[tokio::test]
 async fn test_cli_update_and_delete() {
     let port = next_test_port();
-    let (_tmp, handle) = start_agent_background(port).await;
+    let agent = start_agent_background(port).await;
 
     let (success, stdout, stderr) = run_mqdb(&[
         "create",
@@ -298,7 +326,7 @@ async fn test_cli_update_and_delete() {
         .get("data")
         .and_then(|d| d.get("id"))
         .and_then(|v| v.as_str())
-        .unwrap();
+        .expect("should have data.id");
 
     let (success, stdout, stderr) = run_mqdb(&[
         "update",
@@ -328,7 +356,7 @@ async fn test_cli_update_and_delete() {
     .await;
     assert!(success, "delete should succeed");
 
-    let (_success, stdout, stderr) = run_mqdb(&[
+    let (found, stdout, stderr) = run_mqdb(&[
         "read",
         "users",
         id,
@@ -338,6 +366,7 @@ async fn test_cli_update_and_delete() {
         "json",
     ])
     .await;
+    assert!(!found, "read after delete should fail");
     let response = parse_json(&stdout, &stderr);
     assert_eq!(
         response.get("status").and_then(|v| v.as_str()),
@@ -345,14 +374,13 @@ async fn test_cli_update_and_delete() {
         "read after delete should return error status"
     );
 
-    handle.abort();
+    agent.stop().await;
 }
 
 #[tokio::test]
 async fn test_cli_connect_timeout_against_silent_listener() {
     use std::net::TcpListener;
     use std::sync::mpsc;
-    use std::time::{Duration, Instant};
 
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind silent listener");
     let port = listener
@@ -364,13 +392,12 @@ async fn test_cli_connect_timeout_against_silent_listener() {
     let (accepted_tx, accepted_rx) = mpsc::channel();
     std::thread::spawn(move || {
         if let Ok((stream, _)) = listener.accept() {
-            if accepted_tx.send(Instant::now()).is_ok() {
-                std::thread::sleep(silent_hold);
-            }
+            accepted_tx.send(Instant::now()).ok();
+            std::thread::sleep(silent_hold);
             drop(stream);
         }
     });
-    let max_wall = Duration::from_secs(10);
+    let max_wall = Duration::from_secs(4);
 
     let (success, stdout, stderr) = run_mqdb(&[
         "list",
@@ -386,8 +413,13 @@ async fn test_cli_connect_timeout_against_silent_listener() {
     ])
     .await;
     let elapsed = accepted_rx
-        .try_recv()
-        .expect("the CLI must connect to the silent listener")
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap_or_else(|err| {
+            panic!(
+                "the CLI must connect to the silent listener ({err}): stdout={stdout}, \
+                 stderr={stderr}"
+            )
+        })
         .elapsed();
 
     assert!(
@@ -410,7 +442,7 @@ async fn test_cli_connect_timeout_against_silent_listener() {
 #[tokio::test]
 async fn test_cli_bench_db() {
     let port = next_test_port();
-    let (_tmp, handle) = start_agent_background(port).await;
+    let agent = start_agent_background(port).await;
 
     let (success, stdout, stderr) = run_mqdb(&[
         "bench",
@@ -431,5 +463,5 @@ async fn test_cli_bench_db() {
         "output should contain benchmark stats"
     );
 
-    handle.abort();
+    agent.stop().await;
 }
