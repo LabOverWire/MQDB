@@ -32,9 +32,9 @@ impl TestAgent {
     }
 
     async fn stop(self) {
-        self.shutdown
-            .send(())
-            .expect("the agent listens for shutdown until it stops");
+        self.shutdown.send(()).expect(
+            "the agent stopped before the test did; its broker error is in the tracing output",
+        );
         tokio::time::timeout(Duration::from_secs(10), self.handle)
             .await
             .expect("the agent should stop after shutdown")
@@ -397,6 +397,7 @@ async fn test_cli_connect_timeout_against_silent_listener() {
             drop(stream);
         }
     });
+    let min_wall = Duration::from_secs(1);
     let max_wall = Duration::from_secs(4);
 
     let (success, stdout, stderr) = run_mqdb(&[
@@ -430,6 +431,11 @@ async fn test_cli_connect_timeout_against_silent_listener() {
     assert!(
         combined.contains("timed out"),
         "error message must mention timeout: stdout={stdout}, stderr={stderr}",
+    );
+    assert!(
+        elapsed >= min_wall,
+        "the 2s connect timeout must not abort within {min_wall:?} of the connection being \
+         accepted; {elapsed:?} means --timeout fired early",
     );
     assert!(
         elapsed < max_wall,
