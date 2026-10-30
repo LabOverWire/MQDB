@@ -343,8 +343,8 @@ mqdb dev kill --db-prefix /tmp/my-test
 
 `--all`, `--node` and the bare form match process command lines with `pkill -f`, so they
 also stop nodes and agents started by anything else on the machine. `--db-prefix` stops
-only the PIDs that `dev start-cluster` recorded, after checking that each one still runs
-`cluster start --db <prefix>-N`.
+only the PIDs that `dev start-cluster` recorded, after checking that each one still runs an
+`mqdb cluster start` or `mqdb agent start` whose `--db` resolves to `<prefix>-N`.
 
 ### Clean Test Data
 
@@ -356,8 +356,9 @@ mqdb dev clean
 mqdb dev clean --db-prefix /tmp/my-test
 ```
 
-`dev clean` removes the `<prefix>-N` node directories, `<prefix>-passwd`, and what `dev test`
-leaves: `<prefix>-{own,share,presence}-N` directories and `<prefix>-{ownership,sharing,presence}-passwd`
+`dev clean` removes the `<prefix>-N` node directories and `<prefix>-passwd`. With the default
+prefix `/tmp/mqdb-test` it also removes what `dev test` leaves, which always lives there:
+`/tmp/mqdb-test-{own,share,presence}-N` directories and `/tmp/mqdb-test-{ownership,sharing,presence}-passwd`
 files. It waits up to 10s while an `mqdb cluster start` or `mqdb agent start` process still uses
 one of those directories, then refuses. `dev start-cluster` without `--clean` refuses right away
 if a node still runs on one of its `<prefix>-N` directories. A process is matched by its

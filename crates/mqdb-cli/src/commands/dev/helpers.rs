@@ -113,13 +113,29 @@ fn locate_db(pid: u32, db: &str) -> DbLocation {
     };
     match full {
         Some(full) => std::fs::canonicalize(full).map_or(DbLocation::Gone, DbLocation::Dir),
-        None => DbLocation::Unresolved,
+        None if process_exists(pid) => DbLocation::Unresolved,
+        None => DbLocation::Gone,
     }
+}
+
+fn is_zombie(state: &str) -> bool {
+    state.starts_with('Z')
+}
+
+fn process_exists(pid: u32) -> bool {
+    Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "stat="])
+        .output()
+        .is_ok_and(|output| {
+            let state = String::from_utf8_lossy(&output.stdout);
+            let state = state.trim();
+            !state.is_empty() && !is_zombie(state)
+        })
 }
 
 fn node_processes() -> Result<Vec<NodeProcess>, String> {
     let output = Command::new("ps")
-        .args(["-ww", "-ax", "-o", "pid=,command="])
+        .args(["-ww", "-ax", "-o", "pid=,stat=,command="])
         .output()
         .map_err(|e| format!("run ps: {e}"))?;
     if !output.status.success() {
@@ -132,8 +148,9 @@ fn node_processes() -> Result<Vec<NodeProcess>, String> {
     Ok(table
         .lines()
         .filter_map(|line| {
-            let (pid, command) = line.trim_start().split_once(char::is_whitespace)?;
-            let pid = pid.parse().ok()?;
+            let (pid, rest) = line.trim_start().split_once(char::is_whitespace)?;
+            let (state, command) = rest.trim_start().split_once(char::is_whitespace)?;
+            let pid = pid.parse().ok().filter(|_| !is_zombie(state))?;
             let db = db_argument(command).filter(|_| is_node_command(command))?;
             Some(NodeProcess {
                 pid,
@@ -474,22 +491,37 @@ pub(crate) fn cmd_dev_kill(
 const DEV_TEST_SUITE_DIRS: [&str; 3] = ["own", "share", "presence"];
 const DEV_TEST_SUITE_PASSWDS: [&str; 3] = ["ownership", "sharing", "presence"];
 
-fn is_dev_entry(rest: &str, is_dir: bool) -> bool {
+fn is_dev_test_prefix(db_prefix: &str) -> bool {
+    let prefix = Path::new(db_prefix);
+    let same_parent = prefix
+        .parent()
+        .and_then(|parent| std::fs::canonicalize(parent).ok())
+        .is_some_and(|parent| std::fs::canonicalize("/tmp").is_ok_and(|tmp| parent == tmp));
+    same_parent && prefix.file_name().is_some_and(|name| name == "mqdb-test")
+}
+
+fn is_dev_entry(rest: &str, is_dir: bool, with_dev_test_leftovers: bool) -> bool {
     match (rest.rsplit_once('-'), is_dir) {
         (None, true) => rest.parse::<u16>().is_ok(),
         (None, false) => rest == "passwd",
         (Some((suite, node_id)), true) => {
-            DEV_TEST_SUITE_DIRS.contains(&suite) && node_id.parse::<u16>().is_ok()
+            with_dev_test_leftovers
+                && DEV_TEST_SUITE_DIRS.contains(&suite)
+                && node_id.parse::<u16>().is_ok()
         }
-        (Some((suite, tail)), false) => DEV_TEST_SUITE_PASSWDS.contains(&suite) && tail == "passwd",
+        (Some((suite, tail)), false) => {
+            with_dev_test_leftovers && DEV_TEST_SUITE_PASSWDS.contains(&suite) && tail == "passwd"
+        }
     }
 }
 
 fn clean_targets(db_prefix: &str) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let with_dev_test_leftovers = is_dev_test_prefix(db_prefix);
     Ok(prefix_entries(db_prefix)?
         .into_iter()
         .filter(|(rest, path)| {
-            (path.is_dir() || path.is_file()) && is_dev_entry(rest, path.is_dir())
+            (path.is_dir() || path.is_file())
+                && is_dev_entry(rest, path.is_dir(), with_dev_test_leftovers)
         })
         .map(|(_, path)| path)
         .collect())
@@ -595,8 +627,8 @@ pub(crate) fn cmd_dev_logs(
 #[cfg(test)]
 mod tests {
     use super::{
-        DbLocation, NodeProcess, NodeState, db_argument, is_dev_entry, is_node_command,
-        legacy_node_pattern, node_state,
+        DbLocation, NodeProcess, NodeState, db_argument, is_dev_entry, is_dev_test_prefix,
+        is_node_command, legacy_node_pattern, node_state,
     };
     use std::process::{Child, Command};
 
@@ -647,20 +679,30 @@ mod tests {
 
     #[test]
     fn clean_keeps_entries_that_dev_does_not_create() {
-        assert!(is_dev_entry("1", true));
-        assert!(is_dev_entry("passwd", false));
-        assert!(is_dev_entry("own-2", true));
-        assert!(is_dev_entry("share-1", true));
-        assert!(is_dev_entry("presence-3", true));
-        assert!(is_dev_entry("ownership-passwd", false));
-        assert!(is_dev_entry("sharing-passwd", false));
-        assert!(is_dev_entry("presence-passwd", false));
-        assert!(!is_dev_entry("x-1", true));
-        assert!(!is_dev_entry("x-passwd", false));
-        assert!(!is_dev_entry("passwd", true));
-        assert!(!is_dev_entry("1", false));
-        assert!(!is_dev_entry("own-1x", true));
-        assert!(!is_dev_entry("notes.txt", false));
+        assert!(is_dev_entry("1", true, false));
+        assert!(is_dev_entry("passwd", false, false));
+        assert!(!is_dev_entry("own-2", true, false));
+        assert!(!is_dev_entry("presence-passwd", false, false));
+        assert!(is_dev_entry("own-2", true, true));
+        assert!(is_dev_entry("share-1", true, true));
+        assert!(is_dev_entry("presence-3", true, true));
+        assert!(is_dev_entry("ownership-passwd", false, true));
+        assert!(is_dev_entry("sharing-passwd", false, true));
+        assert!(is_dev_entry("presence-passwd", false, true));
+        assert!(!is_dev_entry("x-1", true, true));
+        assert!(!is_dev_entry("x-passwd", false, true));
+        assert!(!is_dev_entry("passwd", true, true));
+        assert!(!is_dev_entry("1", false, true));
+        assert!(!is_dev_entry("own-1x", true, true));
+        assert!(!is_dev_entry("notes.txt", false, true));
+    }
+
+    #[test]
+    fn only_the_default_prefix_owns_the_dev_test_leftovers() {
+        assert!(is_dev_test_prefix("/tmp/mqdb-test"));
+        assert!(!is_dev_test_prefix("/tmp/mqdb-test2"));
+        assert!(!is_dev_test_prefix("/tmp/foo"));
+        assert!(!is_dev_test_prefix("/tmp/sub/mqdb-test"));
     }
 
     #[test]

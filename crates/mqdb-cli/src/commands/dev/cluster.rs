@@ -224,12 +224,27 @@ pub(crate) fn cmd_dev_start_cluster(
         let transport_mode = if options.no_quic { " (TCP)" } else { " (QUIC)" };
         println!("Starting node {node_id} on port {port}{transport_mode}...");
 
-        let mut child = cmd.spawn()?;
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                drop(pid_file);
+                std::fs::remove_file(&pid_path).map_err(|remove| {
+                    format!("start node {node_id}: {e}; remove {pid_path}: {remove}")
+                })?;
+                return Err(format!("start node {node_id}: {e}").into());
+            }
+        };
         if let Err(e) = std::io::Write::write_all(&mut pid_file, child.id().to_string().as_bytes())
         {
-            child.kill()?;
-            child.wait()?;
-            return Err(format!("record node {node_id} in {pid_path}: {e}; stopped it").into());
+            let stopped = child.kill().and_then(|()| child.wait());
+            return Err(match stopped {
+                Ok(_) => format!("record node {node_id} in {pid_path}: {e}; stopped it"),
+                Err(stop) => format!(
+                    "record node {node_id} in {pid_path}: {e}; could not stop pid {}: {stop}",
+                    child.id()
+                ),
+            }
+            .into());
         }
 
         std::thread::sleep(std::time::Duration::from_millis(500));

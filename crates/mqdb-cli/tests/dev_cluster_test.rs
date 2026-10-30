@@ -160,24 +160,22 @@ fn dev_start_cluster_numbers_nodes_from_the_base_port_and_records_their_pids() {
     );
     assert!(stdout.contains("Starting node 1 on port 32040"), "{stdout}");
     assert!(stdout.contains("Starting node 2 on port 32041"), "{stdout}");
-    for pid in pids {
-        let pid = pid.expect("every started node has a pid file");
-        assert!(
-            pid.trim().parse::<u32>().is_ok(),
-            "pid file holds a pid: {pid}"
-        );
-    }
     assert!(
         killed.status.success(),
         "dev kill --db-prefix must succeed: {}",
         String::from_utf8_lossy(&killed.stderr)
     );
     let killed_stdout = String::from_utf8_lossy(&killed.stdout);
-    for node_id in [1, 2] {
+    for (node_id, pid) in [1, 2].into_iter().zip(pids) {
+        let pid = pid.expect("every started node has a pid file");
+        let pid = pid.trim();
+        assert!(pid.parse::<u32>().is_ok(), "pid file holds a pid: {pid}");
+        let node_line = format!("Node {node_id} (pid {pid}) ");
         assert!(
-            killed_stdout.contains(&format!("Node {node_id} (pid"))
-                && killed_stdout.contains("is not running"),
-            "without a license the nodes exit, so only the stale pid file path runs here: {killed_stdout}"
+            killed_stdout
+                .lines()
+                .any(|line| line.starts_with(&node_line)),
+            "dev kill reports node {node_id} with its recorded pid: {killed_stdout}"
         );
         assert!(!pid_file(&prefix, node_id).exists());
     }
@@ -441,38 +439,25 @@ fn dev_logs_follow_with_a_pattern_leaves_no_tail_behind() {
 }
 
 #[test]
-fn dev_clean_removes_the_stopped_dev_test_suite_dirs_of_its_prefix() {
+fn dev_clean_keeps_a_stopped_cluster_whose_prefix_ends_in_a_suite_name() {
     let dir = TempDir::new().expect("temp dir");
-    let prefix = dir.path().join("mqdb-test");
-    for node_dir in [
-        "mqdb-test-own-1",
-        "mqdb-test-share-2",
-        "mqdb-test-presence-3",
-    ] {
-        std::fs::create_dir_all(prefix.with_file_name(node_dir)).expect("create suite dir");
-    }
-    for passwd in ["mqdb-test-ownership-passwd", "mqdb-test-sharing-passwd"] {
-        std::fs::write(prefix.with_file_name(passwd), "admin:x\n").expect("write suite passwd");
-    }
-    std::fs::create_dir_all(prefix.with_file_name("mqdb-test-own-1x")).expect("create other dir");
+    let prefix = dir.path().join("foo");
+    std::fs::create_dir_all(prefix.with_file_name("foo-1")).expect("create node dir");
+    std::fs::create_dir_all(prefix.with_file_name("foo-own-1")).expect("create other cluster dir");
+    std::fs::write(prefix.with_file_name("foo-presence-passwd"), "admin:x\n")
+        .expect("write other cluster passwd");
 
     let output = mqdb(&["dev", "clean", "--db-prefix", &prefix.display().to_string()]);
 
     assert!(output.status.success(), "{}", output_text(&output));
-    for removed in [
-        "mqdb-test-own-1",
-        "mqdb-test-share-2",
-        "mqdb-test-presence-3",
-        "mqdb-test-ownership-passwd",
-        "mqdb-test-sharing-passwd",
-    ] {
+    assert!(!prefix.with_file_name("foo-1").exists());
+    for kept in ["foo-own-1", "foo-presence-passwd"] {
         assert!(
-            !prefix.with_file_name(removed).exists(),
-            "{removed} must be removed: {}",
+            prefix.with_file_name(kept).exists(),
+            "{kept} belongs to the stopped cluster --db-prefix foo-own or foo-presence: {}",
             output_text(&output)
         );
     }
-    assert!(prefix.with_file_name("mqdb-test-own-1x").exists());
 }
 
 #[test]
@@ -812,4 +797,92 @@ fn dev_logs_follow_tails_every_node_of_the_prefix() {
         seen.contains("line from node 2"),
         "follow must tail node 2 too: {seen}"
     );
+}
+
+#[test]
+fn dev_start_cluster_leaves_no_pid_file_for_a_node_it_could_not_spawn() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    let linked_exe = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("mqdb-spawn-failure-{}", std::process::id()));
+    std::fs::hard_link(env!("CARGO_BIN_EXE_mqdb"), &linked_exe).expect("link the mqdb binary");
+    let start = Command::new(&linked_exe)
+        .args([
+            "dev",
+            "start-cluster",
+            "--nodes",
+            "2",
+            "--base-port",
+            "32060",
+            "--no-quic",
+            "--db-prefix",
+            &prefix.display().to_string(),
+        ])
+        .env_remove("MQDB_LICENSE")
+        .env_remove("MQDB_LICENSE_FILE")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn dev start-cluster");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while std::fs::read_to_string(pid_file(&prefix, 1))
+        .unwrap_or_default()
+        .is_empty()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "node 1 was never recorded"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    std::fs::remove_file(&linked_exe).expect("remove the linked binary");
+    let output = start
+        .wait_with_output()
+        .expect("wait for dev start-cluster");
+
+    assert!(
+        !output.status.success(),
+        "node 2 cannot be spawned once the binary is gone"
+    );
+    assert!(
+        !pid_file(&prefix, 2).exists(),
+        "a node that never started leaves no pid file: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn dev_clean_ignores_a_relative_db_node_that_exits_before_its_cwd_is_read() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    std::fs::create_dir_all(prefix.with_file_name("e2e-1")).expect("create node dir");
+    let vanishing = StandInNode::spawn_args(
+        dir.path(),
+        &["cluster", "start", "--db", "vanishing-node-relative-db"],
+    );
+    let racing_lsof = tool_dir(
+        dir.path(),
+        &[
+            ("ps", "#!/bin/sh\nexec /bin/ps \"$@\"\n"),
+            (
+                "lsof",
+                "#!/bin/sh\nif [ \"$3\" = \"$VANISHING_PID\" ]; then\n  /bin/kill -9 \"$3\"\n  /bin/sleep 1\n  exit 1\nfi\nPATH=/usr/sbin:/usr/bin:/bin exec lsof \"$@\"\n",
+            ),
+        ],
+    );
+
+    let output = mqdb_command(&["dev", "clean", "--db-prefix", &prefix.display().to_string()])
+        .env("PATH", &racing_lsof)
+        .env("VANISHING_PID", vanishing.pid().to_string())
+        .output()
+        .expect("run mqdb");
+
+    assert!(
+        output.status.success(),
+        "a node that is gone does not block clean: {}",
+        output_text(&output)
+    );
+    assert!(!prefix.with_file_name("e2e-1").exists());
+    drop(vanishing);
 }
