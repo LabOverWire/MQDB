@@ -6,6 +6,9 @@ mod routing;
 
 use super::db_handler::DbRequestHandler;
 use super::node_controller::NodeController;
+use super::share_routing::{
+    BrokerView, LocalShare, LocalShareMembers, assign_share_groups, served_locally, share_members,
+};
 use super::transport::{ClusterMessage, ClusterTransport};
 use super::{
     ForwardTarget, LwtPublisher, NodeId, RetainedEchoes, TopicSubscriptionBroadcast,
@@ -14,8 +17,8 @@ use super::{
 use mqdb_vault::VaultKeyStore;
 use mqtt5::QoS;
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
@@ -31,6 +34,9 @@ pub struct ClusterEventHandler<T: ClusterTransport + 'static> {
     vault_key_store: Arc<VaultKeyStore>,
     presence: bool,
     live_connections: mqdb_agent::presence::LiveConnections,
+    local_shares: Arc<Mutex<LocalShareMembers>>,
+    share_rotation: Arc<AtomicUsize>,
+    broker_view: Arc<OnceLock<BrokerView>>,
 }
 
 impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
@@ -43,6 +49,9 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             vault_key_store: Arc::new(VaultKeyStore::new()),
             presence: false,
             live_connections: mqdb_agent::presence::LiveConnections::new(),
+            local_shares: Arc::new(Mutex::new(LocalShareMembers::default())),
+            share_rotation: Arc::new(AtomicUsize::new(0)),
+            broker_view: Arc::new(OnceLock::new()),
         }
     }
 
@@ -73,6 +82,74 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
         self.retained_echoes = echoes;
         self
     }
+
+    #[must_use]
+    pub(crate) fn with_broker_view(mut self, broker_view: Arc<OnceLock<BrokerView>>) -> Self {
+        self.broker_view = broker_view;
+        self
+    }
+
+    fn update_local_shares(&self, update: impl FnOnce(&mut LocalShareMembers)) {
+        update(
+            &mut self
+                .local_shares
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+    }
+
+    async fn held_local_shares(&self, topic: &str) -> Vec<LocalShare> {
+        let candidates = self
+            .local_shares
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .candidates(topic);
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+        let Some(view) = self.broker_view.get() else {
+            return candidates
+                .into_iter()
+                .map(|candidate| LocalShare {
+                    client_id: candidate.client_id,
+                    key: candidate.key,
+                    online: true,
+                })
+                .collect();
+        };
+        let checked = view.held_shares(candidates).await;
+        if !checked.stale.is_empty() {
+            self.update_local_shares(|shares| shares.forget(&checked.stale));
+        }
+        checked.held
+    }
+
+    async fn reconcile_local_shares(&self, client_id: &str) {
+        if let Some(view) = self.broker_view.get() {
+            let stored = view.stored_shares(client_id).await;
+            self.update_local_shares(|shares| shares.reconcile(client_id, &stored));
+        }
+    }
+
+    fn share_assignment(
+        &self,
+        ctrl: &NodeController<T>,
+        topic: &str,
+        held: &[LocalShare],
+    ) -> HashMap<NodeId, Vec<String>> {
+        let members = share_members(&ctrl.stores().topics, &ctrl.stores().wildcards, topic);
+        if members.is_empty() {
+            return HashMap::new();
+        }
+        let locate = |client_id: &str| ctrl.connected_node(client_id);
+        assign_share_groups(
+            &members,
+            &served_locally(held, locate, self.node_id),
+            locate,
+            self.node_id,
+            self.share_rotation.fetch_add(1, Ordering::Relaxed),
+        )
+    }
 }
 
 pub(super) struct LwtForwardingData<T: ClusterTransport> {
@@ -83,6 +160,7 @@ pub(super) struct LwtForwardingData<T: ClusterTransport> {
     pub payload: Vec<u8>,
     pub token: [u8; 16],
     pub remote_nodes: HashMap<NodeId, Vec<ForwardTarget>>,
+    pub share_nodes: HashMap<NodeId, Vec<String>>,
     pub is_clean_session: bool,
 }
 

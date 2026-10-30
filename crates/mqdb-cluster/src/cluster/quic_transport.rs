@@ -46,6 +46,7 @@ pub struct LocalPublishRequest {
     pub kind: LocalPublishKind,
     pub user_properties: Vec<(String, String)>,
     pub order_key: Option<String>,
+    pub share_groups: Option<Vec<String>>,
 }
 
 pub struct QuicDirectTransport {
@@ -493,6 +494,7 @@ impl ClusterTransport for QuicDirectTransport {
             kind: LocalPublishKind::Plain,
             user_properties: Vec::new(),
             order_key: None,
+            share_groups: None,
         });
     }
 
@@ -510,6 +512,7 @@ impl ClusterTransport for QuicDirectTransport {
             kind: LocalPublishKind::Plain,
             user_properties,
             order_key: None,
+            share_groups: None,
         });
     }
 
@@ -521,6 +524,7 @@ impl ClusterTransport for QuicDirectTransport {
             kind: LocalPublishKind::Routed,
             user_properties: publish.user_properties,
             order_key: publish.order_key,
+            share_groups: publish.share_groups,
         });
     }
 
@@ -532,6 +536,7 @@ impl ClusterTransport for QuicDirectTransport {
             kind: LocalPublishKind::Routed,
             user_properties: publish.user_properties,
             order_key: publish.order_key,
+            share_groups: publish.share_groups,
         };
         match self.local_publish_tx.try_send(request) {
             Ok(()) => true,
@@ -554,6 +559,7 @@ impl ClusterTransport for QuicDirectTransport {
             kind: LocalPublishKind::Retained,
             user_properties: Vec::new(),
             order_key: None,
+            share_groups: None,
         });
     }
 
@@ -565,6 +571,7 @@ impl ClusterTransport for QuicDirectTransport {
             kind: LocalPublishKind::RetainedRefresh,
             user_properties: Vec::new(),
             order_key: None,
+            share_groups: None,
         });
     }
 }

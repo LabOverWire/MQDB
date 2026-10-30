@@ -19,6 +19,7 @@ fn routed(record: ChangeEventRecord) -> RoutedPublish {
         qos: 1,
         user_properties: record.user_properties,
         order_key: Some(record.order_key),
+        share_groups: None,
     }
 }
 

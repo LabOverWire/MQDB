@@ -708,6 +708,7 @@ impl ClusteredAgent {
                     qos: 1,
                     user_properties: entry.user_properties.clone(),
                     order_key: None,
+                    share_groups: None,
                 })
                 .await;
                 let _ = outbox.mark_delivered(&entry.operation_id);
@@ -789,16 +790,34 @@ impl ClusteredAgent {
                     .into_iter()
                     .map(|target| ForwardTarget::new(target.client_id, target.qos)),
             );
+            let locate = |client_id: &str| ctrl.connected_node(client_id);
+            let remote_members: Vec<_> = crate::cluster::share_members(
+                &ctrl.stores().topics,
+                &ctrl.stores().wildcards,
+                &lwt.topic,
+            )
+            .into_iter()
+            .filter(|member| locate(member.subscriber.client_id_str()) != Some(node_id))
+            .collect();
+            let share_nodes = crate::cluster::assign_share_groups(
+                &remote_members,
+                &std::collections::HashSet::new(),
+                locate,
+                node_id,
+                0,
+            );
 
-            for (target_node, targets) in remote_nodes {
+            for (target_node, forward) in crate::cluster::remote_forwards(remote_nodes, share_nodes)
+            {
                 let fwd = ForwardedPublish::new(
                     node_id,
                     lwt.topic.clone(),
                     lwt.qos,
                     lwt.retain,
                     lwt.payload.clone(),
-                    targets,
-                );
+                    forward.targets,
+                )
+                .with_share_groups(forward.share_groups);
                 let fwd_msg = ClusterMessage::ForwardedPublish(fwd);
                 if let Err(e) = transport.send(target_node, fwd_msg).await {
                     warn!(target = target_node.get(), error = %e, "failed to forward recovered LWT");
@@ -884,6 +903,7 @@ mod tests {
             kind: LocalPublishKind::Retained,
             user_properties: Vec::new(),
             order_key: None,
+            share_groups: None,
         }
     }
 
@@ -895,6 +915,7 @@ mod tests {
             kind: LocalPublishKind::Routed,
             user_properties: Vec::new(),
             order_key: None,
+            share_groups: None,
         }
     }
 

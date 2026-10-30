@@ -37,6 +37,12 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
             }
 
             self.live_connections.register(&event.client_id);
+            self.update_local_shares(|shares| {
+                shares.connected(&event.client_id, event.clean_start);
+            });
+            if !event.clean_start {
+                self.reconcile_local_shares(&event.client_id).await;
+            }
             if self.presence {
                 self.emit_presence(&mqdb_agent::presence::PresenceEvent::connect(
                     &event.client_id,
@@ -147,6 +153,24 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 return;
             }
 
+            let will_shares = if event.unexpected {
+                let will_topic = self
+                    .controller
+                    .read()
+                    .await
+                    .stores()
+                    .sessions
+                    .get(&event.client_id)
+                    .map(|session| String::from_utf8_lossy(&session.will_topic).to_string())
+                    .filter(|topic| !topic.is_empty());
+                match will_topic {
+                    Some(topic) => self.held_local_shares(&topic).await,
+                    None => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
+
             let mut ctrl = self.controller.write().await;
             let client_id = event.client_id.as_ref();
             let timestamp = current_time_ms();
@@ -171,7 +195,7 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
             ctrl.write_or_forward(location_delete).await;
 
             if event.unexpected
-                && let Some(lwt_data) = Self::prepare_lwt_forwarding(&ctrl, client_id)
+                && let Some(lwt_data) = self.prepare_lwt_forwarding(&ctrl, client_id, &will_shares)
             {
                 let is_clean = lwt_data.is_clean_session;
                 let token = lwt_data.token;
@@ -184,7 +208,7 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                     lwt_data.qos,
                     lwt_data.retain,
                     &lwt_data.payload,
-                    lwt_data.remote_nodes,
+                    crate::cluster::remote_forwards(lwt_data.remote_nodes, lwt_data.share_nodes),
                 )
                 .await;
 
@@ -220,6 +244,15 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 trace!("skipping internal client subscription");
                 return;
             }
+            self.update_local_shares(|shares| {
+                for sub in event
+                    .subscriptions
+                    .iter()
+                    .filter(|sub| sub.result.is_success())
+                {
+                    shares.subscribed(&event.client_id, &sub.topic_filter);
+                }
+            });
 
             debug!(
                 client_id = %event.client_id,
@@ -312,6 +345,11 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 trace!("skipping internal client unsubscribe");
                 return;
             }
+            self.update_local_shares(|shares| {
+                for topic_filter in &event.topic_filters {
+                    shares.unsubscribed(&event.client_id, topic_filter);
+                }
+            });
 
             debug!(
                 client_id = %event.client_id,

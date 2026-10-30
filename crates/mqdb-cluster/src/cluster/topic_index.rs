@@ -4,8 +4,10 @@
 use super::protocol::Operation;
 use super::{NUM_PARTITIONS, NodeId, PartitionId};
 use bebytes::BeBytes;
-use std::collections::HashMap;
-use std::sync::RwLock;
+use mqtt5::parse_shared_subscription;
+use std::collections::{BTreeSet, HashMap};
+use std::ops::Deref;
+use std::sync::{PoisonError, RwLock};
 
 #[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
 pub struct SubscriberLocation {
@@ -17,7 +19,6 @@ pub struct SubscriberLocation {
 }
 
 impl SubscriberLocation {
-    #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub fn create(client_id: &str, client_partition: PartitionId, qos: u8) -> Self {
         let client_bytes = client_id.as_bytes().to_vec();
@@ -53,7 +54,6 @@ pub struct TopicIndexEntry {
 }
 
 impl TopicIndexEntry {
-    #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub fn create(topic: &str) -> Self {
         let topic_bytes = topic.as_bytes().to_vec();
@@ -72,7 +72,6 @@ impl TopicIndexEntry {
         super::store_utils::bytes_to_str(&self.topic)
     }
 
-    #[allow(clippy::cast_possible_truncation)]
     pub fn add_subscriber(&mut self, client_id: &str, client_partition: PartitionId, qos: u8) {
         if self
             .subscribers
@@ -86,7 +85,6 @@ impl TopicIndexEntry {
         self.subscriber_count = self.subscribers.len() as u16;
     }
 
-    #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub fn remove_subscriber(&mut self, client_id: &str) -> bool {
         let len_before = self.subscribers.len();
@@ -101,14 +99,13 @@ impl TopicIndexEntry {
     }
 }
 
-/// # Panics
-/// Panics if the partition number is out of range.
-#[allow(clippy::cast_possible_truncation)]
 #[must_use]
 pub fn topic_partition(topic: &str) -> PartitionId {
     let hash = crc32fast::hash(topic.as_bytes());
-    let partition_num = (hash % u32::from(NUM_PARTITIONS)) as u16;
-    PartitionId::new(partition_num).unwrap()
+    u16::try_from(hash % u32::from(NUM_PARTITIONS))
+        .ok()
+        .and_then(PartitionId::new)
+        .unwrap_or(PartitionId::ZERO)
 }
 
 #[must_use]
@@ -141,9 +138,72 @@ impl std::fmt::Display for TopicIndexError {
 
 impl std::error::Error for TopicIndexError {}
 
+#[derive(Default)]
+struct IndexedEntries {
+    by_topic: HashMap<String, TopicIndexEntry>,
+    shared_by_filter: HashMap<String, BTreeSet<String>>,
+}
+
+impl Deref for IndexedEntries {
+    type Target = HashMap<String, TopicIndexEntry>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.by_topic
+    }
+}
+
+impl IndexedEntries {
+    fn insert(&mut self, topic: String, entry: TopicIndexEntry) {
+        if let (filter, Some(_)) = parse_shared_subscription(&topic) {
+            self.shared_by_filter
+                .entry(filter.to_string())
+                .or_default()
+                .insert(topic.clone());
+        }
+        self.by_topic.insert(topic, entry);
+    }
+
+    fn remove(&mut self, topic: &str) {
+        if self.by_topic.remove(topic).is_some()
+            && let (filter, Some(_)) = parse_shared_subscription(topic)
+            && let Some(topics) = self.shared_by_filter.get_mut(filter)
+        {
+            topics.remove(topic);
+            if topics.is_empty() {
+                self.shared_by_filter.remove(filter);
+            }
+        }
+    }
+
+    fn get_mut(&mut self, topic: &str) -> Option<&mut TopicIndexEntry> {
+        self.by_topic.get_mut(topic)
+    }
+
+    fn get_or_create(&mut self, topic: &str) -> &mut TopicIndexEntry {
+        if !self.by_topic.contains_key(topic) {
+            self.insert(topic.to_string(), TopicIndexEntry::create(topic));
+        }
+        self.by_topic
+            .entry(topic.to_string())
+            .or_insert_with(|| TopicIndexEntry::create(topic))
+    }
+
+    fn retain(&mut self, keep: impl Fn(&str) -> bool) {
+        let dropped: Vec<String> = self
+            .by_topic
+            .keys()
+            .filter(|topic| !keep(topic))
+            .cloned()
+            .collect();
+        for topic in &dropped {
+            self.remove(topic);
+        }
+    }
+}
+
 pub struct TopicIndex {
     node_id: NodeId,
-    entries: RwLock<HashMap<String, TopicIndexEntry>>,
+    entries: RwLock<IndexedEntries>,
 }
 
 impl TopicIndex {
@@ -151,15 +211,16 @@ impl TopicIndex {
     pub fn new(node_id: NodeId) -> Self {
         Self {
             node_id,
-            entries: RwLock::new(HashMap::new()),
+            entries: RwLock::new(IndexedEntries::default()),
         }
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries.read().unwrap().len()
+        self.entries
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 
     #[must_use]
@@ -167,9 +228,6 @@ impl TopicIndex {
         self.len() == 0
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
-    ///
     /// # Errors
     /// This function currently always succeeds.
     pub fn subscribe(
@@ -180,10 +238,8 @@ impl TopicIndex {
         qos: u8,
     ) -> Result<(), TopicIndexError> {
         tracing::debug!(topic, client_id, "subscribe: local subscribe");
-        let mut entries = self.entries.write().unwrap();
-        let entry = entries
-            .entry(topic.to_string())
-            .or_insert_with(|| TopicIndexEntry::create(topic));
+        let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
+        let entry = entries.get_or_create(topic);
         entry.add_subscriber(client_id, client_partition, qos);
         tracing::debug!(
             topic,
@@ -193,14 +249,11 @@ impl TopicIndex {
         Ok(())
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
-    ///
     /// # Errors
     /// Returns `NotFound` if the topic does not exist.
     pub fn unsubscribe(&self, topic: &str, client_id: &str) -> Result<(), TopicIndexError> {
         tracing::debug!(topic, client_id, "unsubscribe called");
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
         if let Some(entry) = entries.get_mut(topic) {
             let _ = entry.remove_subscriber(client_id);
             if entry.subscribers.is_empty() {
@@ -213,11 +266,9 @@ impl TopicIndex {
         }
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
     #[must_use]
     pub fn get_subscribers(&self, topic: &str) -> Vec<SubscriberLocation> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().unwrap_or_else(PoisonError::into_inner);
         let result = entries
             .get(topic)
             .map(|e| e.subscribers.clone())
@@ -232,48 +283,66 @@ impl TopicIndex {
         result
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
     #[must_use]
-    pub fn get_entry(&self, topic: &str) -> Option<TopicIndexEntry> {
-        self.entries.read().unwrap().get(topic).cloned()
+    pub fn shared_subscribers(&self, topic: &str) -> Vec<(String, String, SubscriberLocation)> {
+        let entries = self.entries.read().unwrap_or_else(PoisonError::into_inner);
+        let Some(shared_topics) = entries.shared_by_filter.get(topic) else {
+            return Vec::new();
+        };
+        shared_topics
+            .iter()
+            .filter_map(|shared_topic| {
+                let group = parse_shared_subscription(shared_topic).1?;
+                let entry = entries.get(shared_topic)?;
+                Some((group, entry))
+            })
+            .flat_map(|(group, entry)| {
+                entry.subscribers.iter().map(move |subscriber| {
+                    (group.to_string(), topic.to_string(), subscriber.clone())
+                })
+            })
+            .collect()
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
+    #[must_use]
+    pub fn get_entry(&self, topic: &str) -> Option<TopicIndexEntry> {
+        self.entries
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(topic)
+            .cloned()
+    }
+
     #[must_use]
     pub fn next_seq(&self, topic: &str) -> Option<u64> {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
         entries.get_mut(topic).map(TopicIndexEntry::next_seq)
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
     #[must_use]
     pub fn topics_on_partition(&self, partition: PartitionId) -> Vec<String> {
         self.entries
             .read()
-            .unwrap()
+            .unwrap_or_else(PoisonError::into_inner)
             .keys()
             .filter(|t| topic_partition(t) == partition)
             .cloned()
             .collect()
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
     #[must_use]
     pub fn topic_count(&self) -> usize {
-        self.entries.read().unwrap().len()
+        self.entries
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
     #[must_use]
     pub fn get_client_topics(&self, client_id: &str) -> Vec<(String, u8)> {
         self.entries
             .read()
-            .unwrap()
+            .unwrap_or_else(PoisonError::into_inner)
             .iter()
             .filter_map(|(topic, entry)| {
                 entry
@@ -285,8 +354,6 @@ impl TopicIndex {
             .collect()
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
     pub fn subscribe_with_data(
         &self,
         topic: &str,
@@ -294,18 +361,13 @@ impl TopicIndex {
         client_partition: PartitionId,
         qos: u8,
     ) -> (TopicIndexEntry, Vec<u8>) {
-        let mut entries = self.entries.write().unwrap();
-        let entry = entries
-            .entry(topic.to_string())
-            .or_insert_with(|| TopicIndexEntry::create(topic));
+        let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
+        let entry = entries.get_or_create(topic);
         entry.add_subscriber(client_id, client_partition, qos);
         let data = Self::serialize(entry);
         (entry.clone(), data)
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
-    ///
     /// # Errors
     /// Returns `NotFound` if the topic does not exist.
     pub fn unsubscribe_with_data(
@@ -313,7 +375,7 @@ impl TopicIndex {
         topic: &str,
         client_id: &str,
     ) -> Result<(TopicIndexEntry, Vec<u8>), TopicIndexError> {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
         if let Some(entry) = entries.get_mut(topic) {
             let _ = entry.remove_subscriber(client_id);
             let data = Self::serialize(entry);
@@ -337,9 +399,6 @@ impl TopicIndex {
         super::store_utils::deserialize(bytes)
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
-    ///
     /// # Errors
     /// Returns `SerializationError` if deserialization fails.
     pub fn apply_replicated(
@@ -357,7 +416,7 @@ impl TopicIndex {
                     incoming_subscribers = incoming.subscribers.len(),
                     "apply_replicated: deserialized entry"
                 );
-                let mut entries = self.entries.write().unwrap();
+                let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
                 let existed_before = entries.contains_key(id);
                 let before_count = entries.get(id).map_or(0, |e| e.subscribers.len());
                 if incoming.subscribers.is_empty() {
@@ -381,19 +440,16 @@ impl TopicIndex {
                 Ok(())
             }
             Operation::Delete => {
-                let mut entries = self.entries.write().unwrap();
+                let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
                 entries.remove(id);
                 Ok(())
             }
         }
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
-    #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub fn export_for_partition(&self, partition: PartitionId) -> Vec<u8> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().unwrap_or_else(PoisonError::into_inner);
         let partition_entries: Vec<_> = entries
             .iter()
             .filter(|(topic, _)| topic_partition(topic) == partition)
@@ -415,9 +471,6 @@ impl TopicIndex {
         buf
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
-    ///
     /// # Errors
     /// Returns `SerializationError` if UTF-8 parsing fails.
     pub fn import_entries(&self, data: &[u8]) -> Result<usize, TopicIndexError> {
@@ -468,7 +521,7 @@ impl TopicIndex {
                 );
                 self.entries
                     .write()
-                    .unwrap()
+                    .unwrap_or_else(PoisonError::into_inner)
                     .insert(topic.to_string(), entry);
                 imported += 1;
             }
@@ -477,13 +530,11 @@ impl TopicIndex {
         Ok(imported)
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
     pub fn clear_partition(&self, partition: PartitionId) -> usize {
         tracing::debug!(partition = partition.get(), "clear_partition called");
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
         let before = entries.len();
-        entries.retain(|topic, _| topic_partition(topic) != partition);
+        entries.retain(|topic| topic_partition(topic) != partition);
         let removed = before - entries.len();
         if removed > 0 {
             tracing::debug!(
@@ -495,17 +546,14 @@ impl TopicIndex {
         removed
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn query(
         &self,
         _filter: Option<&str>,
         limit: u32,
         cursor: Option<&[u8]>,
     ) -> (Vec<TopicIndexEntry>, bool, Option<Vec<u8>>) {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().unwrap_or_else(PoisonError::into_inner);
         let start_key = cursor.and_then(|c| std::str::from_utf8(c).ok());
 
         let mut results: Vec<_> = entries
@@ -590,6 +638,54 @@ mod tests {
         assert_eq!(entry.topic, parsed.topic);
         assert_eq!(entry.last_seq, parsed.last_seq);
         assert_eq!(entry.subscribers.len(), parsed.subscribers.len());
+    }
+
+    #[test]
+    fn shared_subscribers_are_found_by_their_plain_topic_and_kept_apart_from_it() {
+        let index = TopicIndex::new(node(1));
+        index.subscribe("sh/x", "plain", partition(1), 1).unwrap();
+        index
+            .subscribe("$share/g/sh/x", "member-g", partition(2), 1)
+            .unwrap();
+        index
+            .subscribe("$share/h/sh/x", "member-h", partition(3), 1)
+            .unwrap();
+        index
+            .subscribe("$share/g/sh/y", "member-y", partition(4), 1)
+            .unwrap();
+
+        let mut shared: Vec<(String, String)> = index
+            .shared_subscribers("sh/x")
+            .into_iter()
+            .map(|(group, filter, sub)| {
+                assert_eq!(filter, "sh/x");
+                (group, sub.client_id_str().to_string())
+            })
+            .collect();
+        shared.sort();
+
+        assert_eq!(
+            shared,
+            vec![
+                ("g".to_string(), "member-g".to_string()),
+                ("h".to_string(), "member-h".to_string()),
+            ]
+        );
+        let plain: Vec<_> = index
+            .get_subscribers("sh/x")
+            .iter()
+            .map(|sub| sub.client_id_str().to_string())
+            .collect();
+        assert_eq!(plain, vec!["plain".to_string()]);
+
+        index.unsubscribe("$share/g/sh/x", "member-g").unwrap();
+        index
+            .apply_replicated(Operation::Delete, "$share/h/sh/x", &[])
+            .unwrap();
+        assert!(index.shared_subscribers("sh/x").is_empty());
+        assert_eq!(index.shared_subscribers("sh/y").len(), 1);
+        assert_eq!(index.clear_partition(topic_partition("$share/g/sh/y")), 1);
+        assert!(index.shared_subscribers("sh/y").is_empty());
     }
 
     #[test]

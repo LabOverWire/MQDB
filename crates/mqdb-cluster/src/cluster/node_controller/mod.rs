@@ -1797,5 +1797,6 @@ fn routed_from_forwarded(fwd: &ForwardedPublish) -> RoutedPublish {
         qos: fwd.qos,
         user_properties: fwd.user_properties.clone(),
         order_key: fwd.order_key.clone(),
+        share_groups: fwd.share_groups.clone(),
     }
 }

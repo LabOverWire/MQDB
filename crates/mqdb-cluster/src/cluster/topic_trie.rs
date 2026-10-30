@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::{PartitionId, session_partition};
-use std::collections::HashMap;
+use mqtt5::{parse_shared_subscription, topic_matches_filter};
+use std::collections::{BTreeSet, HashMap};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubscriptionType {
@@ -60,6 +61,7 @@ impl TrieNode {
 pub struct TopicTrie {
     root: TrieNode,
     pattern_count: usize,
+    shared_patterns: BTreeSet<String>,
 }
 
 impl TopicTrie {
@@ -92,6 +94,9 @@ impl TopicTrie {
             node.subscribers.push(subscriber);
             self.pattern_count += 1;
         }
+        if parse_shared_subscription(pattern).1.is_some() {
+            self.shared_patterns.insert(pattern.to_string());
+        }
     }
 
     pub fn remove(&mut self, pattern: &str, client_id: &str) -> bool {
@@ -99,8 +104,24 @@ impl TopicTrie {
         let removed = Self::remove_recursive(&mut self.root, &levels, 0, client_id);
         if removed {
             self.pattern_count = self.pattern_count.saturating_sub(1);
+            if self
+                .find(pattern)
+                .is_none_or(|node| node.subscribers.is_empty())
+            {
+                self.shared_patterns.remove(pattern);
+            }
         }
         removed
+    }
+
+    fn find(&self, pattern: &str) -> Option<&TrieNode> {
+        pattern
+            .split('/')
+            .try_fold(&self.root, |node, level| match level {
+                "+" => node.single_wildcard.as_deref(),
+                "#" => node.multi_wildcard.as_deref(),
+                _ => node.children.get(level),
+            })
     }
 
     fn remove_recursive(
@@ -182,6 +203,24 @@ impl TopicTrie {
     }
 
     #[must_use]
+    pub fn match_shared(&self, topic: &str) -> Vec<(&str, &str, &WildcardSubscriber)> {
+        self.shared_patterns
+            .iter()
+            .filter_map(|pattern| match parse_shared_subscription(pattern) {
+                (filter, Some(group)) if topic_matches_filter(topic, filter) => {
+                    self.find(pattern).map(|node| (group, filter, node))
+                }
+                _ => None,
+            })
+            .flat_map(|(group, filter, node)| {
+                node.subscribers
+                    .iter()
+                    .map(move |subscriber| (group, filter, subscriber))
+            })
+            .collect()
+    }
+
+    #[must_use]
     pub fn pattern_count(&self) -> usize {
         self.pattern_count
     }
@@ -194,44 +233,39 @@ impl TopicTrie {
     #[must_use]
     pub fn all_subscriptions(&self) -> Vec<(String, &WildcardSubscriber)> {
         let mut result = Vec::new();
-        Self::collect_subscriptions(&self.root, "", &mut result);
+        Self::collect_subscriptions(&self.root, None, &mut result);
         result
     }
 
     fn collect_subscriptions<'a>(
         node: &'a TrieNode,
-        current_pattern: &str,
+        current_pattern: Option<&str>,
         result: &mut Vec<(String, &'a WildcardSubscriber)>,
     ) {
         for subscriber in &node.subscribers {
-            result.push((current_pattern.to_string(), subscriber));
+            result.push((current_pattern.unwrap_or_default().to_string(), subscriber));
         }
 
         for (segment, child) in &node.children {
-            let pattern = if current_pattern.is_empty() {
-                segment.clone()
-            } else {
-                format!("{current_pattern}/{segment}")
-            };
-            Self::collect_subscriptions(child, &pattern, result);
+            let pattern = Self::child_pattern(current_pattern, segment);
+            Self::collect_subscriptions(child, Some(&pattern), result);
         }
 
         if let Some(ref single) = node.single_wildcard {
-            let pattern = if current_pattern.is_empty() {
-                "+".to_string()
-            } else {
-                format!("{current_pattern}/+")
-            };
-            Self::collect_subscriptions(single, &pattern, result);
+            let pattern = Self::child_pattern(current_pattern, "+");
+            Self::collect_subscriptions(single, Some(&pattern), result);
         }
 
         if let Some(ref multi) = node.multi_wildcard {
-            let pattern = if current_pattern.is_empty() {
-                "#".to_string()
-            } else {
-                format!("{current_pattern}/#")
-            };
-            Self::collect_subscriptions(multi, &pattern, result);
+            let pattern = Self::child_pattern(current_pattern, "#");
+            Self::collect_subscriptions(multi, Some(&pattern), result);
+        }
+    }
+
+    fn child_pattern(current_pattern: Option<&str>, segment: &str) -> String {
+        match current_pattern {
+            Some(prefix) => format!("{prefix}/{segment}"),
+            None => segment.to_string(),
         }
     }
 
