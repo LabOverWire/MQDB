@@ -9,7 +9,7 @@
 > - share, unshare and shares, plus the view/edit checks on read and update, are resolved on the resource primary (README.md describes the 503 and stale-grant window while a partition changes primary)
 > - `shared` is a `_shares` list scattered to every node and hydrated
 > - email grantees are resolved to canonical ids across partitions
-> - grants are cleared on a direct delete, as in agent mode (in both modes an FK cascade delete leaves them, #253)
+> - grants are cleared on a direct delete and on TTL expiry; an FK cascade delete leaves them when the cascading node is the record's primary (#253). Agent mode leaves them on every cascade delete and TTL expiry
 > - generic CRUD on `_shares` is refused
 >
 > The cluster gaps (pending-grant sweep, cross-partition cascade, cascading unshare, the `cascade` default, and phases 2-3 not being ported) are listed once, with their issues, in README.md under "Sharing Operations".
@@ -70,7 +70,7 @@ function or file, not line numbers, because the line numbers have moved.
 | **Events** | **broadcast to all** authenticated subscribers; final fan-out is done by **mqtt-lib's broker** (off-limits); MQDB publishes each event once to a shared topic | `dispatcher.rs`, `agent/tasks.rs`, `topic_rules.rs` (`$DB/+/events/#` = ReadOnly → any subscribe allowed) |
 | `%u` topic ACL | **implemented** — ACL patterns like `$DB/u/%u/#` expand per-user at subscribe time | mqtt-lib `broker/acl/rules.rs` |
 | Sender identity | password/SCRAM → username; JWT → `sub`; **OAuth → `sub = canonical_id` (UUID from `_identities`), NOT email** | `http/handlers.rs` (`mint_refresh_jwt` and the ticket JWT set `sub` to the canonical id), `auth_config.rs` |
-| Email→id lookup | exists server-side: `find_canonical_id_by_email` over `_identities.email_hash` | `http/handlers.rs` `find_canonical_id_by_email` |
+| Email→id lookup | exists server-side: `find_canonical_id_by_email` over `_identity_links.email_hash` | `http/handlers.rs` `find_canonical_id_by_email` |
 | Cluster events | **no event task**; the broker emits/replicates events natively — emission point differs from agent | `cluster_agent/broker.rs`, `db_handler/json_ops.rs` |
 
 Two consequences drive the design:

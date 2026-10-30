@@ -11,14 +11,20 @@ mqdb passwd bob -b bob -f passwd
 mqdb passwd carol -b carol -f passwd
 mqdb passwd dave -b dave -f passwd
 mqdb passwd admin -b admin -f passwd
+```
 
+Start the agent in its own terminal; it runs in the foreground:
+```bash
 mqdb agent start --db /tmp/mqdb-sharing --bind 127.0.0.1:1883 \
     --passwd passwd --admin-users admin --ownership docs=userId
+```
 
+In another terminal:
+```bash
 mqdb constraint add docs --fk ref:docs:id:set_null --user admin --pass admin
 ```
 
-The FK on `ref` is a self-reference, which is what a cascade follows. Every command below is followed by `--user <name> --pass <name>` for the user named in the comment. Denials return `{"code":403,...}` and exit non-zero; the message is `forbidden` in agent mode and `permission denied` in cluster mode.
+The FK on `ref` is a self-reference, which is what a cascade follows. Every client command in the sections below that has a user comment is run with `--user <name> --pass <name>` for that user. Denials return `{"code":403,...}` and exit non-zero; the message is `forbidden` in agent mode and `permission denied` in cluster mode.
 
 ---
 
@@ -36,7 +42,7 @@ mqdb delete docs d1                                                # bob: 403, d
 mqdb share docs d1 carol                                           # bob: 403, only the owner or an admin shares
 ```
 
-**Expected:** both `share` calls print the following (the second with `"permission": "edit"`):
+**Expected:** alice's two `share` calls print the following (the second with `"permission": "edit"`):
 ```json
 {
   "data": {
@@ -75,7 +81,7 @@ mqdb read docs d1                          # bob: 403
 mqdb share docs d1 bob                     # alice
 mqdb delete docs d1                        # alice
 mqdb create docs -d '{"id":"d1","userId":"alice","title":"D1 again"}'         # alice
-mqdb shares docs d1                        # alice: [] (the direct delete cleared the grants; an FK cascade delete does not, #253)
+mqdb shares docs d1                        # alice: [] (the direct delete cleared the grants; in agent mode an FK cascade delete does not, #253)
 mqdb read docs d1                          # bob: 403
 ```
 
@@ -92,9 +98,9 @@ mqdb read docs d1                          # bob: 403
 
 ## 52. Cluster
 
-Start a 3-node cluster with the same password file, which must contain `admin` (`dev start-cluster` adds `--admin-users admin`). Then add the FK constraint:
+Stop the agent from the setup first (Ctrl-C in its terminal), because node 1 of the cluster binds 127.0.0.1:1883. Start a 3-node cluster with the same password file, which must contain `admin` (`dev start-cluster` adds `--admin-users admin`). Then add the FK constraint:
 ```bash
-mqdb dev start-cluster --nodes 3 --clean --passwd passwd --ownership docs=userId --license <key>
+mqdb dev start-cluster --nodes 3 --clean --passwd passwd --ownership docs=userId --license /path/to/license.key
 mqdb constraint add docs --fk ref:docs:id:set_null --broker 127.0.0.1:1883 --user admin --pass admin
 ```
 
@@ -134,4 +140,4 @@ mqdb read docs "$D2" --broker 127.0.0.1:1884          # dave: ok
 - [ ] Cascade grants the referenced record; `--no-cascade` grants only the named record
 - [ ] Unshare revokes access (agent: across the cascade too)
 - [ ] A direct delete clears the record's grants
-- [ ] Cluster: the same results across nodes, with the differences shown in section 52 (the full list of cluster gaps is in README.md under "Sharing Operations")
+- [ ] Cluster: the same results across nodes, with the differences shown in section 52 (the full list of cluster gaps is in the [repository README](../../README.md#sharing-operations))
