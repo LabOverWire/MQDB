@@ -1560,12 +1560,14 @@ async fn db_upsert_creates_or_updates() {
 
     let entity1 = ctrl
         .db_upsert("products", "p1", b"{\"price\":100}", 1000)
-        .await;
+        .await
+        .unwrap();
     assert_eq!(entity1.data, b"{\"price\":100}");
 
     let entity2 = ctrl
         .db_upsert("products", "p1", b"{\"price\":200}", 2000)
-        .await;
+        .await
+        .unwrap();
     assert_eq!(entity2.data, b"{\"price\":200}");
     assert_eq!(entity2.timestamp_ms, 2000);
 }
@@ -3152,3 +3154,4 @@ async fn forwarded_delete_cascade_events_carry_the_deleters_origin() {
 mod change_events;
 mod forwarded_write;
 mod partition_map;
+mod store_failure;

@@ -206,7 +206,8 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     /// # Errors
-    /// Returns `DbDataStoreError::AlreadyExists` if an entity with the given ID already exists.
+    /// Returns `DbDataStoreError::AlreadyExists` if an entity with the given ID already exists,
+    /// or `Commit` if the write cannot be committed.
     pub async fn db_create(
         &mut self,
         entity_type: &str,
@@ -215,7 +216,7 @@ impl<T: ClusterTransport> NodeController<T> {
         timestamp_ms: u64,
     ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
         let (db_entity, write) = self.db_create_prepare(entity_type, id, data, timestamp_ms)?;
-        self.write_or_forward(write).await;
+        self.commit_write(write, None, &[]).await?;
         Ok(db_entity)
     }
 
@@ -234,7 +235,8 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     /// # Errors
-    /// Returns `DbDataStoreError::NotFound` if the entity does not exist.
+    /// Returns `DbDataStoreError::NotFound` if the entity does not exist, or `Commit` if the
+    /// write cannot be committed.
     pub async fn db_update(
         &mut self,
         entity_type: &str,
@@ -243,22 +245,24 @@ impl<T: ClusterTransport> NodeController<T> {
         timestamp_ms: u64,
     ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
         let (db_entity, write) = self.db_update_prepare(entity_type, id, data, timestamp_ms)?;
-        self.write_or_forward(write).await;
+        self.commit_write(write, None, &[]).await?;
         Ok(db_entity)
     }
 
+    /// # Errors
+    /// Returns `DbDataStoreError::Commit` if the write cannot be committed.
     pub async fn db_upsert(
         &mut self,
         entity_type: &str,
         id: &str,
         data: &[u8],
         timestamp_ms: u64,
-    ) -> super::db::DbEntity {
+    ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
         let (db_entity, write) =
             self.stores
                 .db_upsert_replicated(entity_type, id, data, timestamp_ms);
-        self.write_or_forward(write).await;
-        db_entity
+        self.commit_write(write, None, &[]).await?;
+        Ok(db_entity)
     }
 
     /// # Errors
@@ -273,28 +277,39 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     /// # Errors
-    /// Returns `DbDataStoreError::NotFound` if the entity does not exist.
+    /// Returns `DbDataStoreError::NotFound` if the entity does not exist, or `Commit` if the
+    /// write cannot be committed.
     pub async fn db_delete(
         &mut self,
         entity_type: &str,
         id: &str,
     ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
         let (db_entity, write) = self.db_delete_prepare(entity_type, id)?;
-        self.write_or_forward(write).await;
+        self.commit_write(write, None, &[]).await?;
         Ok(db_entity)
     }
 
-    pub async fn db_commit(&mut self, write: ReplicationWrite, event: &ChangeEvent) {
-        self.write_or_forward_with_event(write, change_event_record(event), &[])
-            .await;
-    }
-
-    pub(crate) async fn commit_with_change_event(
+    async fn commit_write(
         &mut self,
         write: ReplicationWrite,
-        event: ChangeEvent,
-    ) {
-        self.db_commit(write, &event).await;
+        event: Option<ChangeEventRecord>,
+        extra_outbox: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<(), super::db::DbDataStoreError> {
+        self.write_or_forward_with_event(write, event, extra_outbox)
+            .await
+            .map_err(super::db::DbDataStoreError::Commit)
+    }
+
+    /// # Errors
+    /// Returns `DbDataStoreError::Commit` if the write cannot be committed, in which case
+    /// nothing is applied and no change event is published.
+    pub async fn db_commit(
+        &mut self,
+        write: ReplicationWrite,
+        event: &ChangeEvent,
+    ) -> Result<(), super::db::DbDataStoreError> {
+        self.commit_write(write, Some(change_event_record(event)), &[])
+            .await
     }
 
     pub(crate) async fn commit_delete_with_change_event(
@@ -303,13 +318,14 @@ impl<T: ClusterTransport> NodeController<T> {
         event: ChangeEvent,
         data: &Value,
         cascade: Option<&CascadeOutboxPayload>,
-    ) {
+    ) -> Result<(), super::db::DbDataStoreError> {
         match cascade {
-            Some(cascade) => self.db_commit_with_cascade(write, &event, cascade).await,
-            None => self.db_commit(write, &event).await,
+            Some(cascade) => self.db_commit_with_cascade(write, &event, cascade).await?,
+            None => self.db_commit(write, &event).await?,
         }
         self.release_unique_for_deleted_record(&event.entity, &event.id, data)
             .await;
+        Ok(())
     }
 
     pub(crate) async fn db_commit_with_cascade(
@@ -317,13 +333,57 @@ impl<T: ClusterTransport> NodeController<T> {
         write: ReplicationWrite,
         event: &ChangeEvent,
         cascade: &CascadeOutboxPayload,
-    ) {
-        self.write_or_forward_with_event(
+    ) -> Result<(), super::db::DbDataStoreError> {
+        self.commit_write(
             write,
-            change_event_record(event),
+            Some(change_event_record(event)),
             &[(cascade.key.clone(), cascade.value.clone())],
         )
-        .await;
+        .await
+    }
+
+    pub(crate) async fn db_create_with_event(
+        &mut self,
+        entity_type: &str,
+        id: &str,
+        data_bytes: &[u8],
+        data: Value,
+        now_ms: u64,
+        origin: EventOrigin<'_>,
+    ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
+        let (db_entity, write) = self.db_create_prepare(entity_type, id, data_bytes, now_ms)?;
+        let event = self.change_event(
+            ChangeEvent::create(
+                entity_type.to_string(),
+                db_entity.id_str().to_string(),
+                data,
+            ),
+            origin,
+        );
+        self.db_commit(write, &event).await?;
+        Ok(db_entity)
+    }
+
+    pub(crate) async fn db_update_with_event(
+        &mut self,
+        entity_type: &str,
+        id: &str,
+        data_bytes: &[u8],
+        data: Value,
+        now_ms: u64,
+        origin: EventOrigin<'_>,
+    ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
+        let (db_entity, write) = self.db_update_prepare(entity_type, id, data_bytes, now_ms)?;
+        let event = self.change_event(
+            ChangeEvent::update(
+                entity_type.to_string(),
+                db_entity.id_str().to_string(),
+                data,
+            ),
+            origin,
+        );
+        self.db_commit(write, &event).await?;
+        Ok(db_entity)
     }
 
     #[must_use]
@@ -948,13 +1008,18 @@ impl<T: ClusterTransport> NodeController<T> {
 
         let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
 
-        let result = match self.db_update_prepare(entity, id, &data_bytes, now_ms) {
-            Ok((db_entity, write)) => {
-                let event = self.change_event(
-                    ChangeEvent::update(entity.to_string(), id.to_string(), merged_data.clone()),
-                    EventOrigin::of(request),
-                );
-                self.commit_with_change_event(write, event).await;
+        let result = match self
+            .db_update_with_event(
+                entity,
+                id,
+                &data_bytes,
+                merged_data.clone(),
+                now_ms,
+                EventOrigin::of(request),
+            )
+            .await
+        {
+            Ok(db_entity) => {
                 if has_unique_changes {
                     self.commit_unique_constraints(
                         entity,
@@ -1132,7 +1197,7 @@ impl<T: ClusterTransport> NodeController<T> {
             origin,
         );
         self.commit_delete_with_change_event(write, event, &data, cascade)
-            .await;
+            .await?;
         if self.ownership.owner_field(entity).is_some() {
             self.clear_all_resource_grants(entity, id).await;
         }
@@ -1311,8 +1376,12 @@ impl<T: ClusterTransport> NodeController<T> {
                             ChangeEvent::delete(entity.clone(), id.clone(), data.clone()),
                             origin,
                         );
-                        self.commit_delete_with_change_event(write, event, &data, None)
-                            .await;
+                        if let Err(e) = self
+                            .commit_delete_with_change_event(write, event, &data, None)
+                            .await
+                        {
+                            tracing::warn!(%entity, %id, %e, "cascade delete not committed");
+                        }
                     }
                 }
                 CascadeSideEffect::LocalSetNull {
@@ -1320,15 +1389,16 @@ impl<T: ClusterTransport> NodeController<T> {
                     id,
                     updated_data,
                 } => {
-                    if let Ok((_, write)) = self.db_update_prepare(entity, id, updated_data, now_ms)
+                    let data_json: Value =
+                        serde_json::from_slice(updated_data).unwrap_or(Value::Null);
+                    match self
+                        .db_update_with_event(entity, id, updated_data, data_json, now_ms, origin)
+                        .await
                     {
-                        let data_json: serde_json::Value =
-                            serde_json::from_slice(updated_data).unwrap_or(Value::Null);
-                        let event = self.change_event(
-                            ChangeEvent::update(entity.clone(), id.clone(), data_json),
-                            origin,
-                        );
-                        self.commit_with_change_event(write, event).await;
+                        Ok(_) | Err(super::db::DbDataStoreError::NotFound) => {}
+                        Err(e) => {
+                            tracing::warn!(%entity, %id, %e, "cascade set-null not committed");
+                        }
                     }
                 }
                 CascadeSideEffect::RemoteDelete { entity, id, .. } => {
@@ -1658,15 +1728,11 @@ impl<T: ClusterTransport> NodeController<T> {
         }
         obj.insert(field.to_string(), Value::Null);
         let updated_bytes = serde_json::to_vec(&record).unwrap_or_default();
-        match self.db_update_prepare(entity, id, &updated_bytes, now_ms) {
-            Ok((_, write)) => {
-                let event = self.change_event(
-                    ChangeEvent::update(entity.to_string(), id.to_string(), record),
-                    origin,
-                );
-                self.commit_with_change_event(write, event).await;
-                true
-            }
+        match self
+            .db_update_with_event(entity, id, &updated_bytes, record, now_ms, origin)
+            .await
+        {
+            Ok(_) => true,
             Err(super::db::DbDataStoreError::NotFound) => true,
             Err(_) => false,
         }
@@ -1686,8 +1752,8 @@ impl<T: ClusterTransport> NodeController<T> {
                     origin,
                 );
                 self.commit_delete_with_change_event(write, event, &data, None)
-                    .await;
-                true
+                    .await
+                    .is_ok()
             }
             Err(super::db::DbDataStoreError::NotFound) => true,
             Err(_) => false,
@@ -1856,8 +1922,18 @@ impl<T: ClusterTransport> NodeController<T> {
 
         let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
 
-        let result = match self.db_create_prepare(entity, &id, &data_bytes, now_ms) {
-            Ok((db_entity, write)) => {
+        let result = match self
+            .db_create_with_event(
+                entity,
+                &id,
+                &data_bytes,
+                data.clone(),
+                now_ms,
+                EventOrigin::of(request),
+            )
+            .await
+        {
+            Ok(db_entity) => {
                 self.commit_all_reservations(
                     entity,
                     &request_id,
@@ -1865,11 +1941,6 @@ impl<T: ClusterTransport> NodeController<T> {
                     &remote_reserved,
                 )
                 .await;
-                let event = self.change_event(
-                    ChangeEvent::create(entity.to_string(), id.clone(), data.clone()),
-                    EventOrigin::of(request),
-                );
-                self.commit_with_change_event(write, event).await;
                 crate::cluster::db_handler::helpers::json_ok_with_id(db_entity.id_str(), &data)
             }
             Err(super::db::DbDataStoreError::AlreadyExists) => {

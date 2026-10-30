@@ -216,8 +216,12 @@ impl<T: ClusterTransport> NodeController<T> {
         let retained_topic = (write.entity == entity::RETAINED).then(|| write.id.clone());
         let replicas: Vec<NodeId> = self.partition_map.replicas(partition).to_vec();
         let event = write.event.take();
+        let unstored_event = event.clone();
         if let Err(e) = self.replicate_write_async(write, &replicas, event).await {
             tracing::warn!(?partition, ?e, "failed to replicate write request");
+            if let Some(record) = unstored_event {
+                self.publish_unowned_change_event(partition, record).await;
+            }
             return;
         }
         if let Some(topic) = retained_topic {
@@ -439,17 +443,9 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     pub async fn write_or_forward(&mut self, write: ReplicationWrite) {
-        self.write_or_forward_impl(write, None, &[]).await;
-    }
-
-    pub(crate) async fn write_or_forward_with_event(
-        &mut self,
-        write: ReplicationWrite,
-        event: ChangeEventRecord,
-        extra_outbox: &[(Vec<u8>, Vec<u8>)],
-    ) {
-        self.write_or_forward_impl(write, Some(event), extra_outbox)
-            .await;
+        if let Err(e) = self.write_or_forward_with_event(write, None, &[]).await {
+            tracing::debug!(%e, "write_or_forward: write not applied");
+        }
     }
 
     async fn broadcast_write(&self, write: &ReplicationWrite) {
@@ -484,12 +480,16 @@ impl<T: ClusterTransport> NodeController<T> {
             })
     }
 
-    async fn write_or_forward_impl(
+    /// # Errors
+    /// Returns `NotPrimary` if this node is named primary without the primary role or no
+    /// primary is known, and `StoreFailed` if this node is the primary and cannot persist the
+    /// write. A write forwarded to another primary returns `Ok`.
+    pub(crate) async fn write_or_forward_with_event(
         &mut self,
         mut write: ReplicationWrite,
         event: Option<ChangeEventRecord>,
         extra_outbox: &[(Vec<u8>, Vec<u8>)],
-    ) {
+    ) -> Result<(), ReplicationError> {
         let write_count = WRITE_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
         if write_count.is_multiple_of(10000) {
             let wr_sent = WRITE_REQUEST_SENT.load(AtomicOrdering::Relaxed);
@@ -508,12 +508,12 @@ impl<T: ClusterTransport> NodeController<T> {
 
         if write.entity == entity::DB_UNIQUE {
             self.replicate_unique_to_group(write).await;
-            return;
+            return Ok(());
         }
 
         if is_broadcast_entity(&write.entity) {
             self.broadcast_write(&write).await;
-            return;
+            return Ok(());
         }
 
         if self.is_primary_for_partition(partition) && self.role(partition) != ReplicaRole::Primary
@@ -526,13 +526,13 @@ impl<T: ClusterTransport> NodeController<T> {
             if let Some(record) = event {
                 self.publish_unowned_change_event(partition, record).await;
             }
+            Err(ReplicationError::NotPrimary)
         } else if self.is_primary_for_partition(partition) {
             let replicas: Vec<NodeId> = self.partition_map.replicas(partition).to_vec();
             WRITE_REQUEST_SENT.fetch_add(replicas.len() as u64, AtomicOrdering::Relaxed);
             let t_lookup = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
-            let _ = self
-                .replicate_write_async_with_extra(write, &replicas, event, extra_outbox)
-                .await;
+            self.replicate_write_async_with_extra(write, &replicas, event, extra_outbox)
+                .await?;
             let t_replicate = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
             tracing::trace!(
                 node = self.node_id.get(),
@@ -542,6 +542,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 t_replicate,
                 "write_or_forward_timing"
             );
+            Ok(())
         } else if let Some((primary, epoch)) = self.believed_primary(partition) {
             write.epoch = epoch;
             tracing::debug!(
@@ -552,12 +553,14 @@ impl<T: ClusterTransport> NodeController<T> {
             );
             self.forward_write_with_change_event(primary, write, event)
                 .await;
+            Ok(())
         } else {
             tracing::warn!(
                 ?partition,
                 entity = ?write.entity,
                 "write_or_forward: no primary found for partition"
             );
+            Err(ReplicationError::NotPrimary)
         }
     }
 }

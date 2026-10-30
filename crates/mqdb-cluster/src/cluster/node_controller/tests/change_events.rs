@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::cluster::data_partition;
+use crate::cluster::db::DbDataStoreError;
 use crate::cluster::event_delivery::{PRUNE_EVERY_MS, RESEND_AFTER_MS};
 use crate::cluster::message_processor::HeartbeatUpdate;
 use crate::cluster::protocol::{ChangeEventDelivery, ChangeEventMark, ChangeEventRecord, EventId};
@@ -111,7 +112,10 @@ fn record_event(n: u64) -> ChangeEvent {
     .with_client_id(Some("editor-1".to_string()))
 }
 
-async fn commit(ctrl: &mut NodeController<MockTransport>, n: u64) -> ChangeEvent {
+async fn try_commit(
+    ctrl: &mut NodeController<MockTransport>,
+    n: u64,
+) -> (ChangeEvent, Result<(), DbDataStoreError>) {
     let data = serde_json::json!({"id": ID, "n": n});
     let bytes = serde_json::to_vec(&data).unwrap();
     let write = if n == 1 {
@@ -126,7 +130,13 @@ async fn commit(ctrl: &mut NodeController<MockTransport>, n: u64) -> ChangeEvent
             .1
     };
     let event = record_event(n);
-    ctrl.commit_with_change_event(write, event.clone()).await;
+    let committed = ctrl.db_commit(write, &event).await;
+    (event, committed)
+}
+
+async fn commit(ctrl: &mut NodeController<MockTransport>, n: u64) -> ChangeEvent {
+    let (event, committed) = try_commit(ctrl, n).await;
+    assert_eq!(committed, Ok(()));
     event
 }
 
@@ -550,8 +560,12 @@ async fn a_node_named_primary_without_the_primary_role_publishes_its_own_event()
     let partition = assign(&mut ctrl, node(1), &[node(2)]);
     ctrl.become_replica(partition, Epoch::new(1), 0);
 
-    commit(&mut ctrl, 1).await;
+    let (_, committed) = try_commit(&mut ctrl, 1).await;
 
+    assert_eq!(
+        committed,
+        Err(DbDataStoreError::Commit(ReplicationError::NotPrimary))
+    );
     assert_eq!(delivered_locally(&ctrl).len(), 1);
     assert!(replication_writes_sent(&ctrl).is_empty());
 }
@@ -704,14 +718,18 @@ async fn a_forwarded_write_the_primary_cannot_store_publishes_its_event_untracke
 }
 
 #[tokio::test]
-async fn a_write_with_an_event_the_primary_cannot_store_publishes_its_event_untracked() {
+async fn a_write_with_an_event_the_primary_cannot_store_publishes_no_event() {
     let (mut primary, backend) = primary_with_failing_store(1);
     primary_with(&mut primary, &[node(2)]);
     backend.fail_writes(true);
 
-    commit(&mut primary, 1).await;
+    let (_, committed) = try_commit(&mut primary, 1).await;
 
-    assert_eq!(delivered_locally(&primary).len(), 1);
+    assert_eq!(
+        committed,
+        Err(DbDataStoreError::Commit(ReplicationError::StoreFailed))
+    );
+    assert!(delivered_locally(&primary).is_empty());
     assert!(replication_writes_sent(&primary).is_empty());
     assert_eq!(backend.keys_containing(ID).unwrap(), 0);
 }
