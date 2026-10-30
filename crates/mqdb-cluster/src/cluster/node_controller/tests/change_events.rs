@@ -216,6 +216,7 @@ async fn an_older_node_and_local_subscribers_get_the_event_with_its_origin() {
             qos: 1,
             user_properties: origin.clone(),
             order_key: Some(format!("{ENTITY}/{ID}")),
+            share_groups: None,
         }]
     );
     let forwarded: Vec<_> = ctrl

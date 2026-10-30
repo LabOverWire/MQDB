@@ -552,6 +552,7 @@ pub struct RoutedPublish {
     pub qos: u8,
     pub user_properties: Vec<(String, String)>,
     pub order_key: Option<String>,
+    pub share_groups: Option<Vec<String>>,
 }
 
 pub trait ClusterTransport: Send + Sync + Debug + Clone {

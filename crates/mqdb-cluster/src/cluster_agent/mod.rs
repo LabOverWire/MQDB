@@ -12,8 +12,8 @@ pub use transport::ClusterTransportKind;
 
 use crate::cluster::raft::RaftCoordinator;
 use crate::cluster::{
-    DedicatedExecutor, InboundMessage, NodeController, NodeId, PartitionMap, ProcessingBatch,
-    RaftAdminCommand, RaftEvent, RaftStatus, RetainedEchoes,
+    BrokerView, DedicatedExecutor, InboundMessage, NodeController, NodeId, PartitionMap,
+    ProcessingBatch, RaftAdminCommand, RaftEvent, RaftStatus, RetainedEchoes,
 };
 use mqdb_core::config::DurabilityMode;
 use mqdb_vault::VaultKeyStore;
@@ -177,6 +177,7 @@ pub struct ClusteredAgent {
     scope_config: Arc<mqdb_core::types::ScopeConfig>,
     presence: bool,
     retained_echoes: Arc<RetainedEchoes>,
+    broker_view: Arc<std::sync::OnceLock<BrokerView>>,
     max_retained_message_size: usize,
     auth_providers: Option<Arc<ComprehensiveAuthProvider>>,
     vault_key_store: Arc<VaultKeyStore>,

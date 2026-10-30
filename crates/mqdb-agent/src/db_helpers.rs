@@ -399,7 +399,7 @@ impl DbAccess for MqttDbAccess {
         Box::pin(async move {
             tracing::warn!(
                 "pending-grant sweep is not supported over the MQTT DB path; pending share \
-                 grants activate on sign-in only in agent mode until cluster parity (#75)"
+                 grants activate on sign-in only in agent mode until cluster parity (#122)"
             );
             Ok(0)
         })

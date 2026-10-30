@@ -3329,6 +3329,7 @@ async fn a_forwarded_publish_reaches_local_subscribers_without_being_forwarded_a
             kind: crate::cluster::LocalPublishKind::Routed,
             user_properties: Vec::new(),
             order_key: None,
+            share_groups: None,
         })
         .await;
 

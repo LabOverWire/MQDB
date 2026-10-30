@@ -309,7 +309,7 @@ impl MqdbAgent {
                         };
                         let publish = PublishPacket::new(presence.topic(), payload, QoS::AtMostOnce)
                             .with_retain(true);
-                        router.route_message(&publish, None).await;
+                        router.route_sys_message(&publish).await;
                     }
                     _ = presence_shutdown_rx.recv() => {
                         debug!("Presence publisher shutting down");
