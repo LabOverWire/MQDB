@@ -555,7 +555,7 @@ async fn a_node_named_primary_without_the_primary_role_publishes_a_forwarded_eve
 }
 
 #[tokio::test]
-async fn a_node_named_primary_without_the_primary_role_publishes_its_own_event() {
+async fn a_commit_refused_without_the_primary_role_publishes_no_event() {
     let mut ctrl = controller(1);
     let partition = assign(&mut ctrl, node(1), &[node(2)]);
     ctrl.become_replica(partition, Epoch::new(1), 0);
@@ -566,7 +566,7 @@ async fn a_node_named_primary_without_the_primary_role_publishes_its_own_event()
         committed,
         Err(DbDataStoreError::Commit(ReplicationError::NotPrimary))
     );
-    assert_eq!(delivered_locally(&ctrl).len(), 1);
+    assert!(delivered_locally(&ctrl).is_empty());
     assert!(replication_writes_sent(&ctrl).is_empty());
 }
 

@@ -98,7 +98,6 @@ fn change_event_user_properties(event: &ChangeEvent) -> Vec<(String, String)> {
 #[derive(Default)]
 pub(crate) struct FkDeletePlan {
     effects: Vec<CascadeSideEffect>,
-    remote_ops: Vec<CascadeRemoteOp>,
     cascade: Option<CascadeOutboxPayload>,
 }
 
@@ -141,6 +140,8 @@ pub(crate) enum CascadeSideEffect {
     LocalSetNull {
         entity: String,
         id: String,
+        field: String,
+        expected_value: String,
         updated_data: Vec<u8>,
     },
     RemoteDelete {
@@ -153,6 +154,38 @@ pub(crate) enum CascadeSideEffect {
         field: String,
         expected_value: String,
     },
+}
+
+impl CascadeSideEffect {
+    fn outbox_op(&self, sender: Option<&str>) -> CascadeRemoteOp {
+        match self {
+            Self::LocalDelete { entity, id } | Self::RemoteDelete { entity, id } => {
+                CascadeRemoteOp::Delete {
+                    entity: entity.clone(),
+                    id: id.clone(),
+                    sender: sender.map(String::from),
+                }
+            }
+            Self::LocalSetNull {
+                entity,
+                id,
+                field,
+                expected_value,
+                ..
+            }
+            | Self::RemoteSetNull {
+                entity,
+                id,
+                field,
+                expected_value,
+            } => CascadeRemoteOp::SetNull {
+                entity: entity.clone(),
+                id: id.clone(),
+                field: field.clone(),
+                expected_value: expected_value.clone(),
+            },
+        }
+    }
 }
 
 fn unique_field_diffs(
@@ -258,22 +291,6 @@ impl<T: ClusterTransport> NodeController<T> {
         timestamp_ms: u64,
     ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
         let (db_entity, write) = self.db_update_prepare(entity_type, id, data, timestamp_ms)?;
-        self.commit_write(write, None, &[]).await?;
-        Ok(db_entity)
-    }
-
-    /// # Errors
-    /// Returns `DbDataStoreError::Commit` if the write cannot be committed.
-    pub async fn db_upsert(
-        &mut self,
-        entity_type: &str,
-        id: &str,
-        data: &[u8],
-        timestamp_ms: u64,
-    ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
-        let (db_entity, write) =
-            self.stores
-                .db_upsert_replicated(entity_type, id, data, timestamp_ms);
         self.commit_write(write, None, &[]).await?;
         Ok(db_entity)
     }
@@ -711,7 +728,7 @@ impl<T: ClusterTransport> NodeController<T> {
             let refused = serde_json::from_slice::<Value>(&response.payload)
                 .ok()
                 .and_then(|parsed| parsed.get("code").and_then(Value::as_u64))
-                == Some(503);
+                .is_some_and(|code| code >= 500);
             tracing::debug!(request_id, refused, "matched cascade ack response");
             self.pending_constraints
                 .resolve_cascade_ack(request_id, !refused);
@@ -1203,12 +1220,12 @@ impl<T: ClusterTransport> NodeController<T> {
             ChangeEvent::delete(entity.to_string(), id.to_string(), data.clone()),
             origin,
         );
+        if self.ownership.owner_field(entity).is_some() {
+            self.clear_all_resource_grants(entity, id).await?;
+        }
         self.commit_delete_with_change_event(write, event, &data, plan.cascade())
             .await?;
         let ack_receivers = self.run_fk_delete_plan(plan, origin).await;
-        if self.ownership.owner_field(entity).is_some() {
-            self.clear_all_resource_grants(entity, id).await;
-        }
         if let Some(cas) = plan.cascade() {
             spawn_cascade_ack_waiter(
                 self.stores.cluster_outbox().cloned(),
@@ -1265,37 +1282,13 @@ impl<T: ClusterTransport> NodeController<T> {
         let effects = self
             .prepare_fk_side_effects(results)
             .map_err(|msg| Self::json_error(409, &msg))?;
-        let remote_ops: Vec<CascadeRemoteOp> = effects
+        let ops: Vec<CascadeRemoteOp> = effects
             .iter()
-            .filter_map(|effect| match effect {
-                CascadeSideEffect::RemoteDelete { entity, id } => Some(CascadeRemoteOp::Delete {
-                    entity: entity.clone(),
-                    id: id.clone(),
-                    sender: origin.sender.map(String::from),
-                }),
-                CascadeSideEffect::RemoteSetNull {
-                    entity,
-                    id,
-                    field,
-                    expected_value,
-                } => Some(CascadeRemoteOp::SetNull {
-                    entity: entity.clone(),
-                    id: id.clone(),
-                    field: field.clone(),
-                    expected_value: expected_value.clone(),
-                }),
-                CascadeSideEffect::LocalDelete { .. } | CascadeSideEffect::LocalSetNull { .. } => {
-                    None
-                }
-            })
+            .map(|effect| effect.outbox_op(origin.sender))
             .collect();
-        let cascade = (!remote_ops.is_empty())
-            .then(|| CascadeOutboxPayload::new(uuid::Uuid::new_v4().to_string(), &remote_ops));
-        Ok(FkDeletePlan {
-            effects,
-            remote_ops,
-            cascade,
-        })
+        let cascade = (!ops.is_empty())
+            .then(|| CascadeOutboxPayload::new(uuid::Uuid::new_v4().to_string(), &ops));
+        Ok(FkDeletePlan { effects, cascade })
     }
 
     pub(crate) fn prepare_fk_side_effects(
@@ -1388,6 +1381,8 @@ impl<T: ClusterTransport> NodeController<T> {
             effects.push(CascadeSideEffect::LocalSetNull {
                 entity: r.source_entity.clone(),
                 id: child_id.to_string(),
+                field: r.source_field.clone(),
+                expected_value: r.target_id.clone(),
                 updated_data,
             });
         } else {
@@ -1406,46 +1401,61 @@ impl<T: ClusterTransport> NodeController<T> {
         origin: EventOrigin<'_>,
     ) -> Vec<oneshot::Receiver<bool>> {
         let now_ms = Self::current_time_ms();
+        let mut ack_receivers = Vec::with_capacity(plan.effects.len());
         for effect in &plan.effects {
-            match effect {
+            let unresolved = match effect {
                 CascadeSideEffect::LocalDelete { entity, id } => {
-                    self.run_local_cascade_delete(entity, id, origin).await;
+                    (!self.run_local_cascade_delete(entity, id, origin).await)
+                        .then(unresolved_cascade_ack)
                 }
                 CascadeSideEffect::LocalSetNull {
                     entity,
                     id,
                     updated_data,
-                } => {
-                    self.run_local_cascade_set_null(entity, id, updated_data, now_ms, origin)
-                        .await;
-                }
+                    ..
+                } => (!self
+                    .run_local_cascade_set_null(entity, id, updated_data, now_ms, origin)
+                    .await)
+                    .then(unresolved_cascade_ack),
                 CascadeSideEffect::RemoteDelete { .. }
-                | CascadeSideEffect::RemoteSetNull { .. } => {}
-            }
-        }
-        let mut ack_receivers = Vec::with_capacity(plan.remote_ops.len());
-        for op in &plan.remote_ops {
-            if let Some(rx) = self.dispatch_cascade_op(op, now_ms, origin).await {
-                ack_receivers.push(rx);
-            }
+                | CascadeSideEffect::RemoteSetNull { .. } => {
+                    self.dispatch_cascade_op(&effect.outbox_op(origin.sender), now_ms, origin)
+                        .await
+                }
+            };
+            ack_receivers.extend(unresolved);
         }
         ack_receivers
     }
 
-    async fn run_local_cascade_delete(&mut self, entity: &str, id: &str, origin: EventOrigin<'_>) {
-        let Ok((db_entity, write)) = self.db_delete_prepare(entity, id) else {
-            return;
+    async fn run_local_cascade_delete(
+        &mut self,
+        entity: &str,
+        id: &str,
+        origin: EventOrigin<'_>,
+    ) -> bool {
+        let (db_entity, write) = match self.db_delete_prepare(entity, id) {
+            Ok(prepared) => prepared,
+            Err(super::db::DbDataStoreError::NotFound) => return true,
+            Err(e) => {
+                tracing::warn!(%entity, %id, %e, "cascade delete not prepared");
+                return false;
+            }
         };
         let data: Value = serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
         let event = self.change_event(
             ChangeEvent::delete(entity.to_string(), id.to_string(), data.clone()),
             origin,
         );
-        if let Err(e) = self
+        match self
             .commit_delete_with_change_event(write, event, &data, None)
             .await
         {
-            tracing::warn!(%entity, %id, %e, "cascade delete not committed");
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(%entity, %id, %e, "cascade delete not committed");
+                false
+            }
         }
     }
 
@@ -1456,15 +1466,16 @@ impl<T: ClusterTransport> NodeController<T> {
         updated_data: &[u8],
         now_ms: u64,
         origin: EventOrigin<'_>,
-    ) {
+    ) -> bool {
         let data_json: Value = serde_json::from_slice(updated_data).unwrap_or(Value::Null);
         match self
             .db_update_with_event(entity, id, updated_data, data_json, now_ms, origin)
             .await
         {
-            Ok(_) | Err(super::db::DbDataStoreError::NotFound) => {}
+            Ok(_) | Err(super::db::DbDataStoreError::NotFound) => true,
             Err(e) => {
                 tracing::warn!(%entity, %id, %e, "cascade set-null not committed");
+                false
             }
         }
     }

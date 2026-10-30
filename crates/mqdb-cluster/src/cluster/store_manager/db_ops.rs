@@ -61,29 +61,6 @@ impl StoreManager {
         Ok((db_entity, write))
     }
 
-    #[must_use]
-    pub fn db_upsert_replicated(
-        &self,
-        entity_type: &str,
-        id: &str,
-        data: &[u8],
-        timestamp_ms: u64,
-    ) -> (DbEntity, ReplicationWrite) {
-        let db_entity = DbEntity::create(entity_type, id, data, timestamp_ms);
-        let partition = data_partition(entity_type, id);
-        let serialized = DbDataStore::serialize(&db_entity);
-        let write = ReplicationWrite::new(
-            partition,
-            Operation::Update,
-            Epoch::ZERO,
-            0,
-            entity::DB_DATA.to_string(),
-            db_entity.key(),
-            serialized,
-        );
-        (db_entity, write)
-    }
-
     /// # Errors
     /// Returns `DbDataStoreError` if the record does not exist.
     pub fn db_delete_replicated(

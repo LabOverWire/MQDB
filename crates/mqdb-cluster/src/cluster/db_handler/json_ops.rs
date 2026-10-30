@@ -1317,6 +1317,11 @@ impl DbRequestHandler {
                     ChangeEvent::delete(entity.to_string(), id.to_string(), data.clone()),
                     EventOrigin::new(sender, client_id),
                 );
+                if self.ownership.owner_field(entity).is_some()
+                    && let Err(error) = controller.clear_all_resource_grants(entity, id).await
+                {
+                    return helpers::json_write_failure(error);
+                }
                 if let Err(error) = controller
                     .commit_delete_with_change_event(write, event, &data, plan.cascade())
                     .await
@@ -1326,9 +1331,6 @@ impl DbRequestHandler {
                 let ack_receivers = controller
                     .run_fk_delete_plan(plan, EventOrigin::new(sender, client_id))
                     .await;
-                if self.ownership.owner_field(entity).is_some() {
-                    controller.clear_all_resource_grants(entity, id).await;
-                }
                 if let Some(cas) = plan.cascade() {
                     crate::cluster::node_controller::db_ops::spawn_cascade_ack_waiter(
                         controller.stores().cluster_outbox().cloned(),

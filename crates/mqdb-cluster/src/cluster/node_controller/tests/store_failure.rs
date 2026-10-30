@@ -43,10 +43,20 @@ fn primary_of_every_partition(backend: &Arc<FaultyBackend>) -> NodeController<Mo
 }
 
 async fn request(ctrl: &mut NodeController<MockTransport>, topic: &str, payload: &Value) -> Value {
+    request_as(ctrl, &DbRequestHandler::new(node(1)), topic, payload, None).await
+}
+
+async fn request_as(
+    ctrl: &mut NodeController<MockTransport>,
+    handler: &DbRequestHandler,
+    topic: &str,
+    payload: &Value,
+    sender: Option<&str>,
+) -> Value {
     let ctx = MqttRequestContext {
         response_topic: Some("resp/t"),
         correlation_data: None,
-        sender: None,
+        sender,
         client_id: None,
     };
     let bytes = if payload.is_null() {
@@ -54,9 +64,8 @@ async fn request(ctrl: &mut NodeController<MockTransport>, topic: &str, payload:
     } else {
         serde_json::to_vec(payload).unwrap()
     };
-    let DbPublishResult::Response(response) = DbRequestHandler::new(node(1))
-        .handle_publish(ctrl, topic, &bytes, &ctx)
-        .await
+    let DbPublishResult::Response(response) =
+        handler.handle_publish(ctrl, topic, &bytes, &ctx).await
     else {
         panic!("{topic} got no response");
     };
@@ -302,4 +311,177 @@ async fn a_parent_delete_the_primary_cannot_store_sends_no_remote_cascade() {
         ),
         (&json!(500), 0)
     );
+}
+
+#[tokio::test]
+async fn a_local_cascade_child_that_cannot_be_stored_stays_pending() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_of_every_partition(&backend);
+    author_with_post(&mut ctrl).await;
+    backend.fail_writes_to_keys_containing("posts/p1");
+
+    let deleted = request(&mut ctrl, "$DB/users/u1/delete", &Value::Null).await;
+    tokio::task::yield_now().await;
+    let pending = ctrl
+        .stores()
+        .cluster_outbox()
+        .unwrap()
+        .pending_cascade_ops()
+        .unwrap();
+
+    assert_eq!(
+        (
+            &deleted["status"],
+            ctrl.db_get("posts", "p1").is_some(),
+            pending.len()
+        ),
+        (&json!("ok"), true, 1)
+    );
+    backend.stop_failing_keys();
+    ctrl.replay_cascade_entries(&pending).await;
+    tokio::task::yield_now().await;
+    assert!(ctrl.db_get("posts", "p1").is_none());
+}
+
+fn sharing_handler(ctrl: &mut NodeController<MockTransport>) -> DbRequestHandler {
+    let mut fields = std::collections::HashMap::new();
+    fields.insert("diagrams".to_string(), "userId".to_string());
+    let ownership = Arc::new(mqdb_core::types::OwnershipConfig::new(fields));
+    ctrl.set_ownership(Arc::clone(&ownership));
+    DbRequestHandler::new(node(1)).with_ownership(ownership)
+}
+
+async fn shared_diagram(ctrl: &mut NodeController<MockTransport>, handler: &DbRequestHandler) {
+    let created = request_as(
+        ctrl,
+        handler,
+        "$DB/diagrams/create",
+        &json!({"id": "d1", "userId": "alice", "title": "D"}),
+        Some("alice"),
+    )
+    .await;
+    let shared = request_as(
+        ctrl,
+        handler,
+        "$DB/diagrams/d1/share",
+        &json!({"grantee": "bob", "permission": "edit"}),
+        Some("alice"),
+    )
+    .await;
+    assert_eq!(
+        (&created["status"], &shared["status"]),
+        (&json!("ok"), &json!("ok"))
+    );
+}
+
+#[tokio::test]
+async fn an_unshare_the_primary_cannot_store_is_refused() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_of_every_partition(&backend);
+    let handler = sharing_handler(&mut ctrl);
+    shared_diagram(&mut ctrl, &handler).await;
+    backend.fail_writes_to_keys_containing("_shares/");
+
+    let unshared = request_as(
+        &mut ctrl,
+        &handler,
+        "$DB/diagrams/d1/unshare",
+        &json!({"grantee": "bob"}),
+        Some("alice"),
+    )
+    .await;
+    let read = request_as(
+        &mut ctrl,
+        &handler,
+        "$DB/diagrams/d1",
+        &Value::Null,
+        Some("bob"),
+    )
+    .await;
+
+    assert_eq!(
+        (&unshared["status"], &read["status"]),
+        (&json!("error"), &json!("ok"))
+    );
+}
+
+#[tokio::test]
+async fn a_downgrade_whose_old_grant_cannot_be_removed_is_refused() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_of_every_partition(&backend);
+    let handler = sharing_handler(&mut ctrl);
+    shared_diagram(&mut ctrl, &handler).await;
+    let old_grant = ctrl.db_list("_shares")[0].id_str().to_string();
+    backend.fail_writes_to_keys_containing(&format!("_shares/{old_grant}"));
+
+    let downgraded = request_as(
+        &mut ctrl,
+        &handler,
+        "$DB/diagrams/d1/share",
+        &json!({"grantee": "bob", "permission": "view"}),
+        Some("alice"),
+    )
+    .await;
+    let update = request_as(
+        &mut ctrl,
+        &handler,
+        "$DB/diagrams/d1/update",
+        &json!({"title": "x"}),
+        Some("bob"),
+    )
+    .await;
+
+    assert_eq!(
+        (
+            &downgraded["status"],
+            &update["code"],
+            ctrl.db_list("_shares").len()
+        ),
+        (&json!("error"), &json!(null), 1)
+    );
+}
+
+#[tokio::test]
+async fn a_resource_delete_whose_grants_cannot_be_removed_is_refused() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_of_every_partition(&backend);
+    let handler = sharing_handler(&mut ctrl);
+    shared_diagram(&mut ctrl, &handler).await;
+    backend.fail_writes_to_keys_containing("_shares/");
+
+    let deleted = request_as(
+        &mut ctrl,
+        &handler,
+        "$DB/diagrams/d1/delete",
+        &Value::Null,
+        Some("alice"),
+    )
+    .await;
+
+    assert_eq!(
+        (
+            &deleted["status"],
+            ctrl.db_get("diagrams", "d1").is_some(),
+            ctrl.db_list("_shares").len()
+        ),
+        (&json!("error"), true, 1)
+    );
+}
+
+#[tokio::test]
+async fn a_cascade_its_receiver_could_not_store_is_not_acked() {
+    let mut ctrl = primary_of_every_partition(&FaultyBackend::shared());
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    ctrl.pending_constraints().insert_cascade_ack(42, tx);
+    let refused = crate::cluster::protocol::JsonDbResponse::new(
+        0,
+        serde_json::to_vec(&json!({"status": "error", "code": 500, "message": "internal error"}))
+            .unwrap(),
+        "_mqdb/cascade_ack/1/42".to_string(),
+        None,
+    );
+
+    ctrl.handle_json_db_response(&refused).await;
+
+    assert!(!rx.await.unwrap());
 }

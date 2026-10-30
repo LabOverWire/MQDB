@@ -523,9 +523,6 @@ impl<T: ClusterTransport> NodeController<T> {
                 entity = ?write.entity,
                 "write_or_forward: primary in the map but not in the primary role"
             );
-            if let Some(record) = event {
-                self.publish_unowned_change_event(partition, record).await;
-            }
             Err(ReplicationError::NotPrimary)
         } else if self.is_primary_for_partition(partition) {
             let replicas: Vec<NodeId> = self.partition_map.replicas(partition).to_vec();

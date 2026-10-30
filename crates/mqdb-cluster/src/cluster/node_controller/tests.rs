@@ -1557,29 +1557,6 @@ async fn db_delete_removes_entity() {
 }
 
 #[tokio::test]
-async fn db_upsert_creates_or_updates() {
-    let node1 = NodeId::validated(1).unwrap();
-    let transport = MockTransport::new(node1);
-    let mut ctrl = create_test_controller(node1, transport);
-
-    let partition = crate::cluster::db::data_partition("products", "p1");
-    ctrl.become_primary(partition, Epoch::new(1));
-
-    let entity1 = ctrl
-        .db_upsert("products", "p1", b"{\"price\":100}", 1000)
-        .await
-        .unwrap();
-    assert_eq!(entity1.data, b"{\"price\":100}");
-
-    let entity2 = ctrl
-        .db_upsert("products", "p1", b"{\"price\":200}", 2000)
-        .await
-        .unwrap();
-    assert_eq!(entity2.data, b"{\"price\":200}");
-    assert_eq!(entity2.timestamp_ms, 2000);
-}
-
-#[tokio::test]
 async fn db_list_returns_all_entities_of_type() {
     let node1 = NodeId::validated(1).unwrap();
     let transport = MockTransport::new(node1);

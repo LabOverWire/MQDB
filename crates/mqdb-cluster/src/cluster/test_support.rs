@@ -36,6 +36,12 @@ impl FaultyBackend {
         }
     }
 
+    pub(crate) fn stop_failing_keys(&self) {
+        if let Ok(mut failing) = self.failing_key.lock() {
+            *failing = None;
+        }
+    }
+
     fn failing_key(&self) -> Option<String> {
         self.failing_key
             .lock()
