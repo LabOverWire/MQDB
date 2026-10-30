@@ -390,10 +390,12 @@ fn dev_logs_follow_with_a_pattern_leaves_no_tail_behind() {
     std::fs::create_dir_all(&node_dir).expect("create node dir");
     let log = node_dir.join("mqdb.log");
     std::fs::write(&log, "match 0\n").expect("write log");
+    let matched = dir.path().join("matched.out");
     let pipeline = format!(
-        "'{}' dev logs -f --pattern match --db-prefix '{}' | head -n 2",
+        "'{}' dev logs -f --pattern match --db-prefix '{}' | head -n 3 > '{}'",
         env!("CARGO_BIN_EXE_mqdb"),
-        prefix.display()
+        prefix.display(),
+        matched.display()
     );
     let mut follower = ProcessGroup {
         child: std::os::unix::process::CommandExt::process_group(
@@ -432,12 +434,21 @@ fn dev_logs_follow_with_a_pattern_leaves_no_tail_behind() {
         .output()
         .expect("run pgrep");
     let leftover_tails = String::from_utf8_lossy(&tails.stdout).trim().to_string();
+    let followed = std::fs::read_to_string(&matched).unwrap_or_default();
     for pid in leftover_tails.lines() {
         let _ = Command::new("kill").arg(pid).status();
     }
     assert!(
         leftover_tails.is_empty(),
         "tail -f must not outlive dev logs: {leftover_tails}"
+    );
+    assert_eq!(
+        followed
+            .lines()
+            .filter(|line| line.starts_with("match "))
+            .count(),
+        2,
+        "the pipeline must have followed matching lines: {followed}"
     );
 }
 
