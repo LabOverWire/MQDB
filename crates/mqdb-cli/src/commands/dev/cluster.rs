@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::helpers::{NODE_PID_FILE, cmd_dev_clean};
+use super::helpers::{NODE_PID_FILE, absolute_prefix, cmd_dev_clean};
 
 fn ensure_dev_passwd(exe: &Path, db_prefix: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let path = format!("{db_prefix}-passwd");
@@ -38,30 +38,32 @@ fn node_port(base_port: u16, node_id: u8) -> u16 {
     base_port + u16::from(node_id) - 1
 }
 
-fn node_layout_args(
-    base_port: u16,
-    nodes: u8,
-    node_id: u8,
-    bind_host: &str,
-    topology: &str,
-) -> Vec<String> {
-    let peer = |n: u8| format!("{n}@127.0.0.1:{}", node_port(base_port, n));
-    let peers: Vec<String> = match topology {
-        "full" => (1..=nodes).filter(|&n| n != node_id).map(peer).collect(),
-        "upper" => ((node_id + 1)..=nodes).map(peer).collect(),
-        _ => (1..node_id).map(peer).collect(),
-    };
-    let mut args = vec![
+fn node_bind_args(base_port: u16, nodes: u8, node_id: u8, bind_host: &str) -> [String; 4] {
+    [
         "--bind".to_string(),
         format!("{bind_host}:{}", node_port(base_port, node_id)),
         "--cluster-port-offset".to_string(),
         nodes.to_string(),
-    ];
-    if !peers.is_empty() {
-        args.push("--peers".to_string());
-        args.push(peers.join(","));
-    }
-    args
+    ]
+}
+
+fn node_peers(base_port: u16, nodes: u8, node_id: u8, topology: &str) -> Option<String> {
+    let is_peer = |n: u8| match topology {
+        "full" => n != node_id,
+        "upper" => n > node_id,
+        _ => n < node_id,
+    };
+    let peers = (1..=nodes)
+        .filter(|&n| is_peer(n))
+        .map(|n| format!("{n}@127.0.0.1:{}", node_port(base_port, n)))
+        .fold(String::new(), |list, peer| {
+            if list.is_empty() {
+                peer
+            } else {
+                format!("{list},{peer}")
+            }
+        });
+    (!peers.is_empty()).then_some(peers)
 }
 
 #[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
@@ -83,10 +85,12 @@ pub(crate) fn cmd_dev_start_cluster(
     license: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     check_port_block(base_port, nodes)?;
+    let prefix = absolute_prefix(db_prefix)?;
+    let db_prefix = prefix.as_str();
 
     if clean {
         println!("Cleaning existing databases...");
-        let _ = cmd_dev_clean(db_prefix);
+        cmd_dev_clean(db_prefix)?;
     }
 
     let exe = std::env::current_exe()?;
@@ -129,13 +133,10 @@ pub(crate) fn cmd_dev_start_cluster(
             cmd.args(["--license", lic_str]);
         }
 
-        cmd.args(node_layout_args(
-            base_port,
-            nodes,
-            node_id,
-            bind_host,
-            topology_name,
-        ));
+        cmd.args(node_bind_args(base_port, nodes, node_id, bind_host));
+        if let Some(peers) = node_peers(base_port, nodes, node_id, topology_name) {
+            cmd.args(["--peers", &peers]);
+        }
 
         if !no_bridge_out && (bridge_out || topology_name == "full") {
             cmd.arg("--bridge-out");
@@ -186,31 +187,27 @@ mod tests {
     #[test]
     fn every_node_and_peer_port_follows_the_base_port() {
         assert_eq!(
-            node_layout_args(32000, 3, 2, "127.0.0.1", "full"),
-            [
-                "--bind",
-                "127.0.0.1:32001",
-                "--cluster-port-offset",
-                "3",
-                "--peers",
-                "1@127.0.0.1:32000,3@127.0.0.1:32002",
-            ]
+            node_bind_args(32000, 3, 2, "127.0.0.1"),
+            ["--bind", "127.0.0.1:32001", "--cluster-port-offset", "3"]
         );
         assert_eq!(
-            node_layout_args(32000, 3, 1, "0.0.0.0", "upper"),
-            [
-                "--bind",
-                "0.0.0.0:32000",
-                "--cluster-port-offset",
-                "3",
-                "--peers",
-                "2@127.0.0.1:32001,3@127.0.0.1:32002",
-            ]
+            node_bind_args(32000, 3, 1, "0.0.0.0"),
+            ["--bind", "0.0.0.0:32000", "--cluster-port-offset", "3"]
         );
         assert_eq!(
-            node_layout_args(32000, 3, 1, "127.0.0.1", "partial"),
-            ["--bind", "127.0.0.1:32000", "--cluster-port-offset", "3"]
+            node_peers(32000, 3, 2, "full").as_deref(),
+            Some("1@127.0.0.1:32000,3@127.0.0.1:32002")
         );
+        assert_eq!(
+            node_peers(32000, 3, 1, "upper").as_deref(),
+            Some("2@127.0.0.1:32001,3@127.0.0.1:32002")
+        );
+        assert_eq!(
+            node_peers(32000, 3, 3, "partial").as_deref(),
+            Some("1@127.0.0.1:32000,2@127.0.0.1:32001")
+        );
+        assert_eq!(node_peers(32000, 3, 1, "partial"), None);
+        assert_eq!(node_peers(32000, 3, 3, "upper"), None);
     }
 
     #[test]

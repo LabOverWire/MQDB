@@ -127,7 +127,7 @@ fn dev_start_cluster_numbers_nodes_from_the_base_port_and_records_their_pids() {
     let prefix = dir.path().join("e2e");
     let prefix_arg = prefix.display().to_string();
 
-    let output = mqdb(&[
+    let output = mqdb_command(&[
         "dev",
         "start-cluster",
         "--nodes",
@@ -137,7 +137,11 @@ fn dev_start_cluster_numbers_nodes_from_the_base_port_and_records_their_pids() {
         "--no-quic",
         "--db-prefix",
         &prefix_arg,
-    ]);
+    ])
+    .env_remove("MQDB_LICENSE")
+    .env_remove("MQDB_LICENSE_FILE")
+    .output()
+    .expect("run mqdb");
     let pids = [1, 2].map(|node_id| std::fs::read_to_string(pid_file(&prefix, node_id)).ok());
     let killed = kill_cluster(&prefix);
 
@@ -161,7 +165,158 @@ fn dev_start_cluster_numbers_nodes_from_the_base_port_and_records_their_pids() {
         "dev kill --db-prefix must succeed: {}",
         String::from_utf8_lossy(&killed.stderr)
     );
+    let killed_stdout = String::from_utf8_lossy(&killed.stdout);
     for node_id in [1, 2] {
+        assert!(
+            killed_stdout.contains(&format!("Node {node_id} (pid"))
+                && killed_stdout.contains("is not running"),
+            "without a license the nodes exit, so only the stale pid file path runs here: {killed_stdout}"
+        );
         assert!(!pid_file(&prefix, node_id).exists());
+    }
+}
+
+fn mqdb_command(args: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mqdb"));
+    command.args(args);
+    command
+}
+
+fn output_text(output: &Output) -> String {
+    format!(
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+#[test]
+fn dev_kill_with_a_relative_db_prefix_stops_a_node_recorded_with_an_absolute_path() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    let mut node = StandInNode::spawn(&prefix.with_file_name("e2e-1"));
+    write_pid_file(&prefix, 1, node.pid());
+
+    let output = mqdb_command(&["dev", "kill", "--db-prefix", "e2e"])
+        .current_dir(dir.path())
+        .output()
+        .expect("run mqdb");
+
+    assert!(output.status.success(), "{}", output_text(&output));
+    assert!(node.has_exited(), "{}", output_text(&output));
+}
+
+#[test]
+fn dev_kill_reads_the_whole_command_line_of_a_node_when_columns_is_narrow() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    let mut node = StandInNode::spawn(&prefix.with_file_name("e2e-1"));
+    write_pid_file(&prefix, 1, node.pid());
+
+    let output = mqdb_command(&["dev", "kill", "--db-prefix", &prefix.display().to_string()])
+        .env("COLUMNS", "40")
+        .output()
+        .expect("run mqdb");
+
+    assert!(output.status.success(), "{}", output_text(&output));
+    assert!(node.has_exited(), "{}", output_text(&output));
+}
+
+#[test]
+fn dev_kill_stops_the_remaining_nodes_when_one_pid_file_is_unreadable() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    let mut node = StandInNode::spawn(&prefix.with_file_name("e2e-2"));
+    std::fs::create_dir_all(prefix.with_file_name("e2e-1")).expect("create node 1 dir");
+    std::fs::write(pid_file(&prefix, 1), "not-a-pid").expect("write a bad pid file");
+    write_pid_file(&prefix, 2, node.pid());
+
+    let output = kill_cluster(&prefix);
+
+    assert!(
+        node.has_exited(),
+        "node 2 must stop although node 1's pid file is bad: {}",
+        output_text(&output)
+    );
+    assert!(
+        !output.status.success(),
+        "the bad pid file is reported as a failure: {}",
+        output_text(&output)
+    );
+}
+
+#[test]
+fn dev_kill_fails_for_a_node_that_has_no_pid_file() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    let node = StandInNode::spawn(&prefix.with_file_name("e2e-1"));
+    write_pid_file(&prefix, 1, node.pid());
+
+    let output = mqdb(&[
+        "dev",
+        "kill",
+        "--db-prefix",
+        &prefix.display().to_string(),
+        "--node",
+        "7",
+    ]);
+
+    assert!(!output.status.success(), "{}", output_text(&output));
+    assert!(pid_file(&prefix, 1).exists());
+}
+
+#[test]
+fn dev_clean_removes_only_this_prefix_and_refuses_while_a_node_runs() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    let prefix_arg = prefix.display().to_string();
+    std::fs::create_dir_all(prefix.with_file_name("e2e-1")).expect("create node 1 dir");
+    std::fs::write(prefix.with_file_name("e2e-passwd"), "admin:x\n").expect("write passwd");
+    let their_node = StandInNode::spawn(&prefix.with_file_name("e2e-x-1"));
+    write_pid_file(&prefix.with_file_name("e2e-x"), 1, their_node.pid());
+
+    let output = mqdb(&["dev", "clean", "--db-prefix", &prefix_arg]);
+    assert!(output.status.success(), "{}", output_text(&output));
+    assert!(!prefix.with_file_name("e2e-1").exists());
+    assert!(!prefix.with_file_name("e2e-passwd").exists());
+    assert!(
+        prefix.with_file_name("e2e-x-1").exists(),
+        "another prefix's node dir must survive: {}",
+        output_text(&output)
+    );
+
+    let our_node = StandInNode::spawn(&prefix.with_file_name("e2e-2"));
+    write_pid_file(&prefix, 2, our_node.pid());
+    let output = mqdb(&["dev", "clean", "--db-prefix", &prefix_arg]);
+    assert!(
+        !output.status.success(),
+        "clean must refuse while a node of the prefix runs: {}",
+        output_text(&output)
+    );
+    assert!(pid_file(&prefix, 2).exists());
+}
+
+#[test]
+fn dev_start_cluster_refuses_a_privileged_or_zero_base_port() {
+    for base_port in ["0", "1023"] {
+        let dir = TempDir::new().expect("temp dir");
+        let prefix_arg = dir.path().join("e2e").display().to_string();
+        let output = mqdb(&[
+            "dev",
+            "start-cluster",
+            "--nodes",
+            "1",
+            "--base-port",
+            base_port,
+            "--no-quic",
+            "--db-prefix",
+            &prefix_arg,
+        ]);
+        assert!(
+            !output.status.success(),
+            "--base-port {base_port}: {}",
+            output_text(&output)
+        );
+        assert!(!dir.path().join("e2e-1").exists());
     }
 }

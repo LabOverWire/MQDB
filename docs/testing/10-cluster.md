@@ -356,6 +356,9 @@ mqdb dev clean
 mqdb dev clean --db-prefix /tmp/my-test
 ```
 
+`dev clean` removes only the `<prefix>-N` node directories and `<prefix>-passwd`. It refuses
+while a node recorded in a `<prefix>-N/mqdb.pid` file is still running.
+
 ### View Logs
 
 ```bash
