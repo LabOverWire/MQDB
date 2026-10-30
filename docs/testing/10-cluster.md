@@ -345,6 +345,9 @@ mqdb dev kill --db-prefix /tmp/my-test
 also stop nodes and agents started by anything else on the machine. `--db-prefix` stops
 only the PIDs that `dev start-cluster` recorded, after checking that each one still runs an
 `mqdb cluster start` or `mqdb agent start` whose `--db` resolves to `<prefix>-N`.
+The `dev test` suites that start their own cluster (`--ownership`, `--sharing`, `--presence`)
+also run `pkill -f "mqdb cluster"` and use ports 1883+, whatever `--db-prefix` or `--base-port`
+another cluster was started with.
 
 ### Clean Test Data
 
@@ -378,8 +381,8 @@ mqdb dev logs --follow
 # View specific node logs
 mqdb dev logs --node 2
 
-# Filter by pattern
-mqdb dev logs --pattern "error|warn"
+# Filter by a literal substring
+mqdb dev logs --pattern "ERROR"
 
 # Show last N lines
 mqdb dev logs --last 100
