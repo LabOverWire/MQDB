@@ -1007,6 +1007,7 @@ async fn seal_response_teaches_primary_a_missed_reservation() {
         PartitionId::new(5).unwrap(),
         1000,
     )
+    .unwrap()
     .with_committed();
     let member = UniqueStore::new(node2);
     member
@@ -1562,12 +1563,14 @@ async fn db_upsert_creates_or_updates() {
 
     let entity1 = ctrl
         .db_upsert("products", "p1", b"{\"price\":100}", 1000)
-        .await;
+        .await
+        .unwrap();
     assert_eq!(entity1.data, b"{\"price\":100}");
 
     let entity2 = ctrl
         .db_upsert("products", "p1", b"{\"price\":200}", 2000)
-        .await;
+        .await
+        .unwrap();
     assert_eq!(entity2.data, b"{\"price\":200}");
     assert_eq!(entity2.timestamp_ms, 2000);
 }
@@ -1896,10 +1899,12 @@ async fn db_list_primary_only_excludes_replica_data() {
 
     ctrl.stores
         .db_data
-        .upsert("items", &primary_id, b"{}", 1000);
+        .upsert("items", &primary_id, b"{}", 1000)
+        .unwrap();
     ctrl.stores
         .db_data
-        .upsert("items", &replica_id, b"{}", 1000);
+        .upsert("items", &replica_id, b"{}", 1000)
+        .unwrap();
 
     assert_eq!(ctrl.db_list("items").len(), 2);
 
@@ -1946,7 +1951,8 @@ async fn fk_reverse_lookup_ignores_stale_replica_data() {
     let post_bytes = serde_json::to_vec(&post_data).unwrap();
     ctrl.stores
         .db_data
-        .upsert("posts", &replica_post_id, &post_bytes, 1000);
+        .upsert("posts", &replica_post_id, &post_bytes, 1000)
+        .unwrap();
 
     assert_eq!(ctrl.db_list("posts").len(), 1);
 
@@ -2053,12 +2059,15 @@ async fn fk_reverse_lookup_restrict_blocks_only_on_primary_data() {
     )
     .await
     .unwrap();
-    ctrl.stores.db_data.upsert(
-        "posts",
-        &replica_post_id,
-        &post_bytes(&replica_post_id),
-        1000,
-    );
+    ctrl.stores
+        .db_data
+        .upsert(
+            "posts",
+            &replica_post_id,
+            &post_bytes(&replica_post_id),
+            1000,
+        )
+        .unwrap();
 
     assert_eq!(ctrl.db_list("posts").len(), 2);
 
@@ -3154,3 +3163,40 @@ async fn forwarded_delete_cascade_events_carry_the_deleters_origin() {
 mod change_events;
 mod forwarded_write;
 mod partition_map;
+
+#[tokio::test]
+async fn forwarded_create_refuses_an_id_longer_than_the_record_id_limit() {
+    use crate::cluster::protocol::JsonDbOp;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    make_all_primary(&mut ctrl, node1);
+    let long_id = "L".repeat(70_000);
+    let partition = crate::cluster::db::data_partition("items", &long_id);
+
+    let request = forwarded_request(
+        JsonDbOp::Create,
+        "items",
+        None,
+        &serde_json::json!({"id": long_id, "v": 1}),
+    );
+    ctrl.handle_json_db_request(node2, partition, &request)
+        .await;
+
+    assert!(ctrl.db_get("items", &long_id).is_none());
+    let responses: Vec<serde_json::Value> = ctrl
+        .transport()
+        .sent_messages()
+        .into_iter()
+        .filter_map(|(to, message)| match message {
+            ClusterMessage::JsonDbResponse(response) if to == node2 => {
+                serde_json::from_slice(&response.payload).ok()
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(responses.len(), 1, "{responses:?}");
+    assert_eq!(responses[0]["status"], "error");
+    assert_eq!(responses[0]["code"], 400);
+}

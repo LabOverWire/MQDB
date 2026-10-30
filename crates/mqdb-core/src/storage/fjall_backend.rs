@@ -8,6 +8,18 @@ use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode, Readable, Sl
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+fn fits_key_limit(key: &[u8]) -> bool {
+    u16::try_from(key.len()).is_ok()
+}
+
+fn oversized_key_error(key: &[u8]) -> crate::error::Error {
+    crate::error::Error::InvalidKey(format!(
+        "key of {} bytes exceeds the {} byte storage limit",
+        key.len(),
+        u16::MAX
+    ))
+}
+
 pub struct FjallBackend {
     db: Database,
     keyspace: Keyspace,
@@ -44,16 +56,25 @@ impl FjallBackend {
 
 impl StorageBackend for FjallBackend {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        if !fits_key_limit(key) {
+            return Ok(None);
+        }
         Ok(self.keyspace.get(key)?.map(|v| v.to_vec()))
     }
 
     fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
+        if !fits_key_limit(key) {
+            return Err(oversized_key_error(key));
+        }
         self.keyspace.insert(key, value)?;
         self.sync_if_needed()?;
         Ok(())
     }
 
     fn remove(&self, key: &[u8]) -> Result<()> {
+        if !fits_key_limit(key) {
+            return Ok(());
+        }
         self.keyspace.remove(key)?;
         self.sync_if_needed()?;
         Ok(())
@@ -192,6 +213,13 @@ impl BatchOperations for FjallBatch {
     }
 
     fn commit(self: Box<Self>) -> Result<()> {
+        if let Some(BatchOp::Insert(key, _)) = self
+            .operations
+            .iter()
+            .find(|op| matches!(op, BatchOp::Insert(key, _) if !fits_key_limit(key)))
+        {
+            return Err(oversized_key_error(key));
+        }
         {
             let _guard = self
                 .commit_lock
@@ -205,7 +233,11 @@ impl BatchOperations for FjallBatch {
                         key,
                         expected_value,
                     } => {
-                        let actual: Option<Slice> = snapshot.get(&self.keyspace, key)?;
+                        let actual: Option<Slice> = if fits_key_limit(key) {
+                            snapshot.get(&self.keyspace, key)?
+                        } else {
+                            None
+                        };
                         match actual {
                             Some(val) if val.as_ref() == expected_value.as_slice() => {}
                             _ => {
@@ -216,7 +248,7 @@ impl BatchOperations for FjallBatch {
                         }
                     }
                     Precondition::Absent { key } => {
-                        if snapshot.get(&self.keyspace, key)?.is_some() {
+                        if fits_key_limit(key) && snapshot.get(&self.keyspace, key)?.is_some() {
                             return Err(crate::error::Error::AbsentPreconditionViolated(
                                 key.clone(),
                             ));
@@ -229,7 +261,8 @@ impl BatchOperations for FjallBatch {
             for op in self.operations {
                 match op {
                     BatchOp::Insert(k, v) => batch.insert(&self.keyspace, k, v),
-                    BatchOp::Remove(k) => batch.remove(&self.keyspace, k),
+                    BatchOp::Remove(k) if fits_key_limit(&k) => batch.remove(&self.keyspace, k),
+                    BatchOp::Remove(_) => {}
                 }
             }
             batch.commit()?;
@@ -243,5 +276,55 @@ impl BatchOperations for FjallBatch {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_backend(dir: &tempfile::TempDir) -> FjallBackend {
+        FjallBackend::open(dir.path(), DurabilityMode::None).unwrap()
+    }
+
+    #[test]
+    fn oversized_key_is_refused_instead_of_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = open_backend(&dir);
+        let key = vec![b'k'; 70_000];
+
+        assert!(matches!(
+            backend.insert(&key, b"v"),
+            Err(crate::error::Error::InvalidKey(_))
+        ));
+        assert_eq!(backend.get(&key).unwrap(), None);
+        backend.remove(&key).unwrap();
+
+        let mut batch = backend.batch();
+        batch.insert(b"small".to_vec(), b"v".to_vec());
+        batch.insert(key.clone(), b"v".to_vec());
+        assert!(matches!(
+            batch.commit(),
+            Err(crate::error::Error::InvalidKey(_))
+        ));
+        assert_eq!(backend.get(b"small").unwrap(), None);
+
+        let mut batch = backend.batch();
+        batch.expect_absent(key.clone());
+        batch.remove(key.clone());
+        batch.insert(b"small".to_vec(), b"v".to_vec());
+        batch.commit().unwrap();
+        assert_eq!(backend.get(b"small").unwrap(), Some(b"v".to_vec()));
+
+        let at_limit = vec![b'k'; usize::from(u16::MAX)];
+        backend.insert(&at_limit, b"v").unwrap();
+        assert_eq!(backend.get(&at_limit).unwrap(), Some(b"v".to_vec()));
+
+        let mut batch = backend.batch();
+        batch.expect_value(key, b"v".to_vec());
+        assert!(matches!(
+            batch.commit(),
+            Err(crate::error::Error::Conflict(_))
+        ));
     }
 }

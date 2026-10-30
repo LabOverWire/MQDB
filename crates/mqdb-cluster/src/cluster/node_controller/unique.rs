@@ -88,7 +88,25 @@ pub async fn await_unique_quorum(
 }
 
 impl<T: ClusterTransport> NodeController<T> {
-    #[allow(clippy::missing_errors_doc)]
+    pub(crate) fn oversized_unique_value(
+        &self,
+        entity: &str,
+        data: &serde_json::Value,
+    ) -> Option<ReserveFailure> {
+        self.stores
+            .constraint_get_unique_fields(entity)
+            .into_iter()
+            .find(|field| {
+                data.get(field).is_some_and(|value| {
+                    let value = serde_json::to_vec(value).unwrap_or_default();
+                    !super::super::db::unique_value_fits_storage(entity, field, &value)
+                })
+            })
+            .map(ReserveFailure::TooLarge)
+    }
+
+    /// # Errors
+    /// Returns a `ReserveFailure` if a unique value is too large, already claimed, or not durable.
     pub async fn start_unique_constraint_check(
         &mut self,
         entity: &str,
@@ -98,6 +116,9 @@ impl<T: ClusterTransport> NodeController<T> {
         request_id: &str,
         now_ms: u64,
     ) -> Result<UniqueCheckPhase1Result, ReserveFailure> {
+        if let Some(failure) = self.oversized_unique_value(entity, data) {
+            return Err(failure);
+        }
         let unique_fields = self.stores.constraint_get_unique_fields(entity);
         let mut local_reserved: Vec<(String, Vec<u8>)> = Vec::new();
         let mut pending_remote: Vec<PendingUniqueReserve> = Vec::new();
@@ -144,6 +165,9 @@ impl<T: ClusterTransport> NodeController<T> {
                         }
                         super::super::db::ReserveResult::Conflict => {
                             Some(ReserveFailure::Conflict(field.clone()))
+                        }
+                        super::super::db::ReserveResult::Unencodable => {
+                            Some(ReserveFailure::TooLarge(field.clone()))
                         }
                     }
                 } else {
@@ -417,6 +441,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     UniqueReserveStatus::AlreadyReserved
                 }
                 super::super::db::ReserveResult::Conflict => UniqueReserveStatus::Conflict,
+                super::super::db::ReserveResult::Unencodable => UniqueReserveStatus::Error,
             }
         } else {
             UniqueReserveStatus::Error

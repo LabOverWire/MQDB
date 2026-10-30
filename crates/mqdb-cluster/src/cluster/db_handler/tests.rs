@@ -4069,3 +4069,96 @@ async fn a_forwarded_unique_create_on_a_node_that_lost_the_partition_is_refused_
     assert_eq!(replies[0]["code"], 503);
     assert_eq!(ctrl.transport().outbox.lock().unwrap().len(), 1);
 }
+
+async fn json_create(
+    ctrl: &mut NodeController<MockTransport>,
+    entity: &str,
+    body: &serde_json::Value,
+) -> serde_json::Value {
+    let response = DbRequestHandler::new(NodeId::validated(1).unwrap())
+        .handle_publish(
+            ctrl,
+            &format!("$DB/{entity}/create"),
+            &serde_json::to_vec(body).unwrap(),
+            &MqttRequestContext {
+                response_topic: Some("resp/t"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
+        )
+        .await;
+    match response {
+        super::DbPublishResult::Response(response) => parse_json_response(&response.payload),
+        super::DbPublishResult::NoResponse => serde_json::json!({"result": "no response"}),
+        super::DbPublishResult::PendingUniqueCheck(_)
+        | super::DbPublishResult::PendingFkCheck(_)
+        | super::DbPublishResult::PendingFkDelete(_) => serde_json::json!({"result": "pending"}),
+    }
+}
+
+#[tokio::test]
+async fn json_create_refuses_an_id_longer_than_the_record_id_limit() {
+    let mut ctrl = setup_controller_all_partitions();
+    let limit = mqdb_core::protocol::MAX_RECORD_ID_LEN;
+
+    for long_id in ["L".repeat(70_000), "m".repeat(limit + 1)] {
+        let json = json_create(
+            &mut ctrl,
+            "items",
+            &serde_json::json!({"id": long_id, "v": 1}),
+        )
+        .await;
+        assert_eq!(json["status"], "error", "id of {} bytes", long_id.len());
+        assert_eq!(json["code"], 400, "id of {} bytes", long_id.len());
+        assert!(ctrl.db_get("items", &long_id).is_none());
+    }
+
+    let at_limit = "k".repeat(limit);
+    let json = json_create(
+        &mut ctrl,
+        "items",
+        &serde_json::json!({"id": at_limit, "v": 1}),
+    )
+    .await;
+    assert_eq!(json["status"], "ok");
+    let stored = ctrl
+        .db_get("items", &at_limit)
+        .expect("record at the limit is stored");
+    let replicated = super::super::db::DbDataStore::deserialize(
+        &super::super::db::DbDataStore::serialize(&stored),
+    )
+    .expect("record decodes");
+    assert_eq!(replicated.id_str(), at_limit);
+}
+
+#[tokio::test]
+async fn json_create_refuses_a_unique_value_too_large_to_store() {
+    use super::super::db::ClusterConstraint;
+
+    let mut ctrl = setup_controller_all_partitions();
+    ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_code", "code"))
+        .await
+        .unwrap();
+
+    let code = "c".repeat(40_000);
+    let json = json_create(
+        &mut ctrl,
+        "users",
+        &serde_json::json!({"id": "u1", "code": code}),
+    )
+    .await;
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], 400);
+    assert!(ctrl.db_get("users", "u1").is_none());
+    let value = serde_json::to_vec(&serde_json::json!(code)).unwrap();
+    assert!(ctrl.stores().unique_get("users", "code", &value).is_none());
+
+    let json = json_create(
+        &mut ctrl,
+        "users",
+        &serde_json::json!({"id": "u2", "code": "short"}),
+    )
+    .await;
+    assert_ne!(json["status"], "error", "{json}");
+}

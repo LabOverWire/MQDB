@@ -13,7 +13,9 @@ pub use constraint_store::{
     ClusterConstraint, ConstraintStore, ConstraintStoreError, ConstraintType, OnDeleteAction,
     constraint_key,
 };
-pub use data_store::{DbDataStore, DbDataStoreError, DbEntity, FkReverseIndex, db_data_key};
+pub use data_store::{
+    DbDataStore, DbDataStoreError, DbEntity, FkReverseIndex, db_data_key, oversized_body_id_message,
+};
 pub use fk_store::{
     FkStoreError, FkValidationRequest, FkValidationResponse, FkValidationResult, FkValidationStore,
 };
@@ -24,5 +26,5 @@ pub use partition::{
 pub use schema_store::{ClusterSchema, SchemaState, SchemaStore, SchemaStoreError, schema_key};
 pub use unique_store::{
     ReassertResult, ReserveResult, UniqueReservation, UniqueReserveParams, UniqueStore,
-    UniqueStoreError, unique_key,
+    UniqueStoreError, unique_key, unique_value_fits_storage,
 };

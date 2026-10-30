@@ -325,13 +325,7 @@ mod tests {
         let dp = data_partition(entity, "rec-1");
         store
             .db_index
-            .add_entry(IndexEntry::create(
-                entity,
-                "email",
-                value.as_bytes(),
-                dp,
-                "rec-1",
-            ))
+            .add_entry(IndexEntry::create(entity, "email", value.as_bytes(), dp, "rec-1").unwrap())
             .unwrap();
         store.db_unique.reserve(
             &UniqueReserveParams {

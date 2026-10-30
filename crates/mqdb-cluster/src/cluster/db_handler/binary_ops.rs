@@ -201,13 +201,15 @@ impl DbRequestHandler {
 
         let data_partition = PartitionId::new(request.data_partition).unwrap_or(PartitionId::ZERO);
 
-        let entry = IndexEntry::create(
+        let Some(entry) = IndexEntry::create(
             request.entity_str(),
             request.field_str(),
             &request.value,
             data_partition,
             request.record_id_str(),
-        );
+        ) else {
+            return DbResponse::error(DbStatus::InvalidRequest).to_be_bytes();
+        };
 
         match controller.stores_mut().db_index.add_entry(entry) {
             Ok(()) => DbResponse::ok(&[]).to_be_bytes(),
@@ -251,6 +253,7 @@ impl DbRequestHandler {
                 UniqueReserveStatus::AlreadyReservedBySameRequest
             }
             db::ReserveResult::Conflict => UniqueReserveStatus::Conflict,
+            db::ReserveResult::Unencodable => UniqueReserveStatus::Error,
         };
 
         UniqueReserveResponse::create(status).to_be_bytes()

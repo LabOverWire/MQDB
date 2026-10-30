@@ -15,6 +15,11 @@ impl DbRequestHandler {
         serde_json::to_vec(&result).unwrap_or_default()
     }
 
+    pub(super) fn reject_oversized_body_id(data: &Value) -> Option<Vec<u8>> {
+        crate::cluster::db::oversized_body_id_message(data)
+            .map(|message| Self::json_error(400, &message))
+    }
+
     pub(super) fn current_time_ms() -> u64 {
         u64::try_from(
             std::time::SystemTime::now()
