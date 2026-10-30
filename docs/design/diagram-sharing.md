@@ -4,7 +4,7 @@
 >
 > **Agent mode.** The `_shares` entity, `AccessLevel`, and share-aware `check_access` live in `crates/mqdb-agent`.
 >
-> **Phase 5 (cluster), #75 and #122.** Phase 1 is ported, apart from the gaps listed below, in `crates/mqdb-cluster/src/cluster/node_controller/sharing.rs`, `crates/mqdb-cluster/src/cluster/db_handler/json_ops.rs` and `crates/mqdb-cluster/src/cluster/node_controller/db_ops.rs` (`check_forwarded_ownership` grades forwarded reads and updates and keeps forwarded deletes owner-only):
+> **Phase 5 (cluster), #75 and #122.** Phase 1 is ported, apart from the gaps listed in README.md (see below), in `crates/mqdb-cluster/src/cluster/node_controller/sharing.rs`, `crates/mqdb-cluster/src/cluster/db_handler/json_ops.rs` and `crates/mqdb-cluster/src/cluster/node_controller/db_ops.rs` (`check_forwarded_ownership` grades forwarded reads and updates and keeps forwarded deletes owner-only):
 > - each grant is stored on its resource's partition
 > - share, unshare and shares, plus the view/edit checks on read and update, are resolved on the resource primary (README.md describes the 503 and stale-grant window while a partition changes primary)
 > - `shared` is a `_shares` list scattered to every node and hydrated
