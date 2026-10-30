@@ -790,7 +790,6 @@ impl ClusteredAgent {
                     .into_iter()
                     .map(|target| ForwardTarget::new(target.client_id, target.qos)),
             );
-            let alive: std::collections::HashSet<NodeId> = ctrl.alive_nodes().into_iter().collect();
             let members = crate::cluster::share_members(
                 &ctrl.stores().topics,
                 &ctrl.stores().wildcards,
@@ -799,11 +798,10 @@ impl ClusteredAgent {
             let share_nodes = crate::cluster::assign_share_groups(
                 &members,
                 &std::collections::HashSet::new(),
-                crate::cluster::live_remote_node(
-                    |client_id: &str| ctrl.connected_node(client_id),
-                    node_id,
-                    alive,
-                ),
+                |client_id| {
+                    ctrl.connected_node(client_id)
+                        .filter(|node| *node != node_id)
+                },
                 |_| 0,
             );
 

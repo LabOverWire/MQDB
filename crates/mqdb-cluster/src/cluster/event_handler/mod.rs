@@ -128,9 +128,21 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
     }
 
     async fn reconcile_local_shares(&self, client_id: &str) {
-        if let Some(view) = self.broker_view.get() {
-            let stored = view.stored_shares(client_id).await;
-            self.update_local_shares(|shares| shares.reconcile(client_id, &stored));
+        let Some(view) = self.broker_view.get() else {
+            return;
+        };
+        let snapshot = self
+            .local_shares
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .client_candidates(client_id);
+        match view.stored_shares(client_id).await {
+            Ok(stored) => {
+                self.update_local_shares(|shares| shares.reconcile(client_id, &snapshot, &stored));
+            }
+            Err(error) => {
+                warn!(client_id, %error, "stored session unreadable, share members left as tracked");
+            }
         }
     }
 
@@ -145,7 +157,7 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             return HashMap::new();
         }
         let locate = |client_id: &str| ctrl.connected_node(client_id);
-        let alive: HashSet<NodeId> = ctrl.alive_nodes().into_iter().collect();
+        let alive: HashSet<NodeId> = ctrl.alive_or_suspected_nodes().into_iter().collect();
         let mut rotations = self
             .share_rotation
             .lock()

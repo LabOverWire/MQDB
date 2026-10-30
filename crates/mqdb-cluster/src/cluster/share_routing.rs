@@ -9,6 +9,7 @@ use mqtt5::broker::storage::{DynamicStorage, StorageBackend};
 use mqtt5::{parse_shared_subscription, topic_matches_filter};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
+use tracing::warn;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct ShareKey {
@@ -128,15 +129,38 @@ impl LocalShareMembers {
         }
     }
 
-    pub(crate) fn reconcile(&mut self, client_id: &str, stored: &HashSet<ShareKey>) {
+    pub(crate) fn client_candidates(&self, client_id: &str) -> Vec<ShareCandidate> {
+        self.by_client
+            .get(client_id)
+            .map(|keys| {
+                keys.iter()
+                    .map(|(key, version)| ShareCandidate {
+                        client_id: client_id.to_string(),
+                        key: key.clone(),
+                        version: *version,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn reconcile(
+        &mut self,
+        client_id: &str,
+        snapshot: &[ShareCandidate],
+        stored: &HashSet<ShareKey>,
+    ) {
+        let gone: Vec<ShareCandidate> = snapshot
+            .iter()
+            .filter(|candidate| !stored.contains(&candidate.key))
+            .cloned()
+            .collect();
+        self.forget(&gone);
         let tracked: HashSet<ShareKey> = self
             .by_client
             .get(client_id)
             .map(|keys| keys.keys().cloned().collect())
             .unwrap_or_default();
-        for key in tracked.difference(stored) {
-            self.remove(client_id, key);
-        }
         for key in stored.difference(&tracked) {
             self.add(client_id, key.clone());
         }
@@ -242,7 +266,18 @@ impl BrokerView {
                 continue;
             }
             if !stored_by_client.contains_key(&candidate.client_id) {
-                let stored = self.stored_shares(&candidate.client_id).await;
+                let stored = match self.stored_shares(&candidate.client_id).await {
+                    Ok(stored) => stored,
+                    Err(error) => {
+                        warn!(client_id = %candidate.client_id, %error, "stored session unreadable, keeping its share members");
+                        held.push(LocalShare {
+                            client_id: candidate.client_id,
+                            key: candidate.key,
+                            online: false,
+                        });
+                        continue;
+                    }
+                };
                 stored_by_client.insert(candidate.client_id.clone(), stored);
             }
             if stored_by_client
@@ -261,15 +296,16 @@ impl BrokerView {
         HeldShares { held, stale }
     }
 
-    pub(crate) async fn stored_shares(&self, client_id: &str) -> HashSet<ShareKey> {
+    pub(crate) async fn stored_shares(
+        &self,
+        client_id: &str,
+    ) -> mqtt5::error::Result<HashSet<ShareKey>> {
         let Some(storage) = &self.storage else {
-            return HashSet::new();
+            return Ok(HashSet::new());
         };
-        storage
+        Ok(storage
             .get_session(client_id)
-            .await
-            .ok()
-            .flatten()
+            .await?
             .map(|session| {
                 session
                     .subscriptions
@@ -277,7 +313,7 @@ impl BrokerView {
                     .filter_map(|topic_filter| ShareKey::parse(topic_filter))
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default())
     }
 }
 
@@ -530,17 +566,33 @@ mod tests {
         let mut members = LocalShareMembers::default();
         members.subscribed("a", "$share/g/sh/x");
         members.subscribed("a", "$share/h/sh/x");
-        members.reconcile("a", &HashSet::from([key("h", "sh/x")]));
+        let snapshot = members.client_candidates("a");
+        members.reconcile("a", &snapshot, &HashSet::from([key("h", "sh/x")]));
         assert_eq!(
             pairs(&members.candidates("sh/x")),
             vec![("a".to_string(), key("h", "sh/x"))]
         );
-        members.reconcile("a", &HashSet::new());
+        let snapshot = members.client_candidates("a");
+        members.reconcile("a", &snapshot, &HashSet::new());
         assert!(members.candidates("sh/x").is_empty());
-        members.reconcile("b", &HashSet::from([key("k", "sh/+")]));
+        members.reconcile("b", &[], &HashSet::from([key("k", "sh/+")]));
         assert_eq!(
             pairs(&members.candidates("sh/x")),
             vec![("b".to_string(), key("k", "sh/+"))]
+        );
+    }
+
+    #[test]
+    fn reconcile_keeps_a_subscription_added_after_its_snapshot() {
+        let mut members = LocalShareMembers::default();
+        members.subscribed("a", "$share/g/sh/x");
+        let snapshot = members.client_candidates("a");
+        members.unsubscribed("a", "$share/g/sh/x");
+        members.subscribed("a", "$share/g/sh/x");
+        members.reconcile("a", &snapshot, &HashSet::new());
+        assert_eq!(
+            pairs(&members.candidates("sh/x")),
+            vec![("a".to_string(), key("g", "sh/x"))]
         );
     }
 
@@ -617,10 +669,15 @@ mod tests {
             ]
         );
         assert_eq!(
-            view.stored_shares("kept").await,
+            view.stored_shares("kept").await.expect("read kept session"),
             HashSet::from([key("g", "sh/x")])
         );
-        assert!(view.stored_shares("dropped").await.is_empty());
+        assert!(
+            view.stored_shares("dropped")
+                .await
+                .expect("read dropped session")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
