@@ -4,6 +4,7 @@
 mod broker;
 mod handlers;
 mod tasks;
+mod websocket;
 
 use crate::auth_config::AuthSetupConfig;
 use crate::database::Database;
@@ -292,6 +293,7 @@ impl MqdbAgent {
 
         let auth_method = config.auth_config.auth_method;
         let (config, rate_limit) = crate::auth_config::take_auth_rate_limit(config);
+        let ws_listener = self.bind_websocket(&config).await?;
         let broker = mqtt5::broker::MqttBroker::with_config(config).await?;
         let (mut broker, auth_providers) = Self::apply_auth_providers(
             broker,
@@ -353,6 +355,7 @@ impl MqdbAgent {
             }
         };
         let license_task = self.spawn_license_check_task();
+        let ws_task = ws_listener.map(|listener| listener.spawn(&broker, self.shutdown_tx.clone()));
 
         tokio::select! {
             result = broker.run() => result?,
@@ -370,6 +373,9 @@ impl MqdbAgent {
         }
         if let Some(lic) = license_task {
             let _ = lic.await;
+        }
+        if let Some(ws) = ws_task {
+            let _ = ws.await;
         }
 
         Ok(())
@@ -398,6 +404,7 @@ impl MqdbAgent {
 
         let auth_method = config.auth_config.auth_method;
         let (config, rate_limit) = crate::auth_config::take_auth_rate_limit(config);
+        let ws_listener = self.bind_websocket(&config).await?;
         let broker = mqtt5::broker::MqttBroker::with_config(config).await?;
         let (mut broker, auth_providers) = Self::apply_auth_providers(
             broker,
@@ -463,6 +470,7 @@ impl MqdbAgent {
             }
         };
         let license_task = self.spawn_license_check_task();
+        let ws_task = ws_listener.map(|listener| listener.spawn(&broker, self.shutdown_tx.clone()));
 
         tokio::spawn(async move {
             if broker_ready_rx.wait_for(|ready| *ready).await.is_err()
@@ -495,6 +503,9 @@ impl MqdbAgent {
             }
             if let Some(lic) = license_task {
                 let _ = lic.await;
+            }
+            if let Some(ws) = ws_task {
+                let _ = ws.await;
             }
         });
 

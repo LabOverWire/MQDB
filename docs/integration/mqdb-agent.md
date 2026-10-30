@@ -12,6 +12,7 @@ Purpose: MQTT topics, event format, and startup flags a frontend uses to talk to
 |---------|--------|-------|
 | WebSocket listener | ✅ | `--ws-bind 0.0.0.0:8080` |
 | MQTT over WebSocket | ✅ | Browser connects to `ws://host:8080/mqtt` |
+| WebSocket health check | ✅ | Plain HTTP `GET http://host:8080/health` returns `200` with `{"status":"ok"}`, no upgrade needed (for load balancer health checks) |
 | CRUD operations | ✅ | `$DB/{entity}/create`, `$DB/{entity}/{id}`, `$DB/{entity}/{id}/update`, `$DB/{entity}/{id}/delete`, `$DB/{entity}/list` |
 | Real-time events | ✅ | `$DB/{entity}/events/#` for change notifications |
 | Change-only delivery | ✅ | Duplicate payloads suppressed on `$DB/+/events/#` |

@@ -61,7 +61,7 @@ pub(crate) struct AgentStartFields {
     #[arg(
         long,
         env = "MQDB_WS_BIND",
-        help = "WebSocket bind address (e.g. 0.0.0.0:8080)"
+        help = "WebSocket bind address for MQTT on /mqtt and a plain HTTP GET /health (e.g. 0.0.0.0:8080)"
     )]
     pub(crate) ws_bind: Option<SocketAddr>,
     #[command(flatten)]
