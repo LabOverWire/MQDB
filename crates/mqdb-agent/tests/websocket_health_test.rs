@@ -537,9 +537,12 @@ async fn upgraded_connection_without_connect_does_not_delay_stop() {
     );
 
     let _ = stream.write_all(&MQTT_CONNECT_FRAME).await;
-    let reply = read_until_closed(&mut stream, Duration::from_secs(3))
-        .await
-        .unwrap_or_default();
+    let reply = read_until_closed(&mut stream, Duration::from_secs(3)).await;
+    assert!(
+        reply.is_some(),
+        "a connection that never sent CONNECT must be closed by agent stop"
+    );
+    let reply = reply.unwrap_or_default();
     assert!(
         !contains_connack_frame(&reply),
         "a CONNECT sent after agent stop must not be accepted: {reply:?}"
