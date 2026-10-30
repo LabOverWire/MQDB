@@ -425,8 +425,23 @@ async fn stop_is_not_held_by_a_client_that_stopped_reading() {
         stopped.is_ok() && elapsed < Duration::from_secs(8),
         "agent stop took {elapsed:?} behind a WebSocket client that stopped reading"
     );
-    drop(stalled);
+    assert!(
+        peer_closed(&mut stalled).await,
+        "the connection of a client that stopped reading must not outlive agent stop"
+    );
     drop(agent.db_dir);
+}
+
+const PINGREQ_FRAME: [u8; 8] = [0x82, 0x82, 0, 0, 0, 0, 0xC0, 0x00];
+
+async fn peer_closed(stream: &mut TcpStream) -> bool {
+    for _ in 0..10 {
+        if stream.write_all(&PINGREQ_FRAME).await.is_err() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    false
 }
 
 async fn upgrade_only(port: u16) -> (TcpStream, String) {
@@ -487,4 +502,157 @@ async fn connected_sessions_release_their_handshake_slot() {
         client.disconnect().await.unwrap();
     }
     agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upgraded_connection_without_connect_does_not_delay_stop() {
+    let agent = start_agent_with_ws().await;
+    let (mut stream, head) = upgrade_only(agent.ws_port).await;
+    assert!(head.starts_with("HTTP/1.1 101"));
+
+    let started = std::time::Instant::now();
+    let _ = agent.shutdown.send(());
+    let stopped = tokio::time::timeout(Duration::from_secs(8), agent.handle).await;
+    let elapsed = started.elapsed();
+    assert!(
+        stopped.is_ok() && elapsed < Duration::from_secs(3),
+        "agent stop took {elapsed:?} behind a connection that upgraded but sent no CONNECT"
+    );
+
+    let _ = stream.write_all(&MQTT_CONNECT_FRAME).await;
+    let reply = read_until_closed(&mut stream, Duration::from_secs(3))
+        .await
+        .unwrap_or_default();
+    assert!(
+        !contains_connack_frame(&reply),
+        "a CONNECT sent after agent stop must not be accepted: {reply:?}"
+    );
+    drop(agent.db_dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upgrade_request_on_health_path_is_answered_as_health() {
+    let agent = start_agent_with_ws().await;
+    let mut stream = TcpStream::connect(("127.0.0.1", agent.ws_port))
+        .await
+        .unwrap();
+    stream
+        .write_all(format!("GET /health HTTP/1.1\r\n{UPGRADE_HEADERS}\r\n").as_bytes())
+        .await
+        .unwrap();
+
+    let response = read_with_deadline(&mut stream, Duration::from_secs(5)).await;
+
+    assert!(
+        String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200 OK\r\n"),
+        "GET /health is a health probe with or without upgrade headers: {response:?}"
+    );
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_reply_survives_unread_request_bytes() {
+    let agent = start_agent_with_ws().await;
+    let body = [b'b'; 65536];
+    for attempt in 0..10 {
+        let mut stream = TcpStream::connect(("127.0.0.1", agent.ws_port))
+            .await
+            .unwrap();
+        let head = b"GET /health HTTP/1.1\r\nHost: x\r\nContent-Length: 65536\r\n\r\n";
+        let _ = stream.write_all(head).await;
+        let _ = stream.write_all(&body).await;
+        let response = read_with_deadline(&mut stream, Duration::from_secs(5)).await;
+        assert!(
+            String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200 OK\r\n"),
+            "attempt {attempt}: the health reply was lost: {} bytes received",
+            response.len()
+        );
+    }
+    agent.stop().await;
+}
+
+fn scram_connect_frame(index: u8) -> [u8; 64] {
+    let client_id = [b'a' + index / 26, b'a' + index % 26];
+    let parts: [&[u8]; 8] = [
+        &[0x82, 0x80 | 58, 0, 0, 0, 0, 0x10, 56, 0, 4],
+        b"MQTT",
+        &[5, 0x02, 0, 60, 41, 0x15, 0, 13],
+        b"SCRAM-SHA-256",
+        &[0x16, 0, 22],
+        b"n,,n=tester,r=abcdefgh",
+        &[0, 2],
+        &client_id,
+    ];
+    let mut frame = [0u8; 64];
+    let mut at = 0;
+    for part in parts {
+        frame[at..at + part.len()].copy_from_slice(part);
+        at += part.len();
+    }
+    assert_eq!(at, frame.len());
+    frame
+}
+
+async fn first_packet_type(stream: &mut TcpStream) -> u8 {
+    let mut header = [0u8; 2];
+    stream.read_exact(&mut header).await.unwrap();
+    let extended = match header[1] & 0x7f {
+        126 => 2,
+        127 => 8,
+        _ => 0,
+    };
+    let mut length = [0u8; 8];
+    stream.read_exact(&mut length[..extended]).await.unwrap();
+    let mut packet_type = [0u8; 1];
+    stream.read_exact(&mut packet_type).await.unwrap();
+    packet_type[0]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn enhanced_auth_exchanges_keep_their_handshake_slot() {
+    let tmp = TempDir::new().unwrap();
+    let scram_file = tmp.path().join("scram");
+    let line = mqtt5::broker::auth_mechanisms::generate_scram_credential_line_with_iterations(
+        "tester", "secret", 10_000,
+    )
+    .unwrap();
+    std::fs::write(&scram_file, format!("{line}\n")).unwrap();
+    let db = Database::open(tmp.path().join("db")).await.unwrap();
+    let ws_port = next_test_port();
+    let agent = MqdbAgent::new(db)
+        .with_bind_address(local_addr(next_test_port()))
+        .with_ws_bind_address(local_addr(ws_port))
+        .with_scram_file(scram_file);
+    let (handle, mut ready_rx, shutdown) = agent.start().await.unwrap();
+    ready_rx.wait_for(|ready| *ready).await.unwrap();
+
+    let mut pending: [Option<TcpStream>; 128] = std::array::from_fn(|_| None);
+    for (index, slot) in (0u8..).zip(pending.iter_mut()) {
+        let (mut stream, head) = upgrade_only(ws_port).await;
+        assert!(head.starts_with("HTTP/1.1 101"));
+        stream.write_all(&scram_connect_frame(index)).await.unwrap();
+        let packet_type =
+            tokio::time::timeout(Duration::from_secs(3), first_packet_type(&mut stream))
+                .await
+                .expect("the broker must answer a SCRAM CONNECT");
+        assert_eq!(packet_type, 0xF0, "the broker must answer with AUTH");
+        *slot = Some(stream);
+    }
+
+    let mut next = TcpStream::connect(("127.0.0.1", ws_port)).await.unwrap();
+    next.write_all(format!("GET /mqtt HTTP/1.1\r\n{UPGRADE_HEADERS}\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut first = [0u8; 1];
+    let early = tokio::time::timeout(Duration::from_secs(2), next.read(&mut first)).await;
+    assert!(
+        early.is_err(),
+        "a connection must wait while 128 connections are mid enhanced-auth without a CONNACK"
+    );
+
+    drop(pending);
+    drop(next);
+    let _ = shutdown.send(());
+    let _ = handle.await;
+    drop(tmp);
 }

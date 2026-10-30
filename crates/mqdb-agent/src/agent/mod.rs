@@ -359,10 +359,13 @@ impl MqdbAgent {
         let license_task = self.spawn_license_check_task();
         let ws_task = self.spawn_websocket_task(ws_listener, &broker, agent_ready_rx);
 
-        tokio::select! {
-            result = broker.run() => result?,
-            _ = shutdown_rx.recv() => info!("MQDB Agent shutting down"),
-        }
+        let broker_result = tokio::select! {
+            result = broker.run() => result,
+            _ = shutdown_rx.recv() => {
+                info!("MQDB Agent shutting down");
+                Ok(())
+            }
+        };
 
         let _ = self.shutdown_tx.send(());
         let _ = handler_task.await;
@@ -380,7 +383,7 @@ impl MqdbAgent {
             let _ = ws.await;
         }
 
-        Ok(())
+        Ok(broker_result?)
     }
 
     /// # Errors

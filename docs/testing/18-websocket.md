@@ -11,18 +11,18 @@ Manual tests for agent mode's WebSocket listener (`--ws-bind`). Assumes a built 
 | Request | Result |
 |---------|--------|
 | WebSocket upgrade on `/mqtt` (subprotocol `mqtt`) | MQTT 5 session, same auth and ACL as the TCP listener |
-| Plain HTTP `GET /health` (query string allowed) | `200` with `{"status":"ok"}` once the agent is ready |
+| `GET /health` (query string allowed, with or without upgrade headers) | `200` with `{"status":"ok"}` once the agent is ready |
 | Upgrade on any other path | `404` from the WebSocket handshake |
 | Plain HTTP request to any other path | connection closed without a response |
 
-The port starts accepting once the agent is ready: broker, internal request handler (including its response publisher) and event publisher. MQTT over WebSocket therefore depends on that readiness; if the agent never becomes ready, the WebSocket port never accepts, while MQTT over TCP keeps working. `/health` reports that startup readiness. It does not track the internal tasks afterwards, so a handler that stopped later would still report `200`.
+The port is bound at startup, but connections are only served once the agent is ready: broker, internal request handler (including its response publisher) and event publisher. Before that, TCP connections complete into the kernel backlog and wait, so a TCP-level load balancer check passes while an HTTP `GET /health` gets no answer until the agent is ready. MQTT over WebSocket depends on that readiness; if the agent never becomes ready, the listener closes the port and only MQTT over TCP works. `/health` reports that startup readiness. It does not track the internal tasks afterwards, so a handler that stopped later would still report `200`.
 
 Limits:
 - Reading the request and completing the handshake must finish within 10 seconds.
-- At most 128 connections can be between accept and the broker's answer to their MQTT CONNECT. A connection that upgrades and never sends CONNECT keeps its slot until the broker's 10-second connect timeout closes it. Further connections wait in the kernel backlog until a slot frees.
+- At most 128 connections can be between accept and the broker's CONNACK. An enhanced-auth (SCRAM, JWT) exchange before the CONNACK keeps the slot. A connection that upgrades and never completes CONNECT keeps its slot until the broker's 10-second connect timeout closes it. Further connections wait in the kernel backlog until a slot frees.
 - `/health` probes use the same slots. While all 128 are held, `/health` waits like any new WebSocket client, so a load balancer sees the same unavailability a client would.
 - `/health` is answered before the broker's connection limits are checked. The limits apply to WebSocket upgrades.
-- Agent shutdown waits up to 5 seconds for WebSocket connections to close.
+- On agent shutdown, connections that have not received their CONNACK are closed at once, connected sessions get the broker's shutdown DISCONNECT, and any connection still open after 5 seconds is closed.
 
 Cluster mode uses mqtt5's built-in WebSocket listener and has no `/health` route.
 

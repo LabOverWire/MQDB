@@ -42,16 +42,18 @@ upgrade. Every other request is handed to `mqtt5::broker::websocket_server::acce
 default `/mqtt` path and `mqtt` subprotocol, and the upgraded stream runs in an `mqtt5` `ClientHandler` built from the
 broker's router, auth provider, storage, stats and resource monitor.
 
-- The port accepts connections only once the agent is ready (broker, internal handler with its response publisher,
-  and event publisher), so `/health` never reports `200` for a node that cannot serve requests yet. MQTT over
-  WebSocket depends on that readiness, unlike MQTT over TCP. `/health` reports startup readiness only and does not
-  track those internal tasks afterwards.
+- The port is bound at startup but connections are served only once the agent is ready (broker, internal handler with
+  its response publisher, and event publisher). Until then TCP connections wait in the kernel backlog, so `/health`
+  never answers `200` for a node that cannot serve requests yet. MQTT over WebSocket depends on that readiness, unlike
+  MQTT over TCP. `/health` reports startup readiness only and does not track those internal tasks afterwards.
+  `GET /health` is answered as a health probe with or without upgrade headers.
 - `/health` is answered before the broker's connection limits are checked; those limits apply to WebSocket upgrades.
 - Reading the request and completing the handshake must finish within 10 seconds. At most 128 connections can be
-  between accept and the broker's CONNACK; the slot is released when the broker writes its first MQTT packet, or when
-  the connection closes. Further connections, `/health` probes included, wait in the kernel backlog.
-- Connections still in the handshake are closed when the agent shuts down, and agent shutdown waits up to 5 seconds
-  for every WebSocket connection to close.
+  between accept and the broker's CONNACK: the slot is released when a WebSocket frame carrying the CONNACK is written
+  (enhanced-auth AUTH packets do not release it), or when the connection closes. Further connections, `/health`
+  probes included, wait in the kernel backlog.
+- On agent shutdown, connections without a CONNACK are closed at once, connected sessions get the broker's shutdown
+  DISCONNECT, and connections still open after 5 seconds are closed by dropping their handler.
 
 ---
 
