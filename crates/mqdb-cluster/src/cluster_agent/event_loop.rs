@@ -802,6 +802,7 @@ impl ClusteredAgent {
                     ctrl.connected_node(client_id)
                         .filter(|node| *node != node_id)
                 },
+                |_| true,
                 |_| 0,
             );
 

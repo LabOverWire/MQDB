@@ -161,7 +161,8 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             return HashMap::new();
         }
         let locate = |client_id: &str| ctrl.connected_node(client_id);
-        let alive: HashSet<NodeId> = ctrl.alive_or_suspected_nodes().into_iter().collect();
+        let eligible: HashSet<NodeId> = ctrl.alive_or_suspected_nodes().into_iter().collect();
+        let alive: HashSet<NodeId> = ctrl.alive_nodes().into_iter().collect();
         let mut rotations = self
             .share_rotation
             .lock()
@@ -172,7 +173,8 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
         assign_share_groups(
             &members,
             &served_locally(held, locate, self.node_id),
-            live_remote_node(locate, self.node_id, alive),
+            live_remote_node(locate, self.node_id, eligible),
+            |node| alive.contains(&node),
             |key| {
                 let next = rotations.entry(key.clone()).or_default();
                 let current = *next;

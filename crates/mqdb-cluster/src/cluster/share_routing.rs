@@ -364,6 +364,7 @@ pub(crate) fn assign_share_groups(
     members: &[ShareMember],
     served_locally: &HashSet<ShareKey>,
     remote_node: impl Fn(&str) -> Option<NodeId>,
+    preferred: impl Fn(NodeId) -> bool,
     mut rotation: impl FnMut(&ShareKey) -> usize,
 ) -> HashMap<NodeId, Vec<String>> {
     let mut candidates: HashMap<&ShareKey, BTreeSet<NodeId>> = HashMap::new();
@@ -378,7 +379,17 @@ pub(crate) fn assign_share_groups(
         if served_locally.contains(key) {
             continue;
         }
-        if let Some(node) = nodes.iter().nth(rotation(key) % nodes.len()) {
+        let healthy: Vec<NodeId> = nodes
+            .iter()
+            .copied()
+            .filter(|node| preferred(*node))
+            .collect();
+        let pool: Vec<NodeId> = if healthy.is_empty() {
+            nodes.into_iter().collect()
+        } else {
+            healthy
+        };
+        if let Some(node) = pool.get(rotation(key) % pool.len()) {
             assigned.entry(*node).or_default().insert(&key.group);
         }
     }
@@ -437,11 +448,21 @@ mod tests {
     fn a_group_with_only_remote_members_goes_to_one_of_their_nodes() {
         let members = [member("g", "sh/x", "a"), member("g", "sh/x", "b")];
         let places = [("a", 2), ("b", 3)];
-        let assigned =
-            assign_share_groups(&members, &HashSet::new(), remote(&places, 1, &[]), fixed(0));
+        let assigned = assign_share_groups(
+            &members,
+            &HashSet::new(),
+            remote(&places, 1, &[]),
+            |_| true,
+            fixed(0),
+        );
         assert_eq!(assigned, HashMap::from([(node(2), vec!["g".to_string()])]));
-        let rotated =
-            assign_share_groups(&members, &HashSet::new(), remote(&places, 1, &[]), fixed(1));
+        let rotated = assign_share_groups(
+            &members,
+            &HashSet::new(),
+            remote(&places, 1, &[]),
+            |_| true,
+            fixed(1),
+        );
         assert_eq!(rotated, HashMap::from([(node(3), vec!["g".to_string()])]));
     }
 
@@ -452,6 +473,7 @@ mod tests {
             &members,
             &HashSet::from([key("g", "sh/x")]),
             remote(&[("a", 1), ("b", 2)], 1, &[]),
+            |_| true,
             fixed(0),
         );
         assert!(assigned.is_empty());
@@ -464,6 +486,7 @@ mod tests {
             &members,
             &HashSet::new(),
             remote(&[("gone", 1), ("b", 2)], 1, &[]),
+            |_| true,
             fixed(0),
         );
         assert_eq!(assigned, HashMap::from([(node(2), vec!["g".to_string()])]));
@@ -477,6 +500,7 @@ mod tests {
                 &members,
                 &HashSet::new(),
                 remote(&[("a", 2), ("b", 3)], 1, &[2]),
+                |_| true,
                 fixed(rotation),
             );
             assert_eq!(assigned, HashMap::from([(node(3), vec!["g".to_string()])]));
@@ -490,9 +514,36 @@ mod tests {
             &members,
             &HashSet::from([key("g", "sh/+")]),
             remote(&[("b", 2)], 1, &[]),
+            |_| true,
             fixed(0),
         );
         assert_eq!(assigned, HashMap::from([(node(2), vec!["g".to_string()])]));
+    }
+
+    #[test]
+    fn alive_nodes_are_preferred_over_suspected_ones() {
+        let members = [member("g", "sh/x", "a"), member("g", "sh/x", "b")];
+        for rotation in 0..4 {
+            let assigned = assign_share_groups(
+                &members,
+                &HashSet::new(),
+                remote(&[("a", 2), ("b", 3)], 1, &[]),
+                |n| n == node(3),
+                fixed(rotation),
+            );
+            assert_eq!(assigned, HashMap::from([(node(3), vec!["g".to_string()])]));
+        }
+        let only_suspected = assign_share_groups(
+            &members,
+            &HashSet::new(),
+            remote(&[("a", 2), ("b", 3)], 1, &[]),
+            |_| false,
+            fixed(1),
+        );
+        assert_eq!(
+            only_suspected,
+            HashMap::from([(node(3), vec!["g".to_string()])])
+        );
     }
 
     #[test]
@@ -501,6 +552,7 @@ mod tests {
             &[member("g", "sh/x", "a")],
             &HashSet::new(),
             remote(&[], 1, &[]),
+            |_| true,
             fixed(0),
         );
         assert!(assigned.is_empty());

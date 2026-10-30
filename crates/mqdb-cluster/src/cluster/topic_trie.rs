@@ -104,9 +104,10 @@ impl TopicTrie {
         let removed = Self::remove_recursive(&mut self.root, &levels, 0, client_id);
         if removed {
             self.pattern_count = self.pattern_count.saturating_sub(1);
-            if self
-                .find(pattern)
-                .is_none_or(|node| node.subscribers.is_empty())
+            if self.shared_patterns.contains(pattern)
+                && self
+                    .find(pattern)
+                    .is_none_or(|node| node.subscribers.is_empty())
             {
                 self.shared_patterns.remove(pattern);
             }
