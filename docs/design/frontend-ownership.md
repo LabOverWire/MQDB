@@ -24,7 +24,7 @@ The original discussion proposed **user-scoped topic namespacing** (`$DB/u/{user
 When a user authenticates via MQTT CONNECT (password, SCRAM, JWT, or OAuth), the broker injects their identity as `x-mqtt-sender` (username) and `x-mqtt-client-id` (MQTT client ID) user properties on every PUBLISH they send. These are anti-spoof: the broker strips any client-supplied values before injecting the real ones. The database layer reads `x-mqtt-sender` for ownership enforcement and `x-mqtt-client-id` for echo suppression in change events (see `../architecture.md` Section 16 for the full property flow). The ownership layer uses `x-mqtt-sender` to:
 
 - **List operations**: Automatically injects a mandatory filter `userId = {authenticated_user}`. Alice only sees her own diagrams. Bob only sees his.
-- **Read/Update/Delete operations**: Reads the existing record and allows the request when `data.userId == sender`. Otherwise read is allowed with a `view` or `edit` share grant, update only with an `edit` grant, and delete never (agent: `crud.rs` `check_access` via `transport_execute.rs`; cluster: `check_local_share_access` in `node_controller/sharing.rs`). Anything else returns 403. Read is **not** unrestricted.
+- **Read/Update/Delete operations**: Reads the existing record and allows the request when `data.userId == sender`. Otherwise read is allowed with a `view` or `edit` share grant, update only with an `edit` grant, and delete never (agent: `crud.rs` `check_access` via `transport_execute.rs`; cluster: `check_local_share_access` in `node_controller/sharing.rs` for reads and updates graded on the node that received them, `check_forwarded_ownership` in `node_controller/db_ops.rs` for forwarded requests, and `check_cluster_ownership` in `db_handler/json_ops.rs` for deletes). Anything else returns 403. Read is **not** unrestricted.
 - **Missing/null owner**: A record whose owner field is absent or null is **protected** — `None == Some(sender)` is false, so any non-admin gets 403. This holds uniformly: the direct Read/Update/Delete path and the FK cascade path both treat a null/missing owner as not-owned (cascade set-nulls it instead of deleting). See [distributed-design.md → Owner-Aware Cascade](../distributed-design.md).
 - **Create operations**: No restriction. The frontend sets `userId` in the data payload.
 - **Admin users**: Bypass all ownership checks. Admins see all records and can read/update/delete anything.
@@ -59,7 +59,7 @@ const payload = { title: "My Diagram" };
 const payload = { title: "My Diagram", userId: authenticatedUserId };
 ```
 
-The `userId` field must match the MQTT username the frontend authenticates with. With OAuth this is the JWT `sub` claim, which is the user's canonical id from `_identities`, not their email.
+The `userId` field must match the sender identity: the MQTT username for password and SCRAM auth, or the JWT `sub` claim for JWT and OAuth. With OAuth, `sub` is the user's canonical id from `_identities`, not their email.
 
 ### 2. Authenticate with Real Credentials
 
@@ -70,7 +70,7 @@ Anonymous mode does not support ownership enforcement because there is no sender
 - **JWT**: MQTT CONNECT with JWT token as password
 - **OAuth**: Via the HTTP/OAuth flow that issues JWT tokens
 
-The username used in MQTT CONNECT becomes the sender identity for ownership checks.
+The sender identity for ownership checks is the MQTT CONNECT username for password and SCRAM auth, and the token's `sub` claim for JWT and OAuth.
 
 ### 3. Handle 403 Forbidden Responses
 
@@ -138,10 +138,10 @@ mqdb passwd admin -b admin_password -f passwd.txt
 ### OAuth Flow (Production)
 
 For Google OAuth:
-1. Server starts with `--http-bind 0.0.0.0:8080 --google-client-id <ID> --google-client-secret <SECRET>`
-2. Frontend redirects to `/auth/google`
-3. OAuth callback issues JWT token
-4. Frontend uses JWT token as MQTT password
+1. Server starts with `--http-bind 0.0.0.0:8080 --oauth-client-secret <file>` (plus `--oauth-redirect-uri` if the callback is not `http://localhost:{port}/oauth/callback`); the Google client id comes from `--jwt-audience` or the federated JWT config's `providers[0].audience`
+2. Frontend sends the browser to `GET /oauth/authorize?provider=google`
+3. `GET /oauth/callback` sets a session cookie, then `POST /auth/ticket` returns a short-lived JWT
+4. Frontend uses that JWT as the MQTT password
 5. The `sub` claim (the canonical id, not the email) becomes the sender identity
 
 ---

@@ -6,19 +6,13 @@
 >
 > **Phase 5 (cluster), #75 and #122.** Phase 1 is ported in `crates/mqdb-cluster/src/cluster/node_controller/sharing.rs`, `crates/mqdb-cluster/src/cluster/db_handler/json_ops.rs` and `crates/mqdb-cluster/src/cluster/node_controller/db_ops.rs` (`check_forwarded_ownership` grades forwarded reads and updates):
 > - each grant is stored on its resource's partition
-> - share, unshare and shares, plus the view/edit checks on read and update, are resolved on the resource primary (while a partition changes primary, share/unshare can return 503 and the checks can see grants that are not current)
+> - share, unshare and shares, plus the view/edit checks on read and update, are resolved on the resource primary (README.md describes the 503 and stale-grant window while a partition changes primary)
 > - `shared` is a `_shares` list scattered to every node and hydrated
 > - email grantees are resolved to canonical ids across partitions
-> - grants are cleared on delete
+> - grants are cleared on a direct delete, as in agent mode (in both modes an FK cascade delete leaves them, #253)
 > - generic CRUD on `_shares` is refused
 >
-> Phase 1 gaps in a cluster:
-> - the pending-grant sign-in sweep (#122)
-> - a cascade skips closure members held by another primary and does not walk past them (#122)
-> - unshare does not cascade (#247)
-> - a payload that omits `cascade` does not cascade (#248)
->
-> Phases 2-3 are not ported: child derivation, `--ownership-derive` (#210), and scoped events, `--scoped-events` (#211).
+> The cluster gaps (pending-grant sweep, cross-partition cascade, cascading unshare, the `cascade` default, and phases 2-3 not being ported) are listed once, with their issues, in README.md under "Sharing Operations".
 >
 > **Phase 6 (WASM).** The WASM build rejects share operations (`crates/mqdb-wasm/src/execute.rs`).
 >
@@ -58,25 +52,25 @@ example.
 
 ---
 
-## Verified current behavior (what this changes)
+## Behavior before this design (baseline)
 
-All statements below were checked against code, not docs. Where they contradict
-`frontend-ownership.md`, the code wins and that doc must be corrected alongside
-this work.
+This table records the code as this design found it before sharing landed. Phases 1-3 changed the read, update, child-entity and event rows, so
+this is not current behavior; see the status above for that. Sources name the
+function or file, not line numbers, because the line numbers have moved.
 
-| Area | Reality in code | Source |
+| Area | Reality in code (before sharing) | Source |
 |------|-----------------|--------|
-| Ownership config | per-entity `--ownership diagrams=userId`, single owner field | `mqdb-core/src/types.rs:75` |
-| Read | **ownership-enforced** (403 for non-owner) | `transport_execute.rs:72-79` |
-| Update | owner-checked; owner field stripped from payload | `transport_execute.rs:90-101` |
-| Delete | owner-checked | `transport_execute.rs:122-129` |
-| List | injects mandatory `owner_field = sender` (single AND filter; no OR/contains) | `transport_execute.rs:156-166` |
-| Owner check | exact string compare `owner_value != sender` | `crud.rs:424` |
-| **Child entities** | **zero access control** — unconfigured entity → `evaluate` returns `Allowed` even for `sender=None`; FK validation checks existence only; anyone who knows a node id can edit/delete it | `types.rs:144-155`, `constraint.rs` |
-| **Events** | **broadcast to all** authenticated subscribers; final fan-out is done by **mqtt-lib's broker** (off-limits); MQDB publishes each event once to a shared topic | `dispatcher.rs:72-82`, `tasks.rs:215`, `topic_rules.rs:45` (`$DB/+/events/#` = ReadOnly → any subscribe allowed) |
-| `%u` topic ACL | **implemented** — ACL patterns like `$DB/u/%u/#` expand per-user at subscribe time | `mqtt-lib …/broker/acl/rules.rs:12-20` |
-| Sender identity | password/SCRAM → username; JWT → `sub`; **OAuth → `sub = canonical_id` (UUID from `_identities`), NOT email** | `http/handlers.rs:821`, `auth_config.rs` |
-| Email→id lookup | exists server-side: `find_canonical_id_by_email` over `_identities.email_hash` | `http/handlers.rs` |
+| Ownership config | per-entity `--ownership diagrams=userId`, single owner field | `mqdb-core/src/types.rs` `OwnershipConfig` |
+| Read | **ownership-enforced** (403 for non-owner) | `transport_execute.rs` `execute_with_sender`, `Request::Read` arm |
+| Update | owner-checked; owner field stripped from payload | `transport_execute.rs` `execute_with_sender`, `Request::Update` arm |
+| Delete | owner-checked | `transport_execute.rs` `execute_with_sender`, `Request::Delete` arm |
+| List | injects mandatory `owner_field = sender` (single AND filter; no OR/contains) | `transport_execute.rs` `execute_with_sender`, `Request::List` arm |
+| Owner check | exact string compare of owner value and sender | `database/crud.rs` `is_owner` |
+| **Child entities** | **zero access control** — unconfigured entity → `evaluate` returns `Allowed` even for `sender=None`; FK validation checks existence only; anyone who knows a node id can edit/delete it | `mqdb-core/src/types.rs` `OwnershipConfig::evaluate`, `constraint.rs` |
+| **Events** | **broadcast to all** authenticated subscribers; final fan-out is done by **mqtt-lib's broker** (off-limits); MQDB publishes each event once to a shared topic | `dispatcher.rs`, `agent/tasks.rs`, `topic_rules.rs` (`$DB/+/events/#` = ReadOnly → any subscribe allowed) |
+| `%u` topic ACL | **implemented** — ACL patterns like `$DB/u/%u/#` expand per-user at subscribe time | mqtt-lib `broker/acl/rules.rs` |
+| Sender identity | password/SCRAM → username; JWT → `sub`; **OAuth → `sub = canonical_id` (UUID from `_identities`), NOT email** | `http/handlers.rs` (`mint_refresh_jwt` and the ticket JWT set `sub` to the canonical id), `auth_config.rs` |
+| Email→id lookup | exists server-side: `find_canonical_id_by_email` over `_identities.email_hash` | `http/handlers.rs` `find_canonical_id_by_email` |
 | Cluster events | **no event task**; the broker emits/replicates events natively — emission point differs from agent | `cluster_agent/broker.rs`, `db_handler/json_ops.rs` |
 
 Two consequences drive the design:
