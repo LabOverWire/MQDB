@@ -9,7 +9,7 @@ The original discussion proposed **user-scoped topic namespacing** (`$DB/u/{user
 - No topic restructuring (no `$DB/u/{userId}/...` prefix)
 - No ACL file management per user
 - No user provisioning hooks
-- No changes to event subscription topics
+- No changes to event subscription topics, unless the server enables `--scoped-events` (see [Event Subscriptions](#event-subscriptions))
 
 ### What the Frontend Needs to Do
 
@@ -38,10 +38,10 @@ $DB/diagrams/list                → List diagrams (filtered by ownership)
 $DB/diagrams/{id}                → Read a diagram
 $DB/diagrams/{id}/update         → Update a diagram (ownership checked)
 $DB/diagrams/{id}/delete         → Delete a diagram (ownership checked)
-$DB/diagrams/events/#            → Subscribe to diagram changes (unchanged)
+$DB/diagrams/events/#            → Subscribe to diagram changes (unchanged unless --scoped-events is on)
 ```
 
-All other entities (nodes, edges, topics, schemas, variables, groups) continue to work exactly as before — no ownership enforcement on them. Only entities configured with `--ownership` get ownership checks.
+All other entities (nodes, edges, topics, schemas, variables, groups) continue to work exactly as before — no ownership enforcement on them. Only entities configured with `--ownership` get ownership checks, plus child entities mapped to a parent with `--ownership-derive` (agent mode only; see [diagram-sharing.md](diagram-sharing.md#child-entity-enforcement)).
 
 ---
 
@@ -59,7 +59,7 @@ const payload = { title: "My Diagram" };
 const payload = { title: "My Diagram", userId: authenticatedUserId };
 ```
 
-The `userId` field must match the MQTT username the frontend authenticates with. This is the same value that comes from OAuth (email or sub claim).
+The `userId` field must match the MQTT username the frontend authenticates with. With OAuth this is the JWT `sub` claim, which is the user's canonical id from `_identities`, not their email.
 
 ### 2. Authenticate with Real Credentials
 
@@ -74,13 +74,13 @@ The username used in MQTT CONNECT becomes the sender identity for ownership chec
 
 ### 3. Handle 403 Forbidden Responses
 
-When a non-owner attempts to update or delete a record, the server returns:
+When a user without access reads, updates or deletes a record, the server returns (the message is `permission denied` in cluster mode):
 
 ```json
 {
   "status": "error",
   "code": 403,
-  "error": "user 'bob@gmail.com' does not own diagrams/abc-123"
+  "message": "forbidden"
 }
 ```
 
@@ -94,7 +94,7 @@ Child entities (nodes, edges, topics, schemas, variables, groups) do NOT need a 
 2. User fetches nodes for a diagram → fetches by `diagramId` (which they own)
 3. Other users can't discover diagram IDs (UUIDs, not enumerable)
 
-This means no changes to node/edge/topic creation or event subscriptions.
+This means no changes to node/edge/topic creation or event subscriptions. Child records themselves are not access-controlled: any authenticated user who knows a child's id can read or edit it, unless the server enables `--ownership-derive`, which grades child access against the parent diagram, and `--scoped-events`, which delivers child events only to the diagram's owner and grantees (both agent mode only).
 
 ---
 
@@ -142,7 +142,7 @@ For Google OAuth:
 2. Frontend redirects to `/auth/google`
 3. OAuth callback issues JWT token
 4. Frontend uses JWT token as MQTT password
-5. The `sub` claim (or email) becomes the sender identity
+5. The `sub` claim (the canonical id, not the email) becomes the sender identity
 
 ---
 
@@ -152,17 +152,17 @@ Admin users (specified via `--admin-users`) bypass all ownership restrictions:
 
 | Operation | Regular User | Admin User |
 |-----------|-------------|------------|
-| List diagrams | Only own diagrams | All diagrams |
-| Read diagram | Only own diagrams (403 otherwise) | Any diagram |
+| List diagrams | Only own diagrams (diagrams shared with them come from `$DB/diagrams/shared`) | All diagrams |
+| Read diagram | Own diagrams, or ones shared with them at `view` or `edit` (403 otherwise) | Any diagram |
 | Create diagram | Allowed | Allowed |
-| Update diagram | Only own diagrams (403 otherwise) | Any diagram |
-| Delete diagram | Only own diagrams (403 otherwise) | Any diagram |
+| Update diagram | Own diagrams, or ones shared with them at `edit` (403 otherwise) | Any diagram |
+| Delete diagram | Only own diagrams (403 otherwise), even with an `edit` grant | Any diagram |
 
 ---
 
 ## Event Subscriptions
 
-Recipient-scoped events shipped. For ownership-enabled entities, change events are routed to per-recipient topics `$DB/u/{user}/events/{entity}/{id}` (see `events.rs` `recipients` and `agent/tasks.rs`), enabled via the `--scoped-events` flag (`MQDB_SCOPED_EVENTS`). Each subscriber subscribes to its own `$DB/u/{user}/events/#` namespace, and the `%u`-based topic protection prevents subscribing to another user's namespace. The legacy shared `$DB/diagrams/events/#` topic remains for non-ownership entities.
+Recipient-scoped events shipped. For ownership-enabled entities, change events are routed to per-recipient topics `$DB/u/{user}/events/{entity}/{id}` (see `events.rs` `recipients` and `agent/tasks.rs`), enabled via the `--scoped-events` flag (`MQDB_SCOPED_EVENTS`, agent mode only; cluster: #211). Each subscriber subscribes to its own `$DB/u/{user}/events/#` namespace, and the `%u`-based topic protection prevents subscribing to another user's namespace. The legacy shared `$DB/diagrams/events/#` topic remains for non-ownership entities.
 
 ---
 
@@ -207,7 +207,7 @@ mqdb dev test --ownership --nodes 3
 | ACL per user | Not needed for ownership — only if you want topic-level isolation |
 | `userId` field | Add to `diagrams` entity on create |
 | Authentication | Required — anonymous mode incompatible |
-| Child entity isolation | Inherited through `diagramId` FK — no `userId` needed |
+| Child entity isolation | No `userId` needed; enforced against the parent only with `--ownership-derive` (agent mode only) |
 | Admin access | `--admin-users` flag, bypasses all ownership |
-| Event filtering | Recipient-scoped events available via `--scoped-events` (`$DB/u/{user}/events/#`) |
-| Sharing | Largely implemented (agent mode) — see [diagram-sharing.md](diagram-sharing.md) |
+| Event filtering | Recipient-scoped events available via `--scoped-events` (`$DB/u/{user}/events/#`, agent mode only) |
+| Sharing | Implemented in agent mode; partial in cluster mode — see [diagram-sharing.md](diagram-sharing.md) |

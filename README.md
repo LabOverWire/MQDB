@@ -404,7 +404,7 @@ ready_rx.changed().await?; // wait until broker + handler are ready
 
 #### Sharing Operations
 
-An owner can share any ownership-enabled entity (the motivating case is diagrams) with a named user at `view` or `edit`. Grants are stored in a server-managed `_shares` entity that is **not** reachable via generic CRUD — mutate them only through these topics. Agent and cluster mode both support them (see the cluster notes below); the embedded WASM build rejects these operations.
+An owner can share any ownership-enabled entity (the motivating case is diagrams) with a named user at `view` or `edit`. Grants are stored in a server-managed `_shares` entity that is **not** reachable via generic CRUD — mutate them only through these topics. Agent and cluster mode both support them (see the cluster notes below); the embedded WASM build rejects these operations. Design: [docs/design/diagram-sharing.md](docs/design/diagram-sharing.md); manual tests: [docs/testing/17-sharing.md](docs/testing/17-sharing.md).
 
 | Topic | Action |
 |-------|--------|
@@ -415,10 +415,10 @@ An owner can share any ownership-enabled entity (the motivating case is diagrams
 
 `share`/`unshare` cascade by default over self-references (a diagram and the diagrams it links to); a direct share sets the level while a cascade only raises an existing grant. Read requires `view`, update requires `edit`; delete stays owner-only and clears the resource's grants. In OAuth deployments `grantee` is an email resolved to the registered user's canonical id; sharing with an as-yet-unregistered email stores a **pending** grant (inert until that user first signs in, at which point it is filled automatically and access is granted without re-sharing). With password/SCRAM auth `grantee` is the username.
 
-**In a cluster.** A grant is stored on its resource's partition, so `share`, `unshare`, `shares` and the share checks on read and update run on the node that holds that partition's primary; a node that is not the primary forwards the request there. While a partition is changing primary, `share` and `unshare` can fail with a 503 that the client must retry, and `shares` can answer from a node whose grants are incomplete. `shared` sends a `_shares` list to every node and returns the matching resources. An OAuth email grantee is resolved to the canonical id across partitions. Deleting a resource clears its grants. Not yet in cluster mode:
+**In a cluster.** A grant is stored on its resource's partition, so `share`, `unshare`, `shares` and the share checks on read and update run on the node that holds that partition's primary; a node that is not the primary forwards the request there. While a partition is changing primary, `share` and `unshare` can fail with a 503 that the client must retry, and `shares` and the read and update checks can be answered by a node whose copy of the grants is not current. `shared` sends a `_shares` list to every node and returns the matching resources. An OAuth email grantee is resolved to the canonical id across partitions. Deleting a resource clears its grants. Not yet in cluster mode:
 
-- A pending grant is stored but stays inert, because it is not filled when its user signs in.
-- A cascade follows references only while they stay on the shared record's primary. It stops at the first referenced record on another primary (logging a warning), so nothing beyond that record is granted, even records back on the original primary.
+- A pending grant is stored but stays inert, because it is not filled when its user signs in ([#122](https://github.com/LabOverWire/MQDB/issues/122)).
+- A cascade grants only referenced records held by the shared record's primary. It skips a reference held by another primary (logging a warning) and does not follow references beyond it, even to records back on the original primary; the other references are still followed ([#122](https://github.com/LabOverWire/MQDB/issues/122)).
 - `unshare` revokes only the named record and never cascades ([#247](https://github.com/LabOverWire/MQDB/issues/247)).
 - A `share` payload that omits `cascade` does not cascade ([#248](https://github.com/LabOverWire/MQDB/issues/248)); the `mqdb share` CLI always sends the field.
 

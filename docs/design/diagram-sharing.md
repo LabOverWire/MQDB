@@ -4,9 +4,9 @@
 >
 > **Agent mode.** The `_shares` entity, `AccessLevel`, and share-aware `check_access` live in `crates/mqdb-agent`.
 >
-> **Phase 5 (cluster), #75 and #122.** Phase 1 is ported in `crates/mqdb-cluster/src/cluster/node_controller/sharing.rs` and `crates/mqdb-cluster/src/cluster/db_handler/json_ops.rs`:
+> **Phase 5 (cluster), #75 and #122.** Phase 1 is ported in `crates/mqdb-cluster/src/cluster/node_controller/sharing.rs`, `crates/mqdb-cluster/src/cluster/db_handler/json_ops.rs` and `crates/mqdb-cluster/src/cluster/node_controller/db_ops.rs` (`check_forwarded_ownership` grades forwarded reads and updates):
 > - each grant is stored on its resource's partition
-> - share, unshare and shares, plus the view/edit checks on read and update, are resolved on the resource primary
+> - share, unshare and shares, plus the view/edit checks on read and update, are resolved on the resource primary (while a partition changes primary, share/unshare can return 503 and the checks can see grants that are not current)
 > - `shared` is a `_shares` list scattered to every node and hydrated
 > - email grantees are resolved to canonical ids across partitions
 > - grants are cleared on delete
@@ -14,7 +14,7 @@
 >
 > Phase 1 gaps in a cluster:
 > - the pending-grant sign-in sweep (#122)
-> - a cascade stops at the first closure member held by another primary (#122)
+> - a cascade skips closure members held by another primary and does not walk past them (#122)
 > - unshare does not cascade (#247)
 > - a payload that omits `cascade` does not cascade (#248)
 >
@@ -22,7 +22,7 @@
 >
 > **Phase 6 (WASM).** The WASM build rejects share operations (`crates/mqdb-wasm/src/execute.rs`).
 >
-> **Phase 7 (docs).** `frontend-ownership.md` now states that read is ownership-enforced, and README.md has a Sharing Operations section.
+> **Phase 7 (docs).** `frontend-ownership.md` states that read is ownership-enforced and describes share grants, child derivation and scoped events as options, README.md has a Sharing Operations section that links here, and `docs/testing/17-sharing.md` has the E2E scenarios.
 >
 > Public/anonymous sharing exists in neither mode.
 
