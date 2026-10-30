@@ -1631,9 +1631,9 @@ dependencies = [
 
 [[package]]
 name = "mqtt5"
-version = "0.48.1"
+version = "0.49.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6451bf85e391b7938bf8834977251b1fcdf4202b741228fda28c9dfdef3839fe"
+checksum = "2da2aed7a771dfc21b731580528ce8ff78678c7282082fc512e631fe2587896c"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -1680,9 +1680,9 @@ dependencies = [
 
 [[package]]
 name = "mqtt5-protocol"
-version = "0.16.1"
+version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7127c4e0f1719483c3606ce51e0b27d036c4a22b985bef7ad375d89c34d5d145"
+checksum = "36c722aa265377499de35265f520fe774307a774be6687269749dca095418012"
 dependencies = [
  "bebytes",
  "bytes",

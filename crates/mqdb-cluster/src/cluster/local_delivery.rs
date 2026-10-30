@@ -5,6 +5,7 @@ use super::LocalPublishRequest;
 use mqtt5::QoS;
 use mqtt5::broker::router::MessageRouter;
 use mqtt5::packet::publish::PublishPacket;
+use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 use tracing::warn;
@@ -12,8 +13,13 @@ use tracing::warn;
 const ROUTED_LANES: usize = 32;
 const ROUTED_LANE_CAPACITY: usize = 1024;
 
+struct RoutedDelivery {
+    publish: PublishPacket,
+    share_groups: Option<HashSet<String>>,
+}
+
 pub(crate) struct RoutedDeliveryLanes {
-    lanes: [flume::Sender<PublishPacket>; ROUTED_LANES],
+    lanes: [flume::Sender<RoutedDelivery>; ROUTED_LANES],
 }
 
 impl RoutedDeliveryLanes {
@@ -32,8 +38,14 @@ impl RoutedDeliveryLanes {
             PublishPacket::new(request.topic, request.payload, QoS::from(request.qos)),
             |publish, (key, value)| publish.with_user_property(key, value),
         );
-        if let Err(e) = lane.send_async(publish).await {
-            warn!(topic = %e.0.topic_name, "routed delivery lane closed, dropping message");
+        let delivery = RoutedDelivery {
+            publish,
+            share_groups: request
+                .share_groups
+                .map(|groups| groups.into_iter().collect()),
+        };
+        if let Err(e) = lane.send_async(delivery).await {
+            warn!(topic = %e.0.publish.topic_name, "routed delivery lane closed, dropping message");
         }
     }
 }
@@ -48,9 +60,16 @@ fn lane_for(key: &str) -> usize {
     usize::from(hasher.finish().to_le_bytes()[0]) % ROUTED_LANES
 }
 
-async fn run_lane(router: Arc<MessageRouter>, rx: flume::Receiver<PublishPacket>) {
-    while let Ok(publish) = rx.recv_async().await {
-        router.route_message(&publish, None).await;
+async fn run_lane(router: Arc<MessageRouter>, rx: flume::Receiver<RoutedDelivery>) {
+    while let Ok(delivery) = rx.recv_async().await {
+        match &delivery.share_groups {
+            Some(groups) => {
+                router
+                    .route_message_local_only_with_share_groups(&delivery.publish, None, groups)
+                    .await;
+            }
+            None => router.route_message(&delivery.publish, None).await,
+        }
     }
 }
 
@@ -94,7 +113,56 @@ mod tests {
             kind: LocalPublishKind::Routed,
             user_properties: Vec::new(),
             order_key: None,
+            share_groups: None,
         }
+    }
+
+    async fn received_within(receivers: &mut mqtt5::broker::router::LaneReceivers) -> bool {
+        tokio::time::timeout(Duration::from_millis(300), receivers.recv())
+            .await
+            .is_ok_and(|delivered| delivered.is_some())
+    }
+
+    #[tokio::test]
+    async fn a_routed_publish_serves_only_its_assigned_share_groups() {
+        let router = Arc::new(MessageRouter::new());
+        let mut plain = subscribe_test_client(&router, "plain", "sh/x", 8).await;
+        let mut assigned = subscribe_test_client(&router, "member-g", "$share/g/sh/x", 8).await;
+        let mut unassigned = subscribe_test_client(&router, "member-h", "$share/h/sh/x", 8).await;
+        let delivery = RoutedDeliveryLanes::spawn(&router);
+
+        delivery
+            .deliver(LocalPublishRequest {
+                share_groups: Some(vec!["g".to_string()]),
+                ..routed("sh/x", b"m")
+            })
+            .await;
+
+        assert!(
+            received_within(&mut plain).await,
+            "plain subscriber missed it"
+        );
+        assert!(
+            received_within(&mut assigned).await,
+            "assigned group g missed it"
+        );
+        assert!(
+            !received_within(&mut unassigned).await,
+            "unassigned group h received it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_routed_publish_from_an_older_node_serves_every_share_group() {
+        let router = Arc::new(MessageRouter::new());
+        let mut g = subscribe_test_client(&router, "member-g", "$share/g/sh/x", 8).await;
+        let mut h = subscribe_test_client(&router, "member-h", "$share/h/sh/x", 8).await;
+        let delivery = RoutedDeliveryLanes::spawn(&router);
+
+        delivery.deliver(routed("sh/x", b"m")).await;
+
+        assert!(received_within(&mut g).await, "group g missed it");
+        assert!(received_within(&mut h).await, "group h missed it");
     }
 
     #[tokio::test]

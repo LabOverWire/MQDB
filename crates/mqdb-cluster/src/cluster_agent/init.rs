@@ -250,6 +250,7 @@ impl ClusteredAgent {
             scope_config: scope_config_arc,
             presence: config.presence,
             retained_echoes: Arc::new(RetainedEchoes::new()),
+            broker_view: Arc::new(std::sync::OnceLock::new()),
             max_retained_message_size: config.max_retained_message_size,
             auth_providers: None,
             vault_key_store,

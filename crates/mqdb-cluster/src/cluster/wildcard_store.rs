@@ -8,7 +8,7 @@ use super::{
     is_wildcard_pattern, validate_pattern,
 };
 use bebytes::BeBytes;
-use std::sync::RwLock;
+use std::sync::{PoisonError, RwLock};
 
 #[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
 pub struct WildcardEntry {
@@ -25,7 +25,6 @@ pub struct WildcardEntry {
 }
 
 impl WildcardEntry {
-    #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub fn create(
         pattern: &str,
@@ -52,7 +51,6 @@ impl WildcardEntry {
     }
 
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn from_subscriber(pattern: &str, sub: &WildcardSubscriber) -> Self {
         let pattern_bytes = pattern.as_bytes().to_vec();
         let client_bytes = sub.client_id.as_bytes().to_vec();
@@ -136,9 +134,6 @@ impl WildcardStore {
         }
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
-    ///
     /// # Errors
     /// Returns `InvalidPattern` or `NotWildcard` for invalid patterns.
     pub fn subscribe(
@@ -160,7 +155,10 @@ impl WildcardStore {
             SubscriptionType::Db => WildcardSubscriber::db(client_id, qos),
         };
 
-        self.trie.write().unwrap().insert(pattern, subscriber);
+        self.trie
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(pattern, subscriber);
         Ok(())
     }
 
@@ -186,9 +184,6 @@ impl WildcardStore {
         self.subscribe(pattern, client_id, qos, SubscriptionType::Db)
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
-    ///
     /// # Errors
     /// Returns `InvalidPattern` or `NotFound` for invalid/missing patterns.
     pub fn unsubscribe(&self, pattern: &str, client_id: &str) -> Result<(), WildcardStoreError> {
@@ -196,7 +191,11 @@ impl WildcardStore {
             return Err(WildcardStoreError::InvalidPattern);
         }
 
-        let removed = self.trie.write().unwrap().remove(pattern, client_id);
+        let removed = self
+            .trie
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(pattern, client_id);
         if removed {
             Ok(())
         } else {
@@ -204,38 +203,51 @@ impl WildcardStore {
         }
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
     #[must_use]
     pub fn match_topic(&self, topic: &str) -> Vec<SubscriberLocation> {
-        let trie = self.trie.read().unwrap();
+        let trie = self.trie.read().unwrap_or_else(PoisonError::into_inner);
         trie.match_topic(topic)
             .into_iter()
             .map(|sub| SubscriberLocation::create(&sub.client_id, sub.client_partition, sub.qos))
             .collect()
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
+    #[must_use]
+    pub fn match_shared(&self, topic: &str) -> Vec<(String, String, SubscriberLocation)> {
+        let trie = self.trie.read().unwrap_or_else(PoisonError::into_inner);
+        trie.match_shared(topic)
+            .into_iter()
+            .map(|(group, filter, sub)| {
+                (
+                    group.to_string(),
+                    filter.to_string(),
+                    SubscriberLocation::create(&sub.client_id, sub.client_partition, sub.qos),
+                )
+            })
+            .collect()
+    }
+
     #[must_use]
     pub fn pattern_count(&self) -> usize {
-        self.trie.read().unwrap().pattern_count()
+        self.trie
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pattern_count()
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.trie.read().unwrap().is_empty()
+        self.trie
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty()
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
     #[must_use]
     pub fn get_client_patterns(&self, client_id: &str) -> Vec<(String, u8)> {
         self.trie
             .read()
-            .unwrap()
+            .unwrap_or_else(PoisonError::into_inner)
             .all_subscriptions()
             .into_iter()
             .filter(|(_, sub)| sub.client_id == client_id)
@@ -265,9 +277,6 @@ impl WildcardStore {
         WildcardEntry::create(pattern, client_id, client_partition, qos, subscription_type)
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
-    ///
     /// # Errors
     /// Returns `InvalidPattern` or `NotWildcard` for invalid patterns.
     pub fn subscribe_with_data(
@@ -290,7 +299,10 @@ impl WildcardStore {
             SubscriptionType::Db => WildcardSubscriber::db(client_id, qos),
         };
 
-        self.trie.write().unwrap().insert(pattern, subscriber);
+        self.trie
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(pattern, subscriber);
 
         let entry =
             WildcardEntry::create(pattern, client_id, client_partition, qos, subscription_type);
@@ -298,9 +310,6 @@ impl WildcardStore {
         Ok((entry, data))
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
-    ///
     /// # Errors
     /// Returns `InvalidPattern` or `NotFound` for invalid/missing patterns.
     pub fn unsubscribe_with_data(
@@ -312,7 +321,11 @@ impl WildcardStore {
             return Err(WildcardStoreError::InvalidPattern);
         }
 
-        let removed = self.trie.write().unwrap().remove(pattern, client_id);
+        let removed = self
+            .trie
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(pattern, client_id);
         if removed {
             Ok(Vec::new())
         } else {
@@ -320,9 +333,6 @@ impl WildcardStore {
         }
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
-    ///
     /// # Errors
     /// Returns an error if ID parsing or deserialization fails.
     pub fn apply_replicated(
@@ -348,22 +358,25 @@ impl WildcardStore {
                     qos: entry.qos,
                     subscription_type: entry.sub_type(),
                 };
-                self.trie.write().unwrap().insert(pattern, subscriber);
+                self.trie
+                    .write()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(pattern, subscriber);
                 Ok(())
             }
             Operation::Delete => {
-                self.trie.write().unwrap().remove(pattern, client_id);
+                self.trie
+                    .write()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(pattern, client_id);
                 Ok(())
             }
         }
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
-    #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub fn export_for_partition(&self, partition: PartitionId) -> Vec<u8> {
-        let trie = self.trie.read().unwrap();
+        let trie = self.trie.read().unwrap_or_else(PoisonError::into_inner);
         let partition_entries: Vec<_> = trie
             .all_subscriptions()
             .into_iter()
@@ -395,9 +408,6 @@ impl WildcardStore {
         buf
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
-    ///
     /// # Errors
     /// Returns `SerializationError` if UTF-8 parsing fails.
     pub fn import_wildcards(&self, data: &[u8]) -> Result<usize, WildcardStoreError> {
@@ -454,7 +464,10 @@ impl WildcardStore {
                     qos: entry.qos,
                     subscription_type: entry.sub_type(),
                 };
-                self.trie.write().unwrap().insert(pattern, subscriber);
+                self.trie
+                    .write()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(pattern, subscriber);
                 imported += 1;
             }
         }
@@ -462,23 +475,21 @@ impl WildcardStore {
         Ok(imported)
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
     pub fn clear_partition(&self, partition: PartitionId) -> usize {
-        self.trie.write().unwrap().clear_for_partition(partition)
+        self.trie
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear_for_partition(partition)
     }
 
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn query(
         &self,
         _filter: Option<&str>,
         limit: u32,
         cursor: Option<&[u8]>,
     ) -> (Vec<WildcardEntry>, bool, Option<Vec<u8>>) {
-        let trie = self.trie.read().unwrap();
+        let trie = self.trie.read().unwrap_or_else(PoisonError::into_inner);
         let start_key = cursor.and_then(|c| std::str::from_utf8(c).ok());
 
         let mut results: Vec<_> = trie
@@ -571,6 +582,70 @@ mod tests {
             .collect();
         assert!(client_ids.contains(&"client1"));
         assert!(client_ids.contains(&"client2"));
+    }
+
+    #[test]
+    fn shared_wildcard_subscribers_match_by_their_filter_with_their_group() {
+        let store = WildcardStore::new(node(1));
+        store.subscribe_mqtt("sh/+", "plain", 1).unwrap();
+        store
+            .subscribe_mqtt("$share/g/sh/+", "member-g", 1)
+            .unwrap();
+        store.subscribe_mqtt("$share/h/#", "member-h", 1).unwrap();
+        store
+            .subscribe_mqtt("$share/k/other/+", "member-k", 1)
+            .unwrap();
+
+        let mut shared: Vec<(String, String, String)> = store
+            .match_shared("sh/x")
+            .into_iter()
+            .map(|(group, filter, sub)| (group, filter, sub.client_id_str().to_string()))
+            .collect();
+        shared.sort();
+
+        assert_eq!(
+            shared,
+            vec![
+                ("g".to_string(), "sh/+".to_string(), "member-g".to_string()),
+                ("h".to_string(), "#".to_string(), "member-h".to_string()),
+            ]
+        );
+        let plain: Vec<_> = store
+            .match_topic("sh/x")
+            .iter()
+            .map(|sub| sub.client_id_str().to_string())
+            .collect();
+        assert_eq!(plain, vec!["plain".to_string()]);
+
+        store.unsubscribe("$share/g/sh/+", "member-g").unwrap();
+        let remaining: Vec<String> = store
+            .match_shared("sh/x")
+            .into_iter()
+            .map(|(group, _, _)| group)
+            .collect();
+        assert_eq!(remaining, vec!["h".to_string()]);
+    }
+
+    #[test]
+    fn patterns_with_a_leading_empty_level_keep_it() {
+        let store = WildcardStore::new(node(1));
+        store.subscribe_mqtt("/x/+", "plain", 1).unwrap();
+        store
+            .subscribe_mqtt("$share/g//x/+", "member-g", 1)
+            .unwrap();
+
+        let shared: Vec<(String, String)> = store
+            .match_shared("/x/y")
+            .into_iter()
+            .map(|(group, filter, _)| (group, filter))
+            .collect();
+
+        assert_eq!(shared, vec![("g".to_string(), "/x/+".to_string())]);
+        assert!(store.match_shared("x/y").is_empty());
+        assert_eq!(
+            store.get_client_patterns("plain"),
+            vec![("/x/+".to_string(), 1)]
+        );
     }
 
     #[test]

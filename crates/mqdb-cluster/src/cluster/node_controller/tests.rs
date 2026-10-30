@@ -223,6 +223,7 @@ async fn a_forwarded_publish_is_queued_for_delivery_not_republished_as_a_client(
             qos: 1,
             user_properties: vec![("x-origin-client-id".to_string(), "sensor-7".to_string())],
             order_key: Some("plant/temp/sensor-7".to_string()),
+            share_groups: None,
         })]
     );
 }
@@ -248,6 +249,7 @@ async fn a_forwarded_publish_from_the_message_processor_is_queued_for_delivery()
             qos: 1,
             user_properties: vec![("x-origin-client-id".to_string(), "sensor-7".to_string())],
             order_key: Some("plant/temp/sensor-7".to_string()),
+            share_groups: None,
         })]
     );
 }
