@@ -375,7 +375,9 @@ per deployment.
   which is stable, so **grants persist across transfer**; the new owner may revoke.
 - **Orphan cleanup:** deleting a diagram removes its `_shares` rows (FK `on_delete:
   Cascade` keyed by `(resource_entity, resource_id)`, or an explicit sweep in the
-  delete path).
+  delete path). As built, only a direct delete (and a cluster TTL expiry) runs the
+  sweep; FK cascade deletes and agent TTL expiry leave the rows (see the status
+  block and #253).
 
 ---
 

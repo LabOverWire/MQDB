@@ -101,6 +101,7 @@ mqdb read docs d1                          # bob: 403
 Stop the agent from the setup first (Ctrl-C in its terminal), because node 1 of the cluster binds 127.0.0.1:1883. Start a 3-node cluster with the same password file, which must contain `admin` (`dev start-cluster` adds `--admin-users admin`). Then add the FK constraint:
 ```bash
 mqdb dev start-cluster --nodes 3 --clean --passwd passwd --ownership docs=userId --license /path/to/license.key
+sleep 5
 mqdb constraint add docs --fk ref:docs:id:set_null --broker 127.0.0.1:1883 --user admin --pass admin
 ```
 
