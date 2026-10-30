@@ -6,7 +6,7 @@ use super::super::db::{self, data_partition};
 use super::super::db_topic::DbTopicOperation;
 #[cfg(feature = "http-api")]
 use super::super::node_controller::ShareResolveContinuation;
-use super::super::node_controller::db_ops::{EventOrigin, FkDeletePlan};
+use super::super::node_controller::db_ops::{EventOrigin, FkDeletePlan, ForwardRequest};
 use super::super::node_controller::{
     FkCheckContinuation, FkDeleteContinuation, NodeController, PendingFkDeleteWork, PendingFkWork,
     PendingUniqueWork, UniqueCheckContinuation,
@@ -69,7 +69,6 @@ struct UniqueDiffs<'a> {
     old_diff: &'a Value,
 }
 
-#[allow(clippy::unused_self)]
 impl DbRequestHandler {
     fn validate_against_schema<T: ClusterTransport>(
         controller: &NodeController<T>,
@@ -122,7 +121,6 @@ impl DbRequestHandler {
         Some(Self::json_error(400, &msg))
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_json_operation<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -187,12 +185,14 @@ impl DbRequestHandler {
                         let forwarded = controller
                             .forward_json_db_request(
                                 partition,
-                                JsonDbOp::Read,
-                                entity,
-                                Some(id),
-                                payload,
-                                response_topic,
-                                correlation_data,
+                                &ForwardRequest {
+                                    op: JsonDbOp::Read,
+                                    entity,
+                                    id: Some(id),
+                                    payload,
+                                    response_topic,
+                                    correlation_data,
+                                },
                                 EventOrigin::new(sender, mqtt_ctx.client_id),
                             )
                             .await;
@@ -239,12 +239,14 @@ impl DbRequestHandler {
                     let forwarded = controller
                         .forward_json_db_request(
                             partition,
-                            JsonDbOp::Update,
-                            entity,
-                            Some(id),
-                            &forward_payload,
-                            response_topic,
-                            correlation_data,
+                            &ForwardRequest {
+                                op: JsonDbOp::Update,
+                                entity,
+                                id: Some(id),
+                                payload: &forward_payload,
+                                response_topic,
+                                correlation_data,
+                            },
                             EventOrigin::new(sender, mqtt_ctx.client_id),
                         )
                         .await;
@@ -273,7 +275,7 @@ impl DbRequestHandler {
                     sender: uid,
                 } = self.ownership.evaluate(entity, sender)
                     && let Some(err) =
-                        self.check_cluster_ownership(controller, entity, id, owner_field, uid)
+                        Self::check_cluster_ownership(controller, entity, id, owner_field, uid)
                 {
                     return JsonOpResult::Response(err);
                 }
@@ -286,12 +288,14 @@ impl DbRequestHandler {
                     let forwarded = controller
                         .forward_json_db_request(
                             partition,
-                            JsonDbOp::Delete,
-                            entity,
-                            Some(id),
-                            payload,
-                            response_topic,
-                            correlation_data,
+                            &ForwardRequest {
+                                op: JsonDbOp::Delete,
+                                entity,
+                                id: Some(id),
+                                payload,
+                                response_topic,
+                                correlation_data,
+                            },
                             EventOrigin::new(sender, mqtt_ctx.client_id),
                         )
                         .await;
@@ -384,16 +388,7 @@ impl DbRequestHandler {
         let resolved_payload: Option<Vec<u8>> = match op {
             JsonDbOp::Share | JsonDbOp::Unshare => {
                 match self
-                    .resolve_share_identity(
-                        controller,
-                        op,
-                        entity,
-                        id,
-                        payload,
-                        response_topic,
-                        mqtt_ctx.correlation_data,
-                        sender,
-                    )
+                    .resolve_share_identity(controller, op, entity, id, payload, mqtt_ctx)
                     .await
                 {
                     Some(ShareResolution::Suspended) => return JsonOpResult::NoResponse,
@@ -427,12 +422,14 @@ impl DbRequestHandler {
         let forwarded = controller
             .forward_json_db_request(
                 partition,
-                op,
-                entity,
-                Some(id),
-                payload,
-                response_topic,
-                mqtt_ctx.correlation_data,
+                &ForwardRequest {
+                    op,
+                    entity,
+                    id: Some(id),
+                    payload,
+                    response_topic,
+                    correlation_data: mqtt_ctx.correlation_data,
+                },
                 EventOrigin::new(sender, mqtt_ctx.client_id),
             )
             .await;
@@ -452,7 +449,6 @@ impl DbRequestHandler {
     /// `grantee_key` and encrypted `grantee_email`; a share resolves the canonical
     /// grantee locally when possible, else suspends on a cross-partition scatter.
     #[cfg(feature = "http-api")]
-    #[allow(clippy::too_many_arguments)]
     async fn resolve_share_identity<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -460,10 +456,11 @@ impl DbRequestHandler {
         entity: &str,
         id: &str,
         payload: &[u8],
-        response_topic: &str,
-        correlation_data: Option<&[u8]>,
-        sender: Option<&str>,
+        mqtt_ctx: &super::MqttRequestContext<'_>,
     ) -> Option<ShareResolution> {
+        let response_topic = mqtt_ctx.response_topic.unwrap_or("");
+        let correlation_data = mqtt_ctx.correlation_data;
+        let sender = mqtt_ctx.sender;
         let crypto = controller.identity_crypto()?.clone();
         let value: Value = serde_json::from_slice(payload).ok()?;
         let raw = value
@@ -543,7 +540,6 @@ impl DbRequestHandler {
     }
 
     fn check_cluster_ownership<T: ClusterTransport>(
-        &self,
         controller: &mut NodeController<T>,
         entity: &str,
         id: &str,
@@ -561,7 +557,6 @@ impl DbRequestHandler {
         None
     }
 
-    #[allow(clippy::cast_possible_truncation)]
     async fn handle_json_create<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -638,12 +633,14 @@ impl DbRequestHandler {
         let forwarded = controller
             .forward_json_db_request(
                 partition,
-                JsonDbOp::Create,
-                entity,
-                None,
-                payload,
-                mqtt_ctx.response_topic.unwrap_or(""),
-                mqtt_ctx.correlation_data,
+                &ForwardRequest {
+                    op: JsonDbOp::Create,
+                    entity,
+                    id: None,
+                    payload,
+                    response_topic: mqtt_ctx.response_topic.unwrap_or(""),
+                    correlation_data: mqtt_ctx.correlation_data,
+                },
                 EventOrigin::new(mqtt_ctx.sender, mqtt_ctx.client_id),
             )
             .await;
@@ -832,7 +829,6 @@ impl DbRequestHandler {
         )
     }
 
-    #[allow(clippy::cast_possible_truncation)]
     async fn handle_json_read<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -861,12 +857,14 @@ impl DbRequestHandler {
             let forwarded = controller
                 .forward_json_db_request(
                     partition,
-                    JsonDbOp::Read,
-                    entity,
-                    Some(id),
-                    payload,
-                    response_topic,
-                    correlation_data,
+                    &ForwardRequest {
+                        op: JsonDbOp::Read,
+                        entity,
+                        id: Some(id),
+                        payload,
+                        response_topic,
+                        correlation_data,
+                    },
                     EventOrigin::new(sender, mqtt_ctx.client_id),
                 )
                 .await;
@@ -874,7 +872,7 @@ impl DbRequestHandler {
                 tracing::info!(
                     node = node_id,
                     partition = partition.get(),
-                    elapsed_us = start.elapsed().as_micros() as u64,
+                    elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX),
                     forwarded = true,
                     "json_read_forwarded"
                 );
@@ -883,7 +881,7 @@ impl DbRequestHandler {
             tracing::warn!(
                 node = node_id,
                 partition = partition.get(),
-                elapsed_us = start.elapsed().as_micros() as u64,
+                elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX),
                 "json_read_forward_failed"
             );
             return JsonOpResult::Response(Self::json_error(
@@ -924,7 +922,7 @@ impl DbRequestHandler {
         tracing::info!(
             node = node_id,
             partition = partition.get(),
-            elapsed_us = start.elapsed().as_micros() as u64,
+            elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX),
             forwarded = false,
             "json_read_complete"
         );
@@ -957,7 +955,6 @@ impl DbRequestHandler {
         self.execute_local_update(controller, &ctx, updates).await
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn execute_local_update<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -1186,7 +1183,6 @@ impl DbRequestHandler {
     }
 
     fn merge_with_existing<T: ClusterTransport>(
-        &self,
         controller: &mut NodeController<T>,
         entity: &str,
         id: &str,
@@ -1352,7 +1348,6 @@ impl DbRequestHandler {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn handle_json_list<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -1404,13 +1399,18 @@ impl DbRequestHandler {
             ));
         }
 
-        #[allow(clippy::cast_possible_truncation)]
         let pagination: Option<mqdb_core::Pagination> = parsed_data.as_ref().and_then(|d| {
             d.get("pagination")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
                 .or_else(|| {
-                    let limit = d.get("limit").and_then(Value::as_u64).map(|v| v as usize);
-                    let offset = d.get("offset").and_then(Value::as_u64).map(|v| v as usize);
+                    let limit = d
+                        .get("limit")
+                        .and_then(Value::as_u64)
+                        .and_then(|v| usize::try_from(v).ok());
+                    let offset = d
+                        .get("offset")
+                        .and_then(Value::as_u64)
+                        .and_then(|v| usize::try_from(v).ok());
                     match (limit, offset) {
                         (Some(l), Some(o)) => Some(mqdb_core::Pagination::new(l, o)),
                         (Some(l), None) => Some(mqdb_core::Pagination::new(l, 0)),
@@ -1544,18 +1544,11 @@ impl DbRequestHandler {
         Some(serde_json::to_vec(&result).unwrap_or_default())
     }
 
-    #[allow(clippy::too_many_lines, clippy::type_complexity)]
     pub async fn complete_pending_unique_check<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
         local_reserved: Vec<(String, Vec<u8>)>,
-        remote_results: Result<
-            Vec<(String, Vec<u8>, super::NodeId)>,
-            (
-                super::super::node_controller::ReserveFailure,
-                Vec<(String, Vec<u8>, super::NodeId)>,
-            ),
-        >,
+        remote_results: super::super::node_controller::RemoteReserveOutcome,
         continuation: UniqueCheckContinuation,
     ) -> Option<super::super::db_handler::DbPublishResponse> {
         match continuation {
@@ -1846,7 +1839,6 @@ impl DbRequestHandler {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     pub async fn complete_pending_fk_check<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -2050,7 +2042,7 @@ impl DbRequestHandler {
             }
             Ok((old_data, existing_data))
         } else {
-            self.merge_with_existing(controller, entity, id, updates)
+            Self::merge_with_existing(controller, entity, id, updates)
         }
     }
 

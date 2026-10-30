@@ -6,7 +6,6 @@ use super::{StoreApplyError, StoreManager};
 use crate::cluster::{PartitionId, entity};
 
 impl StoreManager {
-    #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub fn export_partition(&self, partition: PartitionId) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -63,13 +62,17 @@ impl StoreManager {
             (entity::CHANGE_EVENTS, self.export_change_events(partition)),
         ];
 
-        buf.extend_from_slice(&(store_data.len() as u8).to_be_bytes());
+        buf.extend_from_slice(
+            &u8::try_from(store_data.len())
+                .unwrap_or(u8::MAX)
+                .to_be_bytes(),
+        );
 
         for (entity_name, data) in store_data {
             let name_bytes = entity_name.as_bytes();
-            buf.push(name_bytes.len() as u8);
+            buf.push(u8::try_from(name_bytes.len()).unwrap_or(u8::MAX));
             buf.extend_from_slice(name_bytes);
-            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            buf.extend_from_slice(&u32::try_from(data.len()).unwrap_or(u32::MAX).to_be_bytes());
             buf.extend_from_slice(&data);
         }
 

@@ -1,6 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use super::db_ops::ForwardRequest;
 use super::*;
 use crate::cluster::NUM_PARTITIONS;
 use crate::cluster::protocol::{Heartbeat, Operation};
@@ -14,8 +15,8 @@ fn create_test_controller(
     node_id: NodeId,
     transport: MockTransport,
 ) -> NodeController<MockTransport> {
-    let (tx_raft_messages, _rx_raft_messages) = flume::unbounded();
-    let (tx_raft_events, _rx_raft_events) = flume::unbounded();
+    let tx_raft_messages = flume::unbounded().0;
+    let tx_raft_events = flume::unbounded().0;
     NodeController::new(
         node_id,
         transport,
@@ -130,8 +131,8 @@ impl ClusterTransport for MockTransport {
 
     async fn send_to_partition_primary(
         &self,
-        _partition: PartitionId,
-        _message: ClusterMessage,
+        _: PartitionId,
+        _: ClusterMessage,
     ) -> Result<(), super::super::transport::TransportError> {
         Ok(())
     }
@@ -144,7 +145,7 @@ impl ClusterTransport for MockTransport {
         self.inbox.lock().unwrap().pop_front()
     }
 
-    fn try_recv_timeout(&self, _timeout_ms: u64) -> Option<InboundMessage> {
+    fn try_recv_timeout(&self, _: u64) -> Option<InboundMessage> {
         self.inbox.lock().unwrap().pop_front()
     }
 
@@ -181,8 +182,8 @@ impl ClusterTransport for MockTransport {
         true
     }
 
-    async fn queue_local_publish_retained(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
-    async fn queue_retained_refresh(&self, _topic: String) {}
+    async fn queue_local_publish_retained(&self, _: String, _: Vec<u8>, _: u8) {}
+    async fn queue_retained_refresh(&self, _: String) {}
 }
 
 fn forwarded_publish(origin: NodeId, topic: &str) -> ClusterMessage {
@@ -1140,7 +1141,8 @@ async fn create_session_quorum_succeeds_as_primary() {
     let partition = session_partition("client1");
     ctrl.become_primary(partition, Epoch::new(1));
 
-    let (session, _rx) = ctrl.create_session_quorum("client1").await.unwrap();
+    let (session, completion) = ctrl.create_session_quorum("client1").await.unwrap();
+    assert_eq!(completion.await, Ok(QuorumResult::Success));
     assert_eq!(session.client_id_str(), "client1");
     assert!(ctrl.stores().sessions.get("client1").is_some());
 }
@@ -1934,10 +1936,11 @@ async fn fk_reverse_lookup_ignores_stale_replica_data() {
 
     assert_eq!(ctrl.db_list("posts").len(), 1);
 
-    let (local_results, _pending) = ctrl
+    let (local_results, pending) = ctrl
         .start_fk_reverse_lookup("users", "u1", None)
         .await
         .unwrap();
+    assert!(pending.is_empty());
     assert!(
         local_results.is_empty(),
         "stale replica data should not appear in FK reverse lookup"
@@ -1982,10 +1985,11 @@ async fn fk_reverse_lookup_finds_primary_partition_data() {
         .await
         .unwrap();
 
-    let (local_results, _pending) = ctrl
+    let (local_results, pending) = ctrl
         .start_fk_reverse_lookup("users", "u1", None)
         .await
         .unwrap();
+    assert!(pending.is_empty());
     assert_eq!(local_results.len(), 1);
     assert_eq!(local_results[0].referencing_ids.len(), 1);
     assert_eq!(local_results[0].referencing_ids[0], primary_post_id);
@@ -2184,7 +2188,8 @@ async fn cascade_set_nulls_cross_owned_ref_with_no_owned_siblings() {
 
     let mut visited = std::collections::HashSet::new();
     visited.insert(("users".to_string(), "u1".to_string()));
-    let (filtered, _queue) = filter_and_extract_cascade(vec![reply], &mut visited);
+    let (filtered, queue) = filter_and_extract_cascade(vec![reply], &mut visited);
+    assert!(queue.is_empty());
     assert_eq!(
         filtered.len(),
         1,
@@ -2237,7 +2242,8 @@ async fn cross_owned_set_null_blocked_on_typed_field() {
 
     let mut visited = std::collections::HashSet::new();
     visited.insert(("users".to_string(), "u1".to_string()));
-    let (filtered, _queue) = filter_and_extract_cascade(vec![reply], &mut visited);
+    let (filtered, queue) = filter_and_extract_cascade(vec![reply], &mut visited);
+    assert!(queue.is_empty());
 
     assert!(
         ctrl.prepare_fk_side_effects(&filtered).is_err(),
@@ -2444,7 +2450,7 @@ async fn cascade_delete_fan_out_propagates_sender_to_remote_primary() {
     );
     ctrl.update_partition_map(map);
 
-    let _rx = ctrl
+    let ack = ctrl
         .send_cascade_request(
             partition,
             JsonDbOp::Delete,
@@ -2454,6 +2460,7 @@ async fn cascade_delete_fan_out_propagates_sender_to_remote_primary() {
             EventOrigin::new(Some("alice"), None),
         )
         .await;
+    assert!(ack.is_some());
 
     let req = ctrl
         .transport
@@ -2572,10 +2579,11 @@ async fn circular_fk_cascade_terminates() {
     ctrl.db_create("alpha", "a1", &a_data, 1000).await.unwrap();
     ctrl.db_create("beta", "b1", &b_data, 1001).await.unwrap();
 
-    let (local, _pending) = ctrl
+    let (local, pending) = ctrl
         .start_fk_reverse_lookup("alpha", "a1", None)
         .await
         .unwrap();
+    assert!(pending.is_empty());
 
     let result = ctrl.collect_local_cascade("alpha", "a1", local, None);
     assert!(
@@ -2639,10 +2647,11 @@ async fn three_way_circular_fk_cascade_terminates() {
     ctrl.db_create("bbb", "b1", &b_data, 1001).await.unwrap();
     ctrl.db_create("ccc", "c1", &c_data, 1002).await.unwrap();
 
-    let (local, _pending) = ctrl
+    let (local, pending) = ctrl
         .start_fk_reverse_lookup("aaa", "a1", None)
         .await
         .unwrap();
+    assert!(pending.is_empty());
     let result = ctrl.collect_local_cascade("aaa", "a1", local, None);
     assert!(
         result.is_ok(),
@@ -2738,12 +2747,14 @@ async fn forwarded_write_without_a_response_topic_keeps_no_vault_decrypt() {
     assert!(
         ctrl.forward_json_db_request(
             partition,
-            JsonDbOp::Update,
-            "notes",
-            Some("n1"),
-            update,
-            "",
-            None,
+            &ForwardRequest {
+                op: JsonDbOp::Update,
+                entity: "notes",
+                id: Some("n1"),
+                payload: update,
+                response_topic: "",
+                correlation_data: None,
+            },
             EventOrigin::new(Some("alice"), None),
         )
         .await
@@ -2753,12 +2764,14 @@ async fn forwarded_write_without_a_response_topic_keeps_no_vault_decrypt() {
     assert!(
         ctrl.forward_json_db_request(
             partition,
-            JsonDbOp::Update,
-            "notes",
-            Some("n1"),
-            update,
-            "resp/t",
-            None,
+            &ForwardRequest {
+                op: JsonDbOp::Update,
+                entity: "notes",
+                id: Some("n1"),
+                payload: update,
+                response_topic: "resp/t",
+                correlation_data: None,
+            },
             EventOrigin::new(Some("alice"), None),
         )
         .await
@@ -2786,9 +2799,9 @@ struct RunningProcessor {
 }
 
 fn spawn_message_processor(node: NodeId, map: PartitionMap) -> RunningProcessor {
-    let (tx_raft_messages, _rx_raft_messages) = flume::unbounded();
-    let (tx_raft_events, _rx_raft_events) = flume::unbounded();
-    let (tx_main_queue, _rx_main_queue) = flume::unbounded();
+    let tx_raft_messages = flume::unbounded().0;
+    let tx_raft_events = flume::unbounded().0;
+    let tx_main_queue = flume::unbounded().0;
     let (inbox, rx_inbox) = flume::unbounded();
     let (tick, rx_tick) = flume::unbounded();
     let (tx_batch, batches) = flume::unbounded();

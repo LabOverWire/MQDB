@@ -95,6 +95,16 @@ fn change_event_user_properties(event: &ChangeEvent) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ForwardRequest<'a> {
+    pub(crate) op: JsonDbOp,
+    pub(crate) entity: &'a str,
+    pub(crate) id: Option<&'a str>,
+    pub(crate) payload: &'a [u8],
+    pub(crate) response_topic: &'a str,
+    pub(crate) correlation_data: Option<&'a [u8]>,
+}
+
 #[derive(Default)]
 pub(crate) struct FkDeletePlan {
     effects: Vec<CascadeSideEffect>,
@@ -556,7 +566,6 @@ impl<T: ClusterTransport> NodeController<T> {
             .await;
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(crate) async fn handle_json_db_request(
         &mut self,
         from: NodeId,
@@ -855,7 +864,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn handle_json_update_local(
         &mut self,
         entity: &str,
@@ -1799,7 +1807,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn handle_json_create_local(
         &mut self,
         partition: PartitionId,
@@ -2114,7 +2121,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(crate) async fn complete_pending_fk_work(
         &mut self,
         fk_ok: bool,
@@ -2430,18 +2436,20 @@ impl<T: ClusterTransport> NodeController<T> {
         .unwrap_or(u64::MAX)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn forward_json_db_request(
         &mut self,
         partition: PartitionId,
-        op: JsonDbOp,
-        entity: &str,
-        id: Option<&str>,
-        payload: &[u8],
-        response_topic: &str,
-        correlation_data: Option<&[u8]>,
+        request: &ForwardRequest<'_>,
         origin: EventOrigin<'_>,
     ) -> bool {
+        let ForwardRequest {
+            op,
+            entity,
+            id,
+            payload,
+            response_topic,
+            correlation_data,
+        } = *request;
         let start = std::time::Instant::now();
         let node_id = self.node_id.get();
 

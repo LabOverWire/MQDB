@@ -8,8 +8,8 @@ use mqdb_cluster::cluster::raft::{RaftConfig, RaftNode, RaftOutput, RaftRole};
 use mqdb_cluster::cluster::{
     ClusterTransport, Epoch, NUM_PARTITIONS, NodeController, NodeId, NodeStatus, Operation,
     PartitionAssignment, PartitionId, PartitionMap, PublishRouter, Qos2Store, RaftEvent,
-    RaftMessage, ReplicationWrite, RetainedStore, SessionStore, SubscriptionCache, TopicIndex,
-    TransportConfig, WildcardStore, session_partition, topic_partition,
+    ReplicationWrite, RetainedStore, SessionStore, SubscriptionCache, TopicIndex, TransportConfig,
+    WildcardStore, session_partition, topic_partition,
 };
 use simulation::framework::runtime::SimulatedRuntime;
 use simulation::transport::SimulatedTransport;
@@ -34,8 +34,6 @@ struct TestNode {
     subscriptions: SubscriptionCache,
     qos2: Qos2Store,
     rx_raft_events: flume::Receiver<RaftEvent>,
-    #[allow(dead_code)]
-    rx_raft_messages: flume::Receiver<RaftMessage>,
 }
 
 struct TestCluster {
@@ -50,10 +48,7 @@ impl TestCluster {
         let network = runtime.network().clone();
 
         let node_ids: Vec<NodeId> = (1..=node_count)
-            .map(|i| {
-                #[allow(clippy::cast_possible_truncation)]
-                NodeId::validated(i as u16).unwrap()
-            })
+            .map(|i| NodeId::validated(u16::try_from(i).unwrap()).unwrap())
             .collect();
 
         let mut nodes = Vec::with_capacity(node_count);
@@ -72,7 +67,7 @@ impl TestCluster {
                 heartbeat_timeout_ms: 500,
                 ack_timeout_ms: 50,
             };
-            let (tx_raft_messages, rx_raft_messages) = flume::unbounded();
+            let tx_raft_messages = flume::unbounded().0;
             let (tx_raft_events, rx_raft_events) = flume::unbounded();
             let mut controller = NodeController::new(
                 node_id,
@@ -108,7 +103,6 @@ impl TestCluster {
                 subscriptions: SubscriptionCache::new(node_id),
                 qos2: Qos2Store::new(node_id),
                 rx_raft_events,
-                rx_raft_messages,
             });
         }
 
@@ -137,6 +131,57 @@ impl TestCluster {
 
     fn advance_ms(&self, ms: u64) {
         self.runtime.clock().advance_ms(ms);
+    }
+
+    async fn replicate_from_first(&mut self, write: ReplicationWrite) {
+        let replicas: Vec<NodeId> = self.nodes.iter().skip(1).map(|n| n.id).collect();
+        self.nodes[0]
+            .controller
+            .replicate_write(write, &replicas, replicas.len())
+            .await
+            .ok();
+        self.advance_ms(10);
+        for node in &mut self.nodes {
+            node.controller.process_messages().await;
+        }
+    }
+
+    async fn run_rounds_from(&mut self, idx: usize, rounds: usize) {
+        for _ in 0..rounds {
+            let output = self.nodes[idx].controller.tick(0);
+            self.nodes[idx].controller.send_tick_output(output).await;
+            self.advance_ms(1);
+            for (other, node) in self.nodes.iter_mut().enumerate() {
+                if other != idx {
+                    node.controller.process_messages().await;
+                }
+            }
+            self.advance_ms(1);
+            self.nodes[idx].controller.process_messages().await;
+        }
+    }
+
+    fn data_on_each_node(&self, entity: &str, id: &str) -> Vec<Option<Vec<u8>>> {
+        self.nodes
+            .iter()
+            .map(|n| n.controller.db_get(entity, id).map(|e| e.data))
+            .collect()
+    }
+
+    fn elect_first_node(&mut self) {
+        let leader = self.nodes[0].id;
+        self.nodes[0].raft.tick(0);
+        let outputs = self.nodes[0].raft.tick(1000);
+        assert_eq!(self.nodes[0].raft.role(), RaftRole::Candidate);
+        for output in outputs {
+            if let RaftOutput::SendRequestVote { to, request } = output
+                && let Some(follower) = self.nodes.iter_mut().find(|n| n.id == to)
+            {
+                let (resp, _) = follower.raft.handle_request_vote(leader, request, 1000);
+                self.nodes[0].raft.handle_request_vote_response(to, resp);
+            }
+        }
+        assert_eq!(self.nodes[0].raft.role(), RaftRole::Leader);
     }
 
     async fn setup_all_primaries(&mut self) {
@@ -232,7 +277,7 @@ impl TestCluster {
             heartbeat_timeout_ms: 500,
             ack_timeout_ms: 50,
         };
-        let (tx_raft_messages, rx_raft_messages) = flume::unbounded();
+        let tx_raft_messages = flume::unbounded().0;
         let (tx_raft_events, rx_raft_events) = flume::unbounded();
         let mut controller = NodeController::new(
             node_id,
@@ -255,7 +300,6 @@ impl TestCluster {
 
         let node_count = self.nodes.len();
         let new_rx_events = rx_raft_events;
-        let new_rx_messages = rx_raft_messages;
         let all_node_ids: Vec<NodeId> = self.nodes.iter().map(|n| n.id).collect();
         let mut partition_map = PartitionMap::new();
         for i in 0..NUM_PARTITIONS {
@@ -285,7 +329,6 @@ impl TestCluster {
             subscriptions: SubscriptionCache::new(node_id),
             qos2: Qos2Store::new(node_id),
             rx_raft_events: new_rx_events,
-            rx_raft_messages: new_rx_messages,
         };
     }
 }
@@ -2264,7 +2307,6 @@ async fn graceful_shutdown_drain() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn raft_command_application_updates_partition_map() {
     use mqdb_cluster::cluster::PartitionMap;
     use mqdb_cluster::cluster::raft::RaftCommand;
@@ -2275,27 +2317,7 @@ async fn raft_command_application_updates_partition_map() {
     let n2 = cluster.nodes[1].id;
     let n3 = cluster.nodes[2].id;
 
-    cluster.nodes[0].raft.tick(0);
-    let outputs = cluster.nodes[0].raft.tick(1000);
-    assert_eq!(cluster.nodes[0].raft.role(), RaftRole::Candidate);
-
-    let mut vote_requests = Vec::new();
-    for output in outputs {
-        if let RaftOutput::SendRequestVote { to, request } = output {
-            vote_requests.push((to, request));
-        }
-    }
-
-    for (to, req) in &vote_requests {
-        if let Some(follower) = cluster.nodes.iter_mut().find(|n| n.id == *to) {
-            let (resp, _) = follower.raft.handle_request_vote(n1, *req, 1000);
-            cluster.nodes[0]
-                .raft
-                .handle_request_vote_response(*to, resp);
-        }
-    }
-
-    assert_eq!(cluster.nodes[0].raft.role(), RaftRole::Leader);
+    cluster.elect_first_node();
 
     let partition = PartitionId::new(10).unwrap();
     let cmd = RaftCommand::update_partition(partition, n2, &[n3], Epoch::new(1));
@@ -2316,10 +2338,9 @@ async fn raft_command_application_updates_partition_map() {
 
     for (to, request) in &append_requests {
         if let Some(follower) = cluster.nodes.iter_mut().find(|n| n.id == *to) {
-            let (response, _outputs) =
-                follower
-                    .raft
-                    .handle_append_entries(n1, request.clone(), 1100);
+            let (response, _) = follower
+                .raft
+                .handle_append_entries(n1, request.clone(), 1100);
             assert!(
                 response.is_success(),
                 "Follower should accept AppendEntries"
@@ -2650,13 +2671,10 @@ async fn raft_log_persisted_and_recovered() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn db_crud_replication_to_replicas() {
     use mqdb_cluster::cluster::db::data_partition;
 
     let mut cluster = TestCluster::new(3);
-    let (n2, n3) = (cluster.nodes[1].id, cluster.nodes[2].id);
-
     let entity_type = "users";
     let entity_id = "user-123";
     let partition = data_partition(entity_type, entity_id);
@@ -2672,10 +2690,8 @@ async fn db_crud_replication_to_replicas() {
         .become_replica(partition, Epoch::new(1), 0);
 
     for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
+        let output = node.controller.tick(0);
+        node.controller.send_tick_output(output).await;
     }
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -2689,34 +2705,12 @@ async fn db_crud_replication_to_replicas() {
         .expect("create should succeed");
     assert_eq!(entity.entity_str(), entity_type);
     assert_eq!(entity.id_str(), entity_id);
-
-    cluster.nodes[0]
-        .controller
-        .replicate_write(create_write, &[n2, n3], 2)
-        .await
-        .ok();
-    cluster.advance_ms(10);
-    for node in &mut cluster.nodes {
-        node.controller.process_messages().await;
-    }
-
-    let primary_entity = cluster.nodes[0].controller.db_get(entity_type, entity_id);
-    assert!(primary_entity.is_some(), "Primary should have the entity");
-    assert_eq!(primary_entity.unwrap().data, b"initial data");
-
-    let replica1_entity = cluster.nodes[1].controller.db_get(entity_type, entity_id);
-    assert!(
-        replica1_entity.is_some(),
-        "Replica 1 should have the entity after replication"
+    cluster.replicate_from_first(create_write).await;
+    assert_eq!(
+        cluster.data_on_each_node(entity_type, entity_id),
+        vec![Some(b"initial data".to_vec()); 3],
+        "primary and both replicas should have the created entity"
     );
-    assert_eq!(replica1_entity.unwrap().data, b"initial data");
-
-    let replica2_entity = cluster.nodes[2].controller.db_get(entity_type, entity_id);
-    assert!(
-        replica2_entity.is_some(),
-        "Replica 2 should have the entity after replication"
-    );
-    assert_eq!(replica2_entity.unwrap().data, b"initial data");
 
     let (updated, update_write) = cluster.nodes[0]
         .controller
@@ -2724,32 +2718,11 @@ async fn db_crud_replication_to_replicas() {
         .db_update_replicated(entity_type, entity_id, b"updated data", 2000)
         .expect("update should succeed");
     assert_eq!(updated.data, b"updated data");
-
-    cluster.nodes[0]
-        .controller
-        .replicate_write(update_write, &[n2, n3], 2)
-        .await
-        .ok();
-    cluster.advance_ms(10);
-    for node in &mut cluster.nodes {
-        node.controller.process_messages().await;
-    }
-
-    let primary_updated = cluster.nodes[0].controller.db_get(entity_type, entity_id);
-    assert_eq!(primary_updated.unwrap().data, b"updated data");
-
-    let replica1_updated = cluster.nodes[1].controller.db_get(entity_type, entity_id);
+    cluster.replicate_from_first(update_write).await;
     assert_eq!(
-        replica1_updated.unwrap().data,
-        b"updated data",
-        "Replica 1 should have updated data"
-    );
-
-    let replica2_updated = cluster.nodes[2].controller.db_get(entity_type, entity_id);
-    assert_eq!(
-        replica2_updated.unwrap().data,
-        b"updated data",
-        "Replica 2 should have updated data"
+        cluster.data_on_each_node(entity_type, entity_id),
+        vec![Some(b"updated data".to_vec()); 3],
+        "primary and both replicas should have the updated entity"
     );
 
     let (deleted, delete_write) = cluster.nodes[0]
@@ -2758,33 +2731,11 @@ async fn db_crud_replication_to_replicas() {
         .db_delete_replicated(entity_type, entity_id)
         .expect("delete should succeed");
     assert_eq!(deleted.id_str(), entity_id);
-
-    cluster.nodes[0]
-        .controller
-        .replicate_write(delete_write, &[n2, n3], 2)
-        .await
-        .ok();
-    cluster.advance_ms(10);
-    for node in &mut cluster.nodes {
-        node.controller.process_messages().await;
-    }
-
-    let primary_deleted = cluster.nodes[0].controller.db_get(entity_type, entity_id);
-    assert!(
-        primary_deleted.is_none(),
-        "Entity should be deleted on primary"
-    );
-
-    let replica1_deleted = cluster.nodes[1].controller.db_get(entity_type, entity_id);
-    assert!(
-        replica1_deleted.is_none(),
-        "Entity should be deleted on replica 1"
-    );
-
-    let replica2_deleted = cluster.nodes[2].controller.db_get(entity_type, entity_id);
-    assert!(
-        replica2_deleted.is_none(),
-        "Entity should be deleted on replica 2"
+    cluster.replicate_from_first(delete_write).await;
+    assert_eq!(
+        cluster.data_on_each_node(entity_type, entity_id),
+        vec![None; 3],
+        "the entity should be deleted on the primary and both replicas"
     );
 }
 
@@ -3279,126 +3230,51 @@ async fn unique_constraint_expires_after_ttl() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn fk_validation_request_lifecycle() {
     use mqdb_cluster::cluster::db::FkValidationRequest;
 
     let mut cluster = TestCluster::new(3);
-    let n2 = cluster.nodes[1].id;
-    let n3 = cluster.nodes[2].id;
-
-    for i in 0..NUM_PARTITIONS {
-        let partition = PartitionId::new(i).unwrap();
-        cluster.nodes[0]
-            .controller
-            .become_primary(partition, Epoch::new(1));
-        cluster.nodes[1]
-            .controller
-            .become_replica(partition, Epoch::new(1), 0);
-        cluster.nodes[2]
-            .controller
-            .become_replica(partition, Epoch::new(1), 0);
-    }
-
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
-    cluster.advance_ms(5);
-    for node in &mut cluster.nodes {
-        node.controller.process_messages().await;
-    }
+    cluster.setup_all_primaries().await;
 
     let request = FkValidationRequest::create("users", "user-123", "fk-req-001", 5000, 1000);
-
     let write = cluster.nodes[0]
         .controller
         .stores()
         .fk_add_request_replicated(request.clone())
         .expect("add request should succeed");
-
-    cluster.nodes[0]
-        .controller
-        .replicate_write(write, &[n2, n3], 2)
-        .await
-        .ok();
-
-    cluster.advance_ms(10);
-    for node in &mut cluster.nodes {
-        node.controller.process_messages().await;
-    }
+    cluster.replicate_from_first(write).await;
 
     let retrieved = cluster.nodes[0]
         .controller
         .stores()
         .fk_get_request("fk-req-001");
-    assert!(retrieved.is_some(), "Primary should have FK request");
-    assert_eq!(retrieved.unwrap().entity_str(), "users");
-
-    let replica1_request = cluster.nodes[1]
-        .controller
-        .stores()
-        .fk_get_request("fk-req-001");
-    assert!(
-        replica1_request.is_some(),
-        "Replica 1 should have FK request after replication"
+    assert_eq!(
+        retrieved.map(|r| r.entity_str().to_string()),
+        Some("users".to_string())
     );
-
-    let replica2_request = cluster.nodes[2]
-        .controller
-        .stores()
-        .fk_get_request("fk-req-001");
-    assert!(
-        replica2_request.is_some(),
-        "Replica 2 should have FK request after replication"
-    );
+    let held: Vec<bool> = cluster
+        .nodes
+        .iter()
+        .map(|n| n.controller.stores().fk_get_request("fk-req-001").is_some())
+        .collect();
+    assert_eq!(held, [true; 3], "every node should hold the FK request");
 
     let (completed, complete_write) = cluster.nodes[0]
         .controller
         .stores()
         .fk_complete_request_replicated("fk-req-001")
         .expect("complete should succeed");
-
     assert_eq!(completed.request_id_str(), "fk-req-001");
+    cluster.replicate_from_first(complete_write).await;
 
-    cluster.nodes[0]
-        .controller
-        .replicate_write(complete_write, &[n2, n3], 2)
-        .await
-        .ok();
-
-    cluster.advance_ms(10);
-    for node in &mut cluster.nodes {
-        node.controller.process_messages().await;
-    }
-
-    let after_complete = cluster.nodes[0]
-        .controller
-        .stores()
-        .fk_get_request("fk-req-001");
-    assert!(
-        after_complete.is_none(),
-        "Request should be removed on primary after completion"
-    );
-
-    let replica1_after = cluster.nodes[1]
-        .controller
-        .stores()
-        .fk_get_request("fk-req-001");
-    assert!(
-        replica1_after.is_none(),
-        "Request should be removed on replica 1 after completion"
-    );
-
-    let replica2_after = cluster.nodes[2]
-        .controller
-        .stores()
-        .fk_get_request("fk-req-001");
-    assert!(
-        replica2_after.is_none(),
-        "Request should be removed on replica 2 after completion"
+    let held: Vec<bool> = cluster
+        .nodes
+        .iter()
+        .map(|n| n.controller.stores().fk_get_request("fk-req-001").is_some())
+        .collect();
+    assert_eq!(
+        held, [false; 3],
+        "the request should be removed everywhere after completion"
     );
 }
 
@@ -3913,14 +3789,25 @@ fn json_value_bytes(value: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::Value::String(value.to_string())).unwrap()
 }
 
+fn sku_reservation<'a>(
+    value: &'a [u8],
+    record_id: &'a str,
+    request_id: &'a str,
+) -> mqdb_cluster::cluster::db::UniqueReserveParams<'a> {
+    mqdb_cluster::cluster::db::UniqueReserveParams {
+        entity: "products",
+        field: "sku",
+        value,
+        record_id,
+        request_id,
+        data_partition: PartitionId::new(5).unwrap(),
+        ttl_ms: 30_000,
+    }
+}
+
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn no_oversell_when_new_primary_missed_a_reservation() {
-    // Model-as-oracle NoOversell test for the exact scenario ClusterUniqueMonotonic.tla flagged:
-    // a promoted primary that MISSED an existing reservation must still refuse to reassign the value.
-    // Without the seal reservation-learning (d-2), node1 would grant the value to a second record and
-    // oversell — so this test fails if that fix regresses.
-    use mqdb_cluster::cluster::db::{ReserveResult, UniqueReserveParams};
+    use mqdb_cluster::cluster::db::ReserveResult;
     use mqdb_cluster::cluster::{ClusterMessage, InboundMessage};
 
     let mut cluster = TestCluster::new(3);
@@ -3936,8 +3823,6 @@ async fn no_oversell_when_new_primary_missed_a_reservation() {
             .become_replica(p, Epoch::new(1), 0);
     }
 
-    // Establish the unique-voter set (what the leader founds from membership) so the promotion seal
-    // has a concrete majority to reach; without it a multi-node cluster fails closed.
     let voters: std::collections::BTreeSet<_> = cluster.nodes.iter().map(|n| n.id).collect();
     for node in &mut cluster.nodes {
         node.controller.seed_unique_voters(voters.clone());
@@ -3947,17 +3832,7 @@ async fn no_oversell_when_new_primary_missed_a_reservation() {
     let unique_part = mqdb_cluster::cluster::db::unique_partition("products", "sku", &value);
     let node0_id = cluster.nodes[0].id;
 
-    // node0 (epoch 1) reserves the value for record "A", but the replication reaches only node2 —
-    // node1 (the future primary) never sees it.
-    let params_a = UniqueReserveParams {
-        entity: "products",
-        field: "sku",
-        value: &value,
-        record_id: "A",
-        request_id: "req-A",
-        data_partition: PartitionId::new(5).unwrap(),
-        ttl_ms: 30_000,
-    };
+    let params_a = sku_reservation(&value, "A", "req-A");
     let (res_a, write_a) = cluster.nodes[0]
         .controller
         .stores()
@@ -3969,9 +3844,9 @@ async fn no_oversell_when_new_primary_missed_a_reservation() {
         write_a.operation,
         Epoch::new(1),
         0,
-        write_a.entity.clone(),
-        write_a.id.clone(),
-        write_a.data.clone(),
+        write_a.entity,
+        write_a.id,
+        write_a.data,
     );
     cluster.nodes[2]
         .controller
@@ -3995,19 +3870,10 @@ async fn no_oversell_when_new_primary_missed_a_reservation() {
         "the future primary must genuinely be missing the reservation for the test to be meaningful"
     );
 
-    // Failover: node1 is promoted to primary at epoch 2 and seals — the seal must LEARN A.
     cluster.nodes[1]
         .controller
         .become_primary(unique_part, Epoch::new(2));
-    for _ in 0..4 {
-        let output = cluster.nodes[1].controller.tick(0);
-        cluster.nodes[1].controller.send_tick_output(output).await;
-        cluster.advance_ms(1);
-        cluster.nodes[0].controller.process_messages().await;
-        cluster.nodes[2].controller.process_messages().await;
-        cluster.advance_ms(1);
-        cluster.nodes[1].controller.process_messages().await;
-    }
+    cluster.run_rounds_from(1, 4).await;
 
     let learned = cluster.nodes[1]
         .controller
@@ -4016,16 +3882,7 @@ async fn no_oversell_when_new_primary_missed_a_reservation() {
         .expect("the promotion seal must teach the new primary the reservation it missed");
     assert_eq!(learned.record_id_str(), "A");
 
-    // The new primary now tries to reserve the SAME value for a DIFFERENT record "B".
-    let params_b = UniqueReserveParams {
-        entity: "products",
-        field: "sku",
-        value: &value,
-        record_id: "B",
-        request_id: "req-B",
-        data_partition: PartitionId::new(5).unwrap(),
-        ttl_ms: 30_000,
-    };
+    let params_b = sku_reservation(&value, "B", "req-B");
     let (res_b, _) = cluster.nodes[1]
         .controller
         .stores()
@@ -4036,7 +3893,6 @@ async fn no_oversell_when_new_primary_missed_a_reservation() {
         "the value is already held by A; the promoted primary must not oversell it to B"
     );
 
-    // NoOversell: exactly one record holds the value, and it is the original owner.
     assert_eq!(
         cluster.nodes[1]
             .controller

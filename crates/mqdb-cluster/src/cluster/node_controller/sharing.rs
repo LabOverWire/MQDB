@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use std::collections::{HashSet, VecDeque};
 
 #[cfg(feature = "http-api")]
-use super::db_ops::EventOrigin;
+use super::db_ops::{EventOrigin, ForwardRequest};
 #[cfg(feature = "http-api")]
 use super::protocol::{JsonDbOp, JsonDbRequest};
 #[cfg(feature = "http-api")]
@@ -517,10 +517,9 @@ impl<T: ClusterTransport> NodeController<T> {
             return;
         }
 
-        #[allow(clippy::cast_possible_truncation)]
         let request_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos() as u64);
+            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
 
         let filter = mqdb_core::Filter::new(
             "email_hash".to_string(),
@@ -662,12 +661,14 @@ impl<T: ClusterTransport> NodeController<T> {
         } else {
             self.forward_json_db_request(
                 partition,
-                JsonDbOp::Share,
-                &cont.entity,
-                Some(&cont.id),
-                &payload,
-                &cont.response_topic,
-                cont.correlation_data.as_deref(),
+                &ForwardRequest {
+                    op: JsonDbOp::Share,
+                    entity: &cont.entity,
+                    id: Some(&cont.id),
+                    payload: &payload,
+                    response_topic: &cont.response_topic,
+                    correlation_data: cont.correlation_data.as_deref(),
+                },
                 EventOrigin::new(Some(cont.granted_by.as_str()), None),
             )
             .await;

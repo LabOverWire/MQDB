@@ -25,19 +25,18 @@ pub struct DbEntity {
 }
 
 impl DbEntity {
-    #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub fn create(entity: &str, id: &str, data: &[u8], timestamp_ms: u64) -> Self {
         let entity_bytes = entity.as_bytes().to_vec();
         let id_bytes = id.as_bytes().to_vec();
         Self {
             version: 1,
-            entity_len: entity_bytes.len() as u16,
+            entity_len: u16::try_from(entity_bytes.len()).unwrap_or(u16::MAX),
             entity: entity_bytes,
-            id_len: id_bytes.len() as u16,
+            id_len: u16::try_from(id_bytes.len()).unwrap_or(u16::MAX),
             id: id_bytes,
             timestamp_ms,
-            data_len: data.len() as u32,
+            data_len: u32::try_from(data.len()).unwrap_or(u32::MAX),
             data: data.to_vec(),
         }
     }
@@ -219,7 +218,6 @@ impl DbDataStore {
     /// # Panics
     /// Panics if the internal lock is poisoned.
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn query(
         &self,
         entity_type: Option<&str>,
@@ -325,7 +323,6 @@ impl DbDataStore {
 
     /// # Panics
     /// Panics if the internal lock is poisoned.
-    #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub fn export_for_partition(&self, partition: PartitionId) -> Vec<u8> {
         let entities = self.read_entities();
@@ -335,15 +332,23 @@ impl DbDataStore {
             .collect();
 
         let mut buf = Vec::new();
-        buf.extend_from_slice(&(partition_entities.len() as u32).to_be_bytes());
+        buf.extend_from_slice(
+            &u32::try_from(partition_entities.len())
+                .unwrap_or(u32::MAX)
+                .to_be_bytes(),
+        );
 
         for (key, entity) in partition_entities {
             let key_bytes = key.as_bytes();
-            buf.extend_from_slice(&(key_bytes.len() as u16).to_be_bytes());
+            buf.extend_from_slice(
+                &u16::try_from(key_bytes.len())
+                    .unwrap_or(u16::MAX)
+                    .to_be_bytes(),
+            );
             buf.extend_from_slice(key_bytes);
 
             let data = Self::serialize(entity);
-            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            buf.extend_from_slice(&u32::try_from(data.len()).unwrap_or(u32::MAX).to_be_bytes());
             buf.extend_from_slice(&data);
         }
 

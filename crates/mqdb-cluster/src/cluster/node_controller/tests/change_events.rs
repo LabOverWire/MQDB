@@ -34,15 +34,13 @@ fn controller_with_storage(
     id: u16,
     backend: &Arc<dyn StorageBackend>,
 ) -> NodeController<MockTransport> {
-    let (tx_raft_messages, _rx_raft_messages) = flume::unbounded();
-    let (tx_raft_events, _rx_raft_events) = flume::unbounded();
     NodeController::new_with_storage(
         node(id),
         MockTransport::new(node(id)),
         TransportConfig::default(),
         Some(Arc::clone(backend)),
-        tx_raft_messages,
-        tx_raft_events,
+        flume::unbounded().0,
+        flume::unbounded().0,
     )
 }
 
