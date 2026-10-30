@@ -291,7 +291,7 @@ impl MqdbAgent {
         let (presence_rx, certificates) = self.apply_event_handlers(&mut config);
 
         let auth_method = config.auth_config.auth_method;
-        let rate_limiter = crate::auth_config::take_auth_rate_limiter(&mut config.auth_config);
+        let (config, rate_limit) = crate::auth_config::take_auth_rate_limit(config);
         let broker = mqtt5::broker::MqttBroker::with_config(config).await?;
         let (mut broker, auth_providers) = Self::apply_auth_providers(
             broker,
@@ -307,7 +307,7 @@ impl MqdbAgent {
                 scoped_events: self.scoped_events,
                 event_scope_entity: self.scope_config.scope_entity(),
                 sparkplug_aware: self.sparkplug_aware,
-                rate_limiter,
+                rate_limit,
             },
         )
         .await?;
@@ -397,7 +397,7 @@ impl MqdbAgent {
         let (presence_rx, certificates) = self.apply_event_handlers(&mut config);
 
         let auth_method = config.auth_config.auth_method;
-        let rate_limiter = crate::auth_config::take_auth_rate_limiter(&mut config.auth_config);
+        let (config, rate_limit) = crate::auth_config::take_auth_rate_limit(config);
         let broker = mqtt5::broker::MqttBroker::with_config(config).await?;
         let (mut broker, auth_providers) = Self::apply_auth_providers(
             broker,
@@ -413,7 +413,7 @@ impl MqdbAgent {
                 scoped_events: self.scoped_events,
                 event_scope_entity: self.scope_config.scope_entity(),
                 sparkplug_aware: self.sparkplug_aware,
-                rate_limiter,
+                rate_limit,
             },
         )
         .await?;

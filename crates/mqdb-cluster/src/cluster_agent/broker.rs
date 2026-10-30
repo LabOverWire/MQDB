@@ -4,7 +4,7 @@
 use super::{AdminRequest, ClusterTransportKind, ClusteredAgent, RunningBroker};
 use crate::cluster::{ClusterEventHandler, DedicatedExecutor, NodeId, QuicDirectTransport};
 use mqdb_agent::auth_config::{
-    AuthSetupResult, enhanced_auth_with_fallback, rate_limited, take_auth_rate_limiter,
+    AuthSetupResult, enhanced_auth_with_fallback, rate_limited, take_auth_rate_limit,
 };
 use mqdb_agent::topic_protection::TopicProtectionAuthProvider;
 use mqtt5::QoS;
@@ -216,8 +216,8 @@ impl ClusteredAgent {
         let auth_method = broker_config.auth_config.auth_method;
         let broker_config = self.apply_quic_config(broker_config);
         let broker_config = self.apply_ws_config(broker_config);
-        let mut broker_config = self.apply_cluster_listener(broker_config)?;
-        let rate_limiter = take_auth_rate_limiter(&mut broker_config.auth_config);
+        let (broker_config, rate_limit) =
+            take_auth_rate_limit(self.apply_cluster_listener(broker_config)?);
 
         let mut broker = MqttBroker::with_config(broker_config).await?;
 
@@ -276,7 +276,7 @@ impl ClusteredAgent {
             broker = broker.with_auth_provider(comprehensive.clone());
         }
 
-        let current_provider = rate_limited(broker.auth_provider(), rate_limiter);
+        let current_provider = rate_limited(broker.auth_provider(), rate_limit, service_username);
         let protected_provider =
             TopicProtectionAuthProvider::new(current_provider, admin_users.clone())
                 .with_internal_service_username(service_username.cloned())
