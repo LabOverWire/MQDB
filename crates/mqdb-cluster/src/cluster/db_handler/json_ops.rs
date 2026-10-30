@@ -6,7 +6,7 @@ use super::super::db::{self, data_partition};
 use super::super::db_topic::DbTopicOperation;
 #[cfg(feature = "http-api")]
 use super::super::node_controller::ShareResolveContinuation;
-use super::super::node_controller::db_ops::EventOrigin;
+use super::super::node_controller::db_ops::{EventOrigin, FkDeletePlan};
 use super::super::node_controller::{
     FkCheckContinuation, FkDeleteContinuation, NodeController, PendingFkDeleteWork, PendingFkWork,
     PendingUniqueWork, UniqueCheckContinuation,
@@ -1278,16 +1278,13 @@ impl DbRequestHandler {
             Ok(results) => results,
             Err(msg) => return JsonOpResult::Response(Self::json_error(409, &msg)),
         };
-        let (cascade, ack_receivers) = match controller
-            .apply_fk_delete_side_effects(
-                entity,
-                id,
-                &all_results,
-                EventOrigin::new(sender, client_id),
-            )
-            .await
-        {
-            Ok(pair) => pair,
+        let plan = match controller.plan_fk_delete(
+            entity,
+            id,
+            &all_results,
+            EventOrigin::new(sender, client_id),
+        ) {
+            Ok(plan) => plan,
             Err(payload) => return JsonOpResult::Response(payload),
         };
         let ctx = JsonOpContext {
@@ -1299,18 +1296,14 @@ impl DbRequestHandler {
             response_topic,
             correlation_data,
         };
-        JsonOpResult::Response(
-            self.execute_delete(controller, &ctx, cascade.as_ref(), ack_receivers)
-                .await,
-        )
+        JsonOpResult::Response(self.execute_delete(controller, &ctx, &plan).await)
     }
 
     async fn execute_delete<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
         ctx: &JsonOpContext<'_>,
-        cascade: Option<&crate::cluster::store_manager::outbox::CascadeOutboxPayload>,
-        ack_receivers: Vec<tokio::sync::oneshot::Receiver<bool>>,
+        plan: &FkDeletePlan,
     ) -> Vec<u8> {
         let entity = ctx.entity;
         let id = ctx.id.unwrap_or("");
@@ -1325,15 +1318,18 @@ impl DbRequestHandler {
                     EventOrigin::new(sender, client_id),
                 );
                 if let Err(error) = controller
-                    .commit_delete_with_change_event(write, event, &data, cascade)
+                    .commit_delete_with_change_event(write, event, &data, plan.cascade())
                     .await
                 {
                     return helpers::json_write_failure(error);
                 }
+                let ack_receivers = controller
+                    .run_fk_delete_plan(plan, EventOrigin::new(sender, client_id))
+                    .await;
                 if self.ownership.owner_field(entity).is_some() {
                     controller.clear_all_resource_grants(entity, id).await;
                 }
-                if let Some(cas) = cascade {
+                if let Some(cas) = plan.cascade() {
                     crate::cluster::node_controller::db_ops::spawn_cascade_ack_waiter(
                         controller.stores().cluster_outbox().cloned(),
                         cas.operation_id.clone(),
@@ -1813,16 +1809,13 @@ impl DbRequestHandler {
                 response_topic,
                 correlation_data,
             } => {
-                let (cascade, ack_receivers) = match controller
-                    .apply_fk_delete_side_effects(
-                        &entity,
-                        &id,
-                        &side_effects,
-                        EventOrigin::new(sender.as_deref(), client_id.as_deref()),
-                    )
-                    .await
-                {
-                    Ok(pair) => pair,
+                let plan = match controller.plan_fk_delete(
+                    &entity,
+                    &id,
+                    &side_effects,
+                    EventOrigin::new(sender.as_deref(), client_id.as_deref()),
+                ) {
+                    Ok(plan) => plan,
                     Err(payload) => {
                         return Some(super::DbPublishResponse {
                             topic: response_topic,
@@ -1840,9 +1833,7 @@ impl DbRequestHandler {
                     response_topic: &response_topic,
                     correlation_data: correlation_data.as_deref(),
                 };
-                let payload = self
-                    .execute_delete(controller, &ctx, cascade.as_ref(), ack_receivers)
-                    .await;
+                let payload = self.execute_delete(controller, &ctx, &plan).await;
                 Some(super::DbPublishResponse {
                     topic: response_topic,
                     payload,

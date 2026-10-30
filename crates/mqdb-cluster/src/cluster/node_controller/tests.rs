@@ -6,6 +6,7 @@ use crate::cluster::NUM_PARTITIONS;
 use crate::cluster::protocol::{Heartbeat, Operation};
 use crate::cluster::quorum::QuorumResult;
 use crate::cluster::session_partition;
+use crate::cluster::test_support::{put_record, remove_record};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
@@ -450,10 +451,13 @@ async fn reconcile_apply_skips_record_deleted_after_collection() {
         .db_constraints
         .add(ClusterConstraint::unique("users", "uniq_email", "email"))
         .unwrap();
-    ctrl.stores()
-        .db_data
-        .create("users", "u1", br#"{"email":"a@x.com"}"#, 1000)
-        .unwrap();
+    put_record(
+        &ctrl.stores().db_data,
+        "users",
+        "u1",
+        br#"{"email":"a@x.com"}"#,
+        1000,
+    );
 
     let work = ctrl.collect_unique_reconcile_work();
     assert_eq!(
@@ -463,7 +467,7 @@ async fn reconcile_apply_skips_record_deleted_after_collection() {
     );
 
     // The lock is released between collect and apply; the record is deleted in that window.
-    ctrl.stores().db_data.delete("users", "u1").unwrap();
+    remove_record(&ctrl.stores().db_data, "users", "u1");
     ctrl.apply_unique_reconcile_chunk(&work).await;
 
     let value = serde_json::to_vec(&serde_json::json!("a@x.com")).unwrap();
@@ -539,17 +543,20 @@ async fn project_reconcile_work_skips_key_deleted_after_gather() {
         .db_constraints
         .add(ClusterConstraint::unique("users", "uniq_email", "email"))
         .unwrap();
-    ctrl.stores()
-        .db_data
-        .create("users", "u1", br#"{"email":"a@x.com"}"#, 1000)
-        .unwrap();
+    put_record(
+        &ctrl.stores().db_data,
+        "users",
+        "u1",
+        br#"{"email":"a@x.com"}"#,
+        1000,
+    );
 
     let keys = ctrl.collect_unique_reconcile_keys();
     assert_eq!(keys.len(), 1, "one owned durable record gathered");
 
     // The read lock is released between key-gather and the per-chunk parse; the record is deleted in
     // that window, so projecting the stale key must yield no work rather than parse a gone record.
-    ctrl.stores().db_data.delete("users", "u1").unwrap();
+    remove_record(&ctrl.stores().db_data, "users", "u1");
     let work = ctrl.project_unique_reconcile_work(&keys);
     assert!(
         work.is_empty(),
@@ -1894,12 +1901,8 @@ async fn db_list_primary_only_excludes_replica_data() {
     let (primary_id, _primary_part, replica_id, replica_part) =
         find_two_ids_on_different_partitions("items");
 
-    ctrl.stores
-        .db_data
-        .upsert("items", &primary_id, b"{}", 1000);
-    ctrl.stores
-        .db_data
-        .upsert("items", &replica_id, b"{}", 1000);
+    put_record(&ctrl.stores.db_data, "items", &primary_id, b"{}", 1000);
+    put_record(&ctrl.stores.db_data, "items", &replica_id, b"{}", 1000);
 
     assert_eq!(ctrl.db_list("items").len(), 2);
 
@@ -1944,9 +1947,13 @@ async fn fk_reverse_lookup_ignores_stale_replica_data() {
         "id": replica_post_id
     });
     let post_bytes = serde_json::to_vec(&post_data).unwrap();
-    ctrl.stores
-        .db_data
-        .upsert("posts", &replica_post_id, &post_bytes, 1000);
+    put_record(
+        &ctrl.stores.db_data,
+        "posts",
+        &replica_post_id,
+        &post_bytes,
+        1000,
+    );
 
     assert_eq!(ctrl.db_list("posts").len(), 1);
 
@@ -2053,7 +2060,8 @@ async fn fk_reverse_lookup_restrict_blocks_only_on_primary_data() {
     )
     .await
     .unwrap();
-    ctrl.stores.db_data.upsert(
+    put_record(
+        &ctrl.stores.db_data,
         "posts",
         &replica_post_id,
         &post_bytes(&replica_post_id),

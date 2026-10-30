@@ -183,6 +183,7 @@ mod tests {
     use super::*;
     use crate::cluster::NodeId;
     use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+    use crate::cluster::test_support::put_record;
 
     fn node(id: u16) -> NodeId {
         NodeId::validated(id).unwrap()
@@ -319,18 +320,27 @@ mod tests {
         let store = StoreManager::new(node(1));
         let fk = fk_comments_to_posts();
 
-        store
-            .db_data
-            .create("comments", "c1", b"{\"post_id\":\"p1\"}", 1_000)
-            .unwrap();
-        store
-            .db_data
-            .create("comments", "c2", b"{\"post_id\":\"p1\"}", 1_000)
-            .unwrap();
-        store
-            .db_data
-            .create("comments", "c3", b"{\"post_id\":\"p2\"}", 1_000)
-            .unwrap();
+        put_record(
+            &store.db_data,
+            "comments",
+            "c1",
+            b"{\"post_id\":\"p1\"}",
+            1_000,
+        );
+        put_record(
+            &store.db_data,
+            "comments",
+            "c2",
+            b"{\"post_id\":\"p1\"}",
+            1_000,
+        );
+        put_record(
+            &store.db_data,
+            "comments",
+            "c3",
+            b"{\"post_id\":\"p2\"}",
+            1_000,
+        );
 
         store.rebuild_fk_index_for_constraint(&fk);
 
@@ -349,10 +359,13 @@ mod tests {
         let store = StoreManager::new(node(1));
         let unique = ClusterConstraint::unique("comments", "uniq_text", "text");
 
-        store
-            .db_data
-            .create("comments", "c1", b"{\"post_id\":\"p1\"}", 1_000)
-            .unwrap();
+        put_record(
+            &store.db_data,
+            "comments",
+            "c1",
+            b"{\"post_id\":\"p1\"}",
+            1_000,
+        );
 
         store.rebuild_fk_index_for_constraint(&unique);
 

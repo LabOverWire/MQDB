@@ -228,6 +228,7 @@ impl StoreManager {
 mod tests {
     use super::*;
     use crate::cluster::NodeId;
+    use crate::cluster::test_support::put_record;
 
     fn node(id: u16) -> NodeId {
         NodeId::validated(id).unwrap()
@@ -238,12 +239,8 @@ mod tests {
         let src = StoreManager::new(node(1));
         let dst = StoreManager::new(node(2));
 
-        src.db_data
-            .create("notes", "n1", b"{\"title\":\"hello\"}", 1000)
-            .unwrap();
-        src.db_data
-            .create("notes", "n2", b"{\"title\":\"world\"}", 2000)
-            .unwrap();
+        put_record(&src.db_data, "notes", "n1", b"{\"title\":\"hello\"}", 1000);
+        put_record(&src.db_data, "notes", "n2", b"{\"title\":\"world\"}", 2000);
 
         let partition = src.db_data.get("notes", "n1").unwrap().partition();
 
@@ -270,7 +267,7 @@ mod tests {
             node(2),
             Some(std::sync::Arc::new(mqdb_core::storage::MemoryBackend::new())),
         );
-        src.db_data.create("notes", "n1", b"{}", 1000).unwrap();
+        put_record(&src.db_data, "notes", "n1", b"{}", 1000);
         let partition = src.db_data.get("notes", "n1").unwrap().partition();
 
         let payload = src.export_partition(partition);
@@ -307,7 +304,7 @@ mod tests {
         };
         use mqdb_core::partition::data_partition;
 
-        store.db_data.create(entity, "rec-1", b"{}", 1000).unwrap();
+        put_record(&store.db_data, entity, "rec-1", b"{}", 1000);
         store
             .db_schema
             .register(entity, b"{\"fields\":[]}")
@@ -438,17 +435,14 @@ mod tests {
         src.db_constraints.add(fk.clone()).unwrap();
         dst.db_constraints.add(fk).unwrap();
 
-        src.db_data
-            .create("posts", "p1", b"{\"title\":\"hello\"}", 1_000)
-            .unwrap();
-        src.db_data
-            .create(
-                "comments",
-                "c1",
-                b"{\"post_id\":\"p1\",\"text\":\"first\"}",
-                1_000,
-            )
-            .unwrap();
+        put_record(&src.db_data, "posts", "p1", b"{\"title\":\"hello\"}", 1_000);
+        put_record(
+            &src.db_data,
+            "comments",
+            "c1",
+            b"{\"post_id\":\"p1\",\"text\":\"first\"}",
+            1_000,
+        );
         src.update_fk_reverse_index(
             crate::cluster::protocol::Operation::Insert,
             "comments",
@@ -512,7 +506,7 @@ mod tests {
                 .unwrap();
         }
 
-        src.db_data.create("alpha", "rec-1", b"{}", 1_000).unwrap();
+        put_record(&src.db_data, "alpha", "rec-1", b"{}", 1_000);
         let any_partition = src.db_data.get("alpha", "rec-1").unwrap().partition();
 
         let schema_partitions: std::collections::HashSet<_> = src

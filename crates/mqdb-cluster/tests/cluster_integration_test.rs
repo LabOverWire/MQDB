@@ -3892,6 +3892,23 @@ async fn unique_constraint_cross_node_message_flow() {
     );
 }
 
+fn put_record(
+    store: &mqdb_cluster::cluster::DbDataStore,
+    entity: &str,
+    id: &str,
+    data: &[u8],
+    timestamp_ms: u64,
+) {
+    let record = mqdb_cluster::cluster::DbEntity::create(entity, id, data, timestamp_ms);
+    store
+        .apply_replicated(
+            Operation::Insert,
+            &record.key(),
+            &mqdb_cluster::cluster::DbDataStore::serialize(&record),
+        )
+        .unwrap();
+}
+
 fn json_value_bytes(value: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::Value::String(value.to_string())).unwrap()
 }
@@ -4133,12 +4150,13 @@ async fn unique_reconcile_reestablishes_lost_reservation() {
         .db_constraints
         .add(ClusterConstraint::unique("users", "uniq_email", "email"))
         .unwrap();
-    cluster.nodes[0]
-        .controller
-        .stores()
-        .db_data
-        .create("users", "u1", br#"{"email":"a@x.com"}"#, 1000)
-        .unwrap();
+    put_record(
+        &cluster.nodes[0].controller.stores().db_data,
+        "users",
+        "u1",
+        br#"{"email":"a@x.com"}"#,
+        1000,
+    );
 
     let value = json_value_bytes("a@x.com");
     assert!(
@@ -4177,10 +4195,13 @@ async fn unique_reconcile_repairs_lost_commit() {
         .db_constraints
         .add(ClusterConstraint::unique("users", "uniq_email", "email"))
         .unwrap();
-    stores
-        .db_data
-        .create("users", "u1", br#"{"email":"a@x.com"}"#, 1000)
-        .unwrap();
+    put_record(
+        &stores.db_data,
+        "users",
+        "u1",
+        br#"{"email":"a@x.com"}"#,
+        1000,
+    );
 
     let value = json_value_bytes("a@x.com");
     let params = UniqueReserveParams {

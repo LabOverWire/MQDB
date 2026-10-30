@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::*;
-use crate::cluster::db::ClusterConstraint;
+use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
 use crate::cluster::db_handler::{DbPublishResult, DbRequestHandler, MqttRequestContext};
 use crate::cluster::test_support::FaultyBackend;
 use crate::cluster::{NUM_PARTITIONS, PartitionAssignment, PartitionMap};
@@ -170,4 +170,136 @@ async fn a_binary_write_the_primary_cannot_store_returns_an_error() {
     assert_eq!(deleted.err().map(|e| e.to_string()), refused);
     assert!(ctrl.db_get("items", "r1").is_none());
     assert_eq!(ctrl.db_get("items", "kept").unwrap().data, b"{\"n\":1}");
+}
+
+async fn author_with_post(ctrl: &mut NodeController<MockTransport>) {
+    let author = request(ctrl, "$DB/users/create", &json!({"id": "u1", "name": "a"})).await;
+    let post = request(
+        ctrl,
+        "$DB/posts/create",
+        &json!({"id": "p1", "author_id": "u1"}),
+    )
+    .await;
+    assert_eq!(
+        (&author["status"], &post["status"]),
+        (&json!("ok"), &json!("ok"))
+    );
+    ctrl.constraint_add(&ClusterConstraint::foreign_key(
+        "posts",
+        "posts_author_fk",
+        "author_id",
+        "users",
+        "id",
+        OnDeleteAction::Cascade,
+    ))
+    .await
+    .unwrap();
+}
+
+fn hand_partition_to(
+    ctrl: &mut NodeController<MockTransport>,
+    moved: PartitionId,
+    primary: NodeId,
+) {
+    ctrl.step_down(moved);
+    let mut map = PartitionMap::default();
+    for i in 0..NUM_PARTITIONS {
+        let partition = PartitionId::new(i).unwrap();
+        let (owner, replicas) = if partition == moved {
+            (primary, vec![node(1)])
+        } else {
+            (node(1), vec![node(2)])
+        };
+        map.set(
+            partition,
+            PartitionAssignment {
+                primary: Some(owner),
+                replicas,
+                epoch: Epoch::new(2),
+            },
+        );
+    }
+    ctrl.update_partition_map(map);
+}
+
+fn cascade_requests_sent(ctrl: &NodeController<MockTransport>) -> usize {
+    ctrl.transport
+        .sent_messages()
+        .iter()
+        .filter(|(_, message)| matches!(message, ClusterMessage::JsonDbRequest { .. }))
+        .count()
+}
+
+#[tokio::test]
+async fn a_parent_delete_the_primary_cannot_store_keeps_its_local_children() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_of_every_partition(&backend);
+    author_with_post(&mut ctrl).await;
+    backend.fail_writes_to_keys_containing("users/u1");
+
+    let deleted = request(&mut ctrl, "$DB/users/u1/delete", &Value::Null).await;
+
+    assert_eq!(
+        (
+            &deleted["code"],
+            ctrl.db_get("users", "u1").is_some(),
+            ctrl.db_get("posts", "p1").is_some()
+        ),
+        (&json!(500), true, true)
+    );
+}
+
+#[tokio::test]
+async fn a_parent_delete_the_primary_cannot_store_sends_no_remote_cascade() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_of_every_partition(&backend);
+    let author = request(
+        &mut ctrl,
+        "$DB/users/create",
+        &json!({"id": "u1", "name": "a"}),
+    )
+    .await;
+    assert_eq!(author["status"], "ok");
+    hand_partition_to(
+        &mut ctrl,
+        crate::cluster::db::data_partition("posts", "p1"),
+        node(2),
+    );
+    let requests_before = cascade_requests_sent(&ctrl);
+    backend.fail_writes_to_keys_containing("users/u1");
+    let remote_child = crate::cluster::node_controller::fk::FkReverseLookupResult {
+        constraint_name: "posts_author_fk".to_string(),
+        source_entity: "posts".to_string(),
+        source_field: "author_id".to_string(),
+        on_delete: OnDeleteAction::Cascade,
+        referencing_ids: vec!["p1".to_string()],
+        cross_owned_ids: Vec::new(),
+        target_id: "u1".to_string(),
+    };
+
+    let response = DbRequestHandler::new(node(1))
+        .complete_pending_fk_delete(
+            &mut ctrl,
+            None,
+            vec![remote_child],
+            FkDeleteContinuation::DeleteFromDbHandler {
+                entity: "users".to_string(),
+                id: "u1".to_string(),
+                sender: None,
+                client_id: None,
+                response_topic: "resp/t".to_string(),
+                correlation_data: None,
+            },
+        )
+        .await
+        .unwrap();
+    let deleted: Value = serde_json::from_slice(&response.payload).unwrap();
+
+    assert_eq!(
+        (
+            &deleted["code"],
+            cascade_requests_sent(&ctrl) - requests_before
+        ),
+        (&json!(500), 0)
+    );
 }
