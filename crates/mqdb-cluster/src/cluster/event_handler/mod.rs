@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use tokio::sync::RwLock;
-use tracing::{debug, warn};
+use tracing::{debug, instrument, warn};
 
 const MAX_SHARE_ROTATIONS: usize = 4096;
 
@@ -127,7 +127,8 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
         checked.held
     }
 
-    async fn reconcile_local_shares(&self, client_id: &str) {
+    #[instrument(skip(self))]
+    async fn reconcile_local_shares(&self, client_id: &str, restore: bool) {
         let Some(view) = self.broker_view.get() else {
             return;
         };
@@ -137,8 +138,11 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             .unwrap_or_else(PoisonError::into_inner)
             .client_candidates(client_id);
         match view.stored_shares(client_id).await {
-            Ok(stored) => {
+            Ok(stored) if restore => {
                 self.update_local_shares(|shares| shares.reconcile(client_id, &snapshot, &stored));
+            }
+            Ok(stored) => {
+                self.update_local_shares(|shares| shares.prune(&snapshot, &stored));
             }
             Err(error) => {
                 warn!(client_id, %error, "stored session unreadable, share members left as tracked");

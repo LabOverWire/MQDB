@@ -41,7 +41,7 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 shares.connected(&event.client_id, event.clean_start);
             });
             if !event.clean_start {
-                self.reconcile_local_shares(&event.client_id).await;
+                self.reconcile_local_shares(&event.client_id, true).await;
             }
             if self.presence {
                 self.emit_presence(&mqdb_agent::presence::PresenceEvent::connect(
@@ -153,7 +153,7 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 return;
             }
 
-            self.reconcile_local_shares(&event.client_id).await;
+            self.reconcile_local_shares(&event.client_id, false).await;
 
             let will_shares = if event.unexpected {
                 let will_topic = self

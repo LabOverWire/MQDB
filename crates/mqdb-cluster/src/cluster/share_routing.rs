@@ -9,7 +9,7 @@ use mqtt5::broker::storage::{DynamicStorage, StorageBackend};
 use mqtt5::{parse_shared_subscription, topic_matches_filter};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
-use tracing::warn;
+use tracing::{instrument, warn};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct ShareKey {
@@ -144,18 +144,22 @@ impl LocalShareMembers {
             .unwrap_or_default()
     }
 
-    pub(crate) fn reconcile(
-        &mut self,
-        client_id: &str,
-        snapshot: &[ShareCandidate],
-        stored: &HashSet<ShareKey>,
-    ) {
+    pub(crate) fn prune(&mut self, snapshot: &[ShareCandidate], stored: &HashSet<ShareKey>) {
         let gone: Vec<ShareCandidate> = snapshot
             .iter()
             .filter(|candidate| !stored.contains(&candidate.key))
             .cloned()
             .collect();
         self.forget(&gone);
+    }
+
+    pub(crate) fn reconcile(
+        &mut self,
+        client_id: &str,
+        snapshot: &[ShareCandidate],
+        stored: &HashSet<ShareKey>,
+    ) {
+        self.prune(snapshot, stored);
         let tracked: HashSet<ShareKey> = self
             .by_client
             .get(client_id)
@@ -228,6 +232,11 @@ pub(crate) fn served_locally(
         .collect()
 }
 
+enum StoredShares {
+    Read(HashSet<ShareKey>),
+    Unreadable,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct HeldShares {
     pub(crate) held: Vec<LocalShare>,
@@ -244,6 +253,7 @@ impl BrokerView {
         Self { router, storage }
     }
 
+    #[instrument(skip_all, fields(candidates = candidates.len()))]
     pub(crate) async fn held_shares(&self, candidates: Vec<ShareCandidate>) -> HeldShares {
         let mut held = Vec::new();
         let mut offline = Vec::new();
@@ -259,7 +269,7 @@ impl BrokerView {
             }
         }
         let online_keys: HashSet<ShareKey> = held.iter().map(|share| share.key.clone()).collect();
-        let mut stored_by_client: HashMap<String, HashSet<ShareKey>> = HashMap::new();
+        let mut stored_by_client: HashMap<String, StoredShares> = HashMap::new();
         let mut stale = Vec::new();
         for candidate in offline {
             if online_keys.contains(&candidate.key) {
@@ -267,23 +277,19 @@ impl BrokerView {
             }
             if !stored_by_client.contains_key(&candidate.client_id) {
                 let stored = match self.stored_shares(&candidate.client_id).await {
-                    Ok(stored) => stored,
+                    Ok(stored) => StoredShares::Read(stored),
                     Err(error) => {
                         warn!(client_id = %candidate.client_id, %error, "stored session unreadable, keeping its share members");
-                        held.push(LocalShare {
-                            client_id: candidate.client_id,
-                            key: candidate.key,
-                            online: false,
-                        });
-                        continue;
+                        StoredShares::Unreadable
                     }
                 };
                 stored_by_client.insert(candidate.client_id.clone(), stored);
             }
-            if stored_by_client
-                .get(&candidate.client_id)
-                .is_some_and(|stored| stored.contains(&candidate.key))
-            {
+            let still_held = match stored_by_client.get(&candidate.client_id) {
+                Some(StoredShares::Read(stored)) => stored.contains(&candidate.key),
+                Some(StoredShares::Unreadable) | None => true,
+            };
+            if still_held {
                 held.push(LocalShare {
                     client_id: candidate.client_id,
                     key: candidate.key,
@@ -296,6 +302,7 @@ impl BrokerView {
         HeldShares { held, stale }
     }
 
+    #[instrument(err, skip(self))]
     pub(crate) async fn stored_shares(
         &self,
         client_id: &str,
@@ -594,6 +601,16 @@ mod tests {
             pairs(&members.candidates("sh/x")),
             vec![("a".to_string(), key("g", "sh/x"))]
         );
+    }
+
+    #[test]
+    fn pruning_never_restores_a_share_from_an_older_stored_session() {
+        let mut members = LocalShareMembers::default();
+        members.subscribed("a", "$share/g/sh/x");
+        let snapshot = members.client_candidates("a");
+        members.connected("a", true);
+        members.prune(&snapshot, &HashSet::from([key("g", "sh/x")]));
+        assert!(members.candidates("sh/x").is_empty());
     }
 
     #[test]
