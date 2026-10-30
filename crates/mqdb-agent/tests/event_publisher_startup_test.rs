@@ -76,6 +76,7 @@ async fn write_right_after_ready_publishes_its_change_event() {
             "trial {trial}: no change event for a write made right after ready"
         );
         subscriber.disconnect().await.unwrap();
+        drop(db);
         agent.stop().await;
     }
 }
@@ -112,6 +113,7 @@ async fn publisher_keeps_running_after_falling_behind() {
         "no change event after the publisher fell behind"
     );
     subscriber.disconnect().await.unwrap();
+    drop(db);
     agent.stop().await;
 }
 

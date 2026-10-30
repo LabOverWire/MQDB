@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::helpers::{NODE_PID_FILE, absolute_prefix, cmd_dev_clean};
+use super::helpers::{NODE_PID_FILE, absolute_prefix, cmd_dev_clean, ensure_no_running_nodes};
 
 fn ensure_dev_passwd(exe: &Path, db_prefix: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let path = format!("{db_prefix}-passwd");
@@ -66,105 +66,148 @@ fn node_peers(base_port: u16, nodes: u8, node_id: u8, topology: &str) -> Option<
     (!peers.is_empty()).then_some(peers)
 }
 
-#[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
-pub(crate) fn cmd_dev_start_cluster(
-    nodes: u8,
-    clean: bool,
-    quic_cert: &Path,
-    quic_key: &Path,
-    quic_ca: &Path,
-    no_quic: bool,
-    db_prefix: &str,
-    base_port: u16,
-    bind_host: &str,
-    topology: Option<&str>,
-    bridge_out: bool,
-    no_bridge_out: bool,
-    passwd: Option<&Path>,
-    ownership: Option<&str>,
-    license: Option<&Path>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    check_port_block(base_port, nodes)?;
-    let prefix = absolute_prefix(db_prefix)?;
-    let db_prefix = prefix.as_str();
+pub(crate) enum BridgeDirection {
+    TopologyDefault,
+    Out,
+    Both,
+}
 
-    if clean {
+pub(crate) struct StartClusterOptions {
+    pub(crate) nodes: u8,
+    pub(crate) clean: bool,
+    pub(crate) quic_cert: PathBuf,
+    pub(crate) quic_key: PathBuf,
+    pub(crate) quic_ca: PathBuf,
+    pub(crate) no_quic: bool,
+    pub(crate) db_prefix: String,
+    pub(crate) base_port: u16,
+    pub(crate) bind_host: String,
+    pub(crate) topology: Option<String>,
+    pub(crate) bridge: BridgeDirection,
+    pub(crate) passwd: Option<PathBuf>,
+    pub(crate) ownership: Option<String>,
+    pub(crate) license: Option<PathBuf>,
+}
+
+impl StartClusterOptions {
+    fn topology_name(&self) -> &str {
+        self.topology
+            .as_deref()
+            .unwrap_or(if self.no_quic { "partial" } else { "full" })
+    }
+
+    fn bridge_out(&self) -> bool {
+        match self.bridge {
+            BridgeDirection::Out => true,
+            BridgeDirection::Both => false,
+            BridgeDirection::TopologyDefault => self.topology_name() == "full",
+        }
+    }
+}
+
+fn utf8_path<'a>(path: &'a Path, what: &str) -> Result<&'a str, String> {
+    path.to_str()
+        .ok_or_else(|| format!("{what} path {} is not valid UTF-8", path.display()))
+}
+
+fn node_command(
+    exe: &Path,
+    options: &StartClusterOptions,
+    node_id: u8,
+    db_path: &str,
+    passwd: &str,
+) -> Result<Command, Box<dyn std::error::Error>> {
+    let mut cmd = Command::new(exe);
+    cmd.args([
+        "cluster",
+        "start",
+        "--node-id",
+        &node_id.to_string(),
+        "--db",
+        db_path,
+        "--admin-users",
+        "admin",
+        "--passwd",
+        passwd,
+    ]);
+    if let Some(ownership_spec) = &options.ownership {
+        cmd.args(["--ownership", ownership_spec]);
+    }
+    if let Some(license) = &options.license {
+        cmd.args(["--license", utf8_path(license, "license")?]);
+    }
+    cmd.args(node_bind_args(
+        options.base_port,
+        options.nodes,
+        node_id,
+        &options.bind_host,
+    ));
+    if let Some(peers) = node_peers(
+        options.base_port,
+        options.nodes,
+        node_id,
+        options.topology_name(),
+    ) {
+        cmd.args(["--peers", &peers]);
+    }
+    if options.bridge_out() {
+        cmd.arg("--bridge-out");
+    }
+    if !options.no_quic && options.quic_cert.exists() && options.quic_key.exists() {
+        cmd.args([
+            "--quic-cert",
+            utf8_path(&options.quic_cert, "--quic-cert")?,
+            "--quic-key",
+            utf8_path(&options.quic_key, "--quic-key")?,
+        ]);
+        if options.quic_ca.exists() {
+            cmd.args(["--quic-ca", utf8_path(&options.quic_ca, "--quic-ca")?]);
+        }
+        #[cfg(feature = "dev-insecure")]
+        cmd.arg("--quic-insecure");
+    }
+    let rust_log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
+    cmd.env("RUST_LOG", &rust_log);
+    Ok(cmd)
+}
+
+pub(crate) fn cmd_dev_start_cluster(
+    options: &StartClusterOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let nodes = options.nodes;
+    check_port_block(options.base_port, nodes)?;
+    let db_prefix = absolute_prefix(&options.db_prefix)?;
+    ensure_no_running_nodes(&db_prefix)?;
+
+    if options.clean {
         println!("Cleaning existing databases...");
-        cmd_dev_clean(db_prefix)?;
+        cmd_dev_clean(&db_prefix)?;
     }
 
     let exe = std::env::current_exe()?;
-
-    let passwd_path = match passwd {
-        Some(path) => path.to_path_buf(),
-        None => ensure_dev_passwd(&exe, db_prefix)?,
+    let passwd_path = match &options.passwd {
+        Some(path) => path.clone(),
+        None => ensure_dev_passwd(&exe, &db_prefix)?,
     };
-    let passwd_str = passwd_path
-        .to_str()
-        .ok_or("passwd path is not valid UTF-8")?;
+    let passwd = utf8_path(&passwd_path, "passwd")?;
 
-    let topology_name = topology.unwrap_or(if no_quic { "partial" } else { "full" });
-    println!("Using {topology_name} mesh topology (bind: {bind_host})");
+    println!(
+        "Using {} mesh topology (bind: {})",
+        options.topology_name(),
+        options.bind_host
+    );
 
     for node_id in 1..=nodes {
-        let port = node_port(base_port, node_id);
+        let port = node_port(options.base_port, node_id);
         let db_path = format!("{db_prefix}-{node_id}");
-
-        let mut cmd = Command::new(&exe);
-        cmd.args([
-            "cluster",
-            "start",
-            "--node-id",
-            &node_id.to_string(),
-            "--db",
-            &db_path,
-            "--admin-users",
-            "admin",
-            "--passwd",
-            passwd_str,
-        ]);
-
-        if let Some(ownership_spec) = ownership {
-            cmd.args(["--ownership", ownership_spec]);
-        }
-
-        if let Some(lic_path) = license {
-            let lic_str = lic_path.to_str().ok_or("license path is not valid UTF-8")?;
-            cmd.args(["--license", lic_str]);
-        }
-
-        cmd.args(node_bind_args(base_port, nodes, node_id, bind_host));
-        if let Some(peers) = node_peers(base_port, nodes, node_id, topology_name) {
-            cmd.args(["--peers", &peers]);
-        }
-
-        if !no_bridge_out && (bridge_out || topology_name == "full") {
-            cmd.arg("--bridge-out");
-        }
-
-        if !no_quic && quic_cert.exists() && quic_key.exists() {
-            cmd.args([
-                "--quic-cert",
-                quic_cert.to_str().unwrap_or(""),
-                "--quic-key",
-                quic_key.to_str().unwrap_or(""),
-            ]);
-            if quic_ca.exists() {
-                cmd.args(["--quic-ca", quic_ca.to_str().unwrap_or("")]);
-            }
-            #[cfg(feature = "dev-insecure")]
-            cmd.arg("--quic-insecure");
-        }
-
-        let rust_log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
-        cmd.env("RUST_LOG", &rust_log);
+        let mut cmd = node_command(&exe, options, node_id, &db_path, passwd)?;
 
         std::fs::create_dir_all(&db_path)?;
         let log_file = std::fs::File::create(format!("{db_path}/mqdb.log"))?;
         cmd.stdout(log_file.try_clone()?);
         cmd.stderr(log_file);
 
-        let transport_mode = if no_quic { " (TCP)" } else { " (QUIC)" };
+        let transport_mode = if options.no_quic { " (TCP)" } else { " (QUIC)" };
         println!("Starting node {node_id} on port {port}{transport_mode}...");
 
         let child = cmd.spawn()?;

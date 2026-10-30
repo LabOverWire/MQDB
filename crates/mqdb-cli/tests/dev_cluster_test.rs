@@ -13,16 +13,13 @@ struct StandInNode {
 
 impl StandInNode {
     fn spawn(db_path: &Path) -> Self {
+        Self::spawn_running(db_path, "while :; do sleep 1; done")
+    }
+
+    fn spawn_running(db_path: &Path, script: &str) -> Self {
         std::fs::create_dir_all(db_path).expect("create the stand-in node dir");
         let child = Command::new("sh")
-            .args([
-                "-c",
-                "while :; do sleep 1; done",
-                "stand-in",
-                "cluster",
-                "start",
-                "--db",
-            ])
+            .args(["-c", script, "stand-in", "cluster", "start", "--db"])
             .arg(db_path)
             .spawn()
             .expect("spawn a stand-in node");
@@ -340,5 +337,175 @@ fn dev_logs_shows_only_the_nodes_of_its_prefix() {
     assert!(
         !stdout.contains("theirs"),
         "another prefix's log must not be shown: {stdout}"
+    );
+}
+
+fn send_term(pid: u32) {
+    let status = Command::new("kill")
+        .arg(pid.to_string())
+        .status()
+        .expect("run kill");
+    assert!(status.success(), "signal the stand-in node");
+}
+
+fn tool_dir(dir: &Path, tools: &[(&str, &str)]) -> PathBuf {
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).expect("create the tool dir");
+    for (name, script) in tools {
+        let path = bin.join(name);
+        std::fs::write(&path, script).expect("write the tool");
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("make the tool executable");
+    }
+    bin
+}
+
+fn start_one_node(prefix_arg: &str, base_port: &str) -> Output {
+    mqdb_command(&[
+        "dev",
+        "start-cluster",
+        "--nodes",
+        "1",
+        "--base-port",
+        base_port,
+        "--no-quic",
+        "--db-prefix",
+        prefix_arg,
+    ])
+    .env_remove("MQDB_LICENSE")
+    .env_remove("MQDB_LICENSE_FILE")
+    .output()
+    .expect("run mqdb")
+}
+
+#[test]
+fn dev_clean_waits_for_a_stopping_node_to_exit() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    let mut node = StandInNode::spawn_running(
+        &prefix.with_file_name("e2e-1"),
+        "trap 'sleep 5; exit 0' TERM; touch \"$4/trap-set\"; while :; do sleep 1; done",
+    );
+    write_pid_file(&prefix, 1, node.pid());
+    let trap_set = prefix.with_file_name("e2e-1").join("trap-set");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !trap_set.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the stand-in node never set its TERM trap"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    send_term(node.pid());
+
+    let output = mqdb(&["dev", "clean", "--db-prefix", &prefix.display().to_string()]);
+
+    assert!(
+        output.status.success(),
+        "clean must wait for a node that is shutting down: {}",
+        output_text(&output)
+    );
+    assert!(node.has_exited());
+    assert!(!prefix.with_file_name("e2e-1").exists());
+}
+
+#[test]
+fn dev_kill_keeps_the_pid_file_when_ps_cannot_run() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    let mut node = StandInNode::spawn(&prefix.with_file_name("e2e-1"));
+    write_pid_file(&prefix, 1, node.pid());
+    let empty_path = tool_dir(dir.path(), &[]);
+
+    let output = mqdb_command(&["dev", "kill", "--db-prefix", &prefix.display().to_string()])
+        .env("PATH", &empty_path)
+        .output()
+        .expect("run mqdb");
+
+    assert!(
+        !output.status.success(),
+        "a node whose state is unknown is not reported as stopped: {}",
+        output_text(&output)
+    );
+    assert!(pid_file(&prefix, 1).exists(), "{}", output_text(&output));
+    assert!(!node.has_exited());
+}
+
+#[test]
+fn dev_kill_reports_a_signal_that_could_not_be_sent() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    let mut node = StandInNode::spawn(&prefix.with_file_name("e2e-1"));
+    write_pid_file(&prefix, 1, node.pid());
+    let failing_kill = tool_dir(
+        dir.path(),
+        &[
+            ("ps", "#!/bin/sh\nexec /bin/ps \"$@\"\n"),
+            (
+                "kill",
+                "#!/bin/sh\necho 'kill: Operation not permitted' >&2\nexit 1\n",
+            ),
+        ],
+    );
+
+    let output = mqdb_command(&["dev", "kill", "--db-prefix", &prefix.display().to_string()])
+        .env("PATH", &failing_kill)
+        .output()
+        .expect("run mqdb");
+    let text = output_text(&output);
+
+    assert!(!output.status.success(), "{text}");
+    assert!(
+        text.contains("Operation not permitted") && !text.contains("did not stop"),
+        "the failed signal is the reported error: {text}"
+    );
+    assert!(pid_file(&prefix, 1).exists());
+    assert!(!node.has_exited());
+}
+
+#[test]
+fn dev_start_cluster_refuses_while_a_recorded_node_runs() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    let node = StandInNode::spawn(&prefix.with_file_name("e2e-1"));
+    write_pid_file(&prefix, 1, node.pid());
+    let log = prefix.with_file_name("e2e-1").join("mqdb.log");
+    std::fs::write(&log, "running node log\n").expect("write the node log");
+
+    let output = start_one_node(&prefix.display().to_string(), "32050");
+
+    assert!(
+        !output.status.success(),
+        "a second start over a running node must refuse: {}",
+        output_text(&output)
+    );
+    assert_eq!(
+        std::fs::read_to_string(pid_file(&prefix, 1)).expect("pid file"),
+        node.pid().to_string()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&log).expect("node log"),
+        "running node log\n"
+    );
+}
+
+#[test]
+fn dev_start_cluster_treats_a_trailing_slash_as_the_same_prefix() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("foo");
+
+    let output = start_one_node(&format!("{}/", prefix.display()), "32052");
+    let killed = kill_cluster(&prefix);
+
+    assert!(output.status.success(), "{}", output_text(&output));
+    assert!(
+        !dir.path().join("foo").join("-1").exists(),
+        "a trailing slash must not create node dirs inside the prefix: {}",
+        output_text(&output)
+    );
+    assert!(
+        String::from_utf8_lossy(&killed.stdout).contains("Node 1 (pid"),
+        "kill without the slash finds the node: {}",
+        output_text(&killed)
     );
 }

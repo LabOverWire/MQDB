@@ -356,8 +356,9 @@ mqdb dev clean
 mqdb dev clean --db-prefix /tmp/my-test
 ```
 
-`dev clean` removes only the `<prefix>-N` node directories and `<prefix>-passwd`. It refuses
-while a node recorded in a `<prefix>-N/mqdb.pid` file is still running.
+`dev clean` removes only the `<prefix>-N` node directories and `<prefix>-passwd`. If a node
+recorded in a `<prefix>-N/mqdb.pid` file is still running, `dev clean` and `dev start-cluster`
+wait up to 10s for it to exit and then refuse.
 
 ### View Logs
 
@@ -392,7 +393,7 @@ mqdb dev start-cluster --nodes 5
 # Clean existing data first
 mqdb dev start-cluster --clean
 
-# Choose topology: partial (default), upper, or full
+# Choose topology: full (default with QUIC), partial (default with --no-quic), or upper
 mqdb dev start-cluster --topology partial
 mqdb dev start-cluster --topology upper
 mqdb dev start-cluster --topology full
@@ -406,9 +407,9 @@ mqdb dev start-cluster --no-quic
 > on all nodes. Use `--user admin --pass admin` when running CLI commands against the cluster.
 
 **Topology options:**
-- `partial` (default): each node connects to lower-numbered nodes
+- `partial` (default with `--no-quic`): each node connects to lower-numbered nodes
 - `upper`: each node connects to higher-numbered nodes
-- `full`: every node connects to every other node
+- `full` (default with QUIC): every node connects to every other node
 
 ### Start-Cluster Options
 
@@ -423,7 +424,7 @@ mqdb dev start-cluster --no-quic
 | `--db-prefix` | Database path prefix | `/tmp/mqdb-test` |
 | `--base-port` | MQTT port of node 1; node N uses base+N-1, its cluster transport base+nodes+N-1 | `1883` |
 | `--bind-host` | Host to bind | `127.0.0.1` |
-| `--topology` | Mesh topology: `partial`, `upper`, `full` | `partial` |
+| `--topology` | Mesh topology: `partial`, `upper`, `full` | `full`, or `partial` with `--no-quic` |
 | `--bridge-out` | Use Out-only bridge direction | `false` |
 | `--no-bridge-out` | Use Both bridge direction even for full topology | `false` |
 | `--passwd` | Path to password file (auto-generated if omitted) | (auto) |

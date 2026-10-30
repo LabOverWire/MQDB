@@ -78,23 +78,42 @@ fn is_cluster_node(command: &str, node_dir: &Path) -> bool {
     format!(" {command} ").contains(" cluster start ") && same_dir
 }
 
-fn process_command(pid: u32) -> Option<String> {
+fn process_command(pid: u32) -> Result<Option<String>, String> {
     let output = Command::new("ps")
         .args(["-ww", "-p", &pid.to_string(), "-o", "command="])
         .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .map_err(|e| format!("run ps: {e}"))?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    match (output.status.success(), stderr.trim()) {
+        (true, _) => Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        )),
+        (false, "") => Ok(None),
+        (false, error) => Err(format!("ps -p {pid}: {error}")),
+    }
 }
 
-fn runs_node(pid: u32, node_dir: &Path) -> bool {
-    process_command(pid).is_some_and(|command| is_cluster_node(&command, node_dir))
+fn runs_node(pid: u32, node_dir: &Path) -> Result<bool, String> {
+    Ok(process_command(pid)?.is_some_and(|command| is_cluster_node(&command, node_dir)))
+}
+
+fn signal(pid: u32) -> Result<(), String> {
+    let output = Command::new("kill")
+        .arg(pid.to_string())
+        .output()
+        .map_err(|e| format!("run kill: {e}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "kill {pid}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
 }
 
 pub(crate) fn absolute_prefix(db_prefix: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let path = std::path::absolute(db_prefix)?;
+    let path: PathBuf = std::path::absolute(db_prefix)?.components().collect();
     Ok(path
         .to_str()
         .ok_or("--db-prefix is not valid UTF-8")?
@@ -156,6 +175,47 @@ fn forget_node(node: &RecordedNode, pid: u32, state: &str) -> Result<(), String>
     std::fs::remove_file(&node.pid_file).map_err(|e| format!("{}: {e}", node.pid_file.display()))
 }
 
+fn running_nodes(db_prefix: &str) -> Result<Vec<u16>, Box<dyn std::error::Error>> {
+    let mut running = Vec::new();
+    for node in recorded_nodes(db_prefix)? {
+        if let Ok(pid) = read_pid(&node.pid_file)
+            && runs_node(pid, &node.dir)?
+        {
+            running.push(node.node_id);
+        }
+    }
+    Ok(running)
+}
+
+pub(crate) fn ensure_no_running_nodes(db_prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let start = Instant::now();
+    let mut announced = false;
+    loop {
+        let running = running_nodes(db_prefix)?;
+        if running.is_empty() {
+            return Ok(());
+        }
+        let listed = running
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        if start.elapsed() > NODE_STOP_TIMEOUT {
+            return Err(format!(
+                "nodes {listed} of --db-prefix {db_prefix} are still running; stop them with 'mqdb dev kill --db-prefix {db_prefix}'"
+            )
+            .into());
+        }
+        if !announced {
+            println!(
+                "Waiting up to {NODE_STOP_TIMEOUT:?} for nodes {listed} of --db-prefix {db_prefix} to exit..."
+            );
+            announced = true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn kill_cluster(db_prefix: &str, node: Option<u16>) -> Result<(), Box<dyn std::error::Error>> {
     let prefix = absolute_prefix(db_prefix)?;
     let recorded = recorded_nodes(&prefix)?;
@@ -182,31 +242,42 @@ fn kill_cluster(db_prefix: &str, node: Option<u16>) -> Result<(), Box<dyn std::e
     let mut failures = Vec::new();
     let mut signalled = Vec::new();
     for target in targets {
-        match read_pid(&target.pid_file) {
-            Err(e) => failures.push(format!("node {}: {e}", target.node_id)),
-            Ok(pid) if !runs_node(pid, &target.dir) => {
+        let pid = match read_pid(&target.pid_file) {
+            Ok(pid) => pid,
+            Err(e) => {
+                failures.push(format!("node {}: {e}", target.node_id));
+                continue;
+            }
+        };
+        match runs_node(pid, &target.dir) {
+            Ok(true) => match signal(pid) {
+                Ok(()) => signalled.push((target, pid)),
+                Err(e) => failures.push(format!("node {}: {e}", target.node_id)),
+            },
+            Ok(false) => {
                 if let Err(e) = forget_node(&target, pid, "is not running; removed its pid file") {
                     failures.push(e);
                 }
             }
-            Ok(pid) => {
-                Command::new("kill").arg(pid.to_string()).status()?;
-                signalled.push((target, pid));
-            }
+            Err(e) => failures.push(format!("node {}: {e}", target.node_id)),
         }
     }
 
     let start = Instant::now();
     while !signalled.is_empty() && start.elapsed() <= NODE_STOP_TIMEOUT {
-        let (stopped, running): (Vec<_>, Vec<_>) = signalled
-            .into_iter()
-            .partition(|(target, pid)| !runs_node(*pid, &target.dir));
-        for (target, pid) in stopped {
-            if let Err(e) = forget_node(&target, pid, "stopped") {
-                failures.push(e);
+        let mut waiting = Vec::new();
+        for (target, pid) in signalled {
+            match runs_node(pid, &target.dir) {
+                Ok(true) => waiting.push((target, pid)),
+                Ok(false) => {
+                    if let Err(e) = forget_node(&target, pid, "stopped") {
+                        failures.push(e);
+                    }
+                }
+                Err(e) => failures.push(format!("node {}: {e}", target.node_id)),
             }
         }
-        signalled = running;
+        signalled = waiting;
         if !signalled.is_empty() {
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -266,18 +337,7 @@ pub(crate) fn cmd_dev_kill(
 
 pub(crate) fn cmd_dev_clean(db_prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
     let prefix = absolute_prefix(db_prefix)?;
-    let running: Vec<String> = recorded_nodes(&prefix)?
-        .into_iter()
-        .filter(|node| read_pid(&node.pid_file).is_ok_and(|pid| runs_node(pid, &node.dir)))
-        .map(|node| node.node_id.to_string())
-        .collect();
-    if !running.is_empty() {
-        return Err(format!(
-            "nodes {} of --db-prefix {prefix} are still running; stop them with 'mqdb dev kill --db-prefix {prefix}'",
-            running.join(", ")
-        )
-        .into());
-    }
+    ensure_no_running_nodes(&prefix)?;
 
     let passwd = PathBuf::from(format!("{prefix}-passwd"));
     let entries: Vec<PathBuf> = node_dirs(&prefix)?
