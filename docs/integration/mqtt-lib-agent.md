@@ -52,8 +52,9 @@ broker's router, auth provider, storage, stats and resource monitor.
   between accept and the broker's CONNACK: the slot is released when a WebSocket frame carrying the CONNACK is written
   (enhanced-auth AUTH packets do not release it), or when the connection closes. Further connections, `/health`
   probes included, wait in the kernel backlog.
-- On agent shutdown, connections without a CONNACK are closed at once, connected sessions get the broker's shutdown
-  DISCONNECT, and connections still open after 5 seconds are closed by dropping their handler.
+- On agent shutdown, connections without a CONNACK are closed at once, connected MQTT 5 sessions get the broker's
+  shutdown DISCONNECT (MQTT 3.1.1 sessions are closed without one), and connections still open after 5 seconds are
+  closed by dropping their handler.
 
 ---
 

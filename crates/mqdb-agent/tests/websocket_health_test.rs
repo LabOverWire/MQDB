@@ -268,12 +268,29 @@ async fn ws_session_is_closed_by_agent_stop() {
             .starts_with("HTTP/1.1 101")
     );
     stream.write_all(&MQTT_CONNECT_FRAME).await.unwrap();
+    let packet_type = tokio::time::timeout(Duration::from_secs(3), first_packet_type(&mut stream))
+        .await
+        .expect("the broker must answer CONNECT");
+    assert_eq!(
+        packet_type, 0x20,
+        "the broker must answer CONNECT with CONNACK"
+    );
+    let mut connack_rest = [0u8; 64];
+    let _ = tokio::time::timeout(Duration::from_millis(200), stream.read(&mut connack_rest)).await;
 
     agent.stop().await;
 
+    let after_stop = read_until_closed(&mut stream, Duration::from_secs(3)).await;
     assert!(
-        closes_within(&mut stream, Duration::from_secs(3)).await,
+        after_stop.is_some(),
         "an MQTT session over WebSocket must be closed by agent stop"
+    );
+    let after_stop = after_stop.unwrap_or_default();
+    assert!(
+        after_stop
+            .windows(5)
+            .any(|frame| frame[0] == 0x82 && frame[2] == 0xE0 && frame[4] == 0x8B),
+        "a connected MQTT 5 session must get the shutdown DISCONNECT: {after_stop:?}"
     );
 }
 

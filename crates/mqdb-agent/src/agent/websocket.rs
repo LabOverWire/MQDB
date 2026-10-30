@@ -57,6 +57,16 @@ struct WebSocketBroker {
 struct ConnectGate<S> {
     inner: S,
     permit: PermitSlot,
+    frames: FrameTracker,
+}
+
+#[derive(Default)]
+struct FrameTracker {
+    header: [u8; 10],
+    header_len: usize,
+    payload_left: u64,
+    binary_payload_start: bool,
+    connack_seen: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -281,6 +291,7 @@ impl WebSocketBroker {
         let replayed = ConnectGate {
             inner: tokio::io::join(head.into_reader().chain(read_half), write_half),
             permit,
+            frames: FrameTracker::default(),
         };
         match accept_websocket_connection(replayed, &WebSocketServerConfig::new(), addr).await {
             Ok(ws_stream) => Some(ws_stream),
@@ -309,9 +320,12 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for ConnectGate<S> {
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         let written = Pin::new(&mut self.inner).poll_write(cx, buf);
-        if matches!(written, Poll::Ready(Ok(n)) if n > 0)
-            && writes_connack(buf)
-            && let Ok(mut slot) = self.permit.lock()
+        let this = self.get_mut();
+        if let Poll::Ready(Ok(n)) = written
+            && let Ok(mut slot) = this.permit.lock()
+            && slot.is_some()
+            && let Some(sent) = buf.get(..n)
+            && this.frames.observe(sent)
         {
             slot.take();
         }
@@ -327,36 +341,55 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for ConnectGate<S> {
     }
 }
 
-fn writes_connack(mut frames: &[u8]) -> bool {
-    while let [first, second, rest @ ..] = frames {
-        let extended = match second & 0x7f {
+impl FrameTracker {
+    fn observe(&mut self, mut written: &[u8]) -> bool {
+        while !self.connack_seen
+            && let Some((&byte, tail)) = written.split_first()
+        {
+            if self.payload_left > 0 {
+                if self.binary_payload_start {
+                    self.binary_payload_start = false;
+                    self.connack_seen = byte == CONNACK_PACKET;
+                }
+                let skip = usize::try_from(self.payload_left)
+                    .unwrap_or(usize::MAX)
+                    .min(written.len());
+                self.payload_left = self
+                    .payload_left
+                    .saturating_sub(u64::try_from(skip).unwrap_or(u64::MAX));
+                written = &written[skip..];
+                continue;
+            }
+            self.header[self.header_len] = byte;
+            self.header_len += 1;
+            written = tail;
+            if let Some(payload_len) = self.complete_header() {
+                self.binary_payload_start = self.header[0] == BINARY_FRAME && payload_len > 0;
+                self.payload_left = payload_len;
+                self.header_len = 0;
+            }
+        }
+        self.connack_seen
+    }
+
+    fn complete_header(&self) -> Option<u64> {
+        let length_byte = *self.header.get(1).filter(|_| self.header_len >= 2)?;
+        let extended = match length_byte & 0x7f {
             126 => 2,
             127 => 8,
             _ => 0,
         };
-        let Some(length_bytes) = rest.get(..extended) else {
-            return false;
-        };
-        let payload_len = if extended == 0 {
-            u64::from(second & 0x7f)
+        if self.header_len < 2 + extended {
+            return None;
+        }
+        Some(if extended == 0 {
+            u64::from(length_byte & 0x7f)
         } else {
-            length_bytes
+            self.header[2..2 + extended]
                 .iter()
                 .fold(0u64, |length, byte| (length << 8) | u64::from(*byte))
-        };
-        let payload = &rest[extended..];
-        if *first == BINARY_FRAME && payload.first() == Some(&CONNACK_PACKET) {
-            return true;
-        }
-        let Some(next) = usize::try_from(payload_len)
-            .ok()
-            .and_then(|skip| payload.get(skip..))
-        else {
-            return false;
-        };
-        frames = next;
+        })
     }
-    false
 }
 
 impl RequestHead {
@@ -405,7 +438,110 @@ async fn respond_healthy(stream: &mut TcpStream) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{RequestHead, writes_connack};
+    use super::{ConnectGate, FrameTracker, PermitSlot, RequestHead};
+
+    fn writes_connack(bytes: &[u8]) -> bool {
+        FrameTracker::default().observe(bytes)
+    }
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncWrite, AsyncWriteExt};
+    use tokio::sync::Semaphore;
+
+    struct PartialWriter {
+        accepts: usize,
+    }
+
+    impl AsyncWrite for PartialWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Ok(buf.len().min(self.accepts)))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    async fn gate_with_permit(accepts: usize) -> (ConnectGate<PartialWriter>, PermitSlot) {
+        let permit = Arc::new(Semaphore::new(1)).acquire_owned().await.unwrap();
+        let slot = PermitSlot::default();
+        if let Ok(mut held) = slot.lock() {
+            *held = Some(permit);
+        }
+        let gate = ConnectGate {
+            inner: PartialWriter { accepts },
+            permit: Arc::clone(&slot),
+            frames: FrameTracker::default(),
+        };
+        (gate, slot)
+    }
+
+    fn pong_then_connack(pong_payload: u8) -> [u8; 132] {
+        let mut out = [pong_payload; 132];
+        out[0] = 0x8A;
+        out[1] = 125;
+        out[127..].copy_from_slice(&[0x82, 0x03, 0x20, 0x01, 0x00]);
+        out
+    }
+
+    fn slot_released(slot: &PermitSlot) -> bool {
+        slot.lock().is_ok_and(|held| held.is_none())
+    }
+
+    #[tokio::test]
+    async fn connack_written_after_a_partial_frame_releases_the_slot() {
+        let (mut gate, slot) = gate_with_permit(50).await;
+        let out = pong_then_connack(0x7f);
+
+        let mut sent = gate.write(&out[..127]).await.unwrap();
+        while sent < out.len() {
+            sent += gate.write(&out[sent..]).await.unwrap();
+        }
+
+        assert!(
+            slot_released(&slot),
+            "writing a CONNACK frame must release the handshake slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn slot_is_kept_until_the_connack_bytes_are_written() {
+        let (mut gate, slot) = gate_with_permit(50).await;
+        let out = pong_then_connack(0x7f);
+
+        let sent = gate.write(&out).await.unwrap();
+
+        assert_eq!(sent, 50);
+        assert!(
+            !slot_released(&slot),
+            "the slot must stay held while the CONNACK is still unsent"
+        );
+    }
+
+    #[tokio::test]
+    async fn connack_bytes_inside_a_pong_payload_do_not_release_the_slot() {
+        let (mut gate, slot) = gate_with_permit(1024).await;
+        let mut pong = [0u8; 12];
+        pong[0] = 0x8A;
+        pong[1] = 10;
+        pong[2..7].copy_from_slice(&[0x82, 0x03, 0x20, 0x01, 0x00]);
+
+        gate.write_all(&pong).await.unwrap();
+
+        assert!(
+            !slot_released(&slot),
+            "a pong echoing CONNACK-like bytes must not release the slot"
+        );
+    }
 
     #[test]
     fn connack_is_found_only_in_a_binary_frame_carrying_it() {

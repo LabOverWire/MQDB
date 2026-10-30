@@ -22,7 +22,7 @@ Limits:
 - At most 128 connections can be between accept and the broker's CONNACK. An enhanced-auth (SCRAM, JWT) exchange before the CONNACK keeps the slot. A connection that upgrades and never completes CONNECT keeps its slot until the broker's 10-second connect timeout closes it. Further connections wait in the kernel backlog until a slot frees.
 - `/health` probes use the same slots. While all 128 are held, `/health` waits like any new WebSocket client, so a load balancer sees the same unavailability a client would.
 - `/health` is answered before the broker's connection limits are checked. The limits apply to WebSocket upgrades.
-- On agent shutdown, connections that have not received their CONNACK are closed at once, connected sessions get the broker's shutdown DISCONNECT, and any connection still open after 5 seconds is closed.
+- On agent shutdown, connections that have not received their CONNACK are closed at once, connected MQTT 5 sessions get the broker's shutdown DISCONNECT (MQTT 3.1.1 sessions are closed without one), and any connection still open after 5 seconds is closed.
 
 Cluster mode uses mqtt5's built-in WebSocket listener and has no `/health` route.
 
