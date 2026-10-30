@@ -8,7 +8,12 @@ use super::helpers::{NODE_PID_FILE, absolute_prefix, cmd_dev_clean, refuse_if_in
 
 fn ensure_dev_passwd(exe: &Path, db_prefix: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let path = format!("{db_prefix}-passwd");
-    let _ = std::fs::remove_file(&path);
+    match std::fs::remove_file(&path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(format!("remove stale {path}: {e}").into());
+        }
+        Ok(()) | Err(_) => {}
+    }
     let output = Command::new(exe)
         .args(["passwd", "admin", "-b", "admin", "-f", &path])
         .output()?;
@@ -209,6 +214,9 @@ pub(crate) fn cmd_dev_start_cluster(
         let mut cmd = node_command(&exe, options, node_id, &db_path, passwd)?;
 
         std::fs::create_dir_all(&db_path)?;
+        let pid_path = format!("{db_path}/{NODE_PID_FILE}");
+        let mut pid_file = std::fs::File::create(&pid_path)
+            .map_err(|e| format!("record node {node_id} in {pid_path}: {e}"))?;
         let log_file = std::fs::File::create(format!("{db_path}/mqdb.log"))?;
         cmd.stdout(log_file.try_clone()?);
         cmd.stderr(log_file);
@@ -216,8 +224,13 @@ pub(crate) fn cmd_dev_start_cluster(
         let transport_mode = if options.no_quic { " (TCP)" } else { " (QUIC)" };
         println!("Starting node {node_id} on port {port}{transport_mode}...");
 
-        let child = cmd.spawn()?;
-        std::fs::write(format!("{db_path}/{NODE_PID_FILE}"), child.id().to_string())?;
+        let mut child = cmd.spawn()?;
+        if let Err(e) = std::io::Write::write_all(&mut pid_file, child.id().to_string().as_bytes())
+        {
+            child.kill()?;
+            child.wait()?;
+            return Err(format!("record node {node_id} in {pid_path}: {e}; stopped it").into());
+        }
 
         std::thread::sleep(std::time::Duration::from_millis(500));
     }

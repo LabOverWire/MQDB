@@ -356,11 +356,14 @@ mqdb dev clean
 mqdb dev clean --db-prefix /tmp/my-test
 ```
 
-`dev clean` removes the `<prefix>-N` node directories, `<prefix>-passwd`, and the
-`<prefix>-<suite>-N` directories and `<prefix>-<suite>-passwd` files that `dev test` leaves
-(for example `/tmp/mqdb-test-own-1`). It waits up to 10s while any `cluster start` process
-still uses one of those directories, then refuses. `dev start-cluster` without `--clean`
-refuses right away if a node still runs on one of its `<prefix>-N` directories.
+`dev clean` removes the `<prefix>-N` node directories, `<prefix>-passwd`, and what `dev test`
+leaves: `<prefix>-{own,share,presence}-N` directories and `<prefix>-{ownership,sharing,presence}-passwd`
+files. It waits up to 10s while an `mqdb cluster start` or `mqdb agent start` process still uses
+one of those directories, then refuses. `dev start-cluster` without `--clean` refuses right away
+if a node still runs on one of its `<prefix>-N` directories. A process is matched by its
+`--db <dir>` or `--db=<dir>` argument; a relative `--db` is resolved against that process's
+working directory with `lsof`, and an unresolvable one makes `dev clean` refuse. A node given its
+database only through `MQDB_DB` is not detected.
 
 ### View Logs
 

@@ -66,48 +66,60 @@ pub(crate) fn cmd_dev_ps() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn until_next_flag(rest: &str) -> &str {
+    rest.split_once(" --").map_or(rest, |(db, _)| db).trim()
+}
+
 fn db_argument(command: &str) -> Option<&str> {
-    let (_, rest) = command.split_once(" --db ")?;
-    Some(rest.split_once(" --").map_or(rest, |(db, _)| db).trim())
+    command
+        .split_once(" --db=")
+        .or_else(|| command.split_once(" --db "))
+        .map(|(_, rest)| until_next_flag(rest))
 }
 
-fn is_cluster_node(command: &str, node_dir: &Path) -> bool {
-    let same_dir = db_argument(command)
-        .and_then(|db| std::fs::canonicalize(db).ok())
-        .is_some_and(|db| std::fs::canonicalize(node_dir).is_ok_and(|dir| dir == db));
-    format!(" {command} ").contains(" cluster start ") && same_dir
+fn is_node_command(command: &str) -> bool {
+    let padded = format!(" {command} ");
+    padded.contains(" cluster start ") || padded.contains(" agent start ")
 }
 
-fn process_command(pid: u32) -> Result<Option<String>, String> {
-    let output = Command::new("ps")
-        .args(["-ww", "-p", &pid.to_string(), "-o", "command="])
+enum DbLocation {
+    Dir(PathBuf),
+    Gone,
+    Unresolved,
+}
+
+struct NodeProcess {
+    pid: u32,
+    db: DbLocation,
+}
+
+fn process_cwd(pid: u32) -> Option<PathBuf> {
+    let output = Command::new("lsof")
+        .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
         .output()
-        .map_err(|e| format!("run ps: {e}"))?;
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    match (output.status.success(), stderr.trim()) {
-        (true, _) => Ok(Some(
-            String::from_utf8_lossy(&output.stdout).trim().to_string(),
-        )),
-        (false, "") => Ok(None),
-        (false, error) => Err(format!("ps -p {pid}: {error}")),
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix('n'))
+        .map(PathBuf::from)
+}
+
+fn locate_db(pid: u32, db: &str) -> DbLocation {
+    let db = Path::new(db);
+    let full = if db.is_absolute() {
+        Some(db.to_path_buf())
+    } else {
+        process_cwd(pid).map(|cwd| cwd.join(db))
+    };
+    match full {
+        Some(full) => std::fs::canonicalize(full).map_or(DbLocation::Gone, DbLocation::Dir),
+        None => DbLocation::Unresolved,
     }
 }
 
-enum NodeState {
-    Running,
-    Stopped,
-}
-
-fn node_state(pid: u32, node_dir: &Path) -> Result<NodeState, String> {
-    match process_command(pid)? {
-        Some(command) if is_cluster_node(&command, node_dir) => Ok(NodeState::Running),
-        Some(_) | None => Ok(NodeState::Stopped),
-    }
-}
-
-fn live_node_dirs() -> Result<Vec<PathBuf>, String> {
+fn node_processes() -> Result<Vec<NodeProcess>, String> {
     let output = Command::new("ps")
-        .args(["-ww", "-ax", "-o", "command="])
+        .args(["-ww", "-ax", "-o", "pid=,command="])
         .output()
         .map_err(|e| format!("run ps: {e}"))?;
     if !output.status.success() {
@@ -116,20 +128,65 @@ fn live_node_dirs() -> Result<Vec<PathBuf>, String> {
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    let commands = String::from_utf8_lossy(&output.stdout);
-    Ok(commands
+    let table = String::from_utf8_lossy(&output.stdout);
+    Ok(table
         .lines()
-        .filter(|command| format!(" {command} ").contains(" cluster start "))
-        .filter_map(db_argument)
-        .filter_map(|db| std::fs::canonicalize(db).ok())
+        .filter_map(|line| {
+            let (pid, command) = line.trim_start().split_once(char::is_whitespace)?;
+            let pid = pid.parse().ok()?;
+            let db = db_argument(command).filter(|_| is_node_command(command))?;
+            Some(NodeProcess {
+                pid,
+                db: locate_db(pid, db),
+            })
+        })
         .collect())
 }
 
+enum NodeState {
+    Running,
+    Stopped,
+}
+
+fn node_state(processes: &[NodeProcess], pid: u32, node_dir: &Path) -> Result<NodeState, String> {
+    match processes.iter().find(|process| process.pid == pid) {
+        Some(NodeProcess {
+            db: DbLocation::Unresolved,
+            ..
+        }) => Err(format!(
+            "pid {pid} runs an mqdb node whose relative --db cannot be resolved"
+        )),
+        Some(NodeProcess {
+            db: DbLocation::Dir(db),
+            ..
+        }) if std::fs::canonicalize(node_dir).is_ok_and(|dir| &dir == db) => Ok(NodeState::Running),
+        Some(_) | None => Ok(NodeState::Stopped),
+    }
+}
+
 fn dirs_in_use(dirs: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
-    let live = live_node_dirs()?;
+    let processes = node_processes()?;
+    let unresolved: Vec<String> = processes
+        .iter()
+        .filter(|process| matches!(process.db, DbLocation::Unresolved))
+        .map(|process| process.pid.to_string())
+        .collect();
+    if !unresolved.is_empty() {
+        return Err(format!(
+            "cannot tell which directory mqdb pids {} use (relative --db); refusing",
+            unresolved.join(", ")
+        ));
+    }
+    let live: Vec<&PathBuf> = processes
+        .iter()
+        .filter_map(|process| match &process.db {
+            DbLocation::Dir(dir) => Some(dir),
+            DbLocation::Gone | DbLocation::Unresolved => None,
+        })
+        .collect();
     Ok(dirs
         .iter()
-        .filter(|dir| std::fs::canonicalize(dir).is_ok_and(|dir| live.contains(&dir)))
+        .filter(|dir| std::fs::canonicalize(dir).is_ok_and(|dir| live.contains(&&dir)))
         .cloned()
         .collect())
 }
@@ -207,25 +264,33 @@ pub(crate) fn absolute_prefix(db_prefix: &str) -> Result<String, Box<dyn std::er
         .to_string())
 }
 
-fn node_dirs(db_prefix: &str) -> Result<Vec<(u16, PathBuf)>, Box<dyn std::error::Error>> {
-    let node_name_prefix = Path::new(db_prefix)
+fn prefix_entries(db_prefix: &str) -> Result<Vec<(String, PathBuf)>, Box<dyn std::error::Error>> {
+    let name_prefix = Path::new(db_prefix)
         .file_name()
         .and_then(std::ffi::OsStr::to_str)
         .map(|name| format!("{name}-"))
         .ok_or("--db-prefix must end in a file name")?;
     let pattern = format!("{}-*", glob::Pattern::escape(db_prefix));
-    let mut dirs: Vec<(u16, PathBuf)> = glob::glob(&pattern)?
+    let mut entries: Vec<(String, PathBuf)> = glob::glob(&pattern)?
         .filter_map(Result::ok)
-        .filter(|path| path.is_dir())
         .filter_map(|path| {
-            let node_id = path
+            let rest = path
                 .file_name()?
                 .to_str()?
-                .strip_prefix(&node_name_prefix)?
-                .parse()
-                .ok()?;
-            Some((node_id, path))
+                .strip_prefix(&name_prefix)?
+                .to_string();
+            Some((rest, path))
         })
+        .collect();
+    entries.sort();
+    Ok(entries)
+}
+
+fn node_dirs(db_prefix: &str) -> Result<Vec<(u16, PathBuf)>, Box<dyn std::error::Error>> {
+    let mut dirs: Vec<(u16, PathBuf)> = prefix_entries(db_prefix)?
+        .into_iter()
+        .filter(|(_, path)| path.is_dir())
+        .filter_map(|(rest, path)| Some((rest.parse().ok()?, path)))
         .collect();
     dirs.sort_unstable_by_key(|(node_id, _)| *node_id);
     Ok(dirs)
@@ -285,6 +350,7 @@ fn kill_cluster(db_prefix: &str, node: Option<u16>) -> Result<(), Box<dyn std::e
         return Ok(());
     }
 
+    let processes = node_processes()?;
     let mut failures = Vec::new();
     let mut signalled = Vec::new();
     for target in targets {
@@ -295,10 +361,12 @@ fn kill_cluster(db_prefix: &str, node: Option<u16>) -> Result<(), Box<dyn std::e
                 continue;
             }
         };
-        match node_state(pid, &target.dir) {
+        match node_state(&processes, pid, &target.dir) {
             Ok(NodeState::Running) => match signal(pid) {
                 Ok(()) => signalled.push((target, pid)),
-                Err(e) => match node_state(pid, &target.dir) {
+                Err(e) => match node_processes()
+                    .and_then(|processes| node_state(&processes, pid, &target.dir))
+                {
                     Ok(NodeState::Stopped) => {
                         if let Err(e) = forget_node(&target, pid, "stopped") {
                             failures.push(e);
@@ -320,9 +388,16 @@ fn kill_cluster(db_prefix: &str, node: Option<u16>) -> Result<(), Box<dyn std::e
 
     let start = Instant::now();
     while !signalled.is_empty() && start.elapsed() <= NODE_STOP_TIMEOUT {
+        let processes = match node_processes() {
+            Ok(processes) => processes,
+            Err(e) => {
+                failures.push(e);
+                break;
+            }
+        };
         let mut waiting = Vec::new();
         for (target, pid) in signalled {
-            match node_state(pid, &target.dir) {
+            match node_state(&processes, pid, &target.dir) {
                 Ok(NodeState::Running) => waiting.push((target, pid)),
                 Ok(NodeState::Stopped) => {
                     if let Err(e) = forget_node(&target, pid, "stopped") {
@@ -396,42 +471,28 @@ pub(crate) fn cmd_dev_kill(
     Ok(())
 }
 
+const DEV_TEST_SUITE_DIRS: [&str; 3] = ["own", "share", "presence"];
+const DEV_TEST_SUITE_PASSWDS: [&str; 3] = ["ownership", "sharing", "presence"];
+
 fn is_dev_entry(rest: &str, is_dir: bool) -> bool {
-    let tail_matches = |tail: &str| {
-        if is_dir {
-            tail.parse::<u16>().is_ok()
-        } else {
-            tail == "passwd"
+    match (rest.rsplit_once('-'), is_dir) {
+        (None, true) => rest.parse::<u16>().is_ok(),
+        (None, false) => rest == "passwd",
+        (Some((suite, node_id)), true) => {
+            DEV_TEST_SUITE_DIRS.contains(&suite) && node_id.parse::<u16>().is_ok()
         }
-    };
-    match rest.rsplit_once('-') {
-        None => tail_matches(rest),
-        Some((suite, tail)) => {
-            !suite.is_empty() && suite.chars().all(|c| c.is_ascii_lowercase()) && tail_matches(tail)
-        }
+        (Some((suite, tail)), false) => DEV_TEST_SUITE_PASSWDS.contains(&suite) && tail == "passwd",
     }
 }
 
 fn clean_targets(db_prefix: &str) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
-    let name_prefix = Path::new(db_prefix)
-        .file_name()
-        .and_then(std::ffi::OsStr::to_str)
-        .map(|name| format!("{name}-"))
-        .ok_or("--db-prefix must end in a file name")?;
-    let pattern = format!("{}-*", glob::Pattern::escape(db_prefix));
-    let mut targets: Vec<PathBuf> = glob::glob(&pattern)?
-        .filter_map(Result::ok)
-        .filter(|path| {
-            path.file_name()
-                .and_then(std::ffi::OsStr::to_str)
-                .and_then(|name| name.strip_prefix(&name_prefix))
-                .is_some_and(|rest| {
-                    (path.is_dir() || path.is_file()) && is_dev_entry(rest, path.is_dir())
-                })
+    Ok(prefix_entries(db_prefix)?
+        .into_iter()
+        .filter(|(rest, path)| {
+            (path.is_dir() || path.is_file()) && is_dev_entry(rest, path.is_dir())
         })
-        .collect();
-    targets.sort();
-    Ok(targets)
+        .map(|(_, path)| path)
+        .collect())
 }
 
 pub(crate) fn cmd_dev_clean(db_prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -493,12 +554,17 @@ pub(crate) fn cmd_dev_logs(
         cmd.args(["-f", "-n", &last.to_string()]);
         cmd.args(log_files.iter().map(|(_, log_file)| log_file));
         if let Some(pat) = pattern {
-            let child = cmd.stdout(std::process::Stdio::piped()).spawn()?;
-            let tail_output = child.stdout.ok_or("tail has no stdout")?;
-            Command::new("grep")
+            let mut tail = cmd.stdout(std::process::Stdio::piped()).spawn()?;
+            let tail_output = tail.stdout.take().ok_or("tail has no stdout")?;
+            let grep = Command::new("grep")
                 .args(["--line-buffered", pat])
                 .stdin(tail_output)
-                .status()?;
+                .status();
+            if tail.try_wait()?.is_none() {
+                tail.kill()?;
+            }
+            tail.wait()?;
+            grep?;
         } else {
             cmd.status()?;
         }
@@ -528,7 +594,10 @@ pub(crate) fn cmd_dev_logs(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_cluster_node, is_dev_entry, legacy_node_pattern};
+    use super::{
+        DbLocation, NodeProcess, NodeState, db_argument, is_dev_entry, is_node_command,
+        legacy_node_pattern, node_state,
+    };
     use std::process::{Child, Command};
 
     struct Sleeper(Child);
@@ -581,12 +650,16 @@ mod tests {
         assert!(is_dev_entry("1", true));
         assert!(is_dev_entry("passwd", false));
         assert!(is_dev_entry("own-2", true));
+        assert!(is_dev_entry("share-1", true));
+        assert!(is_dev_entry("presence-3", true));
         assert!(is_dev_entry("ownership-passwd", false));
+        assert!(is_dev_entry("sharing-passwd", false));
+        assert!(is_dev_entry("presence-passwd", false));
+        assert!(!is_dev_entry("x-1", true));
+        assert!(!is_dev_entry("x-passwd", false));
         assert!(!is_dev_entry("passwd", true));
         assert!(!is_dev_entry("1", false));
         assert!(!is_dev_entry("own-1x", true));
-        assert!(!is_dev_entry("Own-1", true));
-        assert!(!is_dev_entry("-1", true));
         assert!(!is_dev_entry("notes.txt", false));
     }
 
@@ -597,19 +670,45 @@ mod tests {
         let node_10 = root.path().join("e2e-10");
         std::fs::create_dir_all(&node_1).expect("create node 1 dir");
         std::fs::create_dir_all(&node_10).expect("create node 10 dir");
-        let node_1_arg = node_1.display();
-        let command =
-            format!("/bin/mqdb cluster start --node-id 1 --db {node_1_arg} --bind 127.0.0.1:32000");
-        assert!(is_cluster_node(&command, &node_1));
-        assert!(!is_cluster_node(&command, &node_10));
-        assert!(!is_cluster_node(&command, root.path()));
-        assert!(!is_cluster_node(
-            &format!("/bin/mqdb agent start --db {node_1_arg}"),
-            &node_1
+        let processes = [
+            NodeProcess {
+                pid: 1,
+                db: DbLocation::Dir(std::fs::canonicalize(&node_1).expect("canonical dir")),
+            },
+            NodeProcess {
+                pid: 2,
+                db: DbLocation::Unresolved,
+            },
+        ];
+        assert!(matches!(
+            node_state(&processes, 1, &node_1),
+            Ok(NodeState::Running)
         ));
-        assert!(is_cluster_node(
-            &format!("/bin/mqdb cluster start --db {node_1_arg}"),
-            &node_1
+        assert!(matches!(
+            node_state(&processes, 1, &node_10),
+            Ok(NodeState::Stopped)
         ));
+        assert!(matches!(
+            node_state(&processes, 3, &node_1),
+            Ok(NodeState::Stopped)
+        ));
+        assert!(node_state(&processes, 2, &node_1).is_err());
+    }
+
+    #[test]
+    fn the_db_argument_is_read_in_both_forms() {
+        assert_eq!(
+            db_argument("mqdb cluster start --db /a/e2e-1 --bind x"),
+            Some("/a/e2e-1")
+        );
+        assert_eq!(
+            db_argument("mqdb cluster start --db=/a/e2e-1 --bind x"),
+            Some("/a/e2e-1")
+        );
+        assert_eq!(db_argument("mqdb agent start --db rel"), Some("rel"));
+        assert_eq!(db_argument("mqdb cluster start --bind x"), None);
+        assert!(is_node_command("mqdb agent start --db x"));
+        assert!(is_node_command("mqdb cluster start --db x"));
+        assert!(!is_node_command("mqdb dev clean --db-prefix x"));
     }
 }

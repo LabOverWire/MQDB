@@ -26,6 +26,16 @@ impl StandInNode {
         Self { child }
     }
 
+    fn spawn_args(cwd: &Path, args: &[&str]) -> Self {
+        let child = Command::new("sh")
+            .args(["-c", "while :; do sleep 1; done", "stand-in"])
+            .args(args)
+            .current_dir(cwd)
+            .spawn()
+            .expect("spawn a stand-in node");
+        Self { child }
+    }
+
     fn pid(&self) -> u32 {
         self.child.id()
     }
@@ -270,19 +280,25 @@ fn dev_clean_removes_only_this_prefix_and_refuses_while_one_of_its_dirs_is_in_us
     std::fs::create_dir_all(prefix.with_file_name("e2e-1")).expect("create node 1 dir");
     std::fs::write(prefix.with_file_name("e2e-passwd"), "admin:x\n").expect("write passwd");
     std::fs::create_dir_all(prefix.with_file_name("e2ex-1")).expect("create another prefix dir");
+    std::fs::create_dir_all(prefix.with_file_name("e2e-x-1"))
+        .expect("create a stopped cluster dir");
+    std::fs::write(prefix.with_file_name("e2e-x-passwd"), "admin:x\n").expect("write its passwd");
+    let their_node = StandInNode::spawn(&prefix.with_file_name("e2e-y-1"));
 
     let output = mqdb(&["dev", "clean", "--db-prefix", &prefix_arg]);
     assert!(output.status.success(), "{}", output_text(&output));
     assert!(!prefix.with_file_name("e2e-1").exists());
     assert!(!prefix.with_file_name("e2e-passwd").exists());
-    assert!(
-        prefix.with_file_name("e2ex-1").exists(),
-        "another prefix's node dir must survive: {}",
-        output_text(&output)
-    );
+    for kept in ["e2ex-1", "e2e-x-1", "e2e-x-passwd", "e2e-y-1"] {
+        assert!(
+            prefix.with_file_name(kept).exists(),
+            "{kept} belongs to another prefix and must survive: {}",
+            output_text(&output)
+        );
+    }
+    drop(their_node);
 
-    std::fs::create_dir_all(prefix.with_file_name("e2e-2")).expect("create node 2 dir");
-    let suite_node = StandInNode::spawn(&prefix.with_file_name("e2e-x-1"));
+    let our_node = StandInNode::spawn(&prefix.with_file_name("e2e-2"));
     let output = mqdb(&["dev", "clean", "--db-prefix", &prefix_arg]);
     assert!(
         !output.status.success(),
@@ -290,8 +306,138 @@ fn dev_clean_removes_only_this_prefix_and_refuses_while_one_of_its_dirs_is_in_us
         output_text(&output)
     );
     assert!(prefix.with_file_name("e2e-2").exists());
-    assert!(prefix.with_file_name("e2e-x-1").exists());
-    drop(suite_node);
+    drop(our_node);
+}
+
+#[test]
+fn dev_clean_refuses_while_an_agent_uses_one_of_its_dirs() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    let node_dir = prefix.with_file_name("e2e-1");
+    std::fs::create_dir_all(&node_dir).expect("create node dir");
+    let node_arg = node_dir.display().to_string();
+    let agent = StandInNode::spawn_args(dir.path(), &["agent", "start", "--db", &node_arg]);
+
+    let output = mqdb(&["dev", "clean", "--db-prefix", &prefix.display().to_string()]);
+
+    assert!(!output.status.success(), "{}", output_text(&output));
+    assert!(node_dir.exists());
+    drop(agent);
+}
+
+#[test]
+fn dev_kill_stops_nodes_started_with_db_equals_or_a_relative_db() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    for node_id in [1, 2] {
+        std::fs::create_dir_all(prefix.with_file_name(format!("e2e-{node_id}")))
+            .expect("create node dir");
+    }
+    let equals_arg = format!("--db={}", prefix.with_file_name("e2e-1").display());
+    let mut equals_node = StandInNode::spawn_args(
+        dir.path(),
+        &["cluster", "start", &equals_arg, "--bind", "x"],
+    );
+    let mut relative_node =
+        StandInNode::spawn_args(dir.path(), &["cluster", "start", "--db", "e2e-2"]);
+    write_pid_file(&prefix, 1, equals_node.pid());
+    write_pid_file(&prefix, 2, relative_node.pid());
+
+    let output = kill_cluster(&prefix);
+
+    assert!(output.status.success(), "{}", output_text(&output));
+    assert!(equals_node.has_exited(), "{}", output_text(&output));
+    assert!(relative_node.has_exited(), "{}", output_text(&output));
+}
+
+#[test]
+fn dev_start_cluster_spawns_nothing_when_it_cannot_record_the_pid() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    let node_dir = prefix.with_file_name("e2e-1");
+    std::fs::create_dir_all(node_dir.join("mqdb.pid").join("blocker")).expect("block the pid file");
+
+    let output = start_one_node(&prefix.display().to_string(), "32056");
+
+    assert!(!output.status.success(), "{}", output_text(&output));
+    assert!(
+        !node_dir.join("mqdb.log").exists(),
+        "no node is started without a pid file: {}",
+        output_text(&output)
+    );
+}
+
+#[test]
+fn dev_start_cluster_reports_a_stale_passwd_it_cannot_remove() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    std::fs::create_dir_all(prefix.with_file_name("e2e-passwd").join("blocker"))
+        .expect("block the passwd file");
+
+    let output = start_one_node(&prefix.display().to_string(), "32058");
+
+    assert!(!output.status.success(), "{}", output_text(&output));
+    assert!(
+        output_text(&output).contains("remove stale"),
+        "{}",
+        output_text(&output)
+    );
+}
+
+#[test]
+fn dev_logs_follow_with_a_pattern_leaves_no_tail_behind() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    let node_dir = prefix.with_file_name("e2e-1");
+    std::fs::create_dir_all(&node_dir).expect("create node dir");
+    let log = node_dir.join("mqdb.log");
+    std::fs::write(&log, "match 0\n").expect("write log");
+    let pipeline = format!(
+        "'{}' dev logs -f --pattern match --db-prefix '{}' | head -n 2",
+        env!("CARGO_BIN_EXE_mqdb"),
+        prefix.display()
+    );
+    let mut follower = ProcessGroup {
+        child: std::os::unix::process::CommandExt::process_group(
+            Command::new("sh").args(["-c", &pipeline]),
+            0,
+        )
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn the pipeline"),
+    };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut line = 1;
+    while follower
+        .child
+        .try_wait()
+        .expect("query the pipeline")
+        .is_none()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the pipeline never finished"
+        );
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&log)
+            .expect("open log");
+        std::io::Write::write_all(&mut file, format!("match {line}\n").as_bytes())
+            .expect("append to log");
+        line += 1;
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+
+    let tails = Command::new("pgrep")
+        .args(["-f", &log.display().to_string()])
+        .output()
+        .expect("run pgrep");
+    assert!(
+        String::from_utf8_lossy(&tails.stdout).trim().is_empty(),
+        "tail -f must not outlive dev logs: {}",
+        String::from_utf8_lossy(&tails.stdout)
+    );
 }
 
 #[test]
