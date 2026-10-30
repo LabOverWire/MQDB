@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::helpers::{NODE_PID_FILE, absolute_prefix, cmd_dev_clean, ensure_no_running_nodes};
+use super::helpers::{NODE_PID_FILE, absolute_prefix, cmd_dev_clean, refuse_if_in_use};
 
 fn ensure_dev_passwd(exe: &Path, db_prefix: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let path = format!("{db_prefix}-passwd");
@@ -22,12 +22,18 @@ fn ensure_dev_passwd(exe: &Path, db_prefix: &str) -> Result<PathBuf, Box<dyn std
     Ok(PathBuf::from(path))
 }
 
+pub(crate) const TRANSPORT_PORT_OFFSET: u8 = 50;
+
 fn check_port_block(base_port: u16, nodes: u8) -> Result<(), String> {
-    let block_end = u32::from(base_port) + 2 * u32::from(nodes);
-    if block_end > u32::from(u16::MAX) + 1 {
+    if nodes == 0 || nodes > TRANSPORT_PORT_OFFSET {
         return Err(format!(
-            "--base-port {base_port} with {nodes} nodes needs ports up to {}, past {}",
-            block_end - 1,
+            "--nodes must be between 1 and {TRANSPORT_PORT_OFFSET}, got {nodes}"
+        ));
+    }
+    let last_port = u32::from(base_port) + u32::from(TRANSPORT_PORT_OFFSET) + u32::from(nodes) - 1;
+    if last_port > u32::from(u16::MAX) {
+        return Err(format!(
+            "--base-port {base_port} with {nodes} nodes needs ports up to {last_port}, past {}",
             u16::MAX
         ));
     }
@@ -38,12 +44,12 @@ fn node_port(base_port: u16, node_id: u8) -> u16 {
     base_port + u16::from(node_id) - 1
 }
 
-fn node_bind_args(base_port: u16, nodes: u8, node_id: u8, bind_host: &str) -> [String; 4] {
+fn node_bind_args(base_port: u16, node_id: u8, bind_host: &str) -> [String; 4] {
     [
         "--bind".to_string(),
         format!("{bind_host}:{}", node_port(base_port, node_id)),
         "--cluster-port-offset".to_string(),
-        nodes.to_string(),
+        TRANSPORT_PORT_OFFSET.to_string(),
     ]
 }
 
@@ -138,7 +144,6 @@ fn node_command(
     }
     cmd.args(node_bind_args(
         options.base_port,
-        options.nodes,
         node_id,
         &options.bind_host,
     ));
@@ -177,11 +182,12 @@ pub(crate) fn cmd_dev_start_cluster(
     let nodes = options.nodes;
     check_port_block(options.base_port, nodes)?;
     let db_prefix = absolute_prefix(&options.db_prefix)?;
-    ensure_no_running_nodes(&db_prefix)?;
 
     if options.clean {
         println!("Cleaning existing databases...");
         cmd_dev_clean(&db_prefix)?;
+    } else {
+        refuse_if_in_use(&db_prefix)?;
     }
 
     let exe = std::env::current_exe()?;
@@ -230,12 +236,12 @@ mod tests {
     #[test]
     fn every_node_and_peer_port_follows_the_base_port() {
         assert_eq!(
-            node_bind_args(32000, 3, 2, "127.0.0.1"),
-            ["--bind", "127.0.0.1:32001", "--cluster-port-offset", "3"]
+            node_bind_args(32000, 2, "127.0.0.1"),
+            ["--bind", "127.0.0.1:32001", "--cluster-port-offset", "50"]
         );
         assert_eq!(
-            node_bind_args(32000, 3, 1, "0.0.0.0"),
-            ["--bind", "0.0.0.0:32000", "--cluster-port-offset", "3"]
+            node_bind_args(32000, 1, "0.0.0.0"),
+            ["--bind", "0.0.0.0:32000", "--cluster-port-offset", "50"]
         );
         assert_eq!(
             node_peers(32000, 3, 2, "full").as_deref(),
@@ -254,9 +260,27 @@ mod tests {
     }
 
     #[test]
+    fn a_node_added_later_never_binds_a_transport_port() {
+        let bind_port = |node_id: u8| node_port(32000, node_id);
+        let transport_port = |node_id: u8| bind_port(node_id) + u16::from(TRANSPORT_PORT_OFFSET);
+        for added in 1..=TRANSPORT_PORT_OFFSET {
+            for existing in 1..=TRANSPORT_PORT_OFFSET {
+                assert_ne!(bind_port(added), transport_port(existing));
+            }
+        }
+        assert_eq!(
+            node_bind_args(32000, 4, "127.0.0.1")[3],
+            node_bind_args(32000, 1, "127.0.0.1")[3],
+            "the transport offset does not depend on how many nodes started first"
+        );
+    }
+
+    #[test]
     fn the_port_block_must_fit_below_65536() {
-        assert!(check_port_block(65530, 3).is_ok());
-        assert!(check_port_block(65531, 3).is_err());
-        assert!(check_port_block(u16::MAX, 1).is_err());
+        assert!(check_port_block(65485, 1).is_ok());
+        assert!(check_port_block(65485, 2).is_err());
+        assert!(check_port_block(32000, 50).is_ok());
+        assert!(check_port_block(32000, 51).is_err());
+        assert!(check_port_block(32000, 0).is_err());
     }
 }

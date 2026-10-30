@@ -93,8 +93,95 @@ fn process_command(pid: u32) -> Result<Option<String>, String> {
     }
 }
 
-fn runs_node(pid: u32, node_dir: &Path) -> Result<bool, String> {
-    Ok(process_command(pid)?.is_some_and(|command| is_cluster_node(&command, node_dir)))
+enum NodeState {
+    Running,
+    Stopped,
+}
+
+fn node_state(pid: u32, node_dir: &Path) -> Result<NodeState, String> {
+    match process_command(pid)? {
+        Some(command) if is_cluster_node(&command, node_dir) => Ok(NodeState::Running),
+        Some(_) | None => Ok(NodeState::Stopped),
+    }
+}
+
+fn live_node_dirs() -> Result<Vec<PathBuf>, String> {
+    let output = Command::new("ps")
+        .args(["-ww", "-ax", "-o", "command="])
+        .output()
+        .map_err(|e| format!("run ps: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ps -ax: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let commands = String::from_utf8_lossy(&output.stdout);
+    Ok(commands
+        .lines()
+        .filter(|command| format!(" {command} ").contains(" cluster start "))
+        .filter_map(db_argument)
+        .filter_map(|db| std::fs::canonicalize(db).ok())
+        .collect())
+}
+
+fn dirs_in_use(dirs: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+    let live = live_node_dirs()?;
+    Ok(dirs
+        .iter()
+        .filter(|dir| std::fs::canonicalize(dir).is_ok_and(|dir| live.contains(&dir)))
+        .cloned()
+        .collect())
+}
+
+fn listed(dirs: &[PathBuf]) -> String {
+    dirs.iter()
+        .map(|dir| dir.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+pub(crate) fn refuse_if_in_use(db_prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let dirs: Vec<PathBuf> = node_dirs(db_prefix)?
+        .into_iter()
+        .map(|(_, dir)| dir)
+        .collect();
+    let in_use = dirs_in_use(&dirs)?;
+    if in_use.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "nodes are still running on {}; stop them with 'mqdb dev kill --db-prefix {db_prefix}'",
+            listed(&in_use)
+        )
+        .into())
+    }
+}
+
+fn wait_until_unused(dirs: &[PathBuf], db_prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let start = Instant::now();
+    let mut announced = false;
+    loop {
+        let in_use = dirs_in_use(dirs)?;
+        if in_use.is_empty() {
+            return Ok(());
+        }
+        if start.elapsed() > NODE_STOP_TIMEOUT {
+            return Err(format!(
+                "nodes are still running on {}; stop them with 'mqdb dev kill --db-prefix {db_prefix}'",
+                listed(&in_use)
+            )
+            .into());
+        }
+        if !announced {
+            println!(
+                "Waiting up to {NODE_STOP_TIMEOUT:?} for the nodes on {} to exit...",
+                listed(&in_use)
+            );
+            announced = true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn signal(pid: u32) -> Result<(), String> {
@@ -175,47 +262,6 @@ fn forget_node(node: &RecordedNode, pid: u32, state: &str) -> Result<(), String>
     std::fs::remove_file(&node.pid_file).map_err(|e| format!("{}: {e}", node.pid_file.display()))
 }
 
-fn running_nodes(db_prefix: &str) -> Result<Vec<u16>, Box<dyn std::error::Error>> {
-    let mut running = Vec::new();
-    for node in recorded_nodes(db_prefix)? {
-        if let Ok(pid) = read_pid(&node.pid_file)
-            && runs_node(pid, &node.dir)?
-        {
-            running.push(node.node_id);
-        }
-    }
-    Ok(running)
-}
-
-pub(crate) fn ensure_no_running_nodes(db_prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let start = Instant::now();
-    let mut announced = false;
-    loop {
-        let running = running_nodes(db_prefix)?;
-        if running.is_empty() {
-            return Ok(());
-        }
-        let listed = running
-            .iter()
-            .map(u16::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        if start.elapsed() > NODE_STOP_TIMEOUT {
-            return Err(format!(
-                "nodes {listed} of --db-prefix {db_prefix} are still running; stop them with 'mqdb dev kill --db-prefix {db_prefix}'"
-            )
-            .into());
-        }
-        if !announced {
-            println!(
-                "Waiting up to {NODE_STOP_TIMEOUT:?} for nodes {listed} of --db-prefix {db_prefix} to exit..."
-            );
-            announced = true;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
-
 fn kill_cluster(db_prefix: &str, node: Option<u16>) -> Result<(), Box<dyn std::error::Error>> {
     let prefix = absolute_prefix(db_prefix)?;
     let recorded = recorded_nodes(&prefix)?;
@@ -249,12 +295,21 @@ fn kill_cluster(db_prefix: &str, node: Option<u16>) -> Result<(), Box<dyn std::e
                 continue;
             }
         };
-        match runs_node(pid, &target.dir) {
-            Ok(true) => match signal(pid) {
+        match node_state(pid, &target.dir) {
+            Ok(NodeState::Running) => match signal(pid) {
                 Ok(()) => signalled.push((target, pid)),
-                Err(e) => failures.push(format!("node {}: {e}", target.node_id)),
+                Err(e) => match node_state(pid, &target.dir) {
+                    Ok(NodeState::Stopped) => {
+                        if let Err(e) = forget_node(&target, pid, "stopped") {
+                            failures.push(e);
+                        }
+                    }
+                    Ok(NodeState::Running) | Err(_) => {
+                        failures.push(format!("node {}: {e}", target.node_id));
+                    }
+                },
             },
-            Ok(false) => {
+            Ok(NodeState::Stopped) => {
                 if let Err(e) = forget_node(&target, pid, "is not running; removed its pid file") {
                     failures.push(e);
                 }
@@ -267,9 +322,9 @@ fn kill_cluster(db_prefix: &str, node: Option<u16>) -> Result<(), Box<dyn std::e
     while !signalled.is_empty() && start.elapsed() <= NODE_STOP_TIMEOUT {
         let mut waiting = Vec::new();
         for (target, pid) in signalled {
-            match runs_node(pid, &target.dir) {
-                Ok(true) => waiting.push((target, pid)),
-                Ok(false) => {
+            match node_state(pid, &target.dir) {
+                Ok(NodeState::Running) => waiting.push((target, pid)),
+                Ok(NodeState::Stopped) => {
                     if let Err(e) = forget_node(&target, pid, "stopped") {
                         failures.push(e);
                     }
@@ -296,55 +351,98 @@ fn kill_cluster(db_prefix: &str, node: Option<u16>) -> Result<(), Box<dyn std::e
     }
 }
 
+fn legacy_node_pattern(node_id: u16) -> String {
+    format!("mqdb cluster.*--node-id {node_id}( |$)")
+}
+
+fn pkill(pattern: &str) -> Result<(), String> {
+    let status = Command::new("pkill")
+        .args(["-f", pattern])
+        .status()
+        .map_err(|e| format!("run pkill: {e}"))?;
+    match status.code() {
+        Some(0 | 1) => Ok(()),
+        _ => Err(format!("pkill -f '{pattern}' failed: {status}")),
+    }
+}
+
 pub(crate) fn cmd_dev_kill(
     all: bool,
     node: Option<u16>,
     agent: bool,
     db_prefix: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(prefix) = db_prefix {
-        return kill_cluster(prefix, node);
+    match (db_prefix, agent, node, all) {
+        (Some(prefix), _, _, _) => return kill_cluster(prefix, node),
+        (None, true, _, _) => {
+            println!("Killing MQDB agent...");
+            pkill("mqdb agent")?;
+        }
+        (None, false, Some(node_id), _) => {
+            println!("Killing MQDB cluster node {node_id}...");
+            pkill(&legacy_node_pattern(node_id))?;
+        }
+        (None, false, None, true) => {
+            println!("Killing all MQDB processes...");
+            pkill("mqdb cluster")?;
+            pkill("mqdb agent")?;
+        }
+        (None, false, None, false) => {
+            println!("Killing all MQDB cluster nodes...");
+            pkill("mqdb cluster")?;
+        }
     }
-
-    if agent {
-        println!("Killing MQDB agent...");
-        let _ = Command::new("pkill").args(["-f", "mqdb agent"]).status();
-        println!("Done");
-        return Ok(());
-    }
-
-    if let Some(node_id) = node {
-        println!("Killing MQDB cluster node {node_id}...");
-        let pattern = format!("mqdb cluster.*--node-id {node_id}");
-        let _ = Command::new("pkill").args(["-f", &pattern]).status();
-        println!("Done");
-        return Ok(());
-    }
-
-    if all {
-        println!("Killing all MQDB processes...");
-        let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
-        let _ = Command::new("pkill").args(["-f", "mqdb agent"]).status();
-        println!("Done");
-        return Ok(());
-    }
-
-    println!("Killing all MQDB cluster nodes...");
-    let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
     println!("Done");
     Ok(())
 }
 
+fn is_dev_entry(rest: &str, is_dir: bool) -> bool {
+    let tail_matches = |tail: &str| {
+        if is_dir {
+            tail.parse::<u16>().is_ok()
+        } else {
+            tail == "passwd"
+        }
+    };
+    match rest.rsplit_once('-') {
+        None => tail_matches(rest),
+        Some((suite, tail)) => {
+            !suite.is_empty() && suite.chars().all(|c| c.is_ascii_lowercase()) && tail_matches(tail)
+        }
+    }
+}
+
+fn clean_targets(db_prefix: &str) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let name_prefix = Path::new(db_prefix)
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .map(|name| format!("{name}-"))
+        .ok_or("--db-prefix must end in a file name")?;
+    let pattern = format!("{}-*", glob::Pattern::escape(db_prefix));
+    let mut targets: Vec<PathBuf> = glob::glob(&pattern)?
+        .filter_map(Result::ok)
+        .filter(|path| {
+            path.file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .and_then(|name| name.strip_prefix(&name_prefix))
+                .is_some_and(|rest| {
+                    (path.is_dir() || path.is_file()) && is_dev_entry(rest, path.is_dir())
+                })
+        })
+        .collect();
+    targets.sort();
+    Ok(targets)
+}
+
 pub(crate) fn cmd_dev_clean(db_prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
     let prefix = absolute_prefix(db_prefix)?;
-    ensure_no_running_nodes(&prefix)?;
-
-    let passwd = PathBuf::from(format!("{prefix}-passwd"));
-    let entries: Vec<PathBuf> = node_dirs(&prefix)?
-        .into_iter()
-        .map(|(_, dir)| dir)
-        .chain(passwd.is_file().then_some(passwd))
+    let entries = clean_targets(&prefix)?;
+    let dirs: Vec<PathBuf> = entries
+        .iter()
+        .filter(|entry| entry.is_dir())
+        .cloned()
         .collect();
+    wait_until_unused(&dirs, &prefix)?;
 
     if entries.is_empty() {
         println!("No databases under --db-prefix {prefix}");
@@ -387,36 +485,39 @@ pub(crate) fn cmd_dev_logs(
         return Ok(());
     }
 
+    if follow {
+        for (node_id, log_file) in &log_files {
+            println!("=== Node {node_id} ({}) ===", log_file.display());
+        }
+        let mut cmd = Command::new("tail");
+        cmd.args(["-f", "-n", &last.to_string()]);
+        cmd.args(log_files.iter().map(|(_, log_file)| log_file));
+        if let Some(pat) = pattern {
+            let child = cmd.stdout(std::process::Stdio::piped()).spawn()?;
+            let tail_output = child.stdout.ok_or("tail has no stdout")?;
+            Command::new("grep")
+                .args(["--line-buffered", pat])
+                .stdin(tail_output)
+                .status()?;
+        } else {
+            cmd.status()?;
+        }
+        return Ok(());
+    }
+
     for (node_id, log_file) in &log_files {
         println!("=== Node {node_id} ({}) ===", log_file.display());
+        let content = std::fs::read_to_string(log_file)?;
+        let lines: Vec<&str> = content.lines().collect();
+        let start = lines.len().saturating_sub(last);
 
-        if follow {
-            let mut cmd = Command::new("tail");
-            cmd.args(["-f", "-n", &last.to_string()]);
-            cmd.arg(log_file);
+        for line in &lines[start..] {
             if let Some(pat) = pattern {
-                let child = cmd.stdout(std::process::Stdio::piped()).spawn()?;
-                let tail_output = child.stdout.ok_or("tail has no stdout")?;
-                Command::new("grep")
-                    .args(["--line-buffered", pat])
-                    .stdin(tail_output)
-                    .status()?;
-            } else {
-                cmd.status()?;
-            }
-        } else {
-            let content = std::fs::read_to_string(log_file)?;
-            let lines: Vec<&str> = content.lines().collect();
-            let start = lines.len().saturating_sub(last);
-
-            for line in &lines[start..] {
-                if let Some(pat) = pattern {
-                    if line.contains(pat) {
-                        println!("{line}");
-                    }
-                } else {
+                if line.contains(pat) {
                     println!("{line}");
                 }
+            } else {
+                println!("{line}");
             }
         }
         println!();
@@ -427,7 +528,67 @@ pub(crate) fn cmd_dev_logs(
 
 #[cfg(test)]
 mod tests {
-    use super::is_cluster_node;
+    use super::{is_cluster_node, is_dev_entry, legacy_node_pattern};
+    use std::process::{Child, Command};
+
+    struct Sleeper(Child);
+
+    impl Drop for Sleeper {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn sleeper(node_id: &str) -> Sleeper {
+        Sleeper(
+            Command::new("sh")
+                .args([
+                    "-c",
+                    "while :; do sleep 1; done",
+                    "stand-in",
+                    "mqdb",
+                    "cluster",
+                    "start",
+                    "--node-id",
+                    node_id,
+                    "--db",
+                    "/nonexistent",
+                ])
+                .spawn()
+                .expect("spawn a stand-in node"),
+        )
+    }
+
+    #[test]
+    fn the_legacy_node_pattern_matches_only_that_node_id() {
+        let node_1 = sleeper("1");
+        let node_10 = sleeper("10");
+        let output = Command::new("pgrep")
+            .args(["-f", &legacy_node_pattern(1)])
+            .output()
+            .expect("run pgrep");
+        let pids: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert!(pids.contains(&node_1.0.id().to_string()), "{pids:?}");
+        assert!(!pids.contains(&node_10.0.id().to_string()), "{pids:?}");
+    }
+
+    #[test]
+    fn clean_keeps_entries_that_dev_does_not_create() {
+        assert!(is_dev_entry("1", true));
+        assert!(is_dev_entry("passwd", false));
+        assert!(is_dev_entry("own-2", true));
+        assert!(is_dev_entry("ownership-passwd", false));
+        assert!(!is_dev_entry("passwd", true));
+        assert!(!is_dev_entry("1", false));
+        assert!(!is_dev_entry("own-1x", true));
+        assert!(!is_dev_entry("Own-1", true));
+        assert!(!is_dev_entry("-1", true));
+        assert!(!is_dev_entry("notes.txt", false));
+    }
 
     #[test]
     fn a_node_matches_only_its_own_db_dir() {

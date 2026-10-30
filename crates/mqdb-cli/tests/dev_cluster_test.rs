@@ -263,34 +263,70 @@ fn dev_kill_fails_for_a_node_that_has_no_pid_file() {
 }
 
 #[test]
-fn dev_clean_removes_only_this_prefix_and_refuses_while_a_node_runs() {
+fn dev_clean_removes_only_this_prefix_and_refuses_while_one_of_its_dirs_is_in_use() {
     let dir = TempDir::new().expect("temp dir");
     let prefix = dir.path().join("e2e");
     let prefix_arg = prefix.display().to_string();
     std::fs::create_dir_all(prefix.with_file_name("e2e-1")).expect("create node 1 dir");
     std::fs::write(prefix.with_file_name("e2e-passwd"), "admin:x\n").expect("write passwd");
-    let their_node = StandInNode::spawn(&prefix.with_file_name("e2e-x-1"));
-    write_pid_file(&prefix.with_file_name("e2e-x"), 1, their_node.pid());
+    std::fs::create_dir_all(prefix.with_file_name("e2ex-1")).expect("create another prefix dir");
 
     let output = mqdb(&["dev", "clean", "--db-prefix", &prefix_arg]);
     assert!(output.status.success(), "{}", output_text(&output));
     assert!(!prefix.with_file_name("e2e-1").exists());
     assert!(!prefix.with_file_name("e2e-passwd").exists());
     assert!(
-        prefix.with_file_name("e2e-x-1").exists(),
+        prefix.with_file_name("e2ex-1").exists(),
         "another prefix's node dir must survive: {}",
         output_text(&output)
     );
 
-    let our_node = StandInNode::spawn(&prefix.with_file_name("e2e-2"));
-    write_pid_file(&prefix, 2, our_node.pid());
+    std::fs::create_dir_all(prefix.with_file_name("e2e-2")).expect("create node 2 dir");
+    let suite_node = StandInNode::spawn(&prefix.with_file_name("e2e-x-1"));
     let output = mqdb(&["dev", "clean", "--db-prefix", &prefix_arg]);
     assert!(
         !output.status.success(),
-        "clean must refuse while a node of the prefix runs: {}",
+        "clean must refuse while a node runs on one of its dirs, pid file or not: {}",
         output_text(&output)
     );
-    assert!(pid_file(&prefix, 2).exists());
+    assert!(prefix.with_file_name("e2e-2").exists());
+    assert!(prefix.with_file_name("e2e-x-1").exists());
+    drop(suite_node);
+}
+
+#[test]
+fn dev_clean_removes_the_stopped_dev_test_suite_dirs_of_its_prefix() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("mqdb-test");
+    for node_dir in [
+        "mqdb-test-own-1",
+        "mqdb-test-share-2",
+        "mqdb-test-presence-3",
+    ] {
+        std::fs::create_dir_all(prefix.with_file_name(node_dir)).expect("create suite dir");
+    }
+    for passwd in ["mqdb-test-ownership-passwd", "mqdb-test-sharing-passwd"] {
+        std::fs::write(prefix.with_file_name(passwd), "admin:x\n").expect("write suite passwd");
+    }
+    std::fs::create_dir_all(prefix.with_file_name("mqdb-test-own-1x")).expect("create other dir");
+
+    let output = mqdb(&["dev", "clean", "--db-prefix", &prefix.display().to_string()]);
+
+    assert!(output.status.success(), "{}", output_text(&output));
+    for removed in [
+        "mqdb-test-own-1",
+        "mqdb-test-share-2",
+        "mqdb-test-presence-3",
+        "mqdb-test-ownership-passwd",
+        "mqdb-test-sharing-passwd",
+    ] {
+        assert!(
+            !prefix.with_file_name(removed).exists(),
+            "{removed} must be removed: {}",
+            output_text(&output)
+        );
+    }
+    assert!(prefix.with_file_name("mqdb-test-own-1x").exists());
 }
 
 #[test]
@@ -507,5 +543,127 @@ fn dev_start_cluster_treats_a_trailing_slash_as_the_same_prefix() {
         String::from_utf8_lossy(&killed.stdout).contains("Node 1 (pid"),
         "kill without the slash finds the node: {}",
         output_text(&killed)
+    );
+}
+
+#[test]
+fn dev_kill_treats_a_node_that_exits_before_the_signal_as_stopped() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    let mut node = StandInNode::spawn(&prefix.with_file_name("e2e-1"));
+    write_pid_file(&prefix, 1, node.pid());
+    let racing_kill = tool_dir(
+        dir.path(),
+        &[
+            ("ps", "#!/bin/sh\nexec /bin/ps \"$@\"\n"),
+            (
+                "kill",
+                "#!/bin/sh\n/bin/kill -9 \"$1\"\n/bin/sleep 1\necho \"kill: $1: No such process\" >&2\nexit 1\n",
+            ),
+        ],
+    );
+
+    let output = mqdb_command(&["dev", "kill", "--db-prefix", &prefix.display().to_string()])
+        .env("PATH", &racing_kill)
+        .output()
+        .expect("run mqdb");
+
+    assert!(output.status.success(), "{}", output_text(&output));
+    assert!(node.has_exited());
+    assert!(!pid_file(&prefix, 1).exists(), "{}", output_text(&output));
+}
+
+#[test]
+fn dev_start_cluster_without_clean_refuses_a_running_node_without_waiting() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    let node = StandInNode::spawn(&prefix.with_file_name("e2e-1"));
+    write_pid_file(&prefix, 1, node.pid());
+
+    let output = start_one_node(&prefix.display().to_string(), "32054");
+
+    assert!(!output.status.success(), "{}", output_text(&output));
+    assert!(
+        !output_text(&output).contains("Waiting"),
+        "nothing is stopping, so there is nothing to wait for: {}",
+        output_text(&output)
+    );
+}
+
+#[test]
+fn dev_kill_by_node_id_reports_a_pkill_that_cannot_run() {
+    let dir = TempDir::new().expect("temp dir");
+    let empty_path = tool_dir(dir.path(), &[]);
+
+    let output = mqdb_command(&["dev", "kill", "--node", "9999"])
+        .env("PATH", &empty_path)
+        .output()
+        .expect("run mqdb");
+
+    assert!(
+        !output.status.success(),
+        "a pkill that never ran is not 'Done': {}",
+        output_text(&output)
+    );
+}
+
+struct ProcessGroup {
+    child: Child,
+}
+
+impl Drop for ProcessGroup {
+    fn drop(&mut self) {
+        let group = format!("-{}", self.child.id());
+        let _ = Command::new("kill").args(["--", &group]).status();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn dev_logs_follow_tails_every_node_of_the_prefix() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    for node_id in [1, 2] {
+        let node_dir = prefix.with_file_name(format!("e2e-{node_id}"));
+        std::fs::create_dir_all(&node_dir).expect("create node dir");
+        std::fs::write(
+            node_dir.join("mqdb.log"),
+            format!("line from node {node_id}\n"),
+        )
+        .expect("write log");
+    }
+    let captured = dir.path().join("follow.out");
+    let stdout = std::fs::File::create(&captured).expect("create capture file");
+
+    let follower = ProcessGroup {
+        child: std::os::unix::process::CommandExt::process_group(
+            &mut mqdb_command(&[
+                "dev",
+                "logs",
+                "-f",
+                "--db-prefix",
+                &prefix.display().to_string(),
+            ]),
+            0,
+        )
+        .stdout(stdout)
+        .spawn()
+        .expect("spawn dev logs -f"),
+    };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut seen = String::new();
+    while std::time::Instant::now() < deadline
+        && !(seen.contains("line from node 1") && seen.contains("line from node 2"))
+    {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        seen = std::fs::read_to_string(&captured).unwrap_or_default();
+    }
+    drop(follower);
+
+    assert!(seen.contains("line from node 1"), "{seen}");
+    assert!(
+        seen.contains("line from node 2"),
+        "follow must tail node 2 too: {seen}"
     );
 }

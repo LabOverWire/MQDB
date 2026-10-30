@@ -86,7 +86,7 @@ pub(crate) enum DevAction {
             long,
             default_value = "1883",
             value_parser = clap::value_parser!(u16).range(1024..),
-            help = "Port of node 1; node N uses base+N-1 and its cluster transport base+nodes+N-1"
+            help = "Port of node 1; node N uses base+N-1 and its cluster transport base+50+N-1"
         )]
         base_port: u16,
         #[arg(

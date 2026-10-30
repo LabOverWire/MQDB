@@ -356,9 +356,11 @@ mqdb dev clean
 mqdb dev clean --db-prefix /tmp/my-test
 ```
 
-`dev clean` removes only the `<prefix>-N` node directories and `<prefix>-passwd`. If a node
-recorded in a `<prefix>-N/mqdb.pid` file is still running, `dev clean` and `dev start-cluster`
-wait up to 10s for it to exit and then refuse.
+`dev clean` removes the `<prefix>-N` node directories, `<prefix>-passwd`, and the
+`<prefix>-<suite>-N` directories and `<prefix>-<suite>-passwd` files that `dev test` leaves
+(for example `/tmp/mqdb-test-own-1`). It waits up to 10s while any `cluster start` process
+still uses one of those directories, then refuses. `dev start-cluster` without `--clean`
+refuses right away if a node still runs on one of its `<prefix>-N` directories.
 
 ### View Logs
 
@@ -422,7 +424,7 @@ mqdb dev start-cluster --no-quic
 | `--quic-ca` | CA certificate path | `test_certs/ca.pem` |
 | `--no-quic` | Disable QUIC transport | `false` |
 | `--db-prefix` | Database path prefix | `/tmp/mqdb-test` |
-| `--base-port` | MQTT port of node 1; node N uses base+N-1, its cluster transport base+nodes+N-1 | `1883` |
+| `--base-port` | MQTT port of node 1; node N uses base+N-1 and its cluster transport base+50+N-1 (up to 50 nodes) | `1883` |
 | `--bind-host` | Host to bind | `127.0.0.1` |
 | `--topology` | Mesh topology: `partial`, `upper`, `full` | `full`, or `partial` with `--no-quic` |
 | `--bridge-out` | Use Out-only bridge direction | `false` |
@@ -430,6 +432,19 @@ mqdb dev start-cluster --no-quic
 | `--passwd` | Path to password file (auto-generated if omitted) | (auto) |
 | `--ownership` | Ownership config: `entity=field` pairs | (none) |
 | `--license` | Path to license key file (required for clustering) | (none) |
+
+To add node K to a running dev cluster, start it by hand with the same offset, list every
+existing node as a peer, and record its PID so `dev kill --db-prefix` stops it:
+
+```bash
+mkdir -p /tmp/mqdb-test-4
+mqdb cluster start --node-id 4 --bind 127.0.0.1:1886 --db /tmp/mqdb-test-4 \
+  --peers 1@127.0.0.1:1883,2@127.0.0.1:1884,3@127.0.0.1:1885 --cluster-port-offset 50 --bridge-out \
+  --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem \
+  --passwd /tmp/mqdb-test-passwd --admin-users admin \
+  --license /path/to/license.key >> /tmp/mqdb-test-4/mqdb.log 2>&1 &
+echo $! > /tmp/mqdb-test-4/mqdb.pid
+```
 
 ### Run Built-in Tests
 
