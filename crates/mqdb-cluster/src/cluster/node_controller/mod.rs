@@ -191,13 +191,14 @@ pub struct UniqueCheckPhase1Result {
 pub enum ReserveFailure {
     Conflict(String),
     NotDurable(String),
+    TooLarge(String),
 }
 
 impl ReserveFailure {
     #[must_use]
     pub fn field(&self) -> &str {
         match self {
-            Self::Conflict(f) | Self::NotDurable(f) => f,
+            Self::Conflict(f) | Self::NotDurable(f) | Self::TooLarge(f) => f,
         }
     }
 
@@ -206,6 +207,7 @@ impl ReserveFailure {
         match self {
             Self::Conflict(_) => 409,
             Self::NotDurable(_) => 503,
+            Self::TooLarge(_) => 400,
         }
     }
 
@@ -216,6 +218,7 @@ impl ReserveFailure {
             Self::NotDurable(f) => {
                 format!("unique reservation for field '{f}' is not yet durable; retry")
             }
+            Self::TooLarge(f) => format!("value of unique field '{f}' is too large"),
         }
     }
 }

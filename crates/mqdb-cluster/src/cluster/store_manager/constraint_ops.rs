@@ -15,6 +15,14 @@ impl StoreManager {
         constraint: &ClusterConstraint,
     ) -> Result<ReplicationWrite, super::super::db::ConstraintStoreError> {
         let key = super::super::db::constraint_key(constraint.entity_str(), constraint.name_str());
+        let storage_key = crate::cluster::partition_storage::PartitionStorage::make_key(
+            PartitionId::ZERO,
+            entity::DB_CONSTRAINT,
+            &key,
+        );
+        if u16::try_from(storage_key.len()).is_err() {
+            return Err(super::super::db::ConstraintStoreError::TooLarge);
+        }
         if self
             .db_constraints
             .exists(constraint.entity_str(), constraint.name_str())
@@ -197,6 +205,7 @@ mod tests {
             "id",
             OnDeleteAction::Cascade,
         )
+        .unwrap()
     }
 
     #[test]
@@ -347,7 +356,7 @@ mod tests {
     #[test]
     fn rebuild_fk_index_for_constraint_is_noop_for_unique_constraint() {
         let store = StoreManager::new(node(1));
-        let unique = ClusterConstraint::unique("comments", "uniq_text", "text");
+        let unique = ClusterConstraint::unique("comments", "uniq_text", "text").unwrap();
 
         store
             .db_data

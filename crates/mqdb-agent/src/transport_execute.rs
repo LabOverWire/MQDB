@@ -59,6 +59,16 @@ impl Database {
         }
         match request {
             Request::Create { entity, data } => {
+                let id_limit = mqdb_core::protocol::MAX_RECORD_ID_LEN;
+                if let Some(id) = data.get("id").and_then(serde_json::Value::as_str)
+                    && id.len() > id_limit
+                {
+                    return mqdb_core::error::Error::Validation(format!(
+                        "id is {} bytes, the limit is {id_limit}",
+                        id.len()
+                    ))
+                    .into();
+                }
                 if let OwnershipDecision::Derive {
                     parent_entity,
                     fk_field,

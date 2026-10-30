@@ -8,6 +8,16 @@ use bebytes::BeBytes;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+#[must_use]
+pub fn unique_value_fits_storage(entity: &str, field: &str, value: &[u8]) -> bool {
+    let storage_key = crate::cluster::partition_storage::PartitionStorage::make_key(
+        PartitionId::ZERO,
+        crate::cluster::entity::DB_UNIQUE,
+        &UniqueStore::unique_key(entity, field, value),
+    );
+    u16::try_from(storage_key.len()).is_ok()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
 pub struct UniqueReservation {
     pub version: u8,
@@ -32,7 +42,6 @@ pub struct UniqueReservation {
 }
 
 impl UniqueReservation {
-    #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub fn create(
         entity: &str,
@@ -42,28 +51,23 @@ impl UniqueReservation {
         request_id: &str,
         data_partition: PartitionId,
         expires_at: u64,
-    ) -> Self {
-        let entity_bytes = entity.as_bytes().to_vec();
-        let field_bytes = field.as_bytes().to_vec();
-        let record_id_bytes = record_id.as_bytes().to_vec();
-        let request_id_bytes = request_id.as_bytes().to_vec();
-
-        Self {
+    ) -> Option<Self> {
+        Some(Self {
             version: 1,
-            entity_len: entity_bytes.len() as u16,
-            entity: entity_bytes,
-            field_len: field_bytes.len() as u16,
-            field: field_bytes,
-            value_len: value.len() as u32,
+            entity_len: u16::try_from(entity.len()).ok()?,
+            entity: entity.as_bytes().to_vec(),
+            field_len: u16::try_from(field.len()).ok()?,
+            field: field.as_bytes().to_vec(),
+            value_len: u32::try_from(value.len()).ok()?,
             value: value.to_vec(),
-            record_id_len: record_id_bytes.len() as u16,
-            record_id: record_id_bytes,
-            request_id_len: request_id_bytes.len() as u16,
-            request_id: request_id_bytes,
+            record_id_len: u16::try_from(record_id.len()).ok()?,
+            record_id: record_id.as_bytes().to_vec(),
+            request_id_len: u16::try_from(request_id.len()).ok()?,
+            request_id: request_id.as_bytes().to_vec(),
             data_partition: data_partition.get(),
             expires_at,
             committed: 0,
-        }
+        })
     }
 
     #[must_use]
@@ -141,6 +145,7 @@ pub enum ReserveResult {
     Reserved,
     AlreadyReservedBySameRequest,
     Conflict,
+    Unencodable,
 }
 
 /// Outcome of reconciling a durable record against the unique claim it should own.
@@ -158,6 +163,8 @@ pub enum ReassertResult {
     Conflict,
     /// An uncommitted claim is held by a different (in-flight) record; skip this cycle.
     Pending,
+    /// The claim cannot be stored because a length does not fit the reservation format.
+    Unencodable,
 }
 
 pub struct UniqueReserveParams<'a> {
@@ -218,6 +225,9 @@ impl UniqueStore {
     /// # Panics
     /// Panics if the internal lock is poisoned.
     pub fn reserve(&self, params: &UniqueReserveParams<'_>, now: u64) -> ReserveResult {
+        if !unique_value_fits_storage(params.entity, params.field, params.value) {
+            return ReserveResult::Unencodable;
+        }
         let key = Self::unique_key(params.entity, params.field, params.value);
         let mut reservations = self.reservations.write().unwrap();
 
@@ -235,7 +245,7 @@ impl UniqueStore {
             }
         }
 
-        let reservation = UniqueReservation::create(
+        let Some(reservation) = UniqueReservation::create(
             params.entity,
             params.field,
             params.value,
@@ -243,7 +253,9 @@ impl UniqueStore {
             params.request_id,
             params.data_partition,
             now + params.ttl_ms,
-        );
+        ) else {
+            return ReserveResult::Unencodable;
+        };
         reservations.insert(key, reservation);
         ReserveResult::Reserved
     }
@@ -312,12 +324,15 @@ impl UniqueStore {
         data_partition: PartitionId,
         now: u64,
     ) -> ReassertResult {
+        if !unique_value_fits_storage(entity, field, value) {
+            return ReassertResult::Unencodable;
+        }
         let key = Self::unique_key(entity, field, value);
         let mut reservations = self.reservations.write().unwrap();
 
         match reservations.get(&key) {
             None => {
-                let reservation = UniqueReservation::create(
+                let Some(reservation) = UniqueReservation::create(
                     entity,
                     field,
                     value,
@@ -325,9 +340,10 @@ impl UniqueStore {
                     record_id,
                     data_partition,
                     now,
-                )
-                .with_committed();
-                reservations.insert(key, reservation);
+                ) else {
+                    return ReassertResult::Unencodable;
+                };
+                reservations.insert(key, reservation.with_committed());
                 ReassertResult::Established
             }
             Some(existing) if existing.record_id_str() == record_id => {
@@ -458,29 +474,25 @@ impl UniqueStore {
 
     /// # Panics
     /// Panics if the internal lock is poisoned.
-    #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub fn export_for_partition(&self, partition: PartitionId) -> Vec<u8> {
         let reservations = self.reservations.read().unwrap();
-        let matching: Vec<_> = reservations
+        let encoded: Vec<Vec<u8>> = reservations
             .iter()
             .filter(|(_, r)| r.unique_partition() == partition)
+            .filter_map(|(key, reservation)| {
+                let entry =
+                    super::data_store::encode_snapshot_entry(key, &Self::serialize(reservation));
+                if entry.is_none() {
+                    tracing::warn!(
+                        key_len = key.len(),
+                        "unique claim too large for snapshot, skipped"
+                    );
+                }
+                entry
+            })
             .collect();
-
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&(matching.len() as u32).to_be_bytes());
-
-        for (key, reservation) in matching {
-            let key_bytes = key.as_bytes();
-            buf.extend_from_slice(&(key_bytes.len() as u16).to_be_bytes());
-            buf.extend_from_slice(key_bytes);
-
-            let data = Self::serialize(reservation);
-            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
-            buf.extend_from_slice(&data);
-        }
-
-        buf
+        super::data_store::join_snapshot_entries(&encoded)
     }
 
     /// # Panics
@@ -683,7 +695,8 @@ mod tests {
             "req-abc",
             partition(42),
             1_702_041_600_000,
-        );
+        )
+        .unwrap();
         let bytes = UniqueStore::serialize(&reservation);
         let parsed = UniqueStore::deserialize(&bytes).unwrap();
 
@@ -1161,7 +1174,8 @@ mod tests {
             "req-test",
             partition(5),
             1_702_041_600_000,
-        );
+        )
+        .unwrap();
         let data = UniqueStore::serialize(&reservation);
 
         store
@@ -1183,6 +1197,7 @@ mod tests {
             partition(5),
             1000,
         )
+        .unwrap()
         .with_committed();
         let key = unique_key(&committed);
         store
@@ -1197,7 +1212,8 @@ mod tests {
             "req-b",
             partition(5),
             2000,
-        );
+        )
+        .unwrap();
         let result =
             store.apply_replicated(Operation::Update, &key, &UniqueStore::serialize(&intruder));
 
@@ -1228,6 +1244,7 @@ mod tests {
             partition(5),
             1000,
         )
+        .unwrap()
         .with_committed();
         let key = unique_key(&committed);
         store
@@ -1252,6 +1269,7 @@ mod tests {
             partition(5),
             1000,
         )
+        .unwrap()
         .with_committed();
         member
             .apply_replicated(
@@ -1282,7 +1300,8 @@ mod tests {
             "req-a",
             partition(5),
             2000,
-        );
+        )
+        .unwrap();
         let stale = UniqueStore::new(node(3));
         stale
             .apply_replicated(
@@ -1396,5 +1415,32 @@ mod tests {
                 assert_ne!(r.unique_partition(), target);
             }
         }
+    }
+
+    #[test]
+    fn reserve_and_reassert_refuse_a_value_too_large_to_store() {
+        let store = UniqueStore::new(node(1));
+        let long_value = vec![b'c'; 40_000];
+
+        assert_eq!(
+            store.reserve(
+                &params(
+                    "users",
+                    "code",
+                    &long_value,
+                    "u1",
+                    "req-1",
+                    partition(1),
+                    60_000
+                ),
+                1_000,
+            ),
+            ReserveResult::Unencodable
+        );
+        assert_eq!(
+            store.reassert("users", "code", &long_value, "u1", partition(1), 1_000),
+            ReassertResult::Unencodable
+        );
+        assert!(store.get("users", "code", &long_value).is_none());
     }
 }

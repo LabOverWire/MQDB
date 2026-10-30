@@ -4131,7 +4131,7 @@ async fn unique_reconcile_reestablishes_lost_reservation() {
         .controller
         .stores()
         .db_constraints
-        .add(ClusterConstraint::unique("users", "uniq_email", "email"))
+        .add(ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
         .unwrap();
     cluster.nodes[0]
         .controller
@@ -4175,7 +4175,7 @@ async fn unique_reconcile_repairs_lost_commit() {
     let stores = cluster.nodes[0].controller.stores();
     stores
         .db_constraints
-        .add(ClusterConstraint::unique("users", "uniq_email", "email"))
+        .add(ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
         .unwrap();
     stores
         .db_data
@@ -4230,7 +4230,7 @@ async fn unique_reconcile_leaves_abandoned_for_ttl_reclaim() {
     let stores = cluster.nodes[0].controller.stores();
     stores
         .db_constraints
-        .add(ClusterConstraint::unique("users", "uniq_email", "email"))
+        .add(ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
         .unwrap();
 
     let value = json_value_bytes("ghost@x.com");

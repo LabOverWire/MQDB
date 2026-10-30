@@ -3799,3 +3799,112 @@ async fn test_ownership_list_with_additional_filter() {
         Response::Error { code, message } => panic!("expected ok, got {code}: {message}"),
     }
 }
+
+#[tokio::test]
+async fn create_refuses_an_id_longer_than_the_record_id_limit() {
+    use mqdb_core::{Request, Response};
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let limit = mqdb_core::protocol::MAX_RECORD_ID_LEN;
+
+    for long_id in ["L".repeat(70_000), "m".repeat(limit + 1)] {
+        let response = db
+            .execute(Request::Create {
+                entity: "items".into(),
+                data: json!({"id": long_id, "v": 1}),
+            })
+            .await;
+        match response {
+            Response::Error { code, .. } => assert_eq!(code, 400, "id of {} bytes", long_id.len()),
+            Response::Ok { data } => panic!("id of {} bytes was created: {data}", long_id.len()),
+        }
+    }
+
+    let at_limit = "k".repeat(limit);
+    let response = db
+        .execute(Request::Create {
+            entity: "items".into(),
+            data: json!({"id": at_limit, "v": 1}),
+        })
+        .await;
+    assert!(response.is_ok());
+    let read = db
+        .read("items".into(), at_limit.clone(), vec![], None)
+        .await
+        .unwrap();
+    assert_eq!(read["id"], at_limit);
+}
+
+#[tokio::test]
+async fn create_refuses_unique_and_indexed_values_too_large_to_store() {
+    use mqdb_core::{Request, Response};
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    db.add_unique_constraint("users".into(), vec!["code".into()])
+        .await
+        .unwrap();
+    db.add_index("items".into(), vec!["tag".into()])
+        .await
+        .unwrap();
+
+    for (entity, body) in [
+        ("users", json!({"id": "u1", "code": "c".repeat(70_000)})),
+        ("items", json!({"id": "i1", "tag": "t".repeat(70_000)})),
+    ] {
+        let response = db
+            .execute(Request::Create {
+                entity: entity.into(),
+                data: body,
+            })
+            .await;
+        match response {
+            Response::Error { code, .. } => assert_eq!(code, 400, "{entity}"),
+            Response::Ok { data } => panic!("{entity} created: {data}"),
+        }
+    }
+
+    for (entity, body) in [
+        ("users", json!({"id": "u2", "code": "short"})),
+        ("items", json!({"id": "i2", "tag": "short"})),
+    ] {
+        let response = db
+            .execute(Request::Create {
+                entity: entity.into(),
+                data: body,
+            })
+            .await;
+        assert!(response.is_ok(), "{entity}");
+    }
+}
+
+#[tokio::test]
+async fn restore_keeps_records_whose_ids_exceed_the_create_limit() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path().join("db"))
+        .await
+        .unwrap();
+    let long_id = "k".repeat(600);
+    let backup_file = tmp.path().join("backup.jsonl");
+    let lines = [
+        json!({"_entity": "items", "_data": {"id": "a1", "v": 1}}),
+        json!({"_entity": "items", "_data": {"id": long_id, "v": 2}}),
+        json!({"_entity": "items", "_data": {"id": "z9", "v": 3}}),
+    ];
+    let content: Vec<String> = lines.iter().map(ToString::to_string).collect();
+    std::fs::write(&backup_file, content.join("\n")).unwrap();
+
+    let count = db.restore_logical(&backup_file).await.unwrap();
+
+    assert_eq!(count, 3);
+    let read = db
+        .read("items".into(), long_id.clone(), vec![], None)
+        .await
+        .unwrap();
+    assert_eq!(read["id"], long_id);
+}

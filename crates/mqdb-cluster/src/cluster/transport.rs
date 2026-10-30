@@ -697,7 +697,7 @@ mod tests {
     #[test]
     fn replicated_record_with_a_long_id_arrives_intact() {
         let id = "k".repeat(300);
-        let record = crate::cluster::db::DbEntity::create("item", &id, b"{\"v\":1}", 1000);
+        let record = crate::cluster::db::DbEntity::create("item", &id, b"{\"v\":1}", 1000).unwrap();
         let write = ReplicationWrite::new(
             record.partition(),
             Operation::Insert,
@@ -726,7 +726,8 @@ mod tests {
 
     #[test]
     fn record_with_a_length_past_its_end_is_rejected_without_panicking() {
-        let record = crate::cluster::db::DbEntity::create("item", "abc", b"{\"v\":1}", 1000);
+        let record =
+            crate::cluster::db::DbEntity::create("item", "abc", b"{\"v\":1}", 1000).unwrap();
         let mut bytes = crate::cluster::db::DbDataStore::serialize(&record);
         bytes[1..3].copy_from_slice(&u16::MAX.to_be_bytes());
         assert!(crate::cluster::db::DbDataStore::deserialize(&bytes).is_none());

@@ -19,21 +19,15 @@ impl FkCheckRequest {
     pub const VERSION: u8 = 1;
 
     #[must_use]
-    pub fn create(request_id: u64, entity: &str, id: &str) -> Self {
-        assert!(
-            u16::try_from(entity.len()).is_ok(),
-            "entity name exceeds u16::MAX bytes"
-        );
-        assert!(u16::try_from(id.len()).is_ok(), "id exceeds u16::MAX bytes");
-        #[allow(clippy::cast_possible_truncation)]
-        Self {
+    pub fn create(request_id: u64, entity: &str, id: &str) -> Option<Self> {
+        Some(Self {
             version: Self::VERSION,
             request_id,
-            entity_len: entity.len() as u16,
+            entity_len: u16::try_from(entity.len()).ok()?,
             entity: entity.as_bytes().to_vec(),
-            id_len: id.len() as u16,
+            id_len: u16::try_from(id.len()).ok()?,
             id: id.as_bytes().to_vec(),
-        }
+        })
     }
 
     #[must_use]
@@ -292,7 +286,7 @@ mod tests {
 
     #[test]
     fn fk_check_request_roundtrip() {
-        let req = FkCheckRequest::create(42, "users", "user-123");
+        let req = FkCheckRequest::create(42, "users", "user-123").unwrap();
         let bytes = req.clone().to_be_bytes();
         let (decoded, _) = FkCheckRequest::try_from_be_bytes(&bytes).unwrap();
         assert_eq!(decoded.request_id, 42);
@@ -381,7 +375,7 @@ mod tests {
     fn fk_check_request_version_mismatch_rejected() {
         use crate::cluster::transport::ClusterMessage;
 
-        let mut req = FkCheckRequest::create(42, "users", "u1");
+        let mut req = FkCheckRequest::create(42, "users", "u1").unwrap();
         req.version = 99;
         let bytes = req.to_be_bytes();
         let result = ClusterMessage::decode_from_wire(90, &bytes);

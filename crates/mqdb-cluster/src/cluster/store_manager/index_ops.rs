@@ -17,7 +17,8 @@ impl StoreManager {
         data_partition: PartitionId,
         record_id: &str,
     ) -> Result<(IndexEntry, ReplicationWrite), super::super::db::IndexStoreError> {
-        let entry = IndexEntry::create(entity, field, value, data_partition, record_id);
+        let entry = IndexEntry::create(entity, field, value, data_partition, record_id)
+            .ok_or(super::super::db::IndexStoreError::SerializationError)?;
         self.db_index.add_entry(entry.clone())?;
 
         let serialized = IndexStore::serialize(&entry);

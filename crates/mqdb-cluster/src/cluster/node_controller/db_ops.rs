@@ -247,18 +247,20 @@ impl<T: ClusterTransport> NodeController<T> {
         Ok(db_entity)
     }
 
+    /// # Errors
+    /// Returns `DbDataStoreError::SerializationError` if a length does not fit the record format.
     pub async fn db_upsert(
         &mut self,
         entity_type: &str,
         id: &str,
         data: &[u8],
         timestamp_ms: u64,
-    ) -> super::db::DbEntity {
+    ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
         let (db_entity, write) =
             self.stores
-                .db_upsert_replicated(entity_type, id, data, timestamp_ms);
+                .db_upsert_replicated(entity_type, id, data, timestamp_ms)?;
         self.write_or_forward(write).await;
-        db_entity
+        Ok(db_entity)
     }
 
     /// # Errors
@@ -1708,6 +1710,10 @@ impl<T: ClusterTransport> NodeController<T> {
             Err(_) => return (Self::json_error(400, "invalid JSON payload"), None),
         };
 
+        if let Some(message) = super::db::oversized_create_message(entity, &data) {
+            return (Self::json_error(400, &message), None);
+        }
+
         Self::apply_ttl_expiry(&mut data);
 
         if let serde_json::Value::Object(ref mut obj) = data {
@@ -1747,6 +1753,13 @@ impl<T: ClusterTransport> NodeController<T> {
                         correlation_data: request.correlation_data.clone(),
                     },
                 })),
+            );
+        }
+
+        if let Some(failure) = self.oversized_unique_value(entity, &data) {
+            return (
+                Self::json_error(failure.http_code(), &failure.message()),
+                None,
             );
         }
 
@@ -1958,6 +1971,9 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             super::db::ReserveResult::Conflict => {
                 Some(super::ReserveFailure::Conflict(params.field.to_owned()))
+            }
+            super::db::ReserveResult::Unencodable => {
+                Some(super::ReserveFailure::TooLarge(params.field.to_owned()))
             }
         }
     }

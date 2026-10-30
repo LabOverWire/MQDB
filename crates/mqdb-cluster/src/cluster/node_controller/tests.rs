@@ -450,7 +450,7 @@ async fn reconcile_apply_skips_record_deleted_after_collection() {
     ctrl.update_partition_map(map);
     ctrl.stores()
         .db_constraints
-        .add(ClusterConstraint::unique("users", "uniq_email", "email"))
+        .add(ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
         .unwrap();
     ctrl.stores()
         .db_data
@@ -539,7 +539,7 @@ async fn project_reconcile_work_skips_key_deleted_after_gather() {
     ctrl.update_partition_map(map);
     ctrl.stores()
         .db_constraints
-        .add(ClusterConstraint::unique("users", "uniq_email", "email"))
+        .add(ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
         .unwrap();
     ctrl.stores()
         .db_data
@@ -806,7 +806,7 @@ async fn fk_then_unique_defers_reserve_to_async_completion() {
     ctrl.update_partition_map(map);
     ctrl.stores()
         .db_constraints
-        .add(ClusterConstraint::unique("users", "uniq_email", "email"))
+        .add(ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
         .unwrap();
 
     let continuation = FkCheckContinuation::CreateFromNodeController {
@@ -847,11 +847,7 @@ async fn unsealed_partition_fails_reserve_closed() {
     let entity = "users";
     ctrl.stores()
         .db_constraints
-        .add(crate::cluster::db::ClusterConstraint::unique(
-            entity,
-            "uniq_email",
-            "email",
-        ))
+        .add(crate::cluster::db::ClusterConstraint::unique(entity, "uniq_email", "email").unwrap())
         .unwrap();
     let value = b"a@x.com";
     let unique_part = crate::cluster::db::unique_partition(entity, "email", value);
@@ -1007,6 +1003,7 @@ async fn seal_response_teaches_primary_a_missed_reservation() {
         PartitionId::new(5).unwrap(),
         1000,
     )
+    .unwrap()
     .with_committed();
     let member = UniqueStore::new(node2);
     member
@@ -1562,12 +1559,14 @@ async fn db_upsert_creates_or_updates() {
 
     let entity1 = ctrl
         .db_upsert("products", "p1", b"{\"price\":100}", 1000)
-        .await;
+        .await
+        .unwrap();
     assert_eq!(entity1.data, b"{\"price\":100}");
 
     let entity2 = ctrl
         .db_upsert("products", "p1", b"{\"price\":200}", 2000)
-        .await;
+        .await
+        .unwrap();
     assert_eq!(entity2.data, b"{\"price\":200}");
     assert_eq!(entity2.timestamp_ms, 2000);
 }
@@ -1715,7 +1714,7 @@ async fn db_update_enforces_unique_constraint() {
     let mut ctrl = create_test_controller(node1, transport);
 
     let constraint =
-        crate::cluster::db::ClusterConstraint::unique("users", "email_unique", "email");
+        crate::cluster::db::ClusterConstraint::unique("users", "email_unique", "email").unwrap();
     ctrl.constraint_add(&constraint).await.unwrap();
     setup_all_partitions_primary(&mut ctrl, node1);
 
@@ -1749,7 +1748,7 @@ async fn db_update_allows_same_value() {
     let mut ctrl = create_test_controller(node1, transport);
 
     let constraint =
-        crate::cluster::db::ClusterConstraint::unique("users", "email_unique", "email");
+        crate::cluster::db::ClusterConstraint::unique("users", "email_unique", "email").unwrap();
     ctrl.constraint_add(&constraint).await.unwrap();
     setup_all_partitions_primary(&mut ctrl, node1);
 
@@ -1775,7 +1774,7 @@ async fn db_update_releases_old_unique_value() {
     let mut ctrl = create_test_controller(node1, transport);
 
     let constraint =
-        crate::cluster::db::ClusterConstraint::unique("users", "email_unique", "email");
+        crate::cluster::db::ClusterConstraint::unique("users", "email_unique", "email").unwrap();
     ctrl.constraint_add(&constraint).await.unwrap();
     setup_all_partitions_primary(&mut ctrl, node1);
 
@@ -1896,10 +1895,12 @@ async fn db_list_primary_only_excludes_replica_data() {
 
     ctrl.stores
         .db_data
-        .upsert("items", &primary_id, b"{}", 1000);
+        .upsert("items", &primary_id, b"{}", 1000)
+        .unwrap();
     ctrl.stores
         .db_data
-        .upsert("items", &replica_id, b"{}", 1000);
+        .upsert("items", &replica_id, b"{}", 1000)
+        .unwrap();
 
     assert_eq!(ctrl.db_list("items").len(), 2);
 
@@ -1930,7 +1931,8 @@ async fn fk_reverse_lookup_ignores_stale_replica_data() {
         "users",
         "id",
         OnDeleteAction::Restrict,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk).await.unwrap();
 
     let user_data = serde_json::to_vec(&serde_json::json!({"name": "Alice"})).unwrap();
@@ -1946,7 +1948,8 @@ async fn fk_reverse_lookup_ignores_stale_replica_data() {
     let post_bytes = serde_json::to_vec(&post_data).unwrap();
     ctrl.stores
         .db_data
-        .upsert("posts", &replica_post_id, &post_bytes, 1000);
+        .upsert("posts", &replica_post_id, &post_bytes, 1000)
+        .unwrap();
 
     assert_eq!(ctrl.db_list("posts").len(), 1);
 
@@ -1980,7 +1983,8 @@ async fn fk_reverse_lookup_finds_primary_partition_data() {
         "users",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk).await.unwrap();
 
     let user_data = serde_json::to_vec(&serde_json::json!({"name": "Alice"})).unwrap();
@@ -2028,7 +2032,8 @@ async fn fk_reverse_lookup_restrict_blocks_only_on_primary_data() {
         "users",
         "id",
         OnDeleteAction::Restrict,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk).await.unwrap();
 
     let user_data = serde_json::to_vec(&serde_json::json!({"name": "Alice"})).unwrap();
@@ -2053,12 +2058,15 @@ async fn fk_reverse_lookup_restrict_blocks_only_on_primary_data() {
     )
     .await
     .unwrap();
-    ctrl.stores.db_data.upsert(
-        "posts",
-        &replica_post_id,
-        &post_bytes(&replica_post_id),
-        1000,
-    );
+    ctrl.stores
+        .db_data
+        .upsert(
+            "posts",
+            &replica_post_id,
+            &post_bytes(&replica_post_id),
+            1000,
+        )
+        .unwrap();
 
     assert_eq!(ctrl.db_list("posts").len(), 2);
 
@@ -2090,7 +2098,8 @@ async fn setup_owned_posts_referencing_user(
         "users",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk).await.unwrap();
 
     let user = serde_json::to_vec(&serde_json::json!({"name": "Alice"})).unwrap();
@@ -2280,7 +2289,8 @@ async fn local_cascade_set_nulls_cross_owned_grandchild() {
         "users",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk_posts).await.unwrap();
     let fk_comments = ClusterConstraint::foreign_key(
         "comments",
@@ -2289,7 +2299,8 @@ async fn local_cascade_set_nulls_cross_owned_grandchild() {
         "posts",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk_comments).await.unwrap();
 
     let user = serde_json::to_vec(&serde_json::json!({"name": "Alice"})).unwrap();
@@ -2375,7 +2386,8 @@ async fn setup_post_with_owned_and_cross_owned_comments(
         "posts",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk_comments).await.unwrap();
 
     let post = serde_json::to_vec(&serde_json::json!({
@@ -2570,7 +2582,8 @@ async fn circular_fk_cascade_terminates() {
         "beta",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     let fk_b_to_a = ClusterConstraint::foreign_key(
         "beta",
         "beta_alpha_fk",
@@ -2578,7 +2591,8 @@ async fn circular_fk_cascade_terminates() {
         "alpha",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk_a_to_b).await.unwrap();
     ctrl.constraint_add(&fk_b_to_a).await.unwrap();
 
@@ -2626,7 +2640,8 @@ async fn three_way_circular_fk_cascade_terminates() {
         "bbb",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     let fk_b_c = ClusterConstraint::foreign_key(
         "bbb",
         "bbb_ccc_fk",
@@ -2634,7 +2649,8 @@ async fn three_way_circular_fk_cascade_terminates() {
         "ccc",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     let fk_c_a = ClusterConstraint::foreign_key(
         "ccc",
         "ccc_aaa_fk",
@@ -2642,7 +2658,8 @@ async fn three_way_circular_fk_cascade_terminates() {
         "aaa",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk_a_b).await.unwrap();
     ctrl.constraint_add(&fk_b_c).await.unwrap();
     ctrl.constraint_add(&fk_c_a).await.unwrap();
@@ -3154,3 +3171,135 @@ async fn forwarded_delete_cascade_events_carry_the_deleters_origin() {
 mod change_events;
 mod forwarded_write;
 mod partition_map;
+
+#[tokio::test]
+async fn forwarded_create_refuses_an_id_longer_than_the_record_id_limit() {
+    use crate::cluster::protocol::JsonDbOp;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    make_all_primary(&mut ctrl, node1);
+    let long_id = "L".repeat(70_000);
+    let partition = crate::cluster::db::data_partition("items", &long_id);
+
+    let request = forwarded_request(
+        JsonDbOp::Create,
+        "items",
+        None,
+        &serde_json::json!({"id": long_id, "v": 1}),
+    );
+    ctrl.handle_json_db_request(node2, partition, &request)
+        .await;
+
+    assert!(ctrl.db_get("items", &long_id).is_none());
+    let responses: Vec<serde_json::Value> = ctrl
+        .transport()
+        .sent_messages()
+        .into_iter()
+        .filter_map(|(to, message)| match message {
+            ClusterMessage::JsonDbResponse(response) if to == node2 => {
+                serde_json::from_slice(&response.payload).ok()
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(responses.len(), 1, "{responses:?}");
+    assert_eq!(responses[0]["status"], "error");
+    assert_eq!(responses[0]["code"], 400);
+}
+
+#[tokio::test]
+async fn remote_unique_reserve_refuses_a_value_too_large_to_store() {
+    use crate::cluster::protocol::{UniqueReserveRequest, UniqueReserveStatus};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    make_all_primary(&mut ctrl, node1);
+    let value = serde_json::to_vec(&serde_json::json!("c".repeat(40_000))).unwrap();
+    let request = UniqueReserveRequest::create(
+        7,
+        "users",
+        "code",
+        &value,
+        "u1",
+        "req-1",
+        crate::cluster::db::data_partition("users", "u1"),
+        30_000,
+    );
+
+    ctrl.handle_unique_reserve_request(node2, &request).await;
+
+    assert!(ctrl.stores().unique_get("users", "code", &value).is_none());
+    let statuses: Vec<UniqueReserveStatus> = ctrl
+        .transport()
+        .sent_messages()
+        .into_iter()
+        .filter_map(|(to, message)| match message {
+            ClusterMessage::UniqueReserveResponse(response) if to == node2 => {
+                Some(response.status())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(statuses, [UniqueReserveStatus::Error]);
+}
+
+#[tokio::test]
+async fn fk_check_refuses_a_reference_too_long_to_be_a_record_id() {
+    use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    let parent_id = "p".repeat(70_000);
+    setup_all_primary_except(
+        &mut ctrl,
+        node1,
+        crate::cluster::db::data_partition("parents", &parent_id),
+        node2,
+    );
+    ctrl.constraint_add(
+        &ClusterConstraint::foreign_key(
+            "children",
+            "fk_parent",
+            "parent_id",
+            "parents",
+            "id",
+            OnDeleteAction::Restrict,
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let result = ctrl
+        .start_fk_existence_check("children", &serde_json::json!({"parent_id": parent_id}))
+        .await;
+
+    assert!(result.is_err());
+    assert!(
+        ctrl.transport()
+            .sent_messages()
+            .iter()
+            .all(|(_, message)| !matches!(message, ClusterMessage::FkCheckRequest(_)))
+    );
+}
+
+#[tokio::test]
+async fn constraint_add_refuses_a_constraint_too_large_to_store() {
+    use crate::cluster::db::ClusterConstraint;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    make_all_primary(&mut ctrl, node1);
+    let long_name = "n".repeat(65_530);
+
+    let result = ctrl
+        .constraint_add(&ClusterConstraint::unique("users", &long_name, "email").unwrap())
+        .await;
+
+    assert!(result.is_err());
+    assert!(ctrl.constraint_list("users").is_empty());
+}

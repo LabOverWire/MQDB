@@ -192,6 +192,10 @@ impl From<Error> for Response {
         let (code, message) = match &e {
             Error::NotFound { entity, .. } => (ErrorCode::NotFound, format!("not found: {entity}")),
             Error::Validation(msg) => (ErrorCode::BadRequest, format!("validation error: {msg}")),
+            Error::KeyTooLarge(_) => (
+                ErrorCode::BadRequest,
+                "value too large to store".to_string(),
+            ),
             Error::SchemaViolation { field, reason, .. } => (
                 ErrorCode::BadRequest,
                 format!("schema validation failed: {field} - {reason}"),

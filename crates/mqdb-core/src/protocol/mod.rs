@@ -95,8 +95,8 @@ pub enum AdminOperation {
     PasswordResetSubmit,
 }
 
-const MAX_ENTITY_NAME_LEN: usize = 128;
-const MAX_RECORD_ID_LEN: usize = 512;
+pub const MAX_ENTITY_NAME_LEN: usize = 128;
+pub const MAX_RECORD_ID_LEN: usize = 512;
 const MAX_PAYLOAD_SIZE: usize = 4 * 1024 * 1024;
 
 fn is_valid_entity_name(name: &str) -> bool {

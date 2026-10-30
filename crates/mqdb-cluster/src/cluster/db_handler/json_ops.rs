@@ -561,7 +561,6 @@ impl DbRequestHandler {
         None
     }
 
-    #[allow(clippy::cast_possible_truncation)]
     async fn handle_json_create<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -585,6 +584,10 @@ impl DbRequestHandler {
         }
 
         if let Some(err) = Self::validate_against_schema(controller, entity, &data) {
+            return JsonOpResult::Response(err);
+        }
+
+        if let Some(err) = Self::reject_oversized_create(entity, &data) {
             return JsonOpResult::Response(err);
         }
 

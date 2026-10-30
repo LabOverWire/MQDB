@@ -375,6 +375,27 @@ impl ClusteredAgent {
         ))
     }
 
+    fn constraint_too_large() -> Response {
+        Response::error(
+            ErrorCode::BadRequest,
+            crate::cluster::db::ConstraintStoreError::TooLarge.to_string(),
+        )
+    }
+
+    fn constraint_add_response(
+        result: Result<(), crate::cluster::db::ConstraintStoreError>,
+        message: &str,
+    ) -> Response {
+        match result {
+            Ok(()) => Response::ok(json!({ "message": message })),
+            Err(crate::cluster::db::ConstraintStoreError::AlreadyExists) => {
+                Response::error(ErrorCode::Conflict, "constraint already exists")
+            }
+            Err(crate::cluster::db::ConstraintStoreError::TooLarge) => Self::constraint_too_large(),
+            Err(e) => Response::error(ErrorCode::Internal, e.to_string()),
+        }
+    }
+
     async fn handle_constraint_add(&self, entity: &str, payload: &[u8]) -> Response {
         let constraint_def: serde_json::Value = match serde_json::from_slice(payload) {
             Ok(v) => v,
@@ -415,15 +436,16 @@ impl ClusteredAgent {
 
         match constraint_type {
             "unique" => {
-                let constraint = crate::cluster::db::ClusterConstraint::unique(entity, name, field);
+                let Some(constraint) =
+                    crate::cluster::db::ClusterConstraint::unique(entity, name, field)
+                else {
+                    return Self::constraint_too_large();
+                };
                 let mut ctrl = self.controller.write().await;
-                match ctrl.constraint_add(&constraint).await {
-                    Ok(()) => Response::ok(json!({"message": "constraint added"})),
-                    Err(crate::cluster::db::ConstraintStoreError::AlreadyExists) => {
-                        Response::error(ErrorCode::Conflict, "constraint already exists")
-                    }
-                    Err(e) => Response::error(ErrorCode::Internal, e.to_string()),
-                }
+                Self::constraint_add_response(
+                    ctrl.constraint_add(&constraint).await,
+                    "constraint added",
+                )
             }
             "fk" | "foreign_key" => {
                 let target_entity = constraint_def
@@ -460,22 +482,21 @@ impl ClusteredAgent {
                     return Response::error(ErrorCode::BadRequest, msg);
                 }
 
-                let constraint = crate::cluster::db::ClusterConstraint::foreign_key(
+                let Some(constraint) = crate::cluster::db::ClusterConstraint::foreign_key(
                     entity,
                     name,
                     field,
                     target_entity,
                     target_field,
                     on_delete,
-                );
+                ) else {
+                    return Self::constraint_too_large();
+                };
                 let mut ctrl = self.controller.write().await;
-                match ctrl.constraint_add(&constraint).await {
-                    Ok(()) => Response::ok(json!({"message": "FK constraint added"})),
-                    Err(crate::cluster::db::ConstraintStoreError::AlreadyExists) => {
-                        Response::error(ErrorCode::Conflict, "constraint already exists")
-                    }
-                    Err(e) => Response::error(ErrorCode::Internal, e.to_string()),
-                }
+                Self::constraint_add_response(
+                    ctrl.constraint_add(&constraint).await,
+                    "FK constraint added",
+                )
             }
             _ => Response::error(
                 ErrorCode::BadRequest,

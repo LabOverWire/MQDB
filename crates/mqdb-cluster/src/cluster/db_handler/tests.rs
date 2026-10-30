@@ -331,7 +331,7 @@ async fn unsealed_partition_reserve_is_retryable_not_a_conflict() {
     for i in 0..NUM_PARTITIONS {
         ctrl.become_primary(PartitionId::new(i).unwrap(), Epoch::new(1));
     }
-    ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_email", "email"))
+    ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
         .await
         .unwrap();
 
@@ -582,7 +582,7 @@ async fn delete_releases_unique_claim() {
     let node1 = NodeId::validated(1).unwrap();
     let handler = DbRequestHandler::new(node1);
     let mut ctrl = setup_controller_all_partitions();
-    ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_email", "email"))
+    ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
         .await
         .unwrap();
 
@@ -625,7 +625,7 @@ async fn ttl_reap_releases_unique_claim_and_removes_row() {
     use super::super::db::ClusterConstraint;
 
     let mut ctrl = setup_controller_all_partitions();
-    ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_email", "email"))
+    ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
         .await
         .unwrap();
 
@@ -1251,7 +1251,8 @@ async fn fk_create_with_valid_reference() {
         "users",
         "id",
         OnDeleteAction::Restrict,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk).await.unwrap();
 
     let payload = serde_json::to_vec(&serde_json::json!({
@@ -1296,7 +1297,8 @@ async fn fk_create_with_invalid_reference() {
         "users",
         "id",
         OnDeleteAction::Restrict,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk).await.unwrap();
 
     let payload = serde_json::to_vec(&serde_json::json!({
@@ -1356,7 +1358,8 @@ async fn fk_update_to_invalid_reference() {
         "users",
         "id",
         OnDeleteAction::Restrict,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk).await.unwrap();
 
     let update_payload =
@@ -1415,7 +1418,8 @@ async fn fk_delete_restrict_blocks() {
         "users",
         "id",
         OnDeleteAction::Restrict,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk).await.unwrap();
 
     let response = handler
@@ -1472,7 +1476,8 @@ async fn fk_delete_cascade_removes_children() {
         "users",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk).await.unwrap();
 
     let response = handler
@@ -1529,17 +1534,20 @@ async fn cascade_delete_releases_child_unique_claim() {
         .reassert("posts", "slug", &slug, "p1", rec.partition(), 1000);
     assert!(ctrl.stores().unique_get("posts", "slug", &slug).is_some());
 
-    ctrl.constraint_add(&ClusterConstraint::unique("posts", "posts_slug", "slug"))
+    ctrl.constraint_add(&ClusterConstraint::unique("posts", "posts_slug", "slug").unwrap())
         .await
         .unwrap();
-    ctrl.constraint_add(&ClusterConstraint::foreign_key(
-        "posts",
-        "posts_author_fk",
-        "author_id",
-        "users",
-        "id",
-        OnDeleteAction::Cascade,
-    ))
+    ctrl.constraint_add(
+        &ClusterConstraint::foreign_key(
+            "posts",
+            "posts_author_fk",
+            "author_id",
+            "users",
+            "id",
+            OnDeleteAction::Cascade,
+        )
+        .unwrap(),
+    )
     .await
     .unwrap();
 
@@ -1595,7 +1603,8 @@ async fn fk_delete_set_null_nullifies_children() {
         "users",
         "id",
         OnDeleteAction::SetNull,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk).await.unwrap();
 
     let response = handler
@@ -1639,7 +1648,8 @@ async fn fk_create_with_null_fk_field_allowed() {
         "users",
         "id",
         OnDeleteAction::Restrict,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk).await.unwrap();
 
     let payload = serde_json::to_vec(&serde_json::json!({
@@ -1689,7 +1699,8 @@ async fn fk_delete_restrict_allows_when_no_references() {
         "users",
         "id",
         OnDeleteAction::Restrict,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk).await.unwrap();
 
     let response = handler
@@ -1749,7 +1760,8 @@ async fn fk_delete_cascade_multilevel() {
         "users",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk_posts).await.unwrap();
 
     let fk_comments = ClusterConstraint::foreign_key(
@@ -1759,7 +1771,8 @@ async fn fk_delete_cascade_multilevel() {
         "posts",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk_comments).await.unwrap();
 
     let response = handler
@@ -1804,7 +1817,8 @@ async fn fk_delete_cascade_circular_no_infinite_loop() {
         "entity_b",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk_a_to_b).await.unwrap();
 
     let fk_b_to_a = ClusterConstraint::foreign_key(
@@ -1814,7 +1828,8 @@ async fn fk_delete_cascade_circular_no_infinite_loop() {
         "entity_a",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk_b_to_a).await.unwrap();
 
     let response = handler
@@ -1871,7 +1886,8 @@ async fn fk_delete_cascade_depth_limit_exceeded() {
             &prev_entity,
             "id",
             OnDeleteAction::Cascade,
-        );
+        )
+        .unwrap();
         ctrl.constraint_add(&fk).await.unwrap();
     }
 
@@ -1927,7 +1943,8 @@ async fn fk_set_null_skips_when_fk_field_changed() {
         "users",
         "id",
         OnDeleteAction::SetNull,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk).await.unwrap();
 
     let update_payload = serde_json::to_vec(&serde_json::json!({"author_id": "b"})).unwrap();
@@ -1979,7 +1996,8 @@ async fn fk_create_with_absent_fk_field_allowed() {
         "users",
         "id",
         OnDeleteAction::Restrict,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk).await.unwrap();
 
     let payload = serde_json::to_vec(&serde_json::json!({
@@ -2034,7 +2052,8 @@ async fn fk_create_with_multiple_constraints_validates_all() {
         "users",
         "id",
         OnDeleteAction::Restrict,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk_author).await.unwrap();
 
     let fk_cat = ClusterConstraint::foreign_key(
@@ -2044,7 +2063,8 @@ async fn fk_create_with_multiple_constraints_validates_all() {
         "categories",
         "id",
         OnDeleteAction::Restrict,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk_cat).await.unwrap();
 
     let valid = serde_json::to_vec(&serde_json::json!({
@@ -2549,7 +2569,8 @@ async fn cluster_cascade_share_grants_closure() {
         "diagrams",
         "id",
         OnDeleteAction::Restrict,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk).await.unwrap();
 
     for (id, parent) in [("d3", None), ("d2", Some("d3")), ("d1", Some("d2"))] {
@@ -2613,7 +2634,8 @@ async fn fk_delete_cascade_with_no_children_succeeds() {
         "users",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk).await.unwrap();
 
     let response = handler
@@ -3858,7 +3880,8 @@ async fn author_with_post(ctrl: &mut NodeController<MockTransport>) {
         "users",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk).await.unwrap();
     assert_ne!(data_partition("users", "u1"), data_partition("posts", "p1"));
 }
@@ -4046,7 +4069,7 @@ async fn a_cascade_refused_by_its_receiver_is_not_acked() {
 async fn a_forwarded_unique_create_on_a_node_that_lost_the_partition_is_refused_before_reserving() {
     use super::super::db::ClusterConstraint;
     let mut ctrl = setup_controller_all_partitions();
-    ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_email", "email"))
+    ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
         .await
         .unwrap();
     let partition = data_partition("users", "r9");
@@ -4068,4 +4091,113 @@ async fn a_forwarded_unique_create_on_a_node_that_lost_the_partition_is_refused_
     assert_eq!(replies.len(), 1);
     assert_eq!(replies[0]["code"], 503);
     assert_eq!(ctrl.transport().outbox.lock().unwrap().len(), 1);
+}
+
+async fn json_create(
+    ctrl: &mut NodeController<MockTransport>,
+    entity: &str,
+    body: &serde_json::Value,
+) -> serde_json::Value {
+    let response = DbRequestHandler::new(NodeId::validated(1).unwrap())
+        .handle_publish(
+            ctrl,
+            &format!("$DB/{entity}/create"),
+            &serde_json::to_vec(body).unwrap(),
+            &MqttRequestContext {
+                response_topic: Some("resp/t"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
+        )
+        .await;
+    match response {
+        super::DbPublishResult::Response(response) => parse_json_response(&response.payload),
+        super::DbPublishResult::NoResponse => serde_json::json!({"result": "no response"}),
+        super::DbPublishResult::PendingUniqueCheck(_)
+        | super::DbPublishResult::PendingFkCheck(_)
+        | super::DbPublishResult::PendingFkDelete(_) => serde_json::json!({"result": "pending"}),
+    }
+}
+
+#[tokio::test]
+async fn json_create_refuses_an_id_longer_than_the_record_id_limit() {
+    let mut ctrl = setup_controller_all_partitions();
+    let limit = mqdb_core::protocol::MAX_RECORD_ID_LEN;
+
+    for long_id in ["L".repeat(70_000), "m".repeat(limit + 1)] {
+        let json = json_create(
+            &mut ctrl,
+            "items",
+            &serde_json::json!({"id": long_id, "v": 1}),
+        )
+        .await;
+        assert_eq!(json["status"], "error", "id of {} bytes", long_id.len());
+        assert_eq!(json["code"], 400, "id of {} bytes", long_id.len());
+        assert!(ctrl.db_get("items", &long_id).is_none());
+    }
+
+    let at_limit = "k".repeat(limit);
+    let json = json_create(
+        &mut ctrl,
+        "items",
+        &serde_json::json!({"id": at_limit, "v": 1}),
+    )
+    .await;
+    assert_eq!(json["status"], "ok");
+    let stored = ctrl
+        .db_get("items", &at_limit)
+        .expect("record at the limit is stored");
+    let replicated = super::super::db::DbDataStore::deserialize(
+        &super::super::db::DbDataStore::serialize(&stored),
+    )
+    .expect("record decodes");
+    assert_eq!(replicated.id_str(), at_limit);
+}
+
+#[tokio::test]
+async fn json_create_refuses_a_unique_value_too_large_to_store() {
+    use super::super::db::ClusterConstraint;
+
+    let mut ctrl = setup_controller_all_partitions();
+    ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_code", "code").unwrap())
+        .await
+        .unwrap();
+
+    let code = "c".repeat(40_000);
+    let json = json_create(
+        &mut ctrl,
+        "users",
+        &serde_json::json!({"id": "u1", "code": code}),
+    )
+    .await;
+    assert_eq!(json["status"], "error");
+    assert_eq!(json["code"], 400);
+    assert!(ctrl.db_get("users", "u1").is_none());
+    let value = serde_json::to_vec(&serde_json::json!(code)).unwrap();
+    assert!(ctrl.stores().unique_get("users", "code", &value).is_none());
+
+    let json = json_create(
+        &mut ctrl,
+        "users",
+        &serde_json::json!({"id": "u2", "code": "short"}),
+    )
+    .await;
+    assert_ne!(json["status"], "error", "{json}");
+}
+
+#[tokio::test]
+async fn json_create_refuses_an_entity_name_longer_than_the_limit() {
+    let mut ctrl = setup_controller_all_partitions();
+    let limit = mqdb_core::protocol::MAX_ENTITY_NAME_LEN;
+
+    for entity in ["e".repeat(65_500), "e".repeat(limit + 1)] {
+        let json = json_create(&mut ctrl, &entity, &serde_json::json!({"id": "r1"})).await;
+        assert_eq!(json["code"], 400, "entity of {} bytes", entity.len());
+        assert!(ctrl.db_get(&entity, "r1").is_none());
+    }
+
+    let at_limit = "e".repeat(limit);
+    let json = json_create(&mut ctrl, &at_limit, &serde_json::json!({"id": "r1"})).await;
+    assert_eq!(json["status"], "ok");
 }
