@@ -42,14 +42,16 @@ upgrade. Every other request is handed to `mqtt5::broker::websocket_server::acce
 default `/mqtt` path and `mqtt` subprotocol, and the upgraded stream runs in an `mqtt5` `ClientHandler` built from the
 broker's router, auth provider, storage, stats and resource monitor.
 
-- The port accepts connections only once the agent is ready (broker, internal handler and event publisher), so
-  `/health` never reports `200` for a node that cannot serve requests yet. It reports startup readiness only and does
-  not track those internal tasks afterwards.
+- The port accepts connections only once the agent is ready (broker, internal handler with its response publisher,
+  and event publisher), so `/health` never reports `200` for a node that cannot serve requests yet. MQTT over
+  WebSocket depends on that readiness, unlike MQTT over TCP. `/health` reports startup readiness only and does not
+  track those internal tasks afterwards.
 - `/health` is answered before the broker's connection limits are checked; those limits apply to WebSocket upgrades.
-- Reading the request and completing the handshake must finish within 10 seconds, and at most 128 connections can be
-  in that phase at once; further connections wait in the kernel backlog.
-- Connections still in that phase are closed when the agent shuts down, and agent shutdown waits for every WebSocket
-  connection to close.
+- Reading the request and completing the handshake must finish within 10 seconds. At most 128 connections can be
+  between accept and the broker's CONNACK; the slot is released when the broker writes its first MQTT packet, or when
+  the connection closes. Further connections, `/health` probes included, wait in the kernel backlog.
+- Connections still in the handshake are closed when the agent shuts down, and agent shutdown waits up to 5 seconds
+  for every WebSocket connection to close.
 
 ---
 

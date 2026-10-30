@@ -350,15 +350,13 @@ async fn shutdown_during_a_connection_flood_stops_promptly() {
         let ws_port = agent.ws_port;
         let (halfway_tx, halfway_rx) = std::sync::mpsc::channel();
         let flood = std::thread::spawn(move || {
-            let mut held = Vec::with_capacity(60);
-            for index in 0..60 {
-                if let Ok(stream) = std::net::TcpStream::connect(("127.0.0.1", ws_port)) {
-                    held.push(stream);
-                }
+            let held: [Option<std::net::TcpStream>; 60] = std::array::from_fn(|index| {
+                let stream = std::net::TcpStream::connect(("127.0.0.1", ws_port)).ok();
                 if index == 30 {
                     let _ = halfway_tx.send(());
                 }
-            }
+                stream
+            });
             held
         });
         tokio::task::spawn_blocking(move || halfway_rx.recv())
@@ -377,4 +375,116 @@ async fn shutdown_during_a_connection_flood_stops_promptly() {
         drop(held);
         drop(agent.db_dir);
     }
+}
+
+const STALLED_CONNECT_FRAME: [u8; 22] = [
+    0x82, 0x90, 0, 0, 0, 0, 0x10, 14, 0, 4, b'M', b'Q', b'T', b'T', 5, 0x02, 0, 0, 0, 0, 1, b's',
+];
+
+const STALLED_SUBSCRIBE_FRAME: [u8; 21] = [
+    0x82, 0x8f, 0, 0, 0, 0, 0x82, 13, 0, 1, 0, 0, 7, b's', b't', b'a', b'l', b'l', b'/', b't', 0,
+];
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stop_is_not_held_by_a_client_that_stopped_reading() {
+    let agent = start_agent_with_ws().await;
+    let mut stalled = TcpStream::connect(("127.0.0.1", agent.ws_port))
+        .await
+        .unwrap();
+    stalled
+        .write_all(format!("GET /mqtt HTTP/1.1\r\n{UPGRADE_HEADERS}\r\n").as_bytes())
+        .await
+        .unwrap();
+    assert!(
+        read_until_head_end(&mut stalled)
+            .await
+            .starts_with("HTTP/1.1 101")
+    );
+    stalled.write_all(&STALLED_CONNECT_FRAME).await.unwrap();
+    stalled.write_all(&STALLED_SUBSCRIBE_FRAME).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let publisher = MqttClient::new("stall-publisher");
+    publisher
+        .connect(&format!("ws://127.0.0.1:{}/mqtt", agent.ws_port))
+        .await
+        .unwrap();
+    let payload = vec![b'p'; 16 * 1024];
+    for _ in 0..2000 {
+        publisher
+            .publish_qos1("stall/t", payload.clone())
+            .await
+            .unwrap();
+    }
+
+    let started = std::time::Instant::now();
+    let _ = agent.shutdown.send(());
+    let stopped = tokio::time::timeout(Duration::from_secs(20), agent.handle).await;
+    let elapsed = started.elapsed();
+    assert!(
+        stopped.is_ok() && elapsed < Duration::from_secs(8),
+        "agent stop took {elapsed:?} behind a WebSocket client that stopped reading"
+    );
+    drop(stalled);
+    drop(agent.db_dir);
+}
+
+async fn upgrade_only(port: u16) -> (TcpStream, String) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    stream
+        .write_all(format!("GET /mqtt HTTP/1.1\r\n{UPGRADE_HEADERS}\r\n").as_bytes())
+        .await
+        .unwrap();
+    let head = read_until_head_end(&mut stream).await;
+    (stream, head)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn upgraded_connections_without_connect_keep_their_handshake_slot() {
+    let agent = start_agent_with_ws().await;
+    let mut silent: [Option<TcpStream>; 128] = std::array::from_fn(|_| None);
+    for slot in &mut silent {
+        let (stream, head) = upgrade_only(agent.ws_port).await;
+        assert!(head.starts_with("HTTP/1.1 101"));
+        *slot = Some(stream);
+    }
+
+    let mut next = TcpStream::connect(("127.0.0.1", agent.ws_port))
+        .await
+        .unwrap();
+    next.write_all(format!("GET /mqtt HTTP/1.1\r\n{UPGRADE_HEADERS}\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut first = [0u8; 1];
+    let early = tokio::time::timeout(Duration::from_secs(2), next.read(&mut first)).await;
+    assert!(
+        early.is_err(),
+        "a connection must wait while 128 upgraded connections have not sent CONNECT"
+    );
+
+    drop(silent);
+    let head = read_until_head_end(&mut next).await;
+    assert!(
+        head.starts_with("HTTP/1.1 101"),
+        "the waiting connection must upgrade once slots free: {head:?}"
+    );
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn connected_sessions_release_their_handshake_slot() {
+    let agent = start_agent_with_ws().await;
+    let url = format!("ws://127.0.0.1:{}/mqtt", agent.ws_port);
+    let clients: [MqttClient; 130] =
+        std::array::from_fn(|index| MqttClient::new(format!("slot-release-{index}")));
+    for client in &clients {
+        tokio::time::timeout(Duration::from_secs(3), client.connect(&url))
+            .await
+            .expect("an MQTT session must not keep a handshake slot after its CONNACK")
+            .unwrap();
+    }
+    for client in &clients {
+        client.disconnect().await.unwrap();
+    }
+    agent.stop().await;
 }

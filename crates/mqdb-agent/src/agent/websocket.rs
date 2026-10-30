@@ -16,8 +16,10 @@ use mqtt5::broker::websocket_server::{
 use mqtt5::time::Duration;
 use std::io::Cursor;
 use std::net::SocketAddr;
-use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, Chain, Join};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Chain, Join, ReadBuf};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, watch};
@@ -27,11 +29,14 @@ const MAX_REQUEST_HEAD: usize = 8192;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_PENDING_HANDSHAKES: usize = 128;
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+const BINARY_FRAME: u8 = 0x82;
 const HEAD_TERMINATOR: &[u8] = b"\r\n\r\n";
 const HEALTH_PATH: &[u8] = b"/health";
 const HEALTH_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"status\":\"ok\"}";
 
-type ReplayedStream = Join<Chain<Cursor<Box<[u8]>>, OwnedReadHalf>, OwnedWriteHalf>;
+type ReplayedStream = ConnectGate<Join<Chain<Cursor<Box<[u8]>>, OwnedReadHalf>, OwnedWriteHalf>>;
+type PermitSlot = Arc<Mutex<Option<OwnedSemaphorePermit>>>;
 
 pub(super) struct WebSocketListener {
     listener: TcpListener,
@@ -46,6 +51,11 @@ struct WebSocketBroker {
     storage: Option<Arc<DynamicStorage>>,
     stats: Arc<BrokerStats>,
     resource_monitor: Arc<ResourceMonitor>,
+}
+
+struct ConnectGate<S> {
+    inner: S,
+    permit: PermitSlot,
 }
 
 struct RequestHead {
@@ -136,7 +146,12 @@ impl WebSocketListener {
             drop(listener);
             let _ = connection_shutdown_tx.send(());
             drop(open_tx);
-            closed_rx.recv().await;
+            if tokio::time::timeout(DRAIN_TIMEOUT, closed_rx.recv())
+                .await
+                .is_err()
+            {
+                warn!("timed out waiting for WebSocket connections to close");
+            }
         })
     }
 }
@@ -153,14 +168,17 @@ impl WebSocketBroker {
         if let Err(e) = stream.set_nodelay(true) {
             warn!(error = %e, "failed to set TCP_NODELAY on accepted socket");
         }
+        let permit_slot = PermitSlot::default();
         let upgraded = tokio::select! {
-            upgraded = tokio::time::timeout(HANDSHAKE_TIMEOUT, self.upgrade(stream, addr)) => upgraded,
+            upgraded = tokio::time::timeout(
+                HANDSHAKE_TIMEOUT,
+                self.upgrade(stream, addr, Arc::clone(&permit_slot)),
+            ) => upgraded,
             _ = shutdown_rx.recv() => {
                 debug!("WebSocket connection closed by shutdown before its handshake finished");
                 return;
             }
         };
-        drop(pending_permit);
         let ws_stream = match upgraded {
             Ok(Some(ws_stream)) => ws_stream,
             Ok(None) => return,
@@ -169,6 +187,10 @@ impl WebSocketBroker {
                 return;
             }
         };
+        if let Ok(mut slot) = permit_slot.lock() {
+            *slot = Some(pending_permit);
+        }
+        drop(permit_slot);
 
         let handler = ClientHandler::new(
             BrokerTransport::websocket(ws_stream),
@@ -192,6 +214,7 @@ impl WebSocketBroker {
         &self,
         mut stream: TcpStream,
         addr: SocketAddr,
+        permit: PermitSlot,
     ) -> Option<WebSocketStreamWrapper<ReplayedStream>> {
         let head = match RequestHead::read(&mut stream).await {
             Ok(head) => head,
@@ -214,14 +237,52 @@ impl WebSocketBroker {
         }
 
         let (read_half, write_half) = stream.into_split();
-        let replayed = tokio::io::join(head.into_reader().chain(read_half), write_half);
+        let replayed = ConnectGate {
+            inner: tokio::io::join(head.into_reader().chain(read_half), write_half),
+            permit,
+        };
         match accept_websocket_connection(replayed, &WebSocketServerConfig::new(), addr).await {
             Ok(ws_stream) => Some(ws_stream),
             Err(e) => {
-                error!(error = %e, "WebSocket handshake failed");
+                debug!(error = %e, "WebSocket handshake failed");
                 None
             }
         }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for ConnectGate<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for ConnectGate<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let written = Pin::new(&mut self.inner).poll_write(cx, buf);
+        if buf.first() == Some(&BINARY_FRAME)
+            && matches!(written, Poll::Ready(Ok(n)) if n > 0)
+            && let Ok(mut slot) = self.permit.lock()
+        {
+            slot.take();
+        }
+        written
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
 
