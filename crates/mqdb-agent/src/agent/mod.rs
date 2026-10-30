@@ -317,7 +317,17 @@ impl MqdbAgent {
         info!("MQDB Agent listening on {}", self.bind_address);
 
         let bind_addr = self.bind_address;
-        let (handler_ready_tx, handler_ready_rx) = oneshot::channel();
+        let (handler_ready_tx, publisher_ready_tx, agent_ready_rx) = match ws_listener
+            .as_ref()
+            .map(|_| ReadinessSignals::spawn(broker.ready_receiver()))
+        {
+            Some(signals) => (
+                Some(signals.handler),
+                Some(signals.publisher),
+                Some(signals.ready),
+            ),
+            None => (None, None, None),
+        };
         let handler_task = self.spawn_handler_task(
             bind_addr,
             service_username.clone(),
@@ -327,20 +337,14 @@ impl MqdbAgent {
                 authorizer: broker.auth_provider(),
             },
             broker.ready_receiver(),
-            Some(handler_ready_tx),
+            handler_ready_tx,
         );
-        let (publisher_ready_tx, publisher_ready_rx) = oneshot::channel();
         let event_task = self.spawn_event_task(
             bind_addr,
             service_username.clone(),
             service_password.clone(),
             broker.ready_receiver(),
-            Some(publisher_ready_tx),
-        );
-        let agent_ready_rx = spawn_ready_signal(
-            broker.ready_receiver(),
-            handler_ready_rx,
-            publisher_ready_rx,
+            publisher_ready_tx,
         );
         let presence_task = presence_rx.map(|rx| self.spawn_presence_task(broker.router(), rx));
         let http_task: Option<tokio::task::JoinHandle<()>> = {
@@ -359,8 +363,7 @@ impl MqdbAgent {
             }
         };
         let license_task = self.spawn_license_check_task();
-        let ws_task = ws_listener
-            .map(|listener| listener.spawn(&broker, self.shutdown_tx.clone(), agent_ready_rx));
+        let ws_task = self.spawn_websocket_task(ws_listener, &broker, agent_ready_rx);
 
         tokio::select! {
             result = broker.run() => result?,
@@ -435,7 +438,8 @@ impl MqdbAgent {
         info!("MQDB Agent listening on {}", self.bind_address);
 
         let bind_addr = self.bind_address;
-        let (handler_ready_tx, handler_ready_rx) = oneshot::channel();
+        let readiness = ReadinessSignals::spawn(broker.ready_receiver());
+        let ready_rx = readiness.ready.clone();
         let handler_task = self.spawn_handler_task(
             bind_addr,
             service_username.clone(),
@@ -445,15 +449,14 @@ impl MqdbAgent {
                 authorizer: broker.auth_provider(),
             },
             broker.ready_receiver(),
-            Some(handler_ready_tx),
+            Some(readiness.handler),
         );
-        let (publisher_ready_tx, publisher_ready_rx) = oneshot::channel();
         let event_task = self.spawn_event_task(
             bind_addr,
             service_username.clone(),
             service_password.clone(),
             broker.ready_receiver(),
-            Some(publisher_ready_tx),
+            Some(readiness.publisher),
         );
         let presence_task = presence_rx.map(|rx| self.spawn_presence_task(broker.router(), rx));
         let http_task: Option<tokio::task::JoinHandle<()>> = {
@@ -472,13 +475,7 @@ impl MqdbAgent {
             }
         };
         let license_task = self.spawn_license_check_task();
-        let ready_rx = spawn_ready_signal(
-            broker.ready_receiver(),
-            handler_ready_rx,
-            publisher_ready_rx,
-        );
-        let ws_task = ws_listener
-            .map(|listener| listener.spawn(&broker, self.shutdown_tx.clone(), ready_rx.clone()));
+        let ws_task = self.spawn_websocket_task(ws_listener, &broker, Some(readiness.ready));
 
         let mut shutdown_rx = shutdown_tx.subscribe();
         let handle = tokio::spawn(async move {
@@ -516,22 +513,32 @@ impl MqdbAgent {
     }
 }
 
-fn spawn_ready_signal(
-    mut broker_ready_rx: watch::Receiver<bool>,
-    handler_ready_rx: oneshot::Receiver<()>,
-    publisher_ready_rx: oneshot::Receiver<()>,
-) -> watch::Receiver<bool> {
-    let (ready_tx, ready_rx) = watch::channel(false);
-    tokio::spawn(async move {
-        if broker_ready_rx.wait_for(|ready| *ready).await.is_err()
-            || handler_ready_rx.await.is_err()
-            || publisher_ready_rx.await.is_err()
-        {
-            return;
+struct ReadinessSignals {
+    handler: oneshot::Sender<()>,
+    publisher: oneshot::Sender<()>,
+    ready: watch::Receiver<bool>,
+}
+
+impl ReadinessSignals {
+    fn spawn(mut broker_ready_rx: watch::Receiver<bool>) -> Self {
+        let (handler, handler_ready_rx) = oneshot::channel();
+        let (publisher, publisher_ready_rx) = oneshot::channel();
+        let (ready_tx, ready) = watch::channel(false);
+        tokio::spawn(async move {
+            if broker_ready_rx.wait_for(|ready| *ready).await.is_err()
+                || handler_ready_rx.await.is_err()
+                || publisher_ready_rx.await.is_err()
+            {
+                return;
+            }
+            let _ = ready_tx.send(true);
+        });
+        Self {
+            handler,
+            publisher,
+            ready,
         }
-        let _ = ready_tx.send(true);
-    });
-    ready_rx
+    }
 }
 
 pub(super) fn resolve_connect_address(bind_addr: SocketAddr) -> String {

@@ -206,17 +206,50 @@ async fn connection_mid_handshake_at_shutdown_gets_no_session() {
     agent.stop().await;
 
     let rest = format!("{UPGRADE_HEADERS}\r\n");
-    if stream.write_all(rest.as_bytes()).await.is_ok()
-        && read_until_head_end(&mut stream)
-            .await
-            .starts_with("HTTP/1.1 101")
-    {
-        let _ = stream.write_all(&MQTT_CONNECT_FRAME).await;
+    let mut received = Vec::new();
+    if stream.write_all(rest.as_bytes()).await.is_ok() {
+        let head = read_until_head_end(&mut stream).await;
+        if head.starts_with("HTTP/1.1 101") {
+            let _ = stream.write_all(&MQTT_CONNECT_FRAME).await;
+        }
+        received.extend_from_slice(head.as_bytes());
     }
+    let tail = read_until_closed(&mut stream, Duration::from_secs(3)).await;
     assert!(
-        closes_within(&mut stream, Duration::from_secs(3)).await,
+        tail.is_some(),
         "a connection still in its handshake at shutdown must be closed"
     );
+    received.extend(tail.unwrap_or_default());
+
+    assert!(
+        !String::from_utf8_lossy(&received).contains("101 Switching Protocols"),
+        "no WebSocket upgrade may complete after the agent stopped: {received:?}"
+    );
+    assert!(
+        !contains_connack_frame(&received),
+        "no MQTT session may be accepted after the agent stopped: {received:?}"
+    );
+}
+
+async fn read_until_closed(stream: &mut TcpStream, deadline: Duration) -> Option<Vec<u8>> {
+    let mut received = Vec::new();
+    let mut chunk = [0u8; 1024];
+    let reading = async {
+        loop {
+            match stream.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => received.extend_from_slice(&chunk[..n]),
+            }
+        }
+    };
+    tokio::time::timeout(deadline, reading).await.ok()?;
+    Some(received)
+}
+
+fn contains_connack_frame(bytes: &[u8]) -> bool {
+    bytes
+        .windows(3)
+        .any(|window| window[0] == 0x82 && window[2] == 0x20)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -308,4 +341,40 @@ async fn ws_bind_failure_names_the_websocket_listener() {
     );
     drop(taken);
     drop(tmp);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_during_a_connection_flood_stops_promptly() {
+    for attempt in 0..15 {
+        let agent = start_agent_with_ws().await;
+        let ws_port = agent.ws_port;
+        let (halfway_tx, halfway_rx) = std::sync::mpsc::channel();
+        let flood = std::thread::spawn(move || {
+            let mut held = Vec::with_capacity(60);
+            for index in 0..60 {
+                if let Ok(stream) = std::net::TcpStream::connect(("127.0.0.1", ws_port)) {
+                    held.push(stream);
+                }
+                if index == 30 {
+                    let _ = halfway_tx.send(());
+                }
+            }
+            held
+        });
+        tokio::task::spawn_blocking(move || halfway_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let _ = agent.shutdown.send(());
+        let started = std::time::Instant::now();
+        let stopped = tokio::time::timeout(Duration::from_secs(8), agent.handle).await;
+        let held = flood.join().unwrap();
+        assert!(
+            stopped.is_ok() && started.elapsed() < Duration::from_secs(3),
+            "attempt {attempt}: agent stop took {:?} behind connections accepted as shutdown was sent",
+            started.elapsed()
+        );
+        drop(held);
+        drop(agent.db_dir);
+    }
 }

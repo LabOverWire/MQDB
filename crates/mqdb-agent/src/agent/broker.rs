@@ -227,6 +227,16 @@ impl MqdbAgent {
         }
     }
 
+    pub(super) fn spawn_websocket_task(
+        &self,
+        listener: Option<WebSocketListener>,
+        broker: &MqttBroker,
+        agent_ready_rx: Option<tokio::sync::watch::Receiver<bool>>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let (listener, agent_ready_rx) = listener.zip(agent_ready_rx)?;
+        Some(listener.spawn(broker, self.shutdown_tx.clone(), agent_ready_rx))
+    }
+
     pub(super) async fn bind_websocket(
         &self,
         config: &BrokerConfig,

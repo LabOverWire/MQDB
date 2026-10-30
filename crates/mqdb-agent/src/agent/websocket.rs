@@ -17,20 +17,21 @@ use mqtt5::time::Duration;
 use std::io::Cursor;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, Chain, Join, Take};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, Chain, Join};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, watch};
 use tracing::{debug, error, info, instrument, warn};
 
 const MAX_REQUEST_HEAD: usize = 8192;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
+const MAX_PENDING_HANDSHAKES: usize = 128;
 const HEAD_TERMINATOR: &[u8] = b"\r\n\r\n";
 const HEALTH_PATH: &[u8] = b"/health";
 const HEALTH_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"status\":\"ok\"}";
 
-type ReplayedStream = Join<Chain<Take<Cursor<Box<[u8]>>>, OwnedReadHalf>, OwnedWriteHalf>;
+type ReplayedStream = Join<Chain<Cursor<Box<[u8]>>, OwnedReadHalf>, OwnedWriteHalf>;
 
 pub(super) struct WebSocketListener {
     listener: TcpListener,
@@ -48,7 +49,7 @@ struct WebSocketBroker {
 }
 
 struct RequestHead {
-    bytes: Box<[u8]>,
+    bytes: Box<[u8; MAX_REQUEST_HEAD]>,
     len: usize,
 }
 
@@ -96,30 +97,44 @@ impl WebSocketListener {
             }
             info!(health_path = "/health", "WebSocket listener accepting");
             let (open_tx, mut closed_rx) = mpsc::channel::<()>(1);
+            let (connection_shutdown_tx, _) = broadcast::channel::<()>(1);
+            let pending = Arc::new(Semaphore::new(MAX_PENDING_HANDSHAKES));
             loop {
-                tokio::select! {
-                    accepted = listener.accept() => match accepted {
-                        Ok((stream, addr)) => {
-                            let connection = ws_broker.clone();
-                            let connection_shutdown_rx = shutdown_tx.subscribe();
-                            let open = open_tx.clone();
-                            tokio::spawn(async move {
-                                connection.serve(stream, addr, connection_shutdown_rx).await;
-                                drop(open);
-                            });
-                        }
-                        Err(e) => {
-                            error!(error = %e, "WebSocket accept error");
-                            tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
-                        }
+                let permit = tokio::select! {
+                    biased;
+                    _ = shutdown_rx.recv() => break,
+                    permit = Arc::clone(&pending).acquire_owned() => match permit {
+                        Ok(permit) => permit,
+                        Err(_) => break,
                     },
-                    _ = shutdown_rx.recv() => {
-                        debug!("WebSocket listener shutting down");
-                        break;
+                };
+                let accepted = tokio::select! {
+                    biased;
+                    _ = shutdown_rx.recv() => break,
+                    accepted = listener.accept() => accepted,
+                };
+                match accepted {
+                    Ok((stream, addr)) => {
+                        let connection = ws_broker.clone();
+                        let connection_shutdown_rx = connection_shutdown_tx.subscribe();
+                        let open = open_tx.clone();
+                        tokio::spawn(async move {
+                            connection
+                                .serve(stream, addr, permit, connection_shutdown_rx)
+                                .await;
+                            drop(open);
+                        });
+                    }
+                    Err(e) => {
+                        error!(error = %e, "WebSocket accept error");
+                        drop(permit);
+                        tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
                     }
                 }
             }
+            debug!("WebSocket listener shutting down");
             drop(listener);
+            let _ = connection_shutdown_tx.send(());
             drop(open_tx);
             closed_rx.recv().await;
         })
@@ -132,6 +147,7 @@ impl WebSocketBroker {
         self,
         stream: TcpStream,
         addr: SocketAddr,
+        pending_permit: OwnedSemaphorePermit,
         mut shutdown_rx: broadcast::Receiver<()>,
     ) {
         if let Err(e) = stream.set_nodelay(true) {
@@ -144,6 +160,7 @@ impl WebSocketBroker {
                 return;
             }
         };
+        drop(pending_permit);
         let ws_stream = match upgraded {
             Ok(Some(ws_stream)) => ws_stream,
             Ok(None) => return,
@@ -211,7 +228,7 @@ impl WebSocketBroker {
 impl RequestHead {
     async fn read<S: AsyncRead + Unpin>(stream: &mut S) -> std::io::Result<Self> {
         let mut head = Self {
-            bytes: vec![0u8; MAX_REQUEST_HEAD].into_boxed_slice(),
+            bytes: Box::new([0u8; MAX_REQUEST_HEAD]),
             len: 0,
         };
         while head.len < MAX_REQUEST_HEAD {
@@ -242,9 +259,8 @@ impl RequestHead {
         method == Some(b"GET") && path == Some(HEALTH_PATH)
     }
 
-    fn into_reader(self) -> Take<Cursor<Box<[u8]>>> {
-        let len = self.len as u64;
-        Cursor::new(self.bytes).take(len)
+    fn into_reader(self) -> Cursor<Box<[u8]>> {
+        Cursor::new(Box::from(&self.bytes[..self.len]))
     }
 }
 
@@ -304,5 +320,13 @@ mod tests {
         let head = reading.await.unwrap().unwrap();
         assert_eq!(head.len, 24);
         assert!(head.is_health_request());
+    }
+
+    #[tokio::test]
+    async fn replay_reader_keeps_only_the_bytes_read() {
+        let request = b"GET /mqtt HTTP/1.1\r\nHost: x\r\n\r\n";
+        let head = head_of(request).await;
+        let reader = head.into_reader();
+        assert_eq!(reader.get_ref().len(), request.len());
     }
 }
