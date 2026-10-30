@@ -4,7 +4,7 @@
 >
 > **Agent mode.** The `_shares` entity, `AccessLevel`, and share-aware `check_access` live in `crates/mqdb-agent`.
 >
-> **Phase 5 (cluster), #75 and #122.** Phase 1 is ported in `crates/mqdb-cluster/src/cluster/node_controller/sharing.rs`, `crates/mqdb-cluster/src/cluster/db_handler/json_ops.rs` and `crates/mqdb-cluster/src/cluster/node_controller/db_ops.rs` (`check_forwarded_ownership` grades forwarded reads and updates):
+> **Phase 5 (cluster), #75 and #122.** Phase 1 is ported, apart from the gaps listed below, in `crates/mqdb-cluster/src/cluster/node_controller/sharing.rs`, `crates/mqdb-cluster/src/cluster/db_handler/json_ops.rs` and `crates/mqdb-cluster/src/cluster/node_controller/db_ops.rs` (`check_forwarded_ownership` grades forwarded reads and updates and keeps forwarded deletes owner-only):
 > - each grant is stored on its resource's partition
 > - share, unshare and shares, plus the view/edit checks on read and update, are resolved on the resource primary (README.md describes the 503 and stale-grant window while a partition changes primary)
 > - `shared` is a `_shares` list scattered to every node and hydrated
@@ -375,9 +375,10 @@ per deployment.
   which is stable, so **grants persist across transfer**; the new owner may revoke.
 - **Orphan cleanup:** deleting a diagram removes its `_shares` rows (FK `on_delete:
   Cascade` keyed by `(resource_entity, resource_id)`, or an explicit sweep in the
-  delete path). As built, only a direct delete (and a cluster TTL expiry) runs the
-  sweep; FK cascade deletes and agent TTL expiry leave the rows (see the status
-  block and #253).
+  delete path). As built, a direct delete, a cluster TTL expiry, and a cluster
+  FK cascade delete sent to another primary run the sweep. Agent FK cascade
+  deletes, cluster FK cascade deletes run on the record's primary, and agent TTL
+  expiry leave the rows (see the status block and #253).
 
 ---
 

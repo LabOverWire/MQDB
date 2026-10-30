@@ -88,10 +88,10 @@ The frontend should handle this gracefully — e.g., show a "you don't have perm
 
 ### 4. No Changes to Child Entities
 
-Child entities (nodes, edges, topics, schemas, variables, groups) do NOT need a `userId` field. They inherit isolation through their `diagramId` foreign key:
+Child entities (nodes, edges, topics, schemas, variables, groups) do NOT need a `userId` field. By default their isolation rests only on diagram ids being hard to find, not on any server check:
 
-1. User lists diagrams → only sees their own (ownership filter)
-2. User fetches nodes for a diagram → fetches by `diagramId` (which they own)
+1. User lists diagrams → only sees their own (ownership filter); diagrams shared with them come from `$DB/diagrams/shared`
+2. User fetches nodes for a diagram → fetches by `diagramId` (one they own or were granted)
 3. Other users can't discover diagram IDs (UUIDs, not enumerable)
 
 This means no changes to node/edge/topic creation or event subscriptions. Child records themselves are not access-controlled: any authenticated user who knows a child's id can read, edit or delete it, unless the server maps the child entity with `--ownership-derive`, which grades child access against the parent diagram. Child events stay on the shared topic unless the child is mapped with `--ownership-derive` and `--scoped-events` is also on; then they go only to the diagram's owner and grantees. Both flags are agent mode only.
