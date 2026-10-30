@@ -1,7 +1,10 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use mqtt5::broker::auth::{AuthProvider, AuthorizationMode, CompositeAuthProvider};
+use mqtt5::broker::auth::{
+    AuthProvider, AuthRateLimiter, AuthorizationMode, CompositeAuthProvider,
+    RateLimitedAuthProvider,
+};
 use mqtt5::broker::config::{
     AuthConfig, AuthMethod, FederatedJwtConfig, JwtConfig, RateLimitConfig,
 };
@@ -140,6 +143,34 @@ pub async fn configure_broker_auth(
 }
 
 #[must_use]
+pub fn take_auth_rate_limiter(auth_config: &mut AuthConfig) -> Option<Arc<AuthRateLimiter>> {
+    if !auth_config.rate_limit.enabled {
+        return None;
+    }
+    auth_config.rate_limit.enabled = false;
+    let limits = &auth_config.rate_limit;
+    Some(Arc::new(AuthRateLimiter::new(
+        limits.max_attempts,
+        limits.window_secs,
+        limits.lockout_secs,
+    )))
+}
+
+#[must_use]
+pub fn rate_limited(
+    provider: Arc<dyn AuthProvider>,
+    rate_limiter: Option<Arc<AuthRateLimiter>>,
+) -> Arc<dyn AuthProvider> {
+    match rate_limiter {
+        Some(rate_limiter) => {
+            info!("authentication rate limiting enabled");
+            Arc::new(RateLimitedAuthProvider::new(provider, rate_limiter))
+        }
+        None => provider,
+    }
+}
+
+#[must_use]
 pub fn enhanced_auth_with_fallback(
     auth_method: AuthMethod,
     enhanced: Arc<dyn AuthProvider>,
@@ -163,14 +194,16 @@ mod tests {
 
     #[tokio::test]
     async fn federated_clients_keep_the_roles_from_their_token() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = tempfile::TempDir::new().expect("temp dir");
         let acl_path = dir.path().join("acl");
         std::fs::write(
             &acl_path,
             "role writer topic sensors/# permission readwrite\n",
         )
-        .unwrap();
-        let federated_acl = AclManager::from_file(&acl_path).await.unwrap();
+        .expect("write acl file");
+        let federated_acl = AclManager::from_file(&acl_path)
+            .await
+            .expect("load federated acl");
         federated_acl
             .set_federated_roles(
                 "idp:alice",
@@ -183,11 +216,13 @@ mod tests {
             )
             .await;
         let federated = FederatedJwtAuthProvider::new(Vec::new())
-            .unwrap()
+            .expect("federated provider")
             .with_acl_manager(Arc::new(tokio::sync::RwLock::new(federated_acl)));
         let fallback = Arc::new(ComprehensiveAuthProvider::with_providers(
             PasswordAuthProvider::new(),
-            AclManager::from_file(&acl_path).await.unwrap(),
+            AclManager::from_file(&acl_path)
+                .await
+                .expect("load fallback acl"),
         ));
         let provider =
             enhanced_auth_with_fallback(AuthMethod::JwtFederated, Arc::new(federated), fallback);
@@ -206,7 +241,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_acl_fallback_still_authorizes_enhanced_auth_clients() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = tempfile::TempDir::new().expect("temp dir");
         let acl_path = dir.path().join("acl");
         std::fs::write(
             &acl_path,
@@ -216,8 +251,8 @@ mod tests {
              user * topic secret/# permission deny\n\
              user paysvc topic $DB/sale/# permission readwrite\n",
         )
-        .unwrap();
-        let acl = AclManager::from_file(&acl_path).await.unwrap();
+        .expect("write acl file");
+        let acl = AclManager::from_file(&acl_path).await.expect("load acl");
         let fallback = Arc::new(ComprehensiveAuthProvider::with_providers(
             PasswordAuthProvider::new(),
             acl,
@@ -249,11 +284,12 @@ mod tests {
 
     #[tokio::test]
     async fn password_mode_leaves_the_password_file_unchanged() {
-        let dir = tempfile::TempDir::new().unwrap();
+        let dir = tempfile::TempDir::new().expect("temp dir");
         let path = dir.path().join("passwd");
-        let hash = mqtt5::broker::PasswordAuthProvider::hash_password("admin").unwrap();
+        let hash =
+            mqtt5::broker::PasswordAuthProvider::hash_password("admin").expect("hash password");
         let original = format!("admin:{hash}\n");
-        std::fs::write(&path, &original).unwrap();
+        std::fs::write(&path, &original).expect("write password file");
 
         let config = AuthSetupConfig {
             password_file: Some(path.clone()),
@@ -263,10 +299,13 @@ mod tests {
         let mut auth_config = AuthConfig::default();
         let result = configure_broker_auth(&config, &mut auth_config)
             .await
-            .unwrap();
+            .expect("configure broker auth");
 
         assert!(result.service_username.is_some());
         assert!(result.service_password.is_some());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read password file"),
+            original
+        );
     }
 }

@@ -7,6 +7,7 @@ use crate::cluster::{
     NodeController, NodeId, ProcessingBatch, RoutedDeliveryLanes, TopicSubscriptionBroadcast,
     WildcardBroadcast,
 };
+use mqdb_agent::auth_config::AuthSetupResult;
 use mqtt5::broker::router::MessageRouter;
 use mqtt5::time::Duration;
 use std::sync::Arc;
@@ -24,9 +25,17 @@ impl ClusteredAgent {
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (bridge_configs, use_external_bridge_manager) = self.prepare_bridges()?;
 
-        let (broker_config, service_username, service_password, needs_composite, admin_users) =
-            self.configure_broker_with_event_handler(&bridge_configs, use_external_bridge_manager)
-                .await?;
+        let (
+            broker_config,
+            AuthSetupResult {
+                service_username,
+                service_password,
+                needs_composite,
+                admin_users,
+            },
+        ) = self
+            .configure_broker_with_event_handler(&bridge_configs, use_external_bridge_manager)
+            .await?;
 
         let (broker, auth_providers) = self
             .build_broker(

@@ -58,15 +58,13 @@ pub struct MqdbAgent {
 }
 
 impl MqdbAgent {
-    /// # Panics
-    /// Panics if the default bind address cannot be parsed (should never happen).
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn new(db: Database) -> Self {
         let (shutdown_tx, _) = broadcast::channel(1);
         let backup_dir = db.path().join("backups");
         Self {
             db: Arc::new(db),
-            bind_address: "127.0.0.1:1883".parse().unwrap(),
+            bind_address: SocketAddr::from(([127, 0, 0, 1], 1883)),
             shutdown_tx,
             auth_setup: AuthSetupConfig::default(),
             service_username: None,
@@ -270,12 +268,11 @@ impl MqdbAgent {
 
     #[cfg(feature = "http-api")]
     #[must_use]
-    #[allow(clippy::missing_panics_doc)]
     pub fn with_http_config(mut self, config: crate::http::HttpServerConfig) -> Self {
         self.identity_crypto.clone_from(&config.identity_crypto);
         self.session_store = Some(Arc::clone(&config.session_store));
         self.jti_revocation = Some(Arc::clone(&config.jti_revocation));
-        *self.http_config.lock().expect("http_config lock") = Some(config);
+        self.http_config = std::sync::Mutex::new(Some(config));
         self
     }
 
@@ -294,6 +291,7 @@ impl MqdbAgent {
         let (presence_rx, certificates) = self.apply_event_handlers(&mut config);
 
         let auth_method = config.auth_config.auth_method;
+        let rate_limiter = crate::auth_config::take_auth_rate_limiter(&mut config.auth_config);
         let broker = mqtt5::broker::MqttBroker::with_config(config).await?;
         let (mut broker, auth_providers) = Self::apply_auth_providers(
             broker,
@@ -309,6 +307,7 @@ impl MqdbAgent {
                 scoped_events: self.scoped_events,
                 event_scope_entity: self.scope_config.scope_entity(),
                 sparkplug_aware: self.sparkplug_aware,
+                rate_limiter,
             },
         )
         .await?;
@@ -398,6 +397,7 @@ impl MqdbAgent {
         let (presence_rx, certificates) = self.apply_event_handlers(&mut config);
 
         let auth_method = config.auth_config.auth_method;
+        let rate_limiter = crate::auth_config::take_auth_rate_limiter(&mut config.auth_config);
         let broker = mqtt5::broker::MqttBroker::with_config(config).await?;
         let (mut broker, auth_providers) = Self::apply_auth_providers(
             broker,
@@ -413,6 +413,7 @@ impl MqdbAgent {
                 scoped_events: self.scoped_events,
                 event_scope_entity: self.scope_config.scope_entity(),
                 sparkplug_aware: self.sparkplug_aware,
+                rate_limiter,
             },
         )
         .await?;
