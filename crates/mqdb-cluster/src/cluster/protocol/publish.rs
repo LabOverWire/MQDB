@@ -245,22 +245,7 @@ impl ForwardedPublish {
             )
         };
 
-        let share_groups = if offset == bytes.len() {
-            None
-        } else {
-            if bytes.len() < offset + 2 {
-                return None;
-            }
-            let group_count = usize::from(u16::from_be_bytes([bytes[offset], bytes[offset + 1]]));
-            let mut offset = offset + 2;
-            let mut groups = Vec::with_capacity(group_count);
-            for _ in 0..group_count {
-                let (group, next) = read_str16(bytes, offset)?;
-                offset = next;
-                groups.push(group);
-            }
-            Some(groups)
-        };
+        let share_groups = read_share_groups(bytes, offset);
 
         Some(Self {
             origin_node: NodeId::validated(origin_node)?,
@@ -275,6 +260,19 @@ impl ForwardedPublish {
             share_groups,
         })
     }
+}
+
+fn read_share_groups(bytes: &[u8], offset: usize) -> Option<Vec<String>> {
+    let count_bytes = bytes.get(offset..offset + 2)?;
+    let group_count = usize::from(u16::from_be_bytes([count_bytes[0], count_bytes[1]]));
+    let mut offset = offset + 2;
+    let mut groups = Vec::with_capacity(group_count.min(bytes.len()));
+    for _ in 0..group_count {
+        let (group, next) = read_str16(bytes, offset)?;
+        offset = next;
+        groups.push(group);
+    }
+    Some(groups)
 }
 
 fn put_str16(buf: &mut Vec<u8>, value: &str) {

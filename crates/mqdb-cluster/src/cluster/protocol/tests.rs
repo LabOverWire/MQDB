@@ -368,7 +368,7 @@ fn forwarded_publish_with_no_assigned_groups_is_told_to_serve_none() {
 }
 
 #[test]
-fn forwarded_publish_from_a_node_without_share_groups_selects_none() {
+fn forwarded_publish_from_a_node_without_share_groups_serves_every_group() {
     let origin = NodeId::validated(2).unwrap();
     let fwd = ForwardedPublish::new(origin, "sh/x".to_string(), 1, false, b"m".to_vec(), vec![])
         .with_user_properties(vec![("trace".to_string(), "1".to_string())]);
@@ -380,6 +380,20 @@ fn forwarded_publish_from_a_node_without_share_groups_selects_none() {
         decoded.user_properties,
         vec![("trace".to_string(), "1".to_string())]
     );
+}
+
+#[test]
+fn forwarded_publish_with_an_unreadable_share_trailer_still_decodes() {
+    let origin = NodeId::validated(2).unwrap();
+    let fwd = ForwardedPublish::new(origin, "sh/x".to_string(), 1, false, b"m".to_vec(), vec![])
+        .with_user_properties(vec![("trace".to_string(), "1".to_string())]);
+    let mut bytes = fwd.to_bytes();
+    bytes.extend_from_slice(&[0, 3, 0, 9, b'g']);
+
+    let decoded = ForwardedPublish::from_bytes(&bytes).unwrap();
+
+    assert_eq!(decoded.share_groups, None);
+    assert_eq!(decoded.payload, b"m");
 }
 
 #[test]

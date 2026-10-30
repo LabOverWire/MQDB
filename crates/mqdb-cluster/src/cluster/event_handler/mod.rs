@@ -23,6 +23,8 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
+const MAX_SHARE_ROTATIONS: usize = 4096;
+
 static RETAINED_SET_TOTAL: AtomicU64 = AtomicU64::new(0);
 static RETAINED_SET_SKIPPED: AtomicU64 = AtomicU64::new(0);
 static RETAINED_SET_PROCESSED: AtomicU64 = AtomicU64::new(0);
@@ -148,6 +150,9 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             .share_rotation
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        if rotations.len() > MAX_SHARE_ROTATIONS {
+            rotations.clear();
+        }
         assign_share_groups(
             &members,
             &served_locally(held, locate, self.node_id),
