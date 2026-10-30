@@ -695,7 +695,7 @@ async fn a_cascaded_child_loses_its_grants() {
 }
 
 #[tokio::test]
-async fn a_regrant_whose_new_grant_cannot_be_stored_keeps_the_old_one() {
+async fn a_regrant_interrupted_after_its_first_write_keeps_the_grantee_level() {
     let backend = FaultyBackend::shared();
     let mut ctrl = primary_of_every_partition(&backend);
     let handler = sharing_handler(&mut ctrl);
@@ -828,5 +828,262 @@ async fn a_binary_create_the_primary_cannot_store_is_refused() {
     assert_eq!(
         (status.status(), ctrl.db_list("items").len()),
         (DbStatus::Error, 0)
+    );
+}
+
+fn cascade_of(
+    target: &str,
+    ids: &[&str],
+) -> crate::cluster::node_controller::fk::FkReverseLookupResult {
+    crate::cluster::node_controller::fk::FkReverseLookupResult {
+        constraint_name: "posts_author_fk".to_string(),
+        source_entity: "posts".to_string(),
+        source_field: "author_id".to_string(),
+        on_delete: OnDeleteAction::Cascade,
+        referencing_ids: ids.iter().map(|id| (*id).to_string()).collect(),
+        cross_owned_ids: Vec::new(),
+        target_id: target.to_string(),
+    }
+}
+
+async fn finish_author_delete(
+    ctrl: &mut NodeController<MockTransport>,
+    results: Vec<crate::cluster::node_controller::fk::FkReverseLookupResult>,
+) -> Value {
+    let response = DbRequestHandler::new(node(1))
+        .complete_pending_fk_delete(
+            ctrl,
+            None,
+            results,
+            FkDeleteContinuation::DeleteFromDbHandler {
+                entity: "users".to_string(),
+                id: "u1".to_string(),
+                sender: None,
+                client_id: None,
+                response_topic: "resp/t".to_string(),
+                correlation_data: None,
+            },
+        )
+        .await
+        .unwrap();
+    serde_json::from_slice(&response.payload).unwrap()
+}
+
+fn cascade_delete_requests(ctrl: &NodeController<MockTransport>) -> Vec<Value> {
+    ctrl.transport
+        .sent_messages()
+        .into_iter()
+        .filter_map(|(_, message)| match message {
+            ClusterMessage::JsonDbRequest { request, .. }
+                if request.op == crate::cluster::protocol::JsonDbOp::Delete =>
+            {
+                Some(serde_json::from_slice(&request.payload).unwrap_or(Value::Null))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_cascade_spares_a_child_re_pointed_while_the_lookup_ran() {
+    let mut ctrl = primary_of_every_partition(&FaultyBackend::shared());
+    author_with_post(&mut ctrl).await;
+    let other = request(
+        &mut ctrl,
+        "$DB/users/create",
+        &json!({"id": "u9", "name": "b"}),
+    )
+    .await;
+    let moved = request(
+        &mut ctrl,
+        "$DB/posts/p1/update",
+        &json!({"author_id": "u9"}),
+    )
+    .await;
+    assert_eq!(
+        (&other["status"], &moved["status"]),
+        (&json!("ok"), &json!("ok"))
+    );
+
+    let deleted = finish_author_delete(&mut ctrl, vec![cascade_of("u1", &["p1"])]).await;
+
+    assert_eq!(
+        (
+            &deleted["data"]["deleted"],
+            ctrl.db_get("posts", "p1").is_some()
+        ),
+        (&json!(true), true)
+    );
+}
+
+#[tokio::test]
+async fn a_remote_cascade_delete_carries_its_guard() {
+    let mut ctrl = primary_of_every_partition(&FaultyBackend::shared());
+    let author = request(
+        &mut ctrl,
+        "$DB/users/create",
+        &json!({"id": "u1", "name": "a"}),
+    )
+    .await;
+    assert_eq!(author["status"], "ok");
+    hand_partition_to(
+        &mut ctrl,
+        crate::cluster::db::data_partition("posts", "p2"),
+        node(2),
+    );
+
+    let deleted = finish_author_delete(&mut ctrl, vec![cascade_of("u1", &["p2"])]).await;
+
+    assert_eq!(
+        (&deleted["data"]["deleted"], cascade_delete_requests(&ctrl)),
+        (
+            &json!(true),
+            vec![json!({"__mqdb_fk_expected": "author_id=u1"})]
+        )
+    );
+}
+
+fn cascade_delete_request(
+    entity: &str,
+    id: &str,
+    payload: &Value,
+) -> crate::cluster::protocol::JsonDbRequest {
+    crate::cluster::protocol::JsonDbRequest {
+        request_id: 7,
+        op: crate::cluster::protocol::JsonDbOp::Delete,
+        entity: entity.to_string(),
+        id: Some(id.to_string()),
+        payload: serde_json::to_vec(payload).unwrap(),
+        response_topic: "_mqdb/cascade_ack/2/7".to_string(),
+        correlation_data: None,
+        sender: None,
+        client_id: None,
+    }
+}
+
+#[tokio::test]
+async fn a_guarded_cascade_delete_spares_a_re_pointed_child() {
+    let mut ctrl = primary_of_every_partition(&FaultyBackend::shared());
+    author_with_post(&mut ctrl).await;
+    let other = request(
+        &mut ctrl,
+        "$DB/users/create",
+        &json!({"id": "u9", "name": "b"}),
+    )
+    .await;
+    let moved = request(
+        &mut ctrl,
+        "$DB/posts/p1/update",
+        &json!({"author_id": "u9"}),
+    )
+    .await;
+    assert_eq!(
+        (&other["status"], &moved["status"]),
+        (&json!("ok"), &json!("ok"))
+    );
+    let partition = crate::cluster::db::data_partition("posts", "p1");
+
+    ctrl.handle_json_db_request(
+        node(2),
+        partition,
+        &cascade_delete_request(
+            "posts",
+            "p1",
+            &json!({"__mqdb_fk_expected": "author_id=u1"}),
+        ),
+    )
+    .await;
+
+    assert!(ctrl.db_get("posts", "p1").is_some());
+}
+
+#[tokio::test]
+async fn a_guarded_cascade_delete_of_a_grant_is_applied() {
+    let mut ctrl = primary_of_every_partition(&FaultyBackend::shared());
+    let handler = sharing_handler(&mut ctrl);
+    shared_diagram(&mut ctrl, &handler).await;
+    let grant = ctrl.db_list("_shares")[0].id_str().to_string();
+    let partition = crate::cluster::db::data_partition("_shares", &grant);
+
+    ctrl.handle_json_db_request(
+        node(2),
+        partition,
+        &cascade_delete_request(
+            "_shares",
+            &grant,
+            &json!({"__mqdb_fk_expected": "resource_id=d1"}),
+        ),
+    )
+    .await;
+
+    assert!(ctrl.db_list("_shares").is_empty());
+}
+
+#[tokio::test]
+async fn a_replayed_cascade_spares_a_child_whose_reference_was_cleared() {
+    let mut ctrl = primary_of_every_partition(&FaultyBackend::shared());
+    let author = request(
+        &mut ctrl,
+        "$DB/users/create",
+        &json!({"id": "null", "name": "a"}),
+    )
+    .await;
+    let post = request(
+        &mut ctrl,
+        "$DB/posts/create",
+        &json!({"id": "p1", "author_id": null}),
+    )
+    .await;
+    assert_eq!(
+        (&author["status"], &post["status"]),
+        (&json!("ok"), &json!("ok"))
+    );
+    let ops = [crate::cluster::CascadeRemoteOp::GuardedDelete {
+        entity: "posts".to_string(),
+        id: "p1".to_string(),
+        field: "author_id".to_string(),
+        expected_value: "null".to_string(),
+        sender: None,
+    }];
+    let entry = crate::cluster::CascadePendingEntry {
+        operation_id: "op-null".to_string(),
+        operations: ops.to_vec(),
+    };
+
+    ctrl.replay_cascade_entries(&[entry]).await;
+
+    assert!(ctrl.db_get("posts", "p1").is_some());
+}
+
+fn grant_events(ctrl: &NodeController<MockTransport>) -> usize {
+    ctrl.transport
+        .queued_publishes()
+        .iter()
+        .filter(|publish| format!("{publish:?}").contains("$DB/_shares/events"))
+        .count()
+}
+
+#[tokio::test]
+async fn removing_the_grants_of_a_deleted_resource_publishes_no_grant_events() {
+    let mut ctrl = primary_of_every_partition(&FaultyBackend::shared());
+    let handler = sharing_handler(&mut ctrl);
+    shared_diagram(&mut ctrl, &handler).await;
+
+    let deleted = request_as(
+        &mut ctrl,
+        &handler,
+        "$DB/diagrams/d1/delete",
+        &Value::Null,
+        Some("alice"),
+    )
+    .await;
+
+    assert_eq!(
+        (
+            &deleted["data"]["deleted"],
+            ctrl.db_list("_shares").len(),
+            grant_events(&ctrl)
+        ),
+        (&json!(true), 0, 0)
     );
 }
