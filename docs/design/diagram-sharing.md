@@ -1,6 +1,6 @@
 # Diagram Sharing
 
-> **STATUS: Phases 1-3 IMPLEMENTED (agent mode); Phase 4 (public/anon) and cluster parity PENDING.** The `_shares` entity, `AccessLevel`, and share-aware `check_access` live in `crates/mqdb-agent`. No public/anonymous sharing and no cluster-mode implementation exist yet.
+> **STATUS: Phases 1-3 IMPLEMENTED (agent mode); Phase 1 PARTIAL in cluster mode; Phases 2-3 agent mode only; Phase 4 (public/anon) PENDING.** The agent's `_shares` entity, `AccessLevel`, and share-aware `check_access` live in `crates/mqdb-agent`. The cluster implementation (#75, #122) is in `crates/mqdb-cluster/src/cluster/node_controller/sharing.rs` and `cluster/db_handler/json_ops.rs`. It stores each grant on its resource's partition and resolves share, unshare, shares and the view/edit checks on read and update on the resource primary. It also gathers and hydrates `shared` from every node, resolves email grantees to canonical ids across partitions, clears grants on delete, and refuses generic CRUD on `_shares`. Not yet in cluster mode: the pending-grant sign-in sweep and cascade to closure members on other primaries (#122); cascading unshare, and the `cascade` default of `true` for payloads that omit it; child derivation, `--ownership-derive` (#210); scoped events, `--scoped-events` (#211). Public/anonymous sharing exists in neither mode.
 
 Let a diagram owner grant other users **view** or **edit** access to a diagram and
 the diagrams it references, share a diagram **publicly** by link, and have all of
