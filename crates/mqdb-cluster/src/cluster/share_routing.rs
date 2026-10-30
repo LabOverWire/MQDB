@@ -235,15 +235,19 @@ impl BrokerView {
             }
         }
         let online_keys: HashSet<ShareKey> = held.iter().map(|share| share.key.clone()).collect();
+        let mut stored_by_client: HashMap<String, HashSet<ShareKey>> = HashMap::new();
         let mut stale = Vec::new();
         for candidate in offline {
             if online_keys.contains(&candidate.key) {
                 continue;
             }
-            if self
-                .stored_shares(&candidate.client_id)
-                .await
-                .contains(&candidate.key)
+            if !stored_by_client.contains_key(&candidate.client_id) {
+                let stored = self.stored_shares(&candidate.client_id).await;
+                stored_by_client.insert(candidate.client_id.clone(), stored);
+            }
+            if stored_by_client
+                .get(&candidate.client_id)
+                .is_some_and(|stored| stored.contains(&candidate.key))
             {
                 held.push(LocalShare {
                     client_id: candidate.client_id,

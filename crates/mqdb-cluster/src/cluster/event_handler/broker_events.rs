@@ -153,6 +153,8 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 return;
             }
 
+            self.reconcile_local_shares(&event.client_id).await;
+
             let will_shares = if event.unexpected {
                 let will_topic = self
                     .controller

@@ -180,8 +180,11 @@ impl IndexedEntries {
     }
 
     fn get_or_create(&mut self, topic: &str) -> &mut TopicIndexEntry {
-        if !self.by_topic.contains_key(topic) {
-            self.insert(topic.to_string(), TopicIndexEntry::create(topic));
+        if let (filter, Some(_)) = parse_shared_subscription(topic) {
+            self.shared_by_filter
+                .entry(filter.to_string())
+                .or_default()
+                .insert(topic.to_string());
         }
         self.by_topic
             .entry(topic.to_string())
