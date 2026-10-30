@@ -30,6 +30,7 @@ impl StoreManager {
             (entity::DB_INDEX, RecoveryField::DbIndex),
             (entity::DB_UNIQUE, RecoveryField::DbUnique),
             (entity::DB_FK, RecoveryField::DbFk),
+            (entity::DB_CONSTRAINT, RecoveryField::DbConstraint),
         ];
 
         for (entity_name, field) in entities_to_recover {
