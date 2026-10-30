@@ -9,6 +9,7 @@ Setup (agent):
 mqdb passwd alice -b alice -f passwd
 mqdb passwd bob -b bob -f passwd
 mqdb passwd carol -b carol -f passwd
+mqdb passwd dave -b dave -f passwd
 mqdb passwd admin -b admin -f passwd
 
 mqdb agent start --db /tmp/mqdb-sharing --bind 127.0.0.1:1883 \
@@ -35,7 +36,19 @@ mqdb delete docs d1                                                # bob: 403, d
 mqdb share docs d1 carol                                           # bob: 403, only the owner or an admin shares
 ```
 
-**Expected:** each share returns `{"status":"shared","grantee":"bob","permission":...,"resources_shared":1}`. Sharing again at `view` demotes an `edit` grant.
+**Expected:** both `share` calls print the following (the second with `"permission": "edit"`):
+```json
+{
+  "data": {
+    "grantee": "bob",
+    "permission": "view",
+    "resources_shared": 1,
+    "status": "shared"
+  },
+  "status": "ok"
+}
+```
+Sharing again at `view` demotes an `edit` grant.
 
 ## 50. Listing Grants
 
@@ -53,7 +66,7 @@ mqdb create docs -d '{"id":"d2","userId":"alice","title":"D2"}'               # 
 mqdb create docs -d '{"id":"d3","userId":"alice","title":"D3","ref":"d2"}'    # alice
 mqdb share docs d3 bob                     # alice: resources_shared 2 (d3 and d2)
 mqdb read docs d2                          # bob: ok
-mqdb unshare docs d3 bob                   # alice: {"status":"unshared"}
+mqdb unshare docs d3 bob                   # alice: see below
 mqdb read docs d2                          # bob: 403
 mqdb share docs d3 carol --no-cascade      # alice: resources_shared 1
 
@@ -66,18 +79,52 @@ mqdb shares docs d1                        # alice: [] (delete cleared the grant
 mqdb read docs d1                          # bob: 403
 ```
 
+`unshare` prints:
+```json
+{
+  "data": {
+    "grantee": "bob",
+    "status": "unshared"
+  },
+  "status": "ok"
+}
+```
+
 ## 52. Cluster
 
-Start a 3-node cluster as in [10-cluster.md](10-cluster.md), adding `--passwd passwd --admin-users admin --ownership docs=userId` to every `mqdb cluster start`, and add the FK constraint with `--broker 127.0.0.1:1883`. Then run sections 49-51 with a different `--broker` per step (for example, create and share on 1883, read and update as bob on 1884 and 1885), so the requests are forwarded to the record's primary.
+Start a 3-node cluster with the same password file, which must contain `admin` (`dev start-cluster` adds `--admin-users admin`). Then add the FK constraint:
+```bash
+mqdb dev start-cluster --nodes 3 --clean --passwd passwd --ownership docs=userId --license <key>
+mqdb constraint add docs --fk ref:docs:id:set_null --broker 127.0.0.1:1883 --user admin --pass admin
+```
 
-**Expected:** the same results as in agent mode, except for these differences:
-- `mqdb read docs d2` after `unshare docs d3 bob` still succeeds, because unshare never cascades in a cluster ([#247](https://github.com/LabOverWire/MQDB/issues/247)).
-- `share docs d3 bob` returns `resources_shared: 2` only when d2's partition has the same primary as d3. Otherwise it returns 1 and bob gets 403 on d2. A cascade skips a reference held by another primary and does not follow references beyond it ([#122](https://github.com/LabOverWire/MQDB/issues/122)).
-- A raw MQTT share without a `cascade` field does not cascade ([#248](https://github.com/LabOverWire/MQDB/issues/248)); the CLI always sends the field:
-  ```bash
-  mosquitto_rr -h 127.0.0.1 -p 1883 -u alice -P alice -t '$DB/docs/d3/share' -e resp/share \
-      -m '{"grantee":"carol","permission":"view"}' -W 5
-  ```
+Run sections 49 and 50 with a different `--broker` per step, so requests are forwarded to the record's primary. For example, create and share on 1883, and read and update as bob on 1884 and 1885. **Expected:** the same results as in agent mode.
+
+A cluster cascade grants only referenced records held by the shared record's primary ([#122](https://github.com/LabOverWire/MQDB/issues/122)), so the result depends on where the records live. Create the pair from section 51 and share it:
+```bash
+mqdb create docs -d '{"id":"d2","userId":"alice","title":"D2"}' --broker 127.0.0.1:1883            # alice
+mqdb create docs -d '{"id":"d3","userId":"alice","title":"D3","ref":"d2"}' --broker 127.0.0.1:1883  # alice
+mqdb share docs d3 bob --broker 127.0.0.1:1884                                                      # alice
+```
+- `resources_shared: 2` means d2 has the same primary as d3. Continue with this pair.
+- `resources_shared: 1` means d2 is held by another primary and was not granted, so `mqdb read docs d2` as bob returns 403 (#122). Repeat with new ids (`d2b`/`d3b`, ...) until a share reports 2.
+
+With a pair that reported 2:
+```bash
+mqdb unshare docs d3 bob --broker 127.0.0.1:1885     # alice
+mqdb read docs d3 --broker 127.0.0.1:1884            # bob: 403
+mqdb read docs d2 --broker 127.0.0.1:1884            # bob: ok, unshare does not cascade in a cluster (#247)
+```
+
+On the same pair, a raw MQTT share without a `cascade` field does not cascade in a cluster ([#248](https://github.com/LabOverWire/MQDB/issues/248)). The CLI share that follows grants d2, which shows the pair is co-located:
+```bash
+mosquitto_rr -h 127.0.0.1 -p 1883 -u alice -P alice -t '$DB/docs/d3/share' -e resp/share \
+    -m '{"grantee":"dave","permission":"view"}' -W 5
+mqdb read docs d2 --broker 127.0.0.1:1884            # dave: 403
+mqdb share docs d3 dave --broker 127.0.0.1:1883      # alice: resources_shared 2 (the CLI sends cascade: true)
+mqdb read docs d2 --broker 127.0.0.1:1884            # dave: ok
+```
+**Expected:** the raw share prints `{"data":{"grantee":"dave","permission":"view","resources_shared":1,"status":"shared"},"status":"ok"}`. In agent mode the same raw share reports `"resources_shared":2`.
 
 ## Verification Checklist
 
