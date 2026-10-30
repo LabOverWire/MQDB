@@ -70,11 +70,15 @@ fn until_next_flag(rest: &str) -> &str {
     rest.split_once(" --").map_or(rest, |(db, _)| db).trim()
 }
 
-fn db_argument(command: &str) -> Option<&str> {
+fn flag_argument<'a>(command: &'a str, flag: &str) -> Option<&'a str> {
     command
-        .split_once(" --db=")
-        .or_else(|| command.split_once(" --db "))
+        .split_once(&format!(" {flag}="))
+        .or_else(|| command.split_once(&format!(" {flag} ")))
         .map(|(_, rest)| until_next_flag(rest))
+}
+
+fn db_argument(command: &str) -> Option<&str> {
+    flag_argument(command, "--db")
 }
 
 fn is_node_command(command: &str) -> bool {
@@ -82,7 +86,7 @@ fn is_node_command(command: &str) -> bool {
     padded.contains(" cluster start ") || padded.contains(" agent start ")
 }
 
-enum DbLocation {
+enum PathLocation {
     Dir(PathBuf),
     Gone,
     Unresolved,
@@ -90,7 +94,14 @@ enum DbLocation {
 
 struct NodeProcess {
     pid: u32,
-    db: DbLocation,
+    db: PathLocation,
+    passwd: Option<PathLocation>,
+}
+
+impl NodeProcess {
+    fn locations(&self) -> impl Iterator<Item = &PathLocation> {
+        std::iter::once(&self.db).chain(self.passwd.as_ref())
+    }
 }
 
 fn process_cwd(pid: u32) -> Option<PathBuf> {
@@ -104,17 +115,17 @@ fn process_cwd(pid: u32) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn locate_db(pid: u32, db: &str) -> DbLocation {
-    let db = Path::new(db);
-    let full = if db.is_absolute() {
-        Some(db.to_path_buf())
+fn locate_path(pid: u32, path: &str) -> PathLocation {
+    let path = Path::new(path);
+    let full = if path.is_absolute() {
+        Some(path.to_path_buf())
     } else {
-        process_cwd(pid).map(|cwd| cwd.join(db))
+        process_cwd(pid).map(|cwd| cwd.join(path))
     };
     match full {
-        Some(full) => std::fs::canonicalize(full).map_or(DbLocation::Gone, DbLocation::Dir),
-        None if process_exists(pid) => DbLocation::Unresolved,
-        None => DbLocation::Gone,
+        Some(full) => std::fs::canonicalize(full).map_or(PathLocation::Gone, PathLocation::Dir),
+        None if process_exists(pid) => PathLocation::Unresolved,
+        None => PathLocation::Gone,
     }
 }
 
@@ -154,7 +165,8 @@ fn node_processes() -> Result<Vec<NodeProcess>, String> {
             let db = db_argument(command).filter(|_| is_node_command(command))?;
             Some(NodeProcess {
                 pid,
-                db: locate_db(pid, db),
+                db: locate_path(pid, db),
+                passwd: flag_argument(command, "--passwd").map(|passwd| locate_path(pid, passwd)),
             })
         })
         .collect())
@@ -168,42 +180,47 @@ enum NodeState {
 fn node_state(processes: &[NodeProcess], pid: u32, node_dir: &Path) -> Result<NodeState, String> {
     match processes.iter().find(|process| process.pid == pid) {
         Some(NodeProcess {
-            db: DbLocation::Unresolved,
+            db: PathLocation::Unresolved,
             ..
         }) => Err(format!(
             "pid {pid} runs an mqdb node whose relative --db cannot be resolved"
         )),
         Some(NodeProcess {
-            db: DbLocation::Dir(db),
+            db: PathLocation::Dir(db),
             ..
         }) if std::fs::canonicalize(node_dir).is_ok_and(|dir| &dir == db) => Ok(NodeState::Running),
         Some(_) | None => Ok(NodeState::Stopped),
     }
 }
 
-fn dirs_in_use(dirs: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+fn paths_in_use(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     let processes = node_processes()?;
     let unresolved: Vec<String> = processes
         .iter()
-        .filter(|process| matches!(process.db, DbLocation::Unresolved))
+        .filter(|process| {
+            process
+                .locations()
+                .any(|location| matches!(location, PathLocation::Unresolved))
+        })
         .map(|process| process.pid.to_string())
         .collect();
     if !unresolved.is_empty() {
         return Err(format!(
-            "cannot tell which directory mqdb pids {} use (relative --db); refusing",
+            "cannot tell which paths mqdb pids {} use (relative --db or --passwd); refusing",
             unresolved.join(", ")
         ));
     }
     let live: Vec<&PathBuf> = processes
         .iter()
-        .filter_map(|process| match &process.db {
-            DbLocation::Dir(dir) => Some(dir),
-            DbLocation::Gone | DbLocation::Unresolved => None,
+        .flat_map(NodeProcess::locations)
+        .filter_map(|location| match location {
+            PathLocation::Dir(path) => Some(path),
+            PathLocation::Gone | PathLocation::Unresolved => None,
         })
         .collect();
-    Ok(dirs
+    Ok(paths
         .iter()
-        .filter(|dir| std::fs::canonicalize(dir).is_ok_and(|dir| live.contains(&&dir)))
+        .filter(|path| std::fs::canonicalize(path).is_ok_and(|path| live.contains(&&path)))
         .cloned()
         .collect())
 }
@@ -220,36 +237,36 @@ pub(crate) fn refuse_if_in_use(db_prefix: &str) -> Result<(), Box<dyn std::error
         .into_iter()
         .map(|(_, dir)| dir)
         .collect();
-    let in_use = dirs_in_use(&dirs)?;
+    let in_use = paths_in_use(&dirs)?;
     if in_use.is_empty() {
         Ok(())
     } else {
         Err(format!(
-            "nodes are still running on {}; stop them with 'mqdb dev kill --db-prefix {db_prefix}'",
+            "mqdb nodes still use {}; stop them with 'mqdb dev kill --db-prefix {db_prefix}'",
             listed(&in_use)
         )
         .into())
     }
 }
 
-fn wait_until_unused(dirs: &[PathBuf], db_prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn wait_until_unused(paths: &[PathBuf], db_prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
     let mut announced = false;
     loop {
-        let in_use = dirs_in_use(dirs)?;
+        let in_use = paths_in_use(paths)?;
         if in_use.is_empty() {
             return Ok(());
         }
         if start.elapsed() > NODE_STOP_TIMEOUT {
             return Err(format!(
-                "nodes are still running on {}; stop them with 'mqdb dev kill --db-prefix {db_prefix}'",
+                "mqdb nodes still use {}; stop them with 'mqdb dev kill --db-prefix {db_prefix}'",
                 listed(&in_use)
             )
             .into());
         }
         if !announced {
             println!(
-                "Waiting up to {NODE_STOP_TIMEOUT:?} for the nodes on {} to exit...",
+                "Waiting up to {NODE_STOP_TIMEOUT:?} for the mqdb nodes using {} to exit...",
                 listed(&in_use)
             );
             announced = true;
@@ -530,12 +547,7 @@ fn clean_targets(db_prefix: &str) -> Result<Vec<PathBuf>, Box<dyn std::error::Er
 pub(crate) fn cmd_dev_clean(db_prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
     let prefix = absolute_prefix(db_prefix)?;
     let entries = clean_targets(&prefix)?;
-    let dirs: Vec<PathBuf> = entries
-        .iter()
-        .filter(|entry| entry.is_dir())
-        .cloned()
-        .collect();
-    wait_until_unused(&dirs, &prefix)?;
+    wait_until_unused(&entries, &prefix)?;
 
     if entries.is_empty() {
         println!("No databases under --db-prefix {prefix}");
@@ -627,7 +639,7 @@ pub(crate) fn cmd_dev_logs(
 #[cfg(test)]
 mod tests {
     use super::{
-        DbLocation, NodeProcess, NodeState, db_argument, is_dev_entry, is_dev_test_prefix,
+        NodeProcess, NodeState, PathLocation, db_argument, is_dev_entry, is_dev_test_prefix,
         is_node_command, legacy_node_pattern, node_state,
     };
     use std::process::{Child, Command};
@@ -715,11 +727,13 @@ mod tests {
         let processes = [
             NodeProcess {
                 pid: 1,
-                db: DbLocation::Dir(std::fs::canonicalize(&node_1).expect("canonical dir")),
+                db: PathLocation::Dir(std::fs::canonicalize(&node_1).expect("canonical dir")),
+                passwd: None,
             },
             NodeProcess {
                 pid: 2,
-                db: DbLocation::Unresolved,
+                db: PathLocation::Unresolved,
+                passwd: None,
             },
         ];
         assert!(matches!(

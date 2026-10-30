@@ -431,10 +431,13 @@ fn dev_logs_follow_with_a_pattern_leaves_no_tail_behind() {
         .args(["-f", &log.display().to_string()])
         .output()
         .expect("run pgrep");
+    let leftover_tails = String::from_utf8_lossy(&tails.stdout).trim().to_string();
+    for pid in leftover_tails.lines() {
+        let _ = Command::new("kill").arg(pid).status();
+    }
     assert!(
-        String::from_utf8_lossy(&tails.stdout).trim().is_empty(),
-        "tail -f must not outlive dev logs: {}",
-        String::from_utf8_lossy(&tails.stdout)
+        leftover_tails.is_empty(),
+        "tail -f must not outlive dev logs: {leftover_tails}"
     );
 }
 
@@ -744,9 +747,11 @@ struct ProcessGroup {
 
 impl Drop for ProcessGroup {
     fn drop(&mut self) {
-        let group = format!("-{}", self.child.id());
-        let _ = Command::new("kill").args(["--", &group]).status();
-        let _ = self.child.wait();
+        if let Ok(None) = self.child.try_wait() {
+            let group = format!("-{}", self.child.id());
+            let _ = Command::new("kill").args(["--", &group]).status();
+            let _ = self.child.wait();
+        }
     }
 }
 
@@ -885,4 +890,37 @@ fn dev_clean_ignores_a_relative_db_node_that_exits_before_its_cwd_is_read() {
     );
     assert!(!prefix.with_file_name("e2e-1").exists());
     drop(vanishing);
+}
+
+#[test]
+fn dev_clean_keeps_a_passwd_file_a_running_node_uses() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    let passwd = prefix.with_file_name("e2e-passwd");
+    std::fs::write(&passwd, "admin:x\n").expect("write passwd");
+    let elsewhere = dir.path().join("elsewhere-1");
+    std::fs::create_dir_all(&elsewhere).expect("create the node dir");
+    let elsewhere_arg = elsewhere.display().to_string();
+    let passwd_arg = passwd.display().to_string();
+    let node = StandInNode::spawn_args(
+        dir.path(),
+        &[
+            "cluster",
+            "start",
+            "--db",
+            &elsewhere_arg,
+            "--passwd",
+            &passwd_arg,
+        ],
+    );
+
+    let output = mqdb(&["dev", "clean", "--db-prefix", &prefix.display().to_string()]);
+
+    assert!(
+        !output.status.success(),
+        "clean must refuse while a node reads the passwd file: {}",
+        output_text(&output)
+    );
+    assert!(passwd.exists());
+    drop(node);
 }
