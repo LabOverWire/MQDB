@@ -42,6 +42,12 @@ upgrade. Every other request is handed to `mqtt5::broker::websocket_server::acce
 default `/mqtt` path and `mqtt` subprotocol, and the upgraded stream runs in an `mqtt5` `ClientHandler` built from the
 broker's router, auth provider, storage, stats and resource monitor.
 
+- The port accepts connections only once the agent is ready (broker, internal handler and event publisher), so
+  `/health` never reports `200` for a node that cannot serve requests yet.
+- `/health` is answered before the broker's connection limits are checked; those limits apply to WebSocket upgrades.
+- Reading the request and completing the handshake must finish within 10 seconds, and connections still in that
+  phase are closed when the agent shuts down. Agent shutdown waits for every WebSocket connection to close.
+
 ---
 
 ## Testing
