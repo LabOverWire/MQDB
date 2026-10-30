@@ -3799,3 +3799,41 @@ async fn test_ownership_list_with_additional_filter() {
         Response::Error { code, message } => panic!("expected ok, got {code}: {message}"),
     }
 }
+
+#[tokio::test]
+async fn create_refuses_an_id_longer_than_the_record_id_limit() {
+    use mqdb_core::{Request, Response};
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    let limit = mqdb_core::protocol::MAX_RECORD_ID_LEN;
+
+    for long_id in ["L".repeat(70_000), "m".repeat(limit + 1)] {
+        let response = db
+            .execute(Request::Create {
+                entity: "items".into(),
+                data: json!({"id": long_id, "v": 1}),
+            })
+            .await;
+        match response {
+            Response::Error { code, .. } => assert_eq!(code, 400, "id of {} bytes", long_id.len()),
+            Response::Ok { data } => panic!("id of {} bytes was created: {data}", long_id.len()),
+        }
+    }
+
+    let at_limit = "k".repeat(limit);
+    let response = db
+        .execute(Request::Create {
+            entity: "items".into(),
+            data: json!({"id": at_limit, "v": 1}),
+        })
+        .await;
+    assert!(response.is_ok());
+    let read = db
+        .read("items".into(), at_limit.clone(), vec![], None)
+        .await
+        .unwrap();
+    assert_eq!(read["id"], at_limit);
+}

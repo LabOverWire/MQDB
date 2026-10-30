@@ -51,6 +51,13 @@ impl Database {
         drop(schema_registry);
 
         let id = if let Some(client_id) = data.get("id").and_then(Value::as_str) {
+            let limit = mqdb_core::protocol::MAX_RECORD_ID_LEN;
+            if client_id.len() > limit {
+                return Err(Error::Validation(format!(
+                    "id is {} bytes, the limit is {limit}",
+                    client_id.len()
+                )));
+            }
             client_id.to_string()
         } else {
             let generated = Self::generate_id(&entity_name);
