@@ -4162,3 +4162,19 @@ async fn json_create_refuses_a_unique_value_too_large_to_store() {
     .await;
     assert_ne!(json["status"], "error", "{json}");
 }
+
+#[tokio::test]
+async fn json_create_refuses_an_entity_name_longer_than_the_limit() {
+    let mut ctrl = setup_controller_all_partitions();
+    let limit = mqdb_core::protocol::MAX_ENTITY_NAME_LEN;
+
+    for entity in ["e".repeat(65_500), "e".repeat(limit + 1)] {
+        let json = json_create(&mut ctrl, &entity, &serde_json::json!({"id": "r1"})).await;
+        assert_eq!(json["code"], 400, "entity of {} bytes", entity.len());
+        assert!(ctrl.db_get(&entity, "r1").is_none());
+    }
+
+    let at_limit = "e".repeat(limit);
+    let json = json_create(&mut ctrl, &at_limit, &serde_json::json!({"id": "r1"})).await;
+    assert_eq!(json["status"], "ok");
+}

@@ -225,6 +225,9 @@ impl UniqueStore {
     /// # Panics
     /// Panics if the internal lock is poisoned.
     pub fn reserve(&self, params: &UniqueReserveParams<'_>, now: u64) -> ReserveResult {
+        if !unique_value_fits_storage(params.entity, params.field, params.value) {
+            return ReserveResult::Unencodable;
+        }
         let key = Self::unique_key(params.entity, params.field, params.value);
         let mut reservations = self.reservations.write().unwrap();
 
@@ -321,6 +324,9 @@ impl UniqueStore {
         data_partition: PartitionId,
         now: u64,
     ) -> ReassertResult {
+        if !unique_value_fits_storage(entity, field, value) {
+            return ReassertResult::Unencodable;
+        }
         let key = Self::unique_key(entity, field, value);
         let mut reservations = self.reservations.write().unwrap();
 
@@ -1412,36 +1418,29 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_skips_a_claim_whose_key_does_not_fit_and_keeps_the_rest() {
-        let src = UniqueStore::new(node(1));
-        let dst = UniqueStore::new(node(2));
+    fn reserve_and_reassert_refuse_a_value_too_large_to_store() {
+        let store = UniqueStore::new(node(1));
         let long_value = vec![b'c'; 40_000];
-        let target = unique_partition("users", "code", &long_value);
-        let short_value = (0..)
-            .map(|i| format!("v{i}").into_bytes())
-            .find(|v| unique_partition("users", "code", v) == target)
-            .unwrap();
-        for (value, record) in [(&long_value, "long"), (&short_value, "short")] {
-            assert_eq!(
-                src.reserve(
-                    &params("users", "code", value, record, record, partition(1), 60_000),
-                    1_000,
-                ),
-                ReserveResult::Reserved
-            );
-        }
 
-        let imported = dst
-            .import_reservations(&src.export_for_partition(target))
-            .unwrap();
-
-        assert_eq!(imported, 1);
         assert_eq!(
-            dst.get("users", "code", &short_value)
-                .unwrap()
-                .record_id_str(),
-            "short"
+            store.reserve(
+                &params(
+                    "users",
+                    "code",
+                    &long_value,
+                    "u1",
+                    "req-1",
+                    partition(1),
+                    60_000
+                ),
+                1_000,
+            ),
+            ReserveResult::Unencodable
         );
-        assert!(dst.get("users", "code", &long_value).is_none());
+        assert_eq!(
+            store.reassert("users", "code", &long_value, "u1", partition(1), 1_000),
+            ReassertResult::Unencodable
+        );
+        assert!(store.get("users", "code", &long_value).is_none());
     }
 }

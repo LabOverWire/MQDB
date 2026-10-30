@@ -3837,3 +3837,48 @@ async fn create_refuses_an_id_longer_than_the_record_id_limit() {
         .unwrap();
     assert_eq!(read["id"], at_limit);
 }
+
+#[tokio::test]
+async fn create_refuses_unique_and_indexed_values_too_large_to_store() {
+    use mqdb_core::{Request, Response};
+
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    db.add_unique_constraint("users".into(), vec!["code".into()])
+        .await
+        .unwrap();
+    db.add_index("items".into(), vec!["tag".into()])
+        .await
+        .unwrap();
+
+    for (entity, body) in [
+        ("users", json!({"id": "u1", "code": "c".repeat(70_000)})),
+        ("items", json!({"id": "i1", "tag": "t".repeat(70_000)})),
+    ] {
+        let response = db
+            .execute(Request::Create {
+                entity: entity.into(),
+                data: body,
+            })
+            .await;
+        match response {
+            Response::Error { code, .. } => assert_eq!(code, 400, "{entity}"),
+            Response::Ok { data } => panic!("{entity} created: {data}"),
+        }
+    }
+
+    for (entity, body) in [
+        ("users", json!({"id": "u2", "code": "short"})),
+        ("items", json!({"id": "i2", "tag": "short"})),
+    ] {
+        let response = db
+            .execute(Request::Create {
+                entity: entity.into(),
+                data: body,
+            })
+            .await;
+        assert!(response.is_ok(), "{entity}");
+    }
+}

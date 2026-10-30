@@ -21,6 +21,9 @@ pub enum Error {
     #[error("invalid key format: {0}")]
     InvalidKey(String),
 
+    #[error("key of {0} bytes exceeds the 65535 byte storage limit")]
+    KeyTooLarge(usize),
+
     #[error("validation error: {0}")]
     Validation(String),
 

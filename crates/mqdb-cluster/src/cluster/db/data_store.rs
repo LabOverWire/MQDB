@@ -83,10 +83,17 @@ pub(super) fn join_snapshot_entries(entries: &[Vec<u8>]) -> Vec<u8> {
 }
 
 #[must_use]
-pub fn oversized_body_id_message(data: &serde_json::Value) -> Option<String> {
+pub fn oversized_create_message(entity: &str, data: &serde_json::Value) -> Option<String> {
+    let entity_limit = mqdb_core::protocol::MAX_ENTITY_NAME_LEN;
+    if entity.len() > entity_limit {
+        return Some(format!(
+            "entity name is {} bytes, the limit is {entity_limit}",
+            entity.len()
+        ));
+    }
     let id = data.get("id")?.as_str()?;
-    let limit = mqdb_core::protocol::MAX_RECORD_ID_LEN;
-    (id.len() > limit).then(|| format!("id is {} bytes, the limit is {limit}", id.len()))
+    let id_limit = mqdb_core::protocol::MAX_RECORD_ID_LEN;
+    (id.len() > id_limit).then(|| format!("id is {} bytes, the limit is {id_limit}", id.len()))
 }
 
 #[must_use]
@@ -914,5 +921,19 @@ mod tests {
             idx.lookup("users", "u1", "posts", "editor_id"),
             vec!["p2".to_string()],
         );
+    }
+
+    #[test]
+    fn snapshot_entry_refuses_a_key_whose_length_does_not_fit() {
+        let at_limit = "k".repeat(usize::from(u16::MAX));
+        let entry = encode_snapshot_entry(&at_limit, b"v").unwrap();
+        assert_eq!(&entry[..2], &u16::MAX.to_be_bytes());
+        assert_eq!(entry.len(), 2 + at_limit.len() + 4 + 1);
+
+        assert!(encode_snapshot_entry(&"k".repeat(usize::from(u16::MAX) + 1), b"v").is_none());
+
+        let joined = join_snapshot_entries(&[entry.clone(), entry.clone()]);
+        assert_eq!(&joined[..4], &2_u32.to_be_bytes());
+        assert_eq!(joined.len(), 4 + 2 * entry.len());
     }
 }

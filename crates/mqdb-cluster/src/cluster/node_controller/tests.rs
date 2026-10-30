@@ -3200,3 +3200,78 @@ async fn forwarded_create_refuses_an_id_longer_than_the_record_id_limit() {
     assert_eq!(responses[0]["status"], "error");
     assert_eq!(responses[0]["code"], 400);
 }
+
+#[tokio::test]
+async fn remote_unique_reserve_refuses_a_value_too_large_to_store() {
+    use crate::cluster::protocol::{UniqueReserveRequest, UniqueReserveStatus};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    make_all_primary(&mut ctrl, node1);
+    let value = serde_json::to_vec(&serde_json::json!("c".repeat(40_000))).unwrap();
+    let request = UniqueReserveRequest::create(
+        7,
+        "users",
+        "code",
+        &value,
+        "u1",
+        "req-1",
+        crate::cluster::db::data_partition("users", "u1"),
+        30_000,
+    );
+
+    ctrl.handle_unique_reserve_request(node2, &request).await;
+
+    assert!(ctrl.stores().unique_get("users", "code", &value).is_none());
+    let statuses: Vec<UniqueReserveStatus> = ctrl
+        .transport()
+        .sent_messages()
+        .into_iter()
+        .filter_map(|(to, message)| match message {
+            ClusterMessage::UniqueReserveResponse(response) if to == node2 => {
+                Some(response.status())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(statuses, [UniqueReserveStatus::Error]);
+}
+
+#[tokio::test]
+async fn fk_check_refuses_a_reference_too_long_to_be_a_record_id() {
+    use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    let parent_id = "p".repeat(70_000);
+    setup_all_primary_except(
+        &mut ctrl,
+        node1,
+        crate::cluster::db::data_partition("parents", &parent_id),
+        node2,
+    );
+    ctrl.constraint_add(&ClusterConstraint::foreign_key(
+        "children",
+        "fk_parent",
+        "parent_id",
+        "parents",
+        "id",
+        OnDeleteAction::Restrict,
+    ))
+    .await
+    .unwrap();
+
+    let result = ctrl
+        .start_fk_existence_check("children", &serde_json::json!({"parent_id": parent_id}))
+        .await;
+
+    assert!(result.is_err());
+    assert!(
+        ctrl.transport()
+            .sent_messages()
+            .iter()
+            .all(|(_, message)| !matches!(message, ClusterMessage::FkCheckRequest(_)))
+    );
+}

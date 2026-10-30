@@ -587,7 +587,7 @@ impl DbRequestHandler {
             return JsonOpResult::Response(err);
         }
 
-        if let Some(err) = Self::reject_oversized_body_id(&data) {
+        if let Some(err) = Self::reject_oversized_create(entity, &data) {
             return JsonOpResult::Response(err);
         }
 
