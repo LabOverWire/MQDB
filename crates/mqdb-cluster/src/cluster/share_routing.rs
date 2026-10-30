@@ -309,33 +309,33 @@ pub(crate) fn remote_forwards(
     forwards
 }
 
+pub(crate) fn live_remote_node(
+    locate: impl Fn(&str) -> Option<NodeId>,
+    local: NodeId,
+    alive: HashSet<NodeId>,
+) -> impl Fn(&str) -> Option<NodeId> {
+    move |client_id| locate(client_id).filter(|node| *node != local && alive.contains(node))
+}
+
 pub(crate) fn assign_share_groups(
     members: &[ShareMember],
     served_locally: &HashSet<ShareKey>,
-    locate: impl Fn(&str) -> Option<NodeId>,
-    local: NodeId,
-    rotation: usize,
+    remote_node: impl Fn(&str) -> Option<NodeId>,
+    mut rotation: impl FnMut(&ShareKey) -> usize,
 ) -> HashMap<NodeId, Vec<String>> {
     let mut candidates: HashMap<&ShareKey, BTreeSet<NodeId>> = HashMap::new();
-    let mut online_here: HashSet<&ShareKey> = HashSet::new();
     for member in members {
-        match locate(member.subscriber.client_id_str()) {
-            Some(node) if node == local => {
-                online_here.insert(&member.key);
-            }
-            Some(node) => {
-                candidates.entry(&member.key).or_default().insert(node);
-            }
-            None => {}
+        if let Some(node) = remote_node(member.subscriber.client_id_str()) {
+            candidates.entry(&member.key).or_default().insert(node);
         }
     }
 
     let mut assigned: HashMap<NodeId, BTreeSet<&str>> = HashMap::new();
     for (key, nodes) in candidates {
-        if served_locally.contains(key) || online_here.contains(key) {
+        if served_locally.contains(key) {
             continue;
         }
-        if let Some(node) = nodes.iter().nth(rotation % nodes.len()) {
+        if let Some(node) = nodes.iter().nth(rotation(key) % nodes.len()) {
             assigned.entry(*node).or_default().insert(&key.group);
         }
     }
@@ -377,46 +377,67 @@ mod tests {
         }
     }
 
+    fn remote<'a>(
+        locations: &'a [(&'a str, u16)],
+        local: u16,
+        dead: &'a [u16],
+    ) -> impl Fn(&str) -> Option<NodeId> + 'a {
+        let alive: HashSet<NodeId> = (1..=5).filter(|n| !dead.contains(n)).map(node).collect();
+        live_remote_node(located(locations), node(local), alive)
+    }
+
+    fn fixed(rotation: usize) -> impl FnMut(&ShareKey) -> usize {
+        move |_| rotation
+    }
+
     #[test]
     fn a_group_with_only_remote_members_goes_to_one_of_their_nodes() {
         let members = [member("g", "sh/x", "a"), member("g", "sh/x", "b")];
-        let assigned = assign_share_groups(
-            &members,
-            &HashSet::new(),
-            located(&[("a", 2), ("b", 3)]),
-            node(1),
-            0,
-        );
+        let places = [("a", 2), ("b", 3)];
+        let assigned =
+            assign_share_groups(&members, &HashSet::new(), remote(&places, 1, &[]), fixed(0));
         assert_eq!(assigned, HashMap::from([(node(2), vec!["g".to_string()])]));
-        let rotated = assign_share_groups(
-            &members,
-            &HashSet::new(),
-            located(&[("a", 2), ("b", 3)]),
-            node(1),
-            1,
-        );
+        let rotated =
+            assign_share_groups(&members, &HashSet::new(), remote(&places, 1, &[]), fixed(1));
         assert_eq!(rotated, HashMap::from([(node(3), vec!["g".to_string()])]));
     }
 
     #[test]
-    fn a_group_with_a_local_member_is_not_sent_anywhere() {
+    fn a_group_the_local_broker_serves_is_not_sent_anywhere() {
         let members = [member("g", "sh/x", "a"), member("g", "sh/x", "b")];
-        let online_here = assign_share_groups(
-            &members,
-            &HashSet::new(),
-            located(&[("a", 1), ("b", 2)]),
-            node(1),
-            0,
-        );
-        assert!(online_here.is_empty());
-        let offline_here = assign_share_groups(
+        let assigned = assign_share_groups(
             &members,
             &HashSet::from([key("g", "sh/x")]),
-            located(&[("b", 2)]),
-            node(1),
-            0,
+            remote(&[("a", 1), ("b", 2)], 1, &[]),
+            fixed(0),
         );
-        assert!(offline_here.is_empty());
+        assert!(assigned.is_empty());
+    }
+
+    #[test]
+    fn a_stale_local_location_does_not_stop_forwarding() {
+        let members = [member("g", "sh/x", "gone"), member("g", "sh/x", "b")];
+        let assigned = assign_share_groups(
+            &members,
+            &HashSet::new(),
+            remote(&[("gone", 1), ("b", 2)], 1, &[]),
+            fixed(0),
+        );
+        assert_eq!(assigned, HashMap::from([(node(2), vec!["g".to_string()])]));
+    }
+
+    #[test]
+    fn members_on_dead_nodes_are_not_chosen() {
+        let members = [member("g", "sh/x", "a"), member("g", "sh/x", "b")];
+        for rotation in 0..4 {
+            let assigned = assign_share_groups(
+                &members,
+                &HashSet::new(),
+                remote(&[("a", 2), ("b", 3)], 1, &[2]),
+                fixed(rotation),
+            );
+            assert_eq!(assigned, HashMap::from([(node(3), vec!["g".to_string()])]));
+        }
     }
 
     #[test]
@@ -425,9 +446,8 @@ mod tests {
         let assigned = assign_share_groups(
             &members,
             &HashSet::from([key("g", "sh/+")]),
-            located(&[("b", 2)]),
-            node(1),
-            0,
+            remote(&[("b", 2)], 1, &[]),
+            fixed(0),
         );
         assert_eq!(assigned, HashMap::from([(node(2), vec!["g".to_string()])]));
     }
@@ -437,9 +457,8 @@ mod tests {
         let assigned = assign_share_groups(
             &[member("g", "sh/x", "a")],
             &HashSet::new(),
-            located(&[]),
-            node(1),
-            0,
+            remote(&[], 1, &[]),
+            fixed(0),
         );
         assert!(assigned.is_empty());
     }

@@ -7,7 +7,8 @@ mod routing;
 use super::db_handler::DbRequestHandler;
 use super::node_controller::NodeController;
 use super::share_routing::{
-    BrokerView, LocalShare, LocalShareMembers, assign_share_groups, served_locally, share_members,
+    BrokerView, LocalShare, LocalShareMembers, ShareKey, assign_share_groups, live_remote_node,
+    served_locally, share_members,
 };
 use super::transport::{ClusterMessage, ClusterTransport};
 use super::{
@@ -16,8 +17,8 @@ use super::{
 };
 use mqdb_vault::VaultKeyStore;
 use mqtt5::QoS;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
@@ -35,7 +36,7 @@ pub struct ClusterEventHandler<T: ClusterTransport + 'static> {
     presence: bool,
     live_connections: mqdb_agent::presence::LiveConnections,
     local_shares: Arc<Mutex<LocalShareMembers>>,
-    share_rotation: Arc<AtomicUsize>,
+    share_rotation: Arc<Mutex<HashMap<ShareKey, usize>>>,
     broker_view: Arc<OnceLock<BrokerView>>,
 }
 
@@ -50,7 +51,7 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             presence: false,
             live_connections: mqdb_agent::presence::LiveConnections::new(),
             local_shares: Arc::new(Mutex::new(LocalShareMembers::default())),
-            share_rotation: Arc::new(AtomicUsize::new(0)),
+            share_rotation: Arc::new(Mutex::new(HashMap::new())),
             broker_view: Arc::new(OnceLock::new()),
         }
     }
@@ -142,12 +143,21 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             return HashMap::new();
         }
         let locate = |client_id: &str| ctrl.connected_node(client_id);
+        let alive: HashSet<NodeId> = ctrl.alive_nodes().into_iter().collect();
+        let mut rotations = self
+            .share_rotation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         assign_share_groups(
             &members,
             &served_locally(held, locate, self.node_id),
-            locate,
-            self.node_id,
-            self.share_rotation.fetch_add(1, Ordering::Relaxed),
+            live_remote_node(locate, self.node_id, alive),
+            |key| {
+                let next = rotations.entry(key.clone()).or_default();
+                let current = *next;
+                *next = next.wrapping_add(1);
+                current
+            },
         )
     }
 }

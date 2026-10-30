@@ -107,7 +107,7 @@ impl LocalRetainedWriter {
         }
         self.echoes.record(topic, payload);
         let publish = PublishPacket::new(topic, payload.to_vec(), QoS::from(qos)).with_retain(true);
-        self.router.route_message(&publish, None).await;
+        self.router.route_sys_message(&publish).await;
     }
 
     async fn broker_holds(&self, topic: &str, payload: &[u8], qos: u8) -> bool {

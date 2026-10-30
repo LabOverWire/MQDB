@@ -121,7 +121,8 @@ pub use retained_store::{
 pub use retained_sync::{LocalRetainedWriter, RetainedEchoes};
 pub use session::{SessionData, SessionError, SessionStore, session_key, session_partition};
 pub(crate) use share_routing::{
-    BrokerView, LocalShare, RemoteForward, assign_share_groups, remote_forwards, share_members,
+    BrokerView, LocalShare, RemoteForward, assign_share_groups, live_remote_node, remote_forwards,
+    share_members,
 };
 pub use snapshot::{
     SnapshotBuilder, SnapshotChunk, SnapshotComplete, SnapshotRequest, SnapshotSender,

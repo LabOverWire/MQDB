@@ -790,21 +790,21 @@ impl ClusteredAgent {
                     .into_iter()
                     .map(|target| ForwardTarget::new(target.client_id, target.qos)),
             );
-            let locate = |client_id: &str| ctrl.connected_node(client_id);
-            let remote_members: Vec<_> = crate::cluster::share_members(
+            let alive: std::collections::HashSet<NodeId> = ctrl.alive_nodes().into_iter().collect();
+            let members = crate::cluster::share_members(
                 &ctrl.stores().topics,
                 &ctrl.stores().wildcards,
                 &lwt.topic,
-            )
-            .into_iter()
-            .filter(|member| locate(member.subscriber.client_id_str()) != Some(node_id))
-            .collect();
+            );
             let share_nodes = crate::cluster::assign_share_groups(
-                &remote_members,
+                &members,
                 &std::collections::HashSet::new(),
-                locate,
-                node_id,
-                0,
+                crate::cluster::live_remote_node(
+                    |client_id: &str| ctrl.connected_node(client_id),
+                    node_id,
+                    alive,
+                ),
+                |_| 0,
             );
 
             for (target_node, forward) in crate::cluster::remote_forwards(remote_nodes, share_nodes)
