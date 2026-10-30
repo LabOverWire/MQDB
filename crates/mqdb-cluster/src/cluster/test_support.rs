@@ -14,6 +14,7 @@ pub(crate) struct FaultyBackend {
     fail_flush: AtomicBool,
     fail_writes: AtomicBool,
     failing_key: Mutex<Option<String>>,
+    writes_left: Mutex<Option<usize>>,
     inserts: AtomicUsize,
 }
 
@@ -34,6 +35,26 @@ impl FaultyBackend {
         if let Ok(mut failing) = self.failing_key.lock() {
             *failing = Some(needle.to_string());
         }
+    }
+
+    pub(crate) fn fail_writes_after(&self, writes: usize) {
+        if let Ok(mut left) = self.writes_left.lock() {
+            *left = Some(writes);
+        }
+    }
+
+    fn budget_exhausted(&self) -> bool {
+        self.writes_left
+            .lock()
+            .ok()
+            .is_some_and(|mut left| match left.as_mut() {
+                Some(0) => true,
+                Some(remaining) => {
+                    *remaining -= 1;
+                    false
+                }
+                None => false,
+            })
     }
 
     pub(crate) fn stop_failing_keys(&self) {
@@ -65,6 +86,7 @@ impl FaultyBackend {
     fn write_failure(&self, key: &[u8]) -> Result<()> {
         if self.fail_writes.load(Ordering::SeqCst)
             || key_matches(self.failing_key().as_deref(), key)
+            || self.budget_exhausted()
         {
             return Err(Error::StorageGeneric("write failed".into()));
         }
@@ -116,7 +138,7 @@ impl StorageBackend for FaultyBackend {
     fn batch(&self) -> Box<dyn BatchOperations> {
         Box::new(FaultyBatch {
             inner: self.inner.batch(),
-            fail: self.fail_writes.load(Ordering::SeqCst),
+            fail: self.fail_writes.load(Ordering::SeqCst) || self.budget_exhausted(),
             failing_key: self.failing_key(),
         })
     }

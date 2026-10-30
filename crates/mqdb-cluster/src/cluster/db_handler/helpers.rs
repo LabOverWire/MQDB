@@ -31,6 +31,9 @@ pub(crate) fn json_write_failure(error: DbDataStoreError) -> Vec<u8> {
         DbDataStoreError::NotPrimary | DbDataStoreError::Commit(ReplicationError::NotPrimary) => {
             DbRequestHandler::json_error(503, &error.to_string())
         }
+        DbDataStoreError::SerializationError => {
+            DbRequestHandler::json_error(400, "record too large to encode")
+        }
         _ => DbRequestHandler::json_error(500, "internal error"),
     }
 }

@@ -6,6 +6,17 @@ use crate::cluster::db::{DbDataStore, DbDataStoreError, DbEntity, data_partition
 use crate::cluster::protocol::{Operation, ReplicationWrite};
 use crate::cluster::{Epoch, entity};
 
+fn encodable(entity_type: &str, id: &str, data: &[u8]) -> Result<(), DbDataStoreError> {
+    let fits = u16::try_from(entity_type.len()).is_ok()
+        && u16::try_from(id.len()).is_ok()
+        && u32::try_from(data.len()).is_ok();
+    if fits {
+        Ok(())
+    } else {
+        Err(DbDataStoreError::SerializationError)
+    }
+}
+
 impl StoreManager {
     /// # Errors
     /// Returns `DbDataStoreError` if the record already exists or serialization fails.
@@ -16,6 +27,7 @@ impl StoreManager {
         data: &[u8],
         timestamp_ms: u64,
     ) -> Result<(DbEntity, ReplicationWrite), DbDataStoreError> {
+        encodable(entity_type, id, data)?;
         if self.db_data.get(entity_type, id).is_some() {
             return Err(DbDataStoreError::AlreadyExists);
         }
@@ -43,6 +55,7 @@ impl StoreManager {
         data: &[u8],
         timestamp_ms: u64,
     ) -> Result<(DbEntity, ReplicationWrite), DbDataStoreError> {
+        encodable(entity_type, id, data)?;
         if self.db_data.get(entity_type, id).is_none() {
             return Err(DbDataStoreError::NotFound);
         }

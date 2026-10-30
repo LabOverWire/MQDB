@@ -15,7 +15,7 @@ use crate::cluster::store_manager::outbox::{
 };
 use crate::cluster::{PublishRouter, RoutedPublish};
 use mqdb_core::events::ChangeEvent;
-use mqdb_core::types::{AccessLevel, MAX_LIST_RESULTS, OwnershipDecision};
+use mqdb_core::types::{AccessLevel, MAX_LIST_RESULTS, OwnershipDecision, SHARES_ENTITY};
 use serde_json::Value;
 use tokio::sync::oneshot;
 
@@ -146,6 +146,8 @@ pub(crate) enum CascadeSideEffect {
     LocalDelete {
         entity: String,
         id: String,
+        field: String,
+        expected_value: String,
     },
     LocalSetNull {
         entity: String,
@@ -169,13 +171,23 @@ pub(crate) enum CascadeSideEffect {
 impl CascadeSideEffect {
     fn outbox_op(&self, sender: Option<&str>) -> CascadeRemoteOp {
         match self {
-            Self::LocalDelete { entity, id } | Self::RemoteDelete { entity, id } => {
-                CascadeRemoteOp::Delete {
-                    entity: entity.clone(),
-                    id: id.clone(),
-                    sender: sender.map(String::from),
-                }
-            }
+            Self::LocalDelete {
+                entity,
+                id,
+                field,
+                expected_value,
+            } => CascadeRemoteOp::GuardedDelete {
+                entity: entity.clone(),
+                id: id.clone(),
+                field: field.clone(),
+                expected_value: expected_value.clone(),
+                sender: sender.map(String::from),
+            },
+            Self::RemoteDelete { entity, id } => CascadeRemoteOp::Delete {
+                entity: entity.clone(),
+                id: id.clone(),
+                sender: sender.map(String::from),
+            },
             Self::LocalSetNull {
                 entity,
                 id,
@@ -196,6 +208,23 @@ impl CascadeSideEffect {
             },
         }
     }
+}
+
+fn fk_field_matches(
+    record: Option<super::db::DbEntity>,
+    field: &str,
+    expected_value: &str,
+) -> bool {
+    record
+        .and_then(|record| serde_json::from_slice::<Value>(&record.data).ok())
+        .and_then(|data| {
+            data.get(field).map(|value| match value {
+                Value::String(text) => text == expected_value,
+                other => serde_json::from_str::<Value>(expected_value)
+                    .is_ok_and(|expected| expected == *other),
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn unique_field_diffs(
@@ -1228,9 +1257,6 @@ impl<T: ClusterTransport> NodeController<T> {
             ChangeEvent::delete(entity.to_string(), id.to_string(), data.clone()),
             origin,
         );
-        if self.ownership.owner_field(entity).is_some() {
-            self.clear_all_resource_grants(entity, id).await?;
-        }
         self.commit_delete_with_change_event(write, event, &data, plan.cascade())
             .await?;
         let ack_receivers = self.run_fk_delete_plan(plan, origin).await;
@@ -1262,13 +1288,11 @@ impl<T: ClusterTransport> NodeController<T> {
             if !self.is_primary_for_partition(partition) {
                 continue;
             }
+            let Ok(plan) = self.plan_fk_delete(&entity, &id, &[], EventOrigin::default()) else {
+                continue;
+            };
             if self
-                .delete_record_replicated(
-                    &entity,
-                    &id,
-                    &FkDeletePlan::default(),
-                    EventOrigin::default(),
-                )
+                .delete_record_replicated(&entity, &id, &plan, EventOrigin::default())
                 .await
                 .is_ok()
             {
@@ -1287,9 +1311,32 @@ impl<T: ClusterTransport> NodeController<T> {
     ) -> Result<FkDeletePlan, Vec<u8>> {
         self.require_primary_role(entity, id)
             .map_err(json_write_failure)?;
-        let effects = self
+        let mut effects = self
             .prepare_fk_side_effects(results)
             .map_err(|msg| Self::json_error(409, &msg))?;
+        let deleted: Vec<(String, String)> = std::iter::once((entity.to_string(), id.to_string()))
+            .chain(effects.iter().filter_map(|effect| match effect {
+                CascadeSideEffect::LocalDelete { entity, id, .. } => {
+                    Some((entity.clone(), id.clone()))
+                }
+                CascadeSideEffect::LocalSetNull { .. }
+                | CascadeSideEffect::RemoteDelete { .. }
+                | CascadeSideEffect::RemoteSetNull { .. } => None,
+            }))
+            .collect();
+        for (resource_entity, resource_id) in deleted {
+            if self.ownership.owner_field(&resource_entity).is_none() {
+                continue;
+            }
+            for (share_id, _) in self.shares_for_resource(&resource_entity, &resource_id) {
+                effects.push(CascadeSideEffect::LocalDelete {
+                    entity: SHARES_ENTITY.to_string(),
+                    id: share_id,
+                    field: "resource_id".to_string(),
+                    expected_value: resource_id.clone(),
+                });
+            }
+        }
         let ops: Vec<CascadeRemoteOp> = effects
             .iter()
             .map(|effect| effect.outbox_op(origin.sender))
@@ -1314,6 +1361,8 @@ impl<T: ClusterTransport> NodeController<T> {
                             effects.push(CascadeSideEffect::LocalDelete {
                                 entity: r.source_entity.clone(),
                                 id: child_id.clone(),
+                                field: r.source_field.clone(),
+                                expected_value: r.target_id.clone(),
                             });
                         } else {
                             effects.push(CascadeSideEffect::RemoteDelete {
@@ -1412,7 +1461,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let mut ack_receivers = Vec::with_capacity(plan.effects.len());
         for effect in &plan.effects {
             let unresolved = match effect {
-                CascadeSideEffect::LocalDelete { entity, id } => {
+                CascadeSideEffect::LocalDelete { entity, id, .. } => {
                     (!self.run_local_cascade_delete(entity, id, origin).await)
                         .then(unresolved_cascade_ack)
                 }
@@ -1495,6 +1544,35 @@ impl<T: ClusterTransport> NodeController<T> {
         origin: EventOrigin<'_>,
     ) -> Option<oneshot::Receiver<bool>> {
         match op {
+            CascadeRemoteOp::GuardedDelete {
+                entity,
+                id,
+                field,
+                expected_value,
+                ..
+            } => {
+                let partition = super::db::data_partition(entity, id);
+                if self.holds_primary_role(partition) {
+                    if !fk_field_matches(self.stores.db_get(entity, id), field, expected_value) {
+                        return None;
+                    }
+                    (!self.execute_local_cascade_delete(entity, id, origin).await)
+                        .then(unresolved_cascade_ack)
+                } else {
+                    Some(
+                        self.send_cascade_request(
+                            partition,
+                            JsonDbOp::Delete,
+                            entity,
+                            id,
+                            &[],
+                            origin,
+                        )
+                        .await
+                        .unwrap_or_else(unresolved_cascade_ack),
+                    )
+                }
+            }
             CascadeRemoteOp::Delete { entity, id, .. } => {
                 let partition = super::db::data_partition(entity, id);
                 if self.holds_primary_role(partition) {
@@ -1558,7 +1636,8 @@ impl<T: ClusterTransport> NodeController<T> {
             let mut ack_receivers = Vec::with_capacity(cascade.operations.len());
             for op in &cascade.operations {
                 let origin = match op {
-                    CascadeRemoteOp::Delete { sender, .. } => {
+                    CascadeRemoteOp::Delete { sender, .. }
+                    | CascadeRemoteOp::GuardedDelete { sender, .. } => {
                         EventOrigin::new(sender.as_deref(), None)
                     }
                     CascadeRemoteOp::SetNull { .. } => EventOrigin::default(),
@@ -1774,6 +1853,8 @@ impl<T: ClusterTransport> NodeController<T> {
             return true;
         }
         obj.insert(field.to_string(), Value::Null);
+        let version = obj.get("_version").and_then(Value::as_u64).unwrap_or(0);
+        obj.insert("_version".to_string(), Value::Number((version + 1).into()));
         let updated_bytes = serde_json::to_vec(&record).unwrap_or_default();
         match self
             .db_update_with_event(entity, id, &updated_bytes, record, now_ms, origin)

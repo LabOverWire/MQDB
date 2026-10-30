@@ -247,6 +247,14 @@ pub enum CascadeRemoteOp {
         field: String,
         expected_value: String,
     },
+    GuardedDelete {
+        entity: String,
+        id: String,
+        field: String,
+        expected_value: String,
+        #[serde(default)]
+        sender: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]

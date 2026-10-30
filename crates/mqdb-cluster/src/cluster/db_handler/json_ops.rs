@@ -1313,11 +1313,6 @@ impl DbRequestHandler {
                     ChangeEvent::delete(entity.to_string(), id.to_string(), data.clone()),
                     EventOrigin::new(sender, client_id),
                 );
-                if self.ownership.owner_field(entity).is_some()
-                    && let Err(error) = controller.clear_all_resource_grants(entity, id).await
-                {
-                    return helpers::json_write_failure(error);
-                }
                 if let Err(error) = controller
                     .commit_delete_with_change_event(write, event, &data, plan.cascade())
                     .await

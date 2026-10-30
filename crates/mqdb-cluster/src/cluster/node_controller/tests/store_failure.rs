@@ -161,7 +161,7 @@ async fn a_delete_the_primary_cannot_store_is_refused_and_keeps_its_unique_claim
 }
 
 #[tokio::test]
-async fn a_binary_write_the_primary_cannot_store_returns_an_error() {
+async fn a_controller_write_the_primary_cannot_store_returns_an_error() {
     let backend = FaultyBackend::shared();
     let mut ctrl = primary_of_every_partition(&backend);
     ctrl.db_create("items", "kept", b"{\"n\":1}", 1000)
@@ -442,12 +442,182 @@ async fn a_downgrade_whose_old_grant_cannot_be_removed_is_refused() {
 }
 
 #[tokio::test]
-async fn a_resource_delete_whose_grants_cannot_be_removed_is_refused() {
+async fn a_grant_that_cannot_be_removed_with_its_resource_is_retried() {
     let backend = FaultyBackend::shared();
     let mut ctrl = primary_of_every_partition(&backend);
     let handler = sharing_handler(&mut ctrl);
     shared_diagram(&mut ctrl, &handler).await;
     backend.fail_writes_to_keys_containing("_shares/");
+
+    let deleted = request_as(
+        &mut ctrl,
+        &handler,
+        "$DB/diagrams/d1/delete",
+        &Value::Null,
+        Some("alice"),
+    )
+    .await;
+    let pending = ctrl
+        .stores()
+        .cluster_outbox()
+        .unwrap()
+        .pending_cascade_ops()
+        .unwrap();
+    assert_eq!(
+        (
+            &deleted["data"]["deleted"],
+            ctrl.db_get("diagrams", "d1").is_some(),
+            pending.len()
+        ),
+        (&json!(true), false, 1)
+    );
+
+    backend.stop_failing_keys();
+    ctrl.replay_cascade_entries(&pending).await;
+
+    assert!(ctrl.db_list("_shares").is_empty());
+}
+
+#[tokio::test]
+async fn a_cascade_its_receiver_could_not_store_is_not_acked() {
+    let mut ctrl = primary_of_every_partition(&FaultyBackend::shared());
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    ctrl.pending_constraints().insert_cascade_ack(42, tx);
+    let refused = crate::cluster::protocol::JsonDbResponse::new(
+        0,
+        serde_json::to_vec(&json!({"status": "error", "code": 500, "message": "internal error"}))
+            .unwrap(),
+        "_mqdb/cascade_ack/1/42".to_string(),
+        None,
+    );
+
+    ctrl.handle_json_db_response(&refused).await;
+
+    assert!(!rx.await.unwrap());
+}
+
+#[tokio::test]
+async fn a_replayed_cascade_spares_a_child_recreated_for_another_parent() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_of_every_partition(&backend);
+    author_with_post(&mut ctrl).await;
+    let other = request(
+        &mut ctrl,
+        "$DB/users/create",
+        &json!({"id": "u9", "name": "b"}),
+    )
+    .await;
+    assert_eq!(other["status"], "ok");
+    hand_partition_to(
+        &mut ctrl,
+        crate::cluster::db::data_partition("posts", "p2"),
+        node(2),
+    );
+    let children = crate::cluster::node_controller::fk::FkReverseLookupResult {
+        constraint_name: "posts_author_fk".to_string(),
+        source_entity: "posts".to_string(),
+        source_field: "author_id".to_string(),
+        on_delete: OnDeleteAction::Cascade,
+        referencing_ids: vec!["p1".to_string(), "p2".to_string()],
+        cross_owned_ids: Vec::new(),
+        target_id: "u1".to_string(),
+    };
+    let response = DbRequestHandler::new(node(1))
+        .complete_pending_fk_delete(
+            &mut ctrl,
+            None,
+            vec![children],
+            FkDeleteContinuation::DeleteFromDbHandler {
+                entity: "users".to_string(),
+                id: "u1".to_string(),
+                sender: None,
+                client_id: None,
+                response_topic: "resp/t".to_string(),
+                correlation_data: None,
+            },
+        )
+        .await
+        .unwrap();
+    let deleted: Value = serde_json::from_slice(&response.payload).unwrap();
+    assert_eq!(deleted["data"]["deleted"], true);
+    assert!(ctrl.db_get("posts", "p1").is_none());
+    let recreated = request(
+        &mut ctrl,
+        "$DB/posts/create",
+        &json!({"id": "p1", "author_id": "u9"}),
+    )
+    .await;
+    assert_eq!(recreated["status"], "ok");
+    let pending = ctrl
+        .stores()
+        .cluster_outbox()
+        .unwrap()
+        .pending_cascade_ops()
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+
+    ctrl.replay_cascade_entries(&pending).await;
+
+    assert!(ctrl.db_get("posts", "p1").is_some());
+}
+
+#[tokio::test]
+async fn a_replayed_set_null_bumps_the_child_version() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_of_every_partition(&backend);
+    let author = request(
+        &mut ctrl,
+        "$DB/users/create",
+        &json!({"id": "u1", "name": "a"}),
+    )
+    .await;
+    let post = request(
+        &mut ctrl,
+        "$DB/posts/create",
+        &json!({"id": "p1", "author_id": "u1"}),
+    )
+    .await;
+    assert_eq!(
+        (&author["status"], &post["status"]),
+        (&json!("ok"), &json!("ok"))
+    );
+    ctrl.constraint_add(&ClusterConstraint::foreign_key(
+        "posts",
+        "posts_author_fk",
+        "author_id",
+        "users",
+        "id",
+        OnDeleteAction::SetNull,
+    ))
+    .await
+    .unwrap();
+    backend.fail_writes_to_keys_containing("posts/p1");
+    let deleted = request(&mut ctrl, "$DB/users/u1/delete", &Value::Null).await;
+    assert_eq!(deleted["data"]["deleted"], true);
+    let pending = ctrl
+        .stores()
+        .cluster_outbox()
+        .unwrap()
+        .pending_cascade_ops()
+        .unwrap();
+    backend.stop_failing_keys();
+
+    ctrl.replay_cascade_entries(&pending).await;
+    let read = request(&mut ctrl, "$DB/posts/p1", &Value::Null).await;
+
+    assert_eq!(
+        (&read["data"]["author_id"], &read["data"]["_version"]),
+        (&Value::Null, &json!(2))
+    );
+}
+
+#[tokio::test]
+async fn a_resource_delete_the_primary_cannot_store_keeps_its_grants() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_of_every_partition(&backend);
+    let handler = sharing_handler(&mut ctrl);
+    shared_diagram(&mut ctrl, &handler).await;
+    backend.fail_writes_to_keys_containing("diagrams/d1");
 
     let deleted = request_as(
         &mut ctrl,
@@ -469,19 +639,194 @@ async fn a_resource_delete_whose_grants_cannot_be_removed_is_refused() {
 }
 
 #[tokio::test]
-async fn a_cascade_its_receiver_could_not_store_is_not_acked() {
-    let mut ctrl = primary_of_every_partition(&FaultyBackend::shared());
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    ctrl.pending_constraints().insert_cascade_ack(42, tx);
-    let refused = crate::cluster::protocol::JsonDbResponse::new(
-        0,
-        serde_json::to_vec(&json!({"status": "error", "code": 500, "message": "internal error"}))
-            .unwrap(),
-        "_mqdb/cascade_ack/1/42".to_string(),
-        None,
+async fn a_cascaded_child_loses_its_grants() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_of_every_partition(&backend);
+    let handler = sharing_handler(&mut ctrl);
+    shared_diagram(&mut ctrl, &handler).await;
+    let child = request_as(
+        &mut ctrl,
+        &handler,
+        "$DB/diagrams/create",
+        &json!({"id": "d2", "userId": "alice", "parent_id": "d1"}),
+        Some("alice"),
+    )
+    .await;
+    let shared = request_as(
+        &mut ctrl,
+        &handler,
+        "$DB/diagrams/d2/share",
+        &json!({"grantee": "carol", "permission": "view"}),
+        Some("alice"),
+    )
+    .await;
+    assert_eq!(
+        (&child["status"], &shared["status"]),
+        (&json!("ok"), &json!("ok"))
     );
+    ctrl.constraint_add(&ClusterConstraint::foreign_key(
+        "diagrams",
+        "diagrams_parent_fk",
+        "parent_id",
+        "diagrams",
+        "id",
+        OnDeleteAction::Cascade,
+    ))
+    .await
+    .unwrap();
 
-    ctrl.handle_json_db_response(&refused).await;
+    let deleted = request_as(
+        &mut ctrl,
+        &handler,
+        "$DB/diagrams/d1/delete",
+        &Value::Null,
+        Some("alice"),
+    )
+    .await;
 
-    assert!(!rx.await.unwrap());
+    assert_eq!(
+        (
+            &deleted["data"]["deleted"],
+            ctrl.db_get("diagrams", "d2").is_some(),
+            ctrl.db_list("_shares").len()
+        ),
+        (&json!(true), false, 0)
+    );
+}
+
+#[tokio::test]
+async fn a_regrant_whose_new_grant_cannot_be_stored_keeps_the_old_one() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_of_every_partition(&backend);
+    let handler = sharing_handler(&mut ctrl);
+    shared_diagram(&mut ctrl, &handler).await;
+    backend.fail_writes_after(1);
+
+    let regranted = request_as(
+        &mut ctrl,
+        &handler,
+        "$DB/diagrams/d1/share",
+        &json!({"grantee": "bob", "permission": "view"}),
+        Some("alice"),
+    )
+    .await;
+    let permissions: Vec<Value> = ctrl
+        .db_list("_shares")
+        .iter()
+        .map(|grant| serde_json::from_slice::<Value>(&grant.data).unwrap()["permission"].clone())
+        .collect();
+
+    let highest = permissions
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(mqdb_core::types::AccessLevel::parse)
+        .max();
+
+    assert_eq!(
+        (&regranted["status"], highest),
+        (
+            &json!("error"),
+            mqdb_core::types::AccessLevel::parse("edit")
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_create_whose_id_cannot_be_encoded_is_refused() {
+    let mut ctrl = primary_of_every_partition(&FaultyBackend::shared());
+    let id = "a".repeat(usize::from(u16::MAX) + 1);
+
+    let created = request(&mut ctrl, "$DB/items/create", &json!({"id": id, "n": 1})).await;
+
+    assert_eq!(
+        (&created["status"], ctrl.db_get("items", &id).is_some()),
+        (&json!("error"), false)
+    );
+}
+
+#[tokio::test]
+async fn a_cascade_share_that_cannot_grant_every_member_is_refused() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_of_every_partition(&backend);
+    let handler = sharing_handler(&mut ctrl);
+    let member = request_as(
+        &mut ctrl,
+        &handler,
+        "$DB/diagrams/create",
+        &json!({"id": "d2", "userId": "alice"}),
+        Some("alice"),
+    )
+    .await;
+    let root = request_as(
+        &mut ctrl,
+        &handler,
+        "$DB/diagrams/create",
+        &json!({"id": "d1", "userId": "alice", "embeds": "d2"}),
+        Some("alice"),
+    )
+    .await;
+    assert_eq!(
+        (&member["status"], &root["status"]),
+        (&json!("ok"), &json!("ok"))
+    );
+    ctrl.constraint_add(&ClusterConstraint::foreign_key(
+        "diagrams",
+        "diagrams_embeds_fk",
+        "embeds",
+        "diagrams",
+        "id",
+        OnDeleteAction::SetNull,
+    ))
+    .await
+    .unwrap();
+    backend.fail_writes_after(1);
+
+    let shared = request_as(
+        &mut ctrl,
+        &handler,
+        "$DB/diagrams/d1/share",
+        &json!({"grantee": "bob", "permission": "view", "cascade": true}),
+        Some("alice"),
+    )
+    .await;
+
+    assert_eq!(
+        (&shared["status"], ctrl.db_list("_shares").len()),
+        (&json!("error"), 1)
+    );
+}
+
+#[tokio::test]
+async fn a_binary_create_the_primary_cannot_store_is_refused() {
+    use crate::cluster::db_protocol::{DbResponse, DbStatus, DbWriteRequest};
+    use bebytes::BeBytes;
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_of_every_partition(&backend);
+    backend.fail_writes(true);
+    let partition = PartitionId::new(7).unwrap();
+    let topic = format!("$DB/p{}/items/create", partition.get());
+    let ctx = MqttRequestContext {
+        response_topic: Some("resp/t"),
+        correlation_data: None,
+        sender: None,
+        client_id: None,
+    };
+
+    let DbPublishResult::Response(response) = DbRequestHandler::new(node(1))
+        .handle_publish(
+            &mut ctrl,
+            &topic,
+            &DbWriteRequest::create(b"{\"n\":1}", 1000).to_be_bytes(),
+            &ctx,
+        )
+        .await
+    else {
+        panic!("binary create got no response");
+    };
+    let (status, _) = DbResponse::try_from_be_bytes(&response.payload).unwrap();
+
+    assert_eq!(
+        (status.status(), ctrl.db_list("items").len()),
+        (DbStatus::Error, 0)
+    );
 }

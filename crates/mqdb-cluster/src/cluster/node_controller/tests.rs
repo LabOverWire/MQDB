@@ -2328,21 +2328,21 @@ async fn local_cascade_set_nulls_cross_owned_grandchild() {
             CascadeSideEffect::LocalSetNull { entity, id, .. } if entity == "comments" && id == "comment-carol"
         )) && !has(&|e| matches!(
             e,
-            CascadeSideEffect::LocalDelete { entity, id } if entity == "comments" && id == "comment-carol"
+            CascadeSideEffect::LocalDelete { entity, id, .. } if entity == "comments" && id == "comment-carol"
         )),
         "carol's cross-owned grandchild must be set-null'd, not deleted, at cascade depth 2"
     );
     assert!(
         has(&|e| matches!(
             e,
-            CascadeSideEffect::LocalDelete { entity, id } if entity == "comments" && id == "comment-alice"
+            CascadeSideEffect::LocalDelete { entity, id, .. } if entity == "comments" && id == "comment-alice"
         )),
         "alice's own grandchild is still cascade-deleted"
     );
     assert!(
         has(&|e| matches!(
             e,
-            CascadeSideEffect::LocalDelete { entity, id } if entity == "posts" && id == "post-alice"
+            CascadeSideEffect::LocalDelete { entity, id, .. } if entity == "posts" && id == "post-alice"
         )),
         "alice's own post is still cascade-deleted"
     );
