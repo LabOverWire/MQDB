@@ -450,7 +450,7 @@ async fn reconcile_apply_skips_record_deleted_after_collection() {
     ctrl.update_partition_map(map);
     ctrl.stores()
         .db_constraints
-        .add(ClusterConstraint::unique("users", "uniq_email", "email"))
+        .add(ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
         .unwrap();
     ctrl.stores()
         .db_data
@@ -539,7 +539,7 @@ async fn project_reconcile_work_skips_key_deleted_after_gather() {
     ctrl.update_partition_map(map);
     ctrl.stores()
         .db_constraints
-        .add(ClusterConstraint::unique("users", "uniq_email", "email"))
+        .add(ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
         .unwrap();
     ctrl.stores()
         .db_data
@@ -806,7 +806,7 @@ async fn fk_then_unique_defers_reserve_to_async_completion() {
     ctrl.update_partition_map(map);
     ctrl.stores()
         .db_constraints
-        .add(ClusterConstraint::unique("users", "uniq_email", "email"))
+        .add(ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
         .unwrap();
 
     let continuation = FkCheckContinuation::CreateFromNodeController {
@@ -847,11 +847,7 @@ async fn unsealed_partition_fails_reserve_closed() {
     let entity = "users";
     ctrl.stores()
         .db_constraints
-        .add(crate::cluster::db::ClusterConstraint::unique(
-            entity,
-            "uniq_email",
-            "email",
-        ))
+        .add(crate::cluster::db::ClusterConstraint::unique(entity, "uniq_email", "email").unwrap())
         .unwrap();
     let value = b"a@x.com";
     let unique_part = crate::cluster::db::unique_partition(entity, "email", value);
@@ -1718,7 +1714,7 @@ async fn db_update_enforces_unique_constraint() {
     let mut ctrl = create_test_controller(node1, transport);
 
     let constraint =
-        crate::cluster::db::ClusterConstraint::unique("users", "email_unique", "email");
+        crate::cluster::db::ClusterConstraint::unique("users", "email_unique", "email").unwrap();
     ctrl.constraint_add(&constraint).await.unwrap();
     setup_all_partitions_primary(&mut ctrl, node1);
 
@@ -1752,7 +1748,7 @@ async fn db_update_allows_same_value() {
     let mut ctrl = create_test_controller(node1, transport);
 
     let constraint =
-        crate::cluster::db::ClusterConstraint::unique("users", "email_unique", "email");
+        crate::cluster::db::ClusterConstraint::unique("users", "email_unique", "email").unwrap();
     ctrl.constraint_add(&constraint).await.unwrap();
     setup_all_partitions_primary(&mut ctrl, node1);
 
@@ -1778,7 +1774,7 @@ async fn db_update_releases_old_unique_value() {
     let mut ctrl = create_test_controller(node1, transport);
 
     let constraint =
-        crate::cluster::db::ClusterConstraint::unique("users", "email_unique", "email");
+        crate::cluster::db::ClusterConstraint::unique("users", "email_unique", "email").unwrap();
     ctrl.constraint_add(&constraint).await.unwrap();
     setup_all_partitions_primary(&mut ctrl, node1);
 
@@ -1935,7 +1931,8 @@ async fn fk_reverse_lookup_ignores_stale_replica_data() {
         "users",
         "id",
         OnDeleteAction::Restrict,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk).await.unwrap();
 
     let user_data = serde_json::to_vec(&serde_json::json!({"name": "Alice"})).unwrap();
@@ -1986,7 +1983,8 @@ async fn fk_reverse_lookup_finds_primary_partition_data() {
         "users",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk).await.unwrap();
 
     let user_data = serde_json::to_vec(&serde_json::json!({"name": "Alice"})).unwrap();
@@ -2034,7 +2032,8 @@ async fn fk_reverse_lookup_restrict_blocks_only_on_primary_data() {
         "users",
         "id",
         OnDeleteAction::Restrict,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk).await.unwrap();
 
     let user_data = serde_json::to_vec(&serde_json::json!({"name": "Alice"})).unwrap();
@@ -2099,7 +2098,8 @@ async fn setup_owned_posts_referencing_user(
         "users",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk).await.unwrap();
 
     let user = serde_json::to_vec(&serde_json::json!({"name": "Alice"})).unwrap();
@@ -2289,7 +2289,8 @@ async fn local_cascade_set_nulls_cross_owned_grandchild() {
         "users",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk_posts).await.unwrap();
     let fk_comments = ClusterConstraint::foreign_key(
         "comments",
@@ -2298,7 +2299,8 @@ async fn local_cascade_set_nulls_cross_owned_grandchild() {
         "posts",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk_comments).await.unwrap();
 
     let user = serde_json::to_vec(&serde_json::json!({"name": "Alice"})).unwrap();
@@ -2384,7 +2386,8 @@ async fn setup_post_with_owned_and_cross_owned_comments(
         "posts",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk_comments).await.unwrap();
 
     let post = serde_json::to_vec(&serde_json::json!({
@@ -2579,7 +2582,8 @@ async fn circular_fk_cascade_terminates() {
         "beta",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     let fk_b_to_a = ClusterConstraint::foreign_key(
         "beta",
         "beta_alpha_fk",
@@ -2587,7 +2591,8 @@ async fn circular_fk_cascade_terminates() {
         "alpha",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk_a_to_b).await.unwrap();
     ctrl.constraint_add(&fk_b_to_a).await.unwrap();
 
@@ -2635,7 +2640,8 @@ async fn three_way_circular_fk_cascade_terminates() {
         "bbb",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     let fk_b_c = ClusterConstraint::foreign_key(
         "bbb",
         "bbb_ccc_fk",
@@ -2643,7 +2649,8 @@ async fn three_way_circular_fk_cascade_terminates() {
         "ccc",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     let fk_c_a = ClusterConstraint::foreign_key(
         "ccc",
         "ccc_aaa_fk",
@@ -2651,7 +2658,8 @@ async fn three_way_circular_fk_cascade_terminates() {
         "aaa",
         "id",
         OnDeleteAction::Cascade,
-    );
+    )
+    .unwrap();
     ctrl.constraint_add(&fk_a_b).await.unwrap();
     ctrl.constraint_add(&fk_b_c).await.unwrap();
     ctrl.constraint_add(&fk_c_a).await.unwrap();
@@ -3252,14 +3260,17 @@ async fn fk_check_refuses_a_reference_too_long_to_be_a_record_id() {
         crate::cluster::db::data_partition("parents", &parent_id),
         node2,
     );
-    ctrl.constraint_add(&ClusterConstraint::foreign_key(
-        "children",
-        "fk_parent",
-        "parent_id",
-        "parents",
-        "id",
-        OnDeleteAction::Restrict,
-    ))
+    ctrl.constraint_add(
+        &ClusterConstraint::foreign_key(
+            "children",
+            "fk_parent",
+            "parent_id",
+            "parents",
+            "id",
+            OnDeleteAction::Restrict,
+        )
+        .unwrap(),
+    )
     .await
     .unwrap();
 
@@ -3274,4 +3285,21 @@ async fn fk_check_refuses_a_reference_too_long_to_be_a_record_id() {
             .iter()
             .all(|(_, message)| !matches!(message, ClusterMessage::FkCheckRequest(_)))
     );
+}
+
+#[tokio::test]
+async fn constraint_add_refuses_a_constraint_too_large_to_store() {
+    use crate::cluster::db::ClusterConstraint;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    make_all_primary(&mut ctrl, node1);
+    let long_name = "n".repeat(65_530);
+
+    let result = ctrl
+        .constraint_add(&ClusterConstraint::unique("users", &long_name, "email").unwrap())
+        .await;
+
+    assert!(result.is_err());
+    assert!(ctrl.constraint_list("users").is_empty());
 }

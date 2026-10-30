@@ -85,30 +85,25 @@ pub struct ClusterConstraint {
 }
 
 impl ClusterConstraint {
-    #[allow(clippy::cast_possible_truncation)]
     #[must_use]
-    pub fn unique(entity: &str, name: &str, field: &str) -> Self {
-        let entity_bytes = entity.as_bytes().to_vec();
-        let name_bytes = name.as_bytes().to_vec();
-        let field_bytes = field.as_bytes().to_vec();
-        Self {
+    pub fn unique(entity: &str, name: &str, field: &str) -> Option<Self> {
+        Some(Self {
             version: 2,
-            entity_len: entity_bytes.len() as u16,
-            entity: entity_bytes,
-            name_len: name_bytes.len() as u16,
-            name: name_bytes,
+            entity_len: u16::try_from(entity.len()).ok()?,
+            entity: entity.as_bytes().to_vec(),
+            name_len: u16::try_from(name.len()).ok()?,
+            name: name.as_bytes().to_vec(),
             constraint_type: ConstraintType::Unique as u8,
-            field_len: field_bytes.len() as u16,
-            field: field_bytes,
+            field_len: u16::try_from(field.len()).ok()?,
+            field: field.as_bytes().to_vec(),
             target_entity_len: 0,
             target_entity: Vec::new(),
             target_field_len: 0,
             target_field: Vec::new(),
             on_delete: 0,
-        }
+        })
     }
 
-    #[allow(clippy::cast_possible_truncation, clippy::too_many_arguments)]
     #[must_use]
     pub fn foreign_key(
         entity: &str,
@@ -117,27 +112,22 @@ impl ClusterConstraint {
         target_entity: &str,
         target_field: &str,
         on_delete: OnDeleteAction,
-    ) -> Self {
-        let entity_bytes = entity.as_bytes().to_vec();
-        let name_bytes = name.as_bytes().to_vec();
-        let field_bytes = field.as_bytes().to_vec();
-        let target_entity_bytes = target_entity.as_bytes().to_vec();
-        let target_field_bytes = target_field.as_bytes().to_vec();
-        Self {
+    ) -> Option<Self> {
+        Some(Self {
             version: 2,
-            entity_len: entity_bytes.len() as u16,
-            entity: entity_bytes,
-            name_len: name_bytes.len() as u16,
-            name: name_bytes,
+            entity_len: u16::try_from(entity.len()).ok()?,
+            entity: entity.as_bytes().to_vec(),
+            name_len: u16::try_from(name.len()).ok()?,
+            name: name.as_bytes().to_vec(),
             constraint_type: ConstraintType::ForeignKey as u8,
-            field_len: field_bytes.len() as u16,
-            field: field_bytes,
-            target_entity_len: target_entity_bytes.len() as u16,
-            target_entity: target_entity_bytes,
-            target_field_len: target_field_bytes.len() as u16,
-            target_field: target_field_bytes,
+            field_len: u16::try_from(field.len()).ok()?,
+            field: field.as_bytes().to_vec(),
+            target_entity_len: u16::try_from(target_entity.len()).ok()?,
+            target_entity: target_entity.as_bytes().to_vec(),
+            target_field_len: u16::try_from(target_field.len()).ok()?,
+            target_field: target_field.as_bytes().to_vec(),
             on_delete: on_delete as u8,
-        }
+        })
     }
 
     #[must_use]
@@ -191,6 +181,7 @@ pub enum ConstraintStoreError {
     NotFound,
     AlreadyExists,
     SerializationError,
+    TooLarge,
 }
 
 impl std::fmt::Display for ConstraintStoreError {
@@ -199,6 +190,7 @@ impl std::fmt::Display for ConstraintStoreError {
             Self::NotFound => write!(f, "constraint not found"),
             Self::AlreadyExists => write!(f, "constraint already exists"),
             Self::SerializationError => write!(f, "serialization error"),
+            Self::TooLarge => write!(f, "constraint is too large to store"),
         }
     }
 }
@@ -460,26 +452,24 @@ impl ConstraintStore {
         Self::serialize_entries(constraints.iter())
     }
 
-    #[allow(clippy::cast_possible_truncation)]
     fn serialize_entries<'a, I>(iter: I) -> Vec<u8>
     where
         I: Iterator<Item = (&'a String, &'a ClusterConstraint)>,
     {
-        let entries: Vec<_> = iter.collect();
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&(entries.len() as u32).to_be_bytes());
-
-        for (key, constraint) in entries {
-            let key_bytes = key.as_bytes();
-            buf.extend_from_slice(&(key_bytes.len() as u16).to_be_bytes());
-            buf.extend_from_slice(key_bytes);
-
-            let data = Self::serialize(constraint);
-            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
-            buf.extend_from_slice(&data);
-        }
-
-        buf
+        let encoded: Vec<Vec<u8>> = iter
+            .filter_map(|(key, constraint)| {
+                let entry =
+                    super::data_store::encode_snapshot_entry(key, &Self::serialize(constraint));
+                if entry.is_none() {
+                    tracing::warn!(
+                        key_len = key.len(),
+                        "constraint too large for snapshot, skipped"
+                    );
+                }
+                entry
+            })
+            .collect();
+        super::data_store::join_snapshot_entries(&encoded)
     }
 
     /// # Panics
@@ -593,7 +583,7 @@ mod tests {
 
     #[test]
     fn cluster_constraint_bebytes_roundtrip() {
-        let constraint = ClusterConstraint::unique("users", "unique_email", "email");
+        let constraint = ClusterConstraint::unique("users", "unique_email", "email").unwrap();
         let bytes = ConstraintStore::serialize(&constraint);
         let parsed = ConstraintStore::deserialize(&bytes).unwrap();
 
@@ -606,7 +596,7 @@ mod tests {
     #[test]
     fn add_and_get() {
         let store = ConstraintStore::new(node(1));
-        let constraint = ClusterConstraint::unique("users", "unique_email", "email");
+        let constraint = ClusterConstraint::unique("users", "unique_email", "email").unwrap();
 
         store.add(constraint).unwrap();
         let fetched = store.get("users", "unique_email").unwrap();
@@ -619,7 +609,7 @@ mod tests {
     #[test]
     fn add_duplicate_fails() {
         let store = ConstraintStore::new(node(1));
-        let constraint = ClusterConstraint::unique("users", "unique_email", "email");
+        let constraint = ClusterConstraint::unique("users", "unique_email", "email").unwrap();
 
         store.add(constraint.clone()).unwrap();
         let result = store.add(constraint);
@@ -630,7 +620,7 @@ mod tests {
     #[test]
     fn remove_constraint() {
         let store = ConstraintStore::new(node(1));
-        let constraint = ClusterConstraint::unique("users", "unique_email", "email");
+        let constraint = ClusterConstraint::unique("users", "unique_email", "email").unwrap();
 
         store.add(constraint).unwrap();
         let removed = store.remove("users", "unique_email").unwrap();
@@ -644,21 +634,13 @@ mod tests {
         let store = ConstraintStore::new(node(1));
 
         store
-            .add(ClusterConstraint::unique("users", "unique_email", "email"))
+            .add(ClusterConstraint::unique("users", "unique_email", "email").unwrap())
             .unwrap();
         store
-            .add(ClusterConstraint::unique(
-                "users",
-                "unique_username",
-                "username",
-            ))
+            .add(ClusterConstraint::unique("users", "unique_username", "username").unwrap())
             .unwrap();
         store
-            .add(ClusterConstraint::unique(
-                "orders",
-                "unique_order_id",
-                "order_id",
-            ))
+            .add(ClusterConstraint::unique("orders", "unique_order_id", "order_id").unwrap())
             .unwrap();
 
         let user_constraints = store.list("users");
@@ -673,14 +655,10 @@ mod tests {
         let store = ConstraintStore::new(node(1));
 
         store
-            .add(ClusterConstraint::unique("users", "unique_email", "email"))
+            .add(ClusterConstraint::unique("users", "unique_email", "email").unwrap())
             .unwrap();
         store
-            .add(ClusterConstraint::unique(
-                "users",
-                "unique_username",
-                "username",
-            ))
+            .add(ClusterConstraint::unique("users", "unique_username", "username").unwrap())
             .unwrap();
 
         let fields = store.get_unique_fields("users");
@@ -692,7 +670,7 @@ mod tests {
     #[test]
     fn apply_replicated_insert() {
         let store = ConstraintStore::new(node(1));
-        let constraint = ClusterConstraint::unique("products", "unique_sku", "sku");
+        let constraint = ClusterConstraint::unique("products", "unique_sku", "sku").unwrap();
         let data = ConstraintStore::serialize(&constraint);
 
         store
@@ -705,7 +683,7 @@ mod tests {
     #[test]
     fn apply_replicated_delete() {
         let store = ConstraintStore::new(node(1));
-        let constraint = ClusterConstraint::unique("products", "unique_sku", "sku");
+        let constraint = ClusterConstraint::unique("products", "unique_sku", "sku").unwrap();
         let data = ConstraintStore::serialize(&constraint);
 
         store
@@ -727,7 +705,8 @@ mod tests {
             "users",
             "id",
             OnDeleteAction::Cascade,
-        );
+        )
+        .unwrap();
         let bytes = ConstraintStore::serialize(&constraint);
         let parsed = ConstraintStore::deserialize(&bytes).unwrap();
 
@@ -746,27 +725,33 @@ mod tests {
         let store = ConstraintStore::new(node(1));
 
         store
-            .add(ClusterConstraint::unique("posts", "unique_slug", "slug"))
+            .add(ClusterConstraint::unique("posts", "unique_slug", "slug").unwrap())
             .unwrap();
         store
-            .add(ClusterConstraint::foreign_key(
-                "posts",
-                "posts_author_fk",
-                "author_id",
-                "users",
-                "id",
-                OnDeleteAction::Restrict,
-            ))
+            .add(
+                ClusterConstraint::foreign_key(
+                    "posts",
+                    "posts_author_fk",
+                    "author_id",
+                    "users",
+                    "id",
+                    OnDeleteAction::Restrict,
+                )
+                .unwrap(),
+            )
             .unwrap();
         store
-            .add(ClusterConstraint::foreign_key(
-                "posts",
-                "posts_category_fk",
-                "category_id",
-                "categories",
-                "id",
-                OnDeleteAction::SetNull,
-            ))
+            .add(
+                ClusterConstraint::foreign_key(
+                    "posts",
+                    "posts_category_fk",
+                    "category_id",
+                    "categories",
+                    "id",
+                    OnDeleteAction::SetNull,
+                )
+                .unwrap(),
+            )
             .unwrap();
 
         let fks = store.get_fk_constraints("posts");
@@ -781,34 +766,43 @@ mod tests {
         let store = ConstraintStore::new(node(1));
 
         store
-            .add(ClusterConstraint::foreign_key(
-                "posts",
-                "posts_author_fk",
-                "author_id",
-                "users",
-                "id",
-                OnDeleteAction::Cascade,
-            ))
+            .add(
+                ClusterConstraint::foreign_key(
+                    "posts",
+                    "posts_author_fk",
+                    "author_id",
+                    "users",
+                    "id",
+                    OnDeleteAction::Cascade,
+                )
+                .unwrap(),
+            )
             .unwrap();
         store
-            .add(ClusterConstraint::foreign_key(
-                "comments",
-                "comments_author_fk",
-                "author_id",
-                "users",
-                "id",
-                OnDeleteAction::Restrict,
-            ))
+            .add(
+                ClusterConstraint::foreign_key(
+                    "comments",
+                    "comments_author_fk",
+                    "author_id",
+                    "users",
+                    "id",
+                    OnDeleteAction::Restrict,
+                )
+                .unwrap(),
+            )
             .unwrap();
         store
-            .add(ClusterConstraint::foreign_key(
-                "comments",
-                "comments_post_fk",
-                "post_id",
-                "posts",
-                "id",
-                OnDeleteAction::Cascade,
-            ))
+            .add(
+                ClusterConstraint::foreign_key(
+                    "comments",
+                    "comments_post_fk",
+                    "post_id",
+                    "posts",
+                    "id",
+                    OnDeleteAction::Cascade,
+                )
+                .unwrap(),
+            )
             .unwrap();
 
         let refs_to_users = store.find_referencing_constraints("users");
@@ -855,7 +849,7 @@ mod tests {
     #[test]
     fn apply_replicated_uses_normalized_key() {
         let store = ConstraintStore::new(node(1));
-        let constraint = ClusterConstraint::unique("products", "unique_sku", "sku");
+        let constraint = ClusterConstraint::unique("products", "unique_sku", "sku").unwrap();
         let data = ConstraintStore::serialize(&constraint);
 
         let replication_id = "_db_constraint/products/unique_sku";
@@ -883,7 +877,8 @@ mod tests {
             "users",
             "id",
             OnDeleteAction::Cascade,
-        );
+        )
+        .unwrap();
         let v2_bytes = ConstraintStore::serialize(&v2);
         assert_eq!(v2_bytes[0], 2);
 
@@ -894,7 +889,8 @@ mod tests {
 
     #[test]
     fn deserialize_rejects_unknown_version() {
-        let mut bytes = ConstraintStore::serialize(&ClusterConstraint::unique("x", "y", "z"));
+        let mut bytes =
+            ConstraintStore::serialize(&ClusterConstraint::unique("x", "y", "z").unwrap());
         bytes[0] = 99;
         assert!(ConstraintStore::deserialize(&bytes).is_none());
     }
@@ -906,7 +902,7 @@ mod tests {
 
     #[test]
     fn v1_payload_not_parsed_as_v2() {
-        let v1_unique = ClusterConstraint::unique("users", "unique_email", "email");
+        let v1_unique = ClusterConstraint::unique("users", "unique_email", "email").unwrap();
         let mut v1_bytes = Vec::new();
         v1_bytes.push(1);
         let entity = b"users";
@@ -936,12 +932,8 @@ mod tests {
 
         let entities = ["alpha", "beta", "gamma", "delta"];
         for entity in &entities {
-            src.add(ClusterConstraint::unique(
-                entity,
-                &format!("uniq_{entity}"),
-                "email",
-            ))
-            .unwrap();
+            src.add(ClusterConstraint::unique(entity, &format!("uniq_{entity}"), "email").unwrap())
+                .unwrap();
         }
 
         let target = src.get("alpha", "uniq_alpha").unwrap().partition();
@@ -982,12 +974,8 @@ mod tests {
 
         let entities = ["alpha", "beta", "gamma", "delta", "epsilon"];
         for entity in &entities {
-            src.add(ClusterConstraint::unique(
-                entity,
-                &format!("uniq_{entity}"),
-                "email",
-            ))
-            .unwrap();
+            src.add(ClusterConstraint::unique(entity, &format!("uniq_{entity}"), "email").unwrap())
+                .unwrap();
         }
 
         let partitions: std::collections::HashSet<_> = src
@@ -1011,5 +999,34 @@ mod tests {
                 "every constraint must arrive via export_all, regardless of partition: {entity}:{name}"
             );
         }
+    }
+
+    #[test]
+    fn constraint_with_a_length_that_does_not_fit_is_refused() {
+        let long = "f".repeat(70_000);
+        assert!(ClusterConstraint::unique("users", "uq", &long).is_none());
+        assert!(ClusterConstraint::unique("users", &long, "email").is_none());
+        for (field, target_entity, target_field) in [
+            (long.as_str(), "posts", "id"),
+            ("post_id", long.as_str(), "id"),
+            ("post_id", "posts", long.as_str()),
+        ] {
+            assert!(
+                ClusterConstraint::foreign_key(
+                    "comments",
+                    "fk",
+                    field,
+                    target_entity,
+                    target_field,
+                    OnDeleteAction::Restrict,
+                )
+                .is_none()
+            );
+        }
+        let at_limit = "f".repeat(usize::from(u16::MAX));
+        let constraint = ClusterConstraint::unique("users", "uq", &at_limit).unwrap();
+        let decoded =
+            ConstraintStore::deserialize(&ConstraintStore::serialize(&constraint)).unwrap();
+        assert_eq!(decoded.field_str(), at_limit);
     }
 }

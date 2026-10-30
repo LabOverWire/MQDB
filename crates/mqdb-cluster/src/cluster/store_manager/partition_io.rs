@@ -314,11 +314,7 @@ mod tests {
             .unwrap();
         store
             .db_constraints
-            .add(ClusterConstraint::unique(
-                entity,
-                &format!("uniq_{entity}"),
-                "email",
-            ))
+            .add(ClusterConstraint::unique(entity, &format!("uniq_{entity}"), "email").unwrap())
             .unwrap();
 
         let value = format!("v-{entity}");
@@ -428,7 +424,8 @@ mod tests {
             "posts",
             "id",
             OnDeleteAction::Cascade,
-        );
+        )
+        .unwrap();
         src.db_constraints.add(fk.clone()).unwrap();
         dst.db_constraints.add(fk).unwrap();
 
@@ -488,21 +485,20 @@ mod tests {
         for entity in &entities {
             src.db_schema.register(entity, b"{\"fields\":[]}").unwrap();
             src.db_constraints
-                .add(ClusterConstraint::unique(
-                    entity,
-                    &format!("uniq_{entity}"),
-                    "email",
-                ))
+                .add(ClusterConstraint::unique(entity, &format!("uniq_{entity}"), "email").unwrap())
                 .unwrap();
             src.db_constraints
-                .add(ClusterConstraint::foreign_key(
-                    entity,
-                    &format!("fk_{entity}"),
-                    "parent_id",
-                    "alpha",
-                    "id",
-                    OnDeleteAction::Cascade,
-                ))
+                .add(
+                    ClusterConstraint::foreign_key(
+                        entity,
+                        &format!("fk_{entity}"),
+                        "parent_id",
+                        "alpha",
+                        "id",
+                        OnDeleteAction::Cascade,
+                    )
+                    .unwrap(),
+                )
                 .unwrap();
         }
 
