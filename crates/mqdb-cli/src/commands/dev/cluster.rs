@@ -192,7 +192,14 @@ pub(crate) fn cmd_dev_start_cluster(
         println!("Cleaning existing databases...");
         cmd_dev_clean(&db_prefix)?;
     } else {
-        refuse_if_in_use(&db_prefix)?;
+        let generated_passwd = PathBuf::from(format!("{db_prefix}-passwd"));
+        refuse_if_in_use(
+            &db_prefix,
+            options
+                .passwd
+                .is_none()
+                .then_some(generated_passwd.as_path()),
+        )?;
     }
 
     let exe = std::env::current_exe()?;

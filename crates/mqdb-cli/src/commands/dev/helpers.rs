@@ -232,12 +232,16 @@ fn listed(dirs: &[PathBuf]) -> String {
         .join(", ")
 }
 
-pub(crate) fn refuse_if_in_use(db_prefix: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let dirs: Vec<PathBuf> = node_dirs(db_prefix)?
+pub(crate) fn refuse_if_in_use(
+    db_prefix: &str,
+    replaced_passwd: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let paths: Vec<PathBuf> = node_dirs(db_prefix)?
         .into_iter()
         .map(|(_, dir)| dir)
+        .chain(replaced_passwd.map(Path::to_path_buf))
         .collect();
-    let in_use = paths_in_use(&dirs)?;
+    let in_use = paths_in_use(&paths)?;
     if in_use.is_empty() {
         Ok(())
     } else {

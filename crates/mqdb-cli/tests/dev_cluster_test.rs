@@ -1002,3 +1002,39 @@ fn dev_logs_follow_reports_a_failing_grep() {
         output_text(&output)
     );
 }
+
+#[test]
+fn dev_start_cluster_keeps_a_passwd_file_a_running_node_uses() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    let passwd = prefix.with_file_name("e2e-passwd");
+    std::fs::write(&passwd, "admin:x\nalice:y\n").expect("write passwd");
+    let elsewhere = dir.path().join("agentdb");
+    std::fs::create_dir_all(&elsewhere).expect("create the agent dir");
+    let elsewhere_arg = elsewhere.display().to_string();
+    let passwd_arg = passwd.display().to_string();
+    let agent = StandInNode::spawn_args(
+        dir.path(),
+        &[
+            "agent",
+            "start",
+            "--db",
+            &elsewhere_arg,
+            "--passwd",
+            &passwd_arg,
+        ],
+    );
+
+    let output = start_one_node(&prefix.display().to_string(), "32062");
+
+    assert!(
+        !output.status.success(),
+        "start must refuse while a node reads the passwd file it would replace: {}",
+        output_text(&output)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&passwd).expect("passwd"),
+        "admin:x\nalice:y\n"
+    );
+    drop(agent);
+}

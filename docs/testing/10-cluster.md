@@ -364,7 +364,8 @@ prefix `/tmp/mqdb-test` it also removes what `dev test` leaves, which always liv
 `/tmp/mqdb-test-{own,share,presence}-N` directories and `/tmp/mqdb-test-{ownership,sharing,presence}-passwd`
 files. It waits up to 10s while an `mqdb cluster start` or `mqdb agent start` process still uses
 one of those directories as its `--db` or one of those files as its `--passwd`, then refuses. `dev start-cluster` without `--clean` refuses right away
-if a node still runs on one of its `<prefix>-N` directories. A process is matched by its
+if a node still runs on one of its `<prefix>-N` directories, or, when no `--passwd` is given, still
+uses the `<prefix>-passwd` file it would regenerate. A process is matched by its
 `--db <dir>` or `--db=<dir>` argument; a relative `--db` is resolved against that process's
 working directory with `lsof`, and so is a relative `--passwd`; if either cannot be resolved,
 `dev clean` and `dev start-cluster` refuse. A node given its
