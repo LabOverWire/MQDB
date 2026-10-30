@@ -366,7 +366,8 @@ files. It waits up to 10s while an `mqdb cluster start` or `mqdb agent start` pr
 one of those directories as its `--db` or one of those files as its `--passwd`, then refuses. `dev start-cluster` without `--clean` refuses right away
 if a node still runs on one of its `<prefix>-N` directories. A process is matched by its
 `--db <dir>` or `--db=<dir>` argument; a relative `--db` is resolved against that process's
-working directory with `lsof`, and an unresolvable one makes `dev clean` refuse. A node given its
+working directory with `lsof`, and so is a relative `--passwd`; if either cannot be resolved,
+`dev clean` and `dev start-cluster` refuse. A node given its
 database only through `MQDB_DB` is not detected.
 
 ### View Logs

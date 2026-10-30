@@ -924,3 +924,81 @@ fn dev_clean_keeps_a_passwd_file_a_running_node_uses() {
     assert!(passwd.exists());
     drop(node);
 }
+
+#[test]
+fn dev_logs_follow_matches_the_pattern_literally() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    let node_dir = prefix.with_file_name("e2e-1");
+    std::fs::create_dir_all(&node_dir).expect("create node dir");
+    std::fs::write(node_dir.join("mqdb.log"), "aXb regex only\na.b literal\n").expect("write log");
+    let captured = dir.path().join("follow.out");
+    let stdout = std::fs::File::create(&captured).expect("create capture file");
+
+    let follower = ProcessGroup {
+        child: std::os::unix::process::CommandExt::process_group(
+            &mut mqdb_command(&[
+                "dev",
+                "logs",
+                "-f",
+                "--pattern",
+                "a.b",
+                "--db-prefix",
+                &prefix.display().to_string(),
+            ]),
+            0,
+        )
+        .stdout(stdout)
+        .spawn()
+        .expect("spawn dev logs -f"),
+    };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut seen = String::new();
+    while std::time::Instant::now() < deadline && !seen.contains("a.b literal") {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        seen = std::fs::read_to_string(&captured).unwrap_or_default();
+    }
+    drop(follower);
+
+    assert!(seen.contains("a.b literal"), "{seen}");
+    assert!(
+        !seen.contains("aXb regex only"),
+        "--pattern is a literal substring in follow mode too: {seen}"
+    );
+}
+
+#[test]
+fn dev_logs_follow_reports_a_failing_grep() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    let node_dir = prefix.with_file_name("e2e-1");
+    std::fs::create_dir_all(&node_dir).expect("create node dir");
+    std::fs::write(node_dir.join("mqdb.log"), "line\n").expect("write log");
+    let failing_grep = tool_dir(
+        dir.path(),
+        &[
+            ("tail", "#!/bin/sh\nexec /usr/bin/tail \"$@\"\n"),
+            ("grep", "#!/bin/sh\necho 'grep: broken' >&2\nexit 2\n"),
+        ],
+    );
+
+    let output = mqdb_command(&[
+        "dev",
+        "logs",
+        "-f",
+        "--pattern",
+        "line",
+        "--db-prefix",
+        &prefix.display().to_string(),
+    ])
+    .env("PATH", &failing_grep)
+    .output()
+    .expect("run mqdb");
+
+    assert!(
+        !output.status.success(),
+        "a grep that fails is not a successful follow: {}",
+        output_text(&output)
+    );
+}

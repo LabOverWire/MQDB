@@ -601,14 +601,17 @@ pub(crate) fn cmd_dev_logs(
             let mut tail = cmd.stdout(std::process::Stdio::piped()).spawn()?;
             let tail_output = tail.stdout.take().ok_or("tail has no stdout")?;
             let grep = Command::new("grep")
-                .args(["--line-buffered", pat])
+                .args(["--line-buffered", "-F", "-e", pat])
                 .stdin(tail_output)
                 .status();
             if tail.try_wait()?.is_none() {
                 tail.kill()?;
             }
             tail.wait()?;
-            grep?;
+            let grep = grep?;
+            if grep.code().is_some_and(|code| code > 1) {
+                return Err(format!("grep for '{pat}' failed: {grep}").into());
+            }
         } else {
             cmd.status()?;
         }
