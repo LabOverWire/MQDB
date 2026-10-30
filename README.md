@@ -876,7 +876,7 @@ Every CLI flag can be set via environment variable. This is the primary configur
 | `MQDB_MAX_RETAINED_MESSAGES` | Reject client retained publishes to new topics once this many retained messages are stored, counting the broker's `$SYS` topics, presence and Sparkplug certificates (agent mode only; `0` = no limit) | `0` |
 | `MQDB_MAX_RETAINED_MESSAGE_SIZE` | Reject retained publishes with a larger payload, in bytes (agent and cluster; `0` = no limit) | `0` |
 | `MQDB_EVENT_SCOPE` | Scope events by entity field | — |
-| `MQDB_WS_BIND` | WebSocket bind address | — |
+| `MQDB_WS_BIND` | WebSocket bind address: MQTT over WebSocket on `/mqtt`; in agent mode a plain HTTP `GET /health` on the same port returns `200` for load balancer health checks | — |
 
 **Authentication:**
 

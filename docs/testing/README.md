@@ -23,3 +23,4 @@ The guide is split into focused subdocuments for efficient reference:
 | [15-license.md](15-license.md)             | License key verification and enforcement                                   |
 | [16-sparkplug.md](16-sparkplug.md)         | Sparkplug Aware certificates (agent mode)                                   |
 | [17-sharing.md](17-sharing.md)             | Sharing: share, unshare, shares, shared, cascade (agent and cluster)        |
+| [18-websocket.md](18-websocket.md)         | WebSocket listener: MQTT over WebSocket, `/health`, idle connections        |

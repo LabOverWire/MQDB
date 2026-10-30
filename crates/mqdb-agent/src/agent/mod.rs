@@ -4,6 +4,7 @@
 mod broker;
 mod handlers;
 mod tasks;
+mod websocket;
 
 use crate::auth_config::AuthSetupConfig;
 use crate::database::Database;
@@ -279,9 +280,6 @@ impl MqdbAgent {
     /// # Errors
     /// Returns an error if the broker fails to start or encounters a runtime error.
     pub async fn run(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Subscribe before any startup await so a shutdown() racing the startup
-        // window (e.g. a SIGTERM during a slow bind/cert load) is buffered rather
-        // than lost by the broadcast channel.
         let mut shutdown_rx = self.shutdown_tx.subscribe();
 
         let (mut config, service_username, service_password, needs_composite, admin_users) =
@@ -292,6 +290,7 @@ impl MqdbAgent {
 
         let auth_method = config.auth_config.auth_method;
         let (config, rate_limit) = crate::auth_config::take_auth_rate_limit(config);
+        let ws_listener = self.bind_websocket(&config).await?;
         let broker = mqtt5::broker::MqttBroker::with_config(config).await?;
         let (mut broker, auth_providers) = Self::apply_auth_providers(
             broker,
@@ -318,6 +317,11 @@ impl MqdbAgent {
         info!("MQDB Agent listening on {}", self.bind_address);
 
         let bind_addr = self.bind_address;
+        let (handler_ready_tx, publisher_ready_tx, agent_ready_rx) = ReadinessSignals::split(
+            ws_listener
+                .as_ref()
+                .map(|_| ReadinessSignals::spawn(broker.ready_receiver())),
+        );
         let handler_task = self.spawn_handler_task(
             bind_addr,
             service_username.clone(),
@@ -327,14 +331,14 @@ impl MqdbAgent {
                 authorizer: broker.auth_provider(),
             },
             broker.ready_receiver(),
-            None,
+            handler_ready_tx,
         );
         let event_task = self.spawn_event_task(
             bind_addr,
             service_username.clone(),
             service_password.clone(),
             broker.ready_receiver(),
-            None,
+            publisher_ready_tx,
         );
         let presence_task = presence_rx.map(|rx| self.spawn_presence_task(broker.router(), rx));
         let http_task: Option<tokio::task::JoinHandle<()>> = {
@@ -353,11 +357,15 @@ impl MqdbAgent {
             }
         };
         let license_task = self.spawn_license_check_task();
+        let ws_task = self.spawn_websocket_task(ws_listener, &broker, agent_ready_rx);
 
-        tokio::select! {
-            result = broker.run() => result?,
-            _ = shutdown_rx.recv() => info!("MQDB Agent shutting down"),
-        }
+        let broker_result = tokio::select! {
+            result = broker.run() => result,
+            _ = shutdown_rx.recv() => {
+                info!("MQDB Agent shutting down");
+                Ok(())
+            }
+        };
 
         let _ = self.shutdown_tx.send(());
         let _ = handler_task.await;
@@ -371,8 +379,11 @@ impl MqdbAgent {
         if let Some(lic) = license_task {
             let _ = lic.await;
         }
+        if let Some(ws) = ws_task {
+            let _ = ws.await;
+        }
 
-        Ok(())
+        Ok(broker_result?)
     }
 
     /// # Errors
@@ -387,7 +398,6 @@ impl MqdbAgent {
         ),
         Box<dyn std::error::Error + Send + Sync>,
     > {
-        let (ready_tx, ready_rx) = watch::channel(false);
         let shutdown_tx = self.shutdown_tx.clone();
 
         let (mut config, service_username, service_password, needs_composite, admin_users) =
@@ -398,6 +408,7 @@ impl MqdbAgent {
 
         let auth_method = config.auth_config.auth_method;
         let (config, rate_limit) = crate::auth_config::take_auth_rate_limit(config);
+        let ws_listener = self.bind_websocket(&config).await?;
         let broker = mqtt5::broker::MqttBroker::with_config(config).await?;
         let (mut broker, auth_providers) = Self::apply_auth_providers(
             broker,
@@ -423,10 +434,11 @@ impl MqdbAgent {
 
         info!("MQDB Agent listening on {}", self.bind_address);
 
-        let mut broker_ready_rx = broker.ready_receiver();
-
         let bind_addr = self.bind_address;
-        let (handler_ready_tx, handler_ready_rx) = oneshot::channel();
+        let readiness = ReadinessSignals::spawn(broker.ready_receiver());
+        let ready_rx = readiness.ready.clone();
+        let (handler_ready_tx, publisher_ready_tx, agent_ready_rx) =
+            ReadinessSignals::split(Some(readiness));
         let handler_task = self.spawn_handler_task(
             bind_addr,
             service_username.clone(),
@@ -436,15 +448,14 @@ impl MqdbAgent {
                 authorizer: broker.auth_provider(),
             },
             broker.ready_receiver(),
-            Some(handler_ready_tx),
+            handler_ready_tx,
         );
-        let (publisher_ready_tx, publisher_ready_rx) = oneshot::channel();
         let event_task = self.spawn_event_task(
             bind_addr,
             service_username.clone(),
             service_password.clone(),
             broker.ready_receiver(),
-            Some(publisher_ready_tx),
+            publisher_ready_tx,
         );
         let presence_task = presence_rx.map(|rx| self.spawn_presence_task(broker.router(), rx));
         let http_task: Option<tokio::task::JoinHandle<()>> = {
@@ -463,16 +474,7 @@ impl MqdbAgent {
             }
         };
         let license_task = self.spawn_license_check_task();
-
-        tokio::spawn(async move {
-            if broker_ready_rx.wait_for(|ready| *ready).await.is_err()
-                || handler_ready_rx.await.is_err()
-                || publisher_ready_rx.await.is_err()
-            {
-                return;
-            }
-            let _ = ready_tx.send(true);
-        });
+        let ws_task = self.spawn_websocket_task(ws_listener, &broker, agent_ready_rx);
 
         let mut shutdown_rx = shutdown_tx.subscribe();
         let handle = tokio::spawn(async move {
@@ -496,6 +498,9 @@ impl MqdbAgent {
             if let Some(lic) = license_task {
                 let _ = lic.await;
             }
+            if let Some(ws) = ws_task {
+                let _ = ws.await;
+            }
         });
 
         let caller_shutdown_tx = self.shutdown_tx.clone();
@@ -504,6 +509,51 @@ impl MqdbAgent {
 
     pub fn shutdown(&self) {
         let _ = self.shutdown_tx.send(());
+    }
+}
+
+type ReadinessParts = (
+    Option<oneshot::Sender<()>>,
+    Option<oneshot::Sender<()>>,
+    Option<watch::Receiver<bool>>,
+);
+
+struct ReadinessSignals {
+    handler: oneshot::Sender<()>,
+    publisher: oneshot::Sender<()>,
+    ready: watch::Receiver<bool>,
+}
+
+impl ReadinessSignals {
+    fn spawn(mut broker_ready_rx: watch::Receiver<bool>) -> Self {
+        let (handler, handler_ready_rx) = oneshot::channel();
+        let (publisher, publisher_ready_rx) = oneshot::channel();
+        let (ready_tx, ready) = watch::channel(false);
+        tokio::spawn(async move {
+            if broker_ready_rx.wait_for(|ready| *ready).await.is_err()
+                || handler_ready_rx.await.is_err()
+                || publisher_ready_rx.await.is_err()
+            {
+                return;
+            }
+            let _ = ready_tx.send(true);
+        });
+        Self {
+            handler,
+            publisher,
+            ready,
+        }
+    }
+
+    fn split(signals: Option<Self>) -> ReadinessParts {
+        match signals {
+            Some(Self {
+                handler,
+                publisher,
+                ready,
+            }) => (Some(handler), Some(publisher), Some(ready)),
+            None => (None, None, None),
+        }
     }
 }
 
