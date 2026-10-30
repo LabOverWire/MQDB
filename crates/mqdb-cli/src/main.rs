@@ -416,7 +416,12 @@ async fn dispatch_db(action: DbAction) -> Result<(), Box<dyn std::error::Error>>
 async fn dispatch_dev(action: DevAction) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         DevAction::Ps => commands::dev::cmd_dev_ps()?,
-        DevAction::Kill { all, node, agent } => commands::dev::cmd_dev_kill(all, node, agent),
+        DevAction::Kill {
+            all,
+            node,
+            agent,
+            db_prefix,
+        } => commands::dev::cmd_dev_kill(all, node, agent, db_prefix.as_deref())?,
         DevAction::Clean { db_prefix } => commands::dev::cmd_dev_clean(&db_prefix)?,
         DevAction::Logs {
             node,
@@ -464,6 +469,7 @@ async fn dispatch_dev(action: DevAction) -> Result<(), Box<dyn std::error::Error
             quic_ca,
             no_quic,
             db_prefix,
+            base_port,
             bind_host,
             topology,
             bridge_out,
@@ -479,6 +485,7 @@ async fn dispatch_dev(action: DevAction) -> Result<(), Box<dyn std::error::Error
             &quic_ca,
             no_quic,
             &db_prefix,
+            base_port,
             &bind_host,
             topology.as_deref(),
             bridge_out,

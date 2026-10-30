@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::helpers::cmd_dev_clean;
+use super::helpers::{NODE_PID_FILE, cmd_dev_clean};
 
 fn ensure_dev_passwd(exe: &Path, db_prefix: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let path = format!("{db_prefix}-passwd");
@@ -22,6 +22,48 @@ fn ensure_dev_passwd(exe: &Path, db_prefix: &str) -> Result<PathBuf, Box<dyn std
     Ok(PathBuf::from(path))
 }
 
+fn check_port_block(base_port: u16, nodes: u8) -> Result<(), String> {
+    let block_end = u32::from(base_port) + 2 * u32::from(nodes);
+    if block_end > u32::from(u16::MAX) + 1 {
+        return Err(format!(
+            "--base-port {base_port} with {nodes} nodes needs ports up to {}, past {}",
+            block_end - 1,
+            u16::MAX
+        ));
+    }
+    Ok(())
+}
+
+fn node_port(base_port: u16, node_id: u8) -> u16 {
+    base_port + u16::from(node_id) - 1
+}
+
+fn node_layout_args(
+    base_port: u16,
+    nodes: u8,
+    node_id: u8,
+    bind_host: &str,
+    topology: &str,
+) -> Vec<String> {
+    let peer = |n: u8| format!("{n}@127.0.0.1:{}", node_port(base_port, n));
+    let peers: Vec<String> = match topology {
+        "full" => (1..=nodes).filter(|&n| n != node_id).map(peer).collect(),
+        "upper" => ((node_id + 1)..=nodes).map(peer).collect(),
+        _ => (1..node_id).map(peer).collect(),
+    };
+    let mut args = vec![
+        "--bind".to_string(),
+        format!("{bind_host}:{}", node_port(base_port, node_id)),
+        "--cluster-port-offset".to_string(),
+        nodes.to_string(),
+    ];
+    if !peers.is_empty() {
+        args.push("--peers".to_string());
+        args.push(peers.join(","));
+    }
+    args
+}
+
 #[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
 pub(crate) fn cmd_dev_start_cluster(
     nodes: u8,
@@ -31,6 +73,7 @@ pub(crate) fn cmd_dev_start_cluster(
     quic_ca: &Path,
     no_quic: bool,
     db_prefix: &str,
+    base_port: u16,
     bind_host: &str,
     topology: Option<&str>,
     bridge_out: bool,
@@ -39,6 +82,8 @@ pub(crate) fn cmd_dev_start_cluster(
     ownership: Option<&str>,
     license: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    check_port_block(base_port, nodes)?;
+
     if clean {
         println!("Cleaning existing databases...");
         let _ = cmd_dev_clean(db_prefix);
@@ -46,21 +91,20 @@ pub(crate) fn cmd_dev_start_cluster(
 
     let exe = std::env::current_exe()?;
 
-    let generated_passwd = if passwd.is_none() {
-        Some(ensure_dev_passwd(&exe, db_prefix)?)
-    } else {
-        None
+    let passwd_path = match passwd {
+        Some(path) => path.to_path_buf(),
+        None => ensure_dev_passwd(&exe, db_prefix)?,
     };
-    let passwd_path = passwd.unwrap_or_else(|| generated_passwd.as_deref().expect("just created"));
+    let passwd_str = passwd_path
+        .to_str()
+        .ok_or("passwd path is not valid UTF-8")?;
 
     let topology_name = topology.unwrap_or(if no_quic { "partial" } else { "full" });
     println!("Using {topology_name} mesh topology (bind: {bind_host})");
 
     for node_id in 1..=nodes {
-        let port = 1882 + u16::from(node_id);
+        let port = node_port(base_port, node_id);
         let db_path = format!("{db_prefix}-{node_id}");
-
-        let passwd_str = passwd_path.to_str().expect("db_prefix is valid UTF-8");
 
         let mut cmd = Command::new(&exe);
         cmd.args([
@@ -68,8 +112,6 @@ pub(crate) fn cmd_dev_start_cluster(
             "start",
             "--node-id",
             &node_id.to_string(),
-            "--bind",
-            &format!("{bind_host}:{port}"),
             "--db",
             &db_path,
             "--admin-users",
@@ -87,21 +129,13 @@ pub(crate) fn cmd_dev_start_cluster(
             cmd.args(["--license", lic_str]);
         }
 
-        let peers: Vec<String> = match topology_name {
-            "full" => (1..=nodes)
-                .filter(|&n| n != node_id)
-                .map(|n| format!("{}@127.0.0.1:{}", n, 1882 + u16::from(n)))
-                .collect(),
-            "upper" => ((node_id + 1)..=nodes)
-                .map(|n| format!("{}@127.0.0.1:{}", n, 1882 + u16::from(n)))
-                .collect(),
-            _ => (1..node_id)
-                .map(|n| format!("{}@127.0.0.1:{}", n, 1882 + u16::from(n)))
-                .collect(),
-        };
-        if !peers.is_empty() {
-            cmd.args(["--peers", &peers.join(",")]);
-        }
+        cmd.args(node_layout_args(
+            base_port,
+            nodes,
+            node_id,
+            bind_host,
+            topology_name,
+        ));
 
         if !no_bridge_out && (bridge_out || topology_name == "full") {
             cmd.arg("--bridge-out");
@@ -132,14 +166,57 @@ pub(crate) fn cmd_dev_start_cluster(
         let transport_mode = if no_quic { " (TCP)" } else { " (QUIC)" };
         println!("Starting node {node_id} on port {port}{transport_mode}...");
 
-        cmd.spawn()?;
+        let child = cmd.spawn()?;
+        std::fs::write(format!("{db_path}/{NODE_PID_FILE}"), child.id().to_string())?;
 
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
 
     println!("\nCluster started with {nodes} nodes");
     println!("Use 'mqdb dev ps' to check status");
-    println!("Use 'mqdb dev kill' to stop");
+    println!("Use 'mqdb dev kill --db-prefix {db_prefix}' to stop");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_node_and_peer_port_follows_the_base_port() {
+        assert_eq!(
+            node_layout_args(32000, 3, 2, "127.0.0.1", "full"),
+            [
+                "--bind",
+                "127.0.0.1:32001",
+                "--cluster-port-offset",
+                "3",
+                "--peers",
+                "1@127.0.0.1:32000,3@127.0.0.1:32002",
+            ]
+        );
+        assert_eq!(
+            node_layout_args(32000, 3, 1, "0.0.0.0", "upper"),
+            [
+                "--bind",
+                "0.0.0.0:32000",
+                "--cluster-port-offset",
+                "3",
+                "--peers",
+                "2@127.0.0.1:32001,3@127.0.0.1:32002",
+            ]
+        );
+        assert_eq!(
+            node_layout_args(32000, 3, 1, "127.0.0.1", "partial"),
+            ["--bind", "127.0.0.1:32000", "--cluster-port-offset", "3"]
+        );
+    }
+
+    #[test]
+    fn the_port_block_must_fit_below_65536() {
+        assert!(check_port_block(65530, 3).is_ok());
+        assert!(check_port_block(65531, 3).is_err());
+        assert!(check_port_block(u16::MAX, 1).is_err());
+    }
 }

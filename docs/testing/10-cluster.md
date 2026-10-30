@@ -336,7 +336,15 @@ mqdb dev kill --node 2
 
 # Kill agent only
 mqdb dev kill --agent
+
+# Kill only the nodes started with this --db-prefix (reads <prefix>-N/mqdb.pid)
+mqdb dev kill --db-prefix /tmp/my-test
 ```
+
+`--all`, `--node` and the bare form match process command lines with `pkill -f`, so they
+also stop nodes and agents started by anything else on the machine. `--db-prefix` stops
+only the PIDs that `dev start-cluster` recorded, after checking that each one still runs
+`cluster start --db <prefix>-N`.
 
 ### Clean Test Data
 
@@ -410,6 +418,7 @@ mqdb dev start-cluster --no-quic
 | `--quic-ca` | CA certificate path | `test_certs/ca.pem` |
 | `--no-quic` | Disable QUIC transport | `false` |
 | `--db-prefix` | Database path prefix | `/tmp/mqdb-test` |
+| `--base-port` | MQTT port of node 1; node N uses base+N-1, its cluster transport base+nodes+N-1 | `1883` |
 | `--bind-host` | Host to bind | `127.0.0.1` |
 | `--topology` | Mesh topology: `partial`, `upper`, `full` | `partial` |
 | `--bridge-out` | Use Out-only bridge direction | `false` |
