@@ -311,38 +311,23 @@ pub(crate) fn cmd_dev_logs(
     last: usize,
     db_prefix: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let log_files: Vec<PathBuf> = if let Some(node_id) = node {
-        let log_path = PathBuf::from(format!("{db_prefix}-{node_id}/mqdb.log"));
-        if log_path.exists() {
-            vec![log_path]
-        } else {
-            eprintln!("Log file not found: {}", log_path.display());
-            return Ok(());
-        }
-    } else {
-        glob::glob(&format!("{db_prefix}-*/mqdb.log"))?
-            .filter_map(Result::ok)
-            .collect()
-    };
+    let prefix = absolute_prefix(db_prefix)?;
+    let log_files: Vec<(u16, PathBuf)> = node_dirs(&prefix)?
+        .into_iter()
+        .filter(|(node_id, _)| node.is_none_or(|wanted| wanted == *node_id))
+        .map(|(node_id, dir)| (node_id, dir.join("mqdb.log")))
+        .filter(|(_, log_file)| log_file.is_file())
+        .collect();
 
     if log_files.is_empty() {
-        println!("No log files found matching {db_prefix}-*/mqdb.log");
+        match node {
+            Some(node_id) => eprintln!("Log file not found: {prefix}-{node_id}/mqdb.log"),
+            None => println!("No log files found under --db-prefix {prefix}"),
+        }
         return Ok(());
     }
 
-    for log_file in &log_files {
-        let node_id = log_file
-            .parent()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .and_then(|s| {
-                s.strip_prefix(&format!(
-                    "{}-",
-                    db_prefix.rsplit('/').next().unwrap_or("mqdb-test")
-                ))
-            })
-            .unwrap_or("?");
-
+    for (node_id, log_file) in &log_files {
         println!("=== Node {node_id} ({}) ===", log_file.display());
 
         if follow {
@@ -351,9 +336,10 @@ pub(crate) fn cmd_dev_logs(
             cmd.arg(log_file);
             if let Some(pat) = pattern {
                 let child = cmd.stdout(std::process::Stdio::piped()).spawn()?;
+                let tail_output = child.stdout.ok_or("tail has no stdout")?;
                 Command::new("grep")
                     .args(["--line-buffered", pat])
-                    .stdin(child.stdout.unwrap())
+                    .stdin(tail_output)
                     .status()?;
             } else {
                 cmd.status()?;

@@ -320,3 +320,25 @@ fn dev_start_cluster_refuses_a_privileged_or_zero_base_port() {
         assert!(!dir.path().join("e2e-1").exists());
     }
 }
+
+#[test]
+fn dev_logs_shows_only_the_nodes_of_its_prefix() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    for (node_dir, line) in [("e2e-1", "ours"), ("e2e-x-1", "theirs")] {
+        let node_dir = prefix.with_file_name(node_dir);
+        std::fs::create_dir_all(&node_dir).expect("create node dir");
+        std::fs::write(node_dir.join("mqdb.log"), format!("{line}\n")).expect("write log");
+    }
+
+    let output = mqdb(&["dev", "logs", "--db-prefix", &prefix.display().to_string()]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success(), "{}", output_text(&output));
+    assert!(stdout.contains("=== Node 1 "), "{stdout}");
+    assert!(stdout.contains("ours"), "{stdout}");
+    assert!(
+        !stdout.contains("theirs"),
+        "another prefix's log must not be shown: {stdout}"
+    );
+}
