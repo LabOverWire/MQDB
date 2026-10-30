@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::partition::data_partition;
+use crate::cluster::node_controller::ReplicationError;
 use crate::cluster::protocol::Operation;
 use crate::cluster::{NodeId, PartitionId};
 use bebytes::BeBytes;
@@ -74,6 +75,7 @@ pub enum DbDataStoreError {
     AlreadyExists,
     SerializationError,
     NotPrimary,
+    Commit(ReplicationError),
 }
 
 impl std::fmt::Display for DbDataStoreError {
@@ -83,6 +85,7 @@ impl std::fmt::Display for DbDataStoreError {
             Self::AlreadyExists => write!(f, "entity already exists"),
             Self::SerializationError => write!(f, "serialization error"),
             Self::NotPrimary => write!(f, "this node is not the partition primary"),
+            Self::Commit(e) => write!(f, "commit failed: {e}"),
         }
     }
 }

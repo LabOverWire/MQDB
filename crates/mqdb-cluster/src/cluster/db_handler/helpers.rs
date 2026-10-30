@@ -3,6 +3,7 @@
 
 use super::DbRequestHandler;
 use crate::cluster::db::DbDataStoreError;
+use crate::cluster::node_controller::ReplicationError;
 use serde_json::{Value, json};
 
 impl DbRequestHandler {
@@ -27,7 +28,9 @@ impl DbRequestHandler {
 
 pub(crate) fn json_write_failure(error: DbDataStoreError) -> Vec<u8> {
     match error {
-        DbDataStoreError::NotPrimary => DbRequestHandler::json_error(503, &error.to_string()),
+        DbDataStoreError::NotPrimary | DbDataStoreError::Commit(ReplicationError::NotPrimary) => {
+            DbRequestHandler::json_error(503, &error.to_string())
+        }
         _ => DbRequestHandler::json_error(500, "internal error"),
     }
 }

@@ -778,17 +778,18 @@ impl DbRequestHandler {
         let data_bytes = serde_json::to_vec(data).unwrap_or_default();
 
         JsonOpResult::Response(
-            match controller.db_create_prepare(entity, id, &data_bytes, now_ms) {
-                Ok((db_entity, write)) => {
-                    let event = controller.change_event(
-                        ChangeEvent::create(
-                            entity.to_string(),
-                            db_entity.id_str().to_string(),
-                            data.clone(),
-                        ),
-                        EventOrigin::new(sender, client_id),
-                    );
-                    controller.db_commit(write, &event).await;
+            match controller
+                .db_create_with_event(
+                    entity,
+                    id,
+                    &data_bytes,
+                    data.clone(),
+                    now_ms,
+                    EventOrigin::new(sender, client_id),
+                )
+                .await
+            {
+                Ok(db_entity) => {
                     controller
                         .commit_unique_constraints(
                             entity,
@@ -1136,17 +1137,18 @@ impl DbRequestHandler {
         let data_bytes = serde_json::to_vec(merged_data).unwrap_or_default();
 
         JsonOpResult::Response(
-            match controller.db_update_prepare(entity, id, &data_bytes, now_ms) {
-                Ok((db_entity, write)) => {
-                    let event = controller.change_event(
-                        ChangeEvent::update(
-                            entity.to_string(),
-                            db_entity.id_str().to_string(),
-                            merged_data.clone(),
-                        ),
-                        EventOrigin::new(sender, client_id),
-                    );
-                    controller.db_commit(write, &event).await;
+            match controller
+                .db_update_with_event(
+                    entity,
+                    id,
+                    &data_bytes,
+                    merged_data.clone(),
+                    now_ms,
+                    EventOrigin::new(sender, client_id),
+                )
+                .await
+            {
+                Ok(db_entity) => {
                     if has_unique_changes {
                         controller
                             .commit_unique_constraints(
@@ -1322,14 +1324,12 @@ impl DbRequestHandler {
                     ChangeEvent::delete(entity.to_string(), id.to_string(), data.clone()),
                     EventOrigin::new(sender, client_id),
                 );
-                if let Some(cas) = cascade {
-                    controller.db_commit_with_cascade(write, &event, cas).await;
-                } else {
-                    controller.db_commit(write, &event).await;
+                if let Err(error) = controller
+                    .commit_delete_with_change_event(write, event, &data, cascade)
+                    .await
+                {
+                    return helpers::json_write_failure(error);
                 }
-                controller
-                    .release_unique_for_deleted_record(entity, id, &data)
-                    .await;
                 if self.ownership.owner_field(entity).is_some() {
                     controller.clear_all_resource_grants(entity, id).await;
                 }
@@ -1601,17 +1601,18 @@ impl DbRequestHandler {
                                 .await;
                         }
                         let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
-                        match controller.db_create_prepare(&entity, &id, &data_bytes, now_ms) {
-                            Ok((db_entity, write)) => {
-                                let event = controller.change_event(
-                                    ChangeEvent::create(
-                                        entity.clone(),
-                                        db_entity.id_str().to_string(),
-                                        data.clone(),
-                                    ),
-                                    EventOrigin::new(sender.as_deref(), client_id.as_deref()),
-                                );
-                                controller.db_commit(write, &event).await;
+                        match controller
+                            .db_create_with_event(
+                                &entity,
+                                &id,
+                                &data_bytes,
+                                data.clone(),
+                                now_ms,
+                                EventOrigin::new(sender.as_deref(), client_id.as_deref()),
+                            )
+                            .await
+                        {
+                            Ok(db_entity) => {
                                 controller
                                     .commit_unique_constraints(
                                         &entity,
@@ -1702,17 +1703,18 @@ impl DbRequestHandler {
                                 .await;
                         }
                         let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
-                        match controller.db_update_prepare(&entity, &id, &data_bytes, now_ms) {
-                            Ok((db_entity, write)) => {
-                                let event = controller.change_event(
-                                    ChangeEvent::update(
-                                        entity.clone(),
-                                        db_entity.id_str().to_string(),
-                                        merged_data.clone(),
-                                    ),
-                                    EventOrigin::new(sender.as_deref(), client_id.as_deref()),
-                                );
-                                controller.db_commit(write, &event).await;
+                        match controller
+                            .db_update_with_event(
+                                &entity,
+                                &id,
+                                &data_bytes,
+                                merged_data.clone(),
+                                now_ms,
+                                EventOrigin::new(sender.as_deref(), client_id.as_deref()),
+                            )
+                            .await
+                        {
+                            Ok(db_entity) => {
                                 controller
                                     .commit_unique_constraints(
                                         &entity,

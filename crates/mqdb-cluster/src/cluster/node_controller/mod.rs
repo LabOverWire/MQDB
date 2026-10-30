@@ -46,7 +46,6 @@ use super::write_log::PartitionWriteLog;
 use super::{Epoch, NodeId, PartitionId, PartitionMap};
 use crate::cluster::db_handler::helpers::json_write_failure;
 use db_ops::EventOrigin;
-use mqdb_core::events::ChangeEvent;
 use mqdb_core::storage::StorageBackend;
 use mqdb_core::types::{MAX_LIST_RESULTS, OwnershipConfig, ScopeConfig};
 use mqdb_vault::VaultKeyStore;
@@ -1617,13 +1616,18 @@ impl<T: ClusterTransport> NodeController<T> {
                         Self::json_error(failure.http_code(), &failure.message())
                     }
                     Ok(confirmed_remotes) => {
-                        match self.db_create_prepare(&entity, &id, &data_bytes, now_ms) {
-                            Ok((db_entity, write)) => {
-                                let event = self.change_event(
-                                    ChangeEvent::create(entity.clone(), id.clone(), data.clone()),
-                                    origin,
-                                );
-                                self.commit_with_change_event(write, event).await;
+                        match self
+                            .db_create_with_event(
+                                &entity,
+                                &id,
+                                &data_bytes,
+                                data.clone(),
+                                now_ms,
+                                origin,
+                            )
+                            .await
+                        {
+                            Ok(db_entity) => {
                                 self.commit_unique_constraints(
                                     &entity,
                                     &id,
@@ -1698,17 +1702,18 @@ impl<T: ClusterTransport> NodeController<T> {
                         Self::json_error(failure.http_code(), &failure.message())
                     }
                     Ok(confirmed_remotes) => {
-                        match self.db_update_prepare(&entity, &id, &data_bytes, now_ms) {
-                            Ok((db_entity, write)) => {
-                                let event = self.change_event(
-                                    ChangeEvent::update(
-                                        entity.clone(),
-                                        id.clone(),
-                                        merged_data.clone(),
-                                    ),
-                                    origin,
-                                );
-                                self.commit_with_change_event(write, event).await;
+                        match self
+                            .db_update_with_event(
+                                &entity,
+                                &id,
+                                &data_bytes,
+                                merged_data.clone(),
+                                now_ms,
+                                origin,
+                            )
+                            .await
+                        {
+                            Ok(db_entity) => {
                                 self.commit_unique_constraints(
                                     &entity,
                                     &id,
@@ -1767,7 +1772,7 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplicationError {
     NotPrimary,
     TooManyPending,
