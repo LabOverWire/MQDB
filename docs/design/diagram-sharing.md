@@ -1,6 +1,30 @@
 # Diagram Sharing
 
-> **STATUS: Phases 1-3 IMPLEMENTED (agent mode); Phase 1 PARTIAL in cluster mode; Phases 2-3 agent mode only; Phase 4 (public/anon) PENDING.** The agent's `_shares` entity, `AccessLevel`, and share-aware `check_access` live in `crates/mqdb-agent`. The cluster implementation (#75, #122) is in `crates/mqdb-cluster/src/cluster/node_controller/sharing.rs` and `cluster/db_handler/json_ops.rs`. It stores each grant on its resource's partition and resolves share, unshare, shares and the view/edit checks on read and update on the resource primary. It also gathers and hydrates `shared` from every node, resolves email grantees to canonical ids across partitions, clears grants on delete, and refuses generic CRUD on `_shares`. Not yet in cluster mode: the pending-grant sign-in sweep and cascade to closure members on other primaries (#122); cascading unshare, and the `cascade` default of `true` for payloads that omit it; child derivation, `--ownership-derive` (#210); scoped events, `--scoped-events` (#211). Public/anonymous sharing exists in neither mode.
+> **STATUS (phases as numbered under "Implementation phases"): Phases 1-3 IMPLEMENTED (agent mode); Phase 4 (public/anon, #79) PENDING; Phase 5 (cluster parity) PARTIAL; Phase 6 (WASM) NOT STARTED; Phase 7 (docs) DONE.**
+>
+> **Agent mode.** The `_shares` entity, `AccessLevel`, and share-aware `check_access` live in `crates/mqdb-agent`.
+>
+> **Phase 5 (cluster), #75 and #122.** Phase 1 is ported in `crates/mqdb-cluster/src/cluster/node_controller/sharing.rs` and `crates/mqdb-cluster/src/cluster/db_handler/json_ops.rs`:
+> - each grant is stored on its resource's partition
+> - share, unshare and shares, plus the view/edit checks on read and update, are resolved on the resource primary
+> - `shared` is a `_shares` list scattered to every node and hydrated
+> - email grantees are resolved to canonical ids across partitions
+> - grants are cleared on delete
+> - generic CRUD on `_shares` is refused
+>
+> Phase 1 gaps in a cluster:
+> - the pending-grant sign-in sweep (#122)
+> - a cascade stops at the first closure member held by another primary (#122)
+> - unshare does not cascade (#247)
+> - a payload that omits `cascade` does not cascade (#248)
+>
+> Phases 2-3 are not ported: child derivation, `--ownership-derive` (#210), and scoped events, `--scoped-events` (#211).
+>
+> **Phase 6 (WASM).** The WASM build rejects share operations (`crates/mqdb-wasm/src/execute.rs`).
+>
+> **Phase 7 (docs).** `frontend-ownership.md` now states that read is ownership-enforced, and README.md has a Sharing Operations section.
+>
+> Public/anonymous sharing exists in neither mode.
 
 Let a diagram owner grant other users **view** or **edit** access to a diagram and
 the diagrams it references, share a diagram **publicly** by link, and have all of

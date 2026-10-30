@@ -415,7 +415,14 @@ An owner can share any ownership-enabled entity (the motivating case is diagrams
 
 `share`/`unshare` cascade by default over self-references (a diagram and the diagrams it links to); a direct share sets the level while a cascade only raises an existing grant. Read requires `view`, update requires `edit`; delete stays owner-only and clears the resource's grants. In OAuth deployments `grantee` is an email resolved to the registered user's canonical id; sharing with an as-yet-unregistered email stores a **pending** grant (inert until that user first signs in, at which point it is filled automatically and access is granted without re-sharing). With password/SCRAM auth `grantee` is the username.
 
-**In a cluster.** A grant is stored on its resource's partition, so `share`, `unshare`, `shares` and the share checks on read and update run on that resource's primary; any node accepts the request and forwards it there. `shared` collects grants from every node and returns the resources. An OAuth email grantee is resolved to the canonical id across partitions. Deleting a resource clears its grants. Not yet in cluster mode: a pending grant is stored but stays inert, because it is not filled when its user signs in; a cascade grants only the referenced records whose partitions have the same primary as the shared record (the rest are skipped with a warning in the log); `unshare` revokes only the named record and never cascades; and a `share` payload that omits `cascade` does not cascade (the `mqdb share` CLI always sends the field). Child-entity derivation and scoped events, below, are agent mode only.
+**In a cluster.** A grant is stored on its resource's partition, so `share`, `unshare`, `shares` and the share checks on read and update run on the node that holds that partition's primary; a node that is not the primary forwards the request there. While a partition is changing primary, `share` and `unshare` can fail with a 503 that the client must retry, and `shares` can answer from a node whose grants are incomplete. `shared` sends a `_shares` list to every node and returns the matching resources. An OAuth email grantee is resolved to the canonical id across partitions. Deleting a resource clears its grants. Not yet in cluster mode:
+
+- A pending grant is stored but stays inert, because it is not filled when its user signs in.
+- A cascade follows references only while they stay on the shared record's primary. It stops at the first referenced record on another primary (logging a warning), so nothing beyond that record is granted, even records back on the original primary.
+- `unshare` revokes only the named record and never cascades ([#247](https://github.com/LabOverWire/MQDB/issues/247)).
+- A `share` payload that omits `cascade` does not cascade ([#248](https://github.com/LabOverWire/MQDB/issues/248)); the `mqdb share` CLI always sends the field.
+
+Child-entity derivation and scoped events, below, are agent mode only.
 
 **Child-entity derivation.** Child records (e.g. a diagram's nodes/edges) can inherit access from their parent via `--ownership-derive` (env `MQDB_OWNERSHIP_DERIVE`), a comma-separated map of `child=fk_field>parent_entity` (e.g. `nodes=diagramId>diagrams,edges=diagramId>diagrams`). A derived child's read requires `view` on the parent and create/update/delete require `edit`; the parent reference is immutable on update, so an editor cannot move a child into a diagram they cannot edit. Without a mapping a child entity is unrestricted (default), so derivation is opt-in per deployment.
 
@@ -813,7 +820,7 @@ Use `--no-persist-stores` for testing or ephemeral deployments where data doesn'
 | Unique constraints | Full | Distributed reserve-commit-release protocol across nodes |
 | Foreign key constraints | Full | Distributed existence checks, owner-aware cascade/set-null with ack-wait, in-memory reverse index |
 | NOT NULL constraints | — | Agent mode only; not yet available in cluster mode |
-| Sharing | Partial | share/unshare/shares/shared and view/edit checks on the resource primary; no pending-grant sweep, cross-partition cascade, cascading unshare, `--ownership-derive` or `--scoped-events` (see [Sharing Operations](#sharing-operations)) |
+| Sharing | Partial | share/unshare/shares and view/edit checks run on the resource primary; `shared` gathers grants from every node. No pending-grant sweep, cross-partition cascade, cascading unshare, `cascade` default of `true`, `--ownership-derive` or `--scoped-events` (see [Sharing Operations](#sharing-operations)) |
 | Consumer Groups | Partial | Shared subscriptions work; group tracking is local |
 
 ## CLI Tool
