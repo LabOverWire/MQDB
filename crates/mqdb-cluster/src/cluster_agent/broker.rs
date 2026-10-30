@@ -3,7 +3,9 @@
 
 use super::{AdminRequest, ClusterTransportKind, ClusteredAgent, RunningBroker};
 use crate::cluster::{ClusterEventHandler, DedicatedExecutor, NodeId, QuicDirectTransport};
-use mqdb_agent::auth_config::enhanced_auth_with_fallback;
+use mqdb_agent::auth_config::{
+    AuthSetupResult, enhanced_auth_with_fallback, rate_limited, take_auth_rate_limit,
+};
 use mqdb_agent::topic_protection::TopicProtectionAuthProvider;
 use mqtt5::QoS;
 use mqtt5::broker::auth::ComprehensiveAuthProvider;
@@ -104,16 +106,7 @@ impl ClusteredAgent {
         &self,
         bridge_configs: &[BridgeConfig],
         use_external_bridge_manager: bool,
-    ) -> Result<
-        (
-            BrokerConfig,
-            Option<String>,
-            Option<String>,
-            bool,
-            std::collections::HashSet<String>,
-        ),
-        Box<dyn std::error::Error + Send + Sync>,
-    > {
+    ) -> Result<(BrokerConfig, AuthSetupResult), Box<dyn std::error::Error + Send + Sync>> {
         let auth_cfg = self.build_auth_setup_config();
         let mut temp_auth_config = mqtt5::broker::config::AuthConfig::default();
         let auth_result =
@@ -136,14 +129,13 @@ impl ClusteredAgent {
                 .with_presence(self.presence)
                 .with_retained_echoes(Arc::clone(&self.retained_echoes)),
         );
-        self.configure_broker_with_auth(
+        Ok(self.configure_broker_with_auth(
             event_handler,
             bridge_configs,
             use_external_bridge_manager,
             temp_auth_config,
             auth_result,
-        )
-        .await
+        ))
     }
 
     fn build_auth_setup_config(&self) -> mqdb_agent::auth_config::AuthSetupConfig {
@@ -161,24 +153,14 @@ impl ClusteredAgent {
         }
     }
 
-    #[allow(clippy::type_complexity, clippy::unused_async)]
-    async fn configure_broker_with_auth(
+    fn configure_broker_with_auth(
         &self,
         event_handler: Arc<ClusterEventHandler<ClusterTransportKind>>,
         bridge_configs: &[BridgeConfig],
         use_external_bridge_manager: bool,
         auth_config: mqtt5::broker::config::AuthConfig,
-        auth_result: mqdb_agent::auth_config::AuthSetupResult,
-    ) -> Result<
-        (
-            BrokerConfig,
-            Option<String>,
-            Option<String>,
-            bool,
-            std::collections::HashSet<String>,
-        ),
-        Box<dyn std::error::Error + Send + Sync>,
-    > {
+        auth_result: AuthSetupResult,
+    ) -> (BrokerConfig, AuthSetupResult) {
         let storage_config = StorageConfig {
             backend: StorageBackend::Memory,
             enable_persistence: true,
@@ -217,16 +199,9 @@ impl ClusteredAgent {
 
         config.auth_config = auth_config;
 
-        Ok((
-            config,
-            auth_result.service_username,
-            auth_result.service_password,
-            auth_result.needs_composite,
-            auth_result.admin_users,
-        ))
+        (config, auth_result)
     }
 
-    #[allow(clippy::type_complexity)]
     pub(super) async fn build_broker(
         &self,
         broker_config: BrokerConfig,
@@ -241,7 +216,8 @@ impl ClusteredAgent {
         let auth_method = broker_config.auth_config.auth_method;
         let broker_config = self.apply_quic_config(broker_config);
         let broker_config = self.apply_ws_config(broker_config);
-        let broker_config = self.apply_cluster_listener(broker_config)?;
+        let (broker_config, rate_limit) =
+            take_auth_rate_limit(self.apply_cluster_listener(broker_config)?);
 
         let mut broker = MqttBroker::with_config(broker_config).await?;
 
@@ -300,7 +276,7 @@ impl ClusteredAgent {
             broker = broker.with_auth_provider(comprehensive.clone());
         }
 
-        let current_provider = broker.auth_provider();
+        let current_provider = rate_limited(broker.auth_provider(), rate_limit, service_username);
         let protected_provider =
             TopicProtectionAuthProvider::new(current_provider, admin_users.clone())
                 .with_internal_service_username(service_username.cloned())

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::MqdbAgent;
-use crate::auth_config::enhanced_auth_with_fallback;
+use crate::auth_config::{AuthRateLimit, enhanced_auth_with_fallback, rate_limited};
 use crate::broker_defaults::{
     BROKER_MAX_CLIENTS, BROKER_MAX_PACKET_SIZE, BROKER_SYS_RETAINED_TOPICS, SESSION_EXPIRY_SECS,
 };
@@ -40,6 +40,7 @@ pub(super) struct AuthProviderConfig<'a> {
     pub scoped_events: bool,
     pub event_scope_entity: &'a str,
     pub sparkplug_aware: bool,
+    pub rate_limit: Option<AuthRateLimit>,
 }
 
 struct AgentEventHandler {
@@ -232,7 +233,6 @@ impl MqdbAgent {
         }
     }
 
-    #[allow(clippy::type_complexity)]
     pub(super) async fn apply_auth_providers(
         mut broker: MqttBroker,
         config: AuthProviderConfig<'_>,
@@ -289,7 +289,11 @@ impl MqdbAgent {
             broker = broker.with_auth_provider(comprehensive.clone());
         }
 
-        let current_provider = broker.auth_provider();
+        let current_provider = rate_limited(
+            broker.auth_provider(),
+            config.rate_limit,
+            config.service_username,
+        );
         let protected_provider =
             TopicProtectionAuthProvider::new(current_provider, config.admin_users.clone())
                 .with_internal_service_username(config.service_username.cloned())
