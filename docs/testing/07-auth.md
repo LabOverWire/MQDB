@@ -449,7 +449,7 @@ when authentication succeeds.
 The `mqdb dev test --ownership` command is fully self-contained:
 
 ```bash
-mqdb dev test --ownership --nodes 3
+mqdb dev test --ownership --nodes 3 --license /path/to/license.key
 ```
 
 This command:

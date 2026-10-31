@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 pub(crate) const NODE_PID_FILE: &str = "mqdb.pid";
@@ -367,72 +367,78 @@ fn forget_node(node: &RecordedNode, pid: u32, state: &str) -> Result<(), String>
 
 pub(crate) struct StartedNode {
     pub(crate) node_id: u8,
-    pub(crate) pid: u32,
+    pub(crate) child: Child,
     pub(crate) dir: PathBuf,
 }
 
 impl StartedNode {
-    fn pid_file(&self) -> PathBuf {
-        self.dir.join(NODE_PID_FILE)
-    }
-
     fn forget(&self) -> Result<(), String> {
-        let pid_file = self.pid_file();
+        let pid_file = self.dir.join(NODE_PID_FILE);
         match read_pid(&pid_file) {
-            Ok(recorded) if recorded == self.pid => {
+            Ok(recorded) if recorded == self.child.id() => {
                 std::fs::remove_file(&pid_file).map_err(|e| format!("{}: {e}", pid_file.display()))
             }
             Ok(_) | Err(_) => Ok(()),
         }
     }
+
+    fn exited(&mut self) -> Result<bool, String> {
+        self.child
+            .try_wait()
+            .map(|status| status.is_some())
+            .map_err(|e| format!("node {}: {e}", self.node_id))
+    }
 }
 
-pub(crate) fn stop_started_nodes(nodes: &[StartedNode]) -> Result<(), String> {
-    let processes = node_processes()?;
+pub(crate) fn stop_started_nodes(nodes: &mut [StartedNode]) -> Result<(), String> {
     let mut failures = Vec::new();
-    let mut waiting = Vec::new();
-    for node in nodes {
-        match node_state(&processes, node.pid, &node.dir) {
-            Ok(NodeState::Running) => match signal(node.pid) {
-                Ok(()) => waiting.push(node),
-                Err(e) => failures.push(format!("node {}: {e}", node.node_id)),
-            },
-            Ok(NodeState::Stopped) => {
-                if let Err(e) = node.forget() {
-                    failures.push(e);
+    for node in nodes.iter_mut() {
+        match node.exited() {
+            Ok(false) => {
+                if let Err(e) = signal(node.child.id()) {
+                    failures.push(format!("node {}: {e}", node.node_id));
                 }
             }
-            Err(e) => failures.push(format!("node {}: {e}", node.node_id)),
+            Ok(true) => {}
+            Err(e) => failures.push(e),
         }
     }
 
     let start = Instant::now();
-    while !waiting.is_empty() && start.elapsed() <= NODE_STOP_TIMEOUT {
-        let processes = node_processes()?;
-        let mut still_running = Vec::new();
-        for node in waiting {
-            match node_state(&processes, node.pid, &node.dir) {
-                Ok(NodeState::Running) => still_running.push(node),
-                Ok(NodeState::Stopped) => {
-                    println!("Node {} (pid {}) stopped", node.node_id, node.pid);
-                    if let Err(e) = node.forget() {
-                        failures.push(e);
-                    }
-                }
-                Err(e) => failures.push(format!("node {}: {e}", node.node_id)),
+    loop {
+        let mut running = 0;
+        for node in nodes.iter_mut() {
+            match node.exited() {
+                Ok(false) => running += 1,
+                Ok(true) => {}
+                Err(e) => failures.push(e),
             }
         }
-        waiting = still_running;
-        if !waiting.is_empty() {
-            std::thread::sleep(Duration::from_millis(100));
+        if running == 0 || start.elapsed() > NODE_STOP_TIMEOUT {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    for node in nodes.iter_mut() {
+        let pid = node.child.id();
+        match node.exited() {
+            Ok(true) => println!("Node {} (pid {pid}) stopped", node.node_id),
+            Ok(false) => {
+                failures.push(format!(
+                    "node {} (pid {pid}) did not stop within {NODE_STOP_TIMEOUT:?}; killed it",
+                    node.node_id
+                ));
+                if let Err(e) = node.child.kill().and_then(|()| node.child.wait().map(drop)) {
+                    failures.push(format!("node {} (pid {pid}): {e}", node.node_id));
+                }
+            }
+            Err(e) => failures.push(e),
+        }
+        if let Err(e) = node.forget() {
+            failures.push(e);
         }
     }
-    failures.extend(waiting.iter().map(|node| {
-        format!(
-            "node {} (pid {}) did not stop within {NODE_STOP_TIMEOUT:?}",
-            node.node_id, node.pid
-        )
-    }));
 
     if failures.is_empty() {
         Ok(())
@@ -588,12 +594,6 @@ pub(crate) fn cmd_dev_kill(
 const DEV_TEST_SUITE_DIRS: [&str; 3] = ["own", "share", "presence"];
 const DEV_TEST_SUITE_PASSWDS: [&str; 3] = ["ownership", "sharing", "presence"];
 
-fn is_suite_on_port(name: &str) -> bool {
-    name.split_once('-').is_some_and(|(suite, port)| {
-        DEV_TEST_SUITE_DIRS.contains(&suite) && port.parse::<u16>().is_ok()
-    })
-}
-
 fn is_dev_test_prefix(db_prefix: &str) -> bool {
     let prefix = Path::new(db_prefix);
     let same_parent = prefix
@@ -609,13 +609,11 @@ fn is_dev_entry(rest: &str, is_dir: bool, with_dev_test_leftovers: bool) -> bool
         (None, false) => rest == "passwd",
         (Some((suite, node_id)), true) => {
             with_dev_test_leftovers
-                && (DEV_TEST_SUITE_DIRS.contains(&suite) || is_suite_on_port(suite))
+                && DEV_TEST_SUITE_DIRS.contains(&suite)
                 && node_id.parse::<u16>().is_ok()
         }
         (Some((suite, tail)), false) => {
-            with_dev_test_leftovers
-                && (DEV_TEST_SUITE_PASSWDS.contains(&suite) || is_suite_on_port(suite))
-                && tail == "passwd"
+            with_dev_test_leftovers && DEV_TEST_SUITE_PASSWDS.contains(&suite) && tail == "passwd"
         }
     }
 }
@@ -765,6 +763,38 @@ mod tests {
     }
 
     #[test]
+    fn a_started_node_is_stopped_even_when_its_dir_contains_a_double_dash() {
+        let root = tempfile::TempDir::new().expect("temp dir");
+        let dir = root.path().join("odd --dir").join("t-own-40000-1");
+        std::fs::create_dir_all(&dir).expect("node dir");
+        let child = Command::new("sh")
+            .args([
+                "-c",
+                "while :; do sleep 1; done",
+                "stand-in",
+                "mqdb",
+                "cluster",
+                "start",
+            ])
+            .args(["--node-id", "1", "--db"])
+            .arg(&dir)
+            .spawn()
+            .expect("spawn a stand-in node");
+        std::fs::write(dir.join(super::NODE_PID_FILE), child.id().to_string()).expect("pid file");
+        let mut nodes = [super::StartedNode {
+            node_id: 1,
+            child,
+            dir: dir.clone(),
+        }];
+        assert_eq!(super::stop_started_nodes(&mut nodes), Ok(()));
+        assert!(
+            nodes[0].child.try_wait().expect("poll").is_some(),
+            "the stand-in is still running"
+        );
+        assert!(!dir.join(super::NODE_PID_FILE).exists());
+    }
+
+    #[test]
     fn the_legacy_node_pattern_matches_only_that_node_id() {
         let node_1 = sleeper("1");
         let node_10 = sleeper("10");
@@ -792,11 +822,8 @@ mod tests {
         assert!(is_dev_entry("ownership-passwd", false, true));
         assert!(is_dev_entry("sharing-passwd", false, true));
         assert!(is_dev_entry("presence-passwd", false, true));
-        assert!(is_dev_entry("own-33601-2", true, true));
-        assert!(is_dev_entry("share-33601-passwd", false, true));
-        assert!(!is_dev_entry("own-33601-2", true, false));
-        assert!(!is_dev_entry("own-x-2", true, true));
-        assert!(!is_dev_entry("x-33601-passwd", false, true));
+        assert!(!is_dev_entry("own-33601-2", true, true));
+        assert!(!is_dev_entry("share-33601-passwd", false, true));
         assert!(!is_dev_entry("x-1", true, true));
         assert!(!is_dev_entry("x-passwd", false, true));
         assert!(!is_dev_entry("passwd", true, true));

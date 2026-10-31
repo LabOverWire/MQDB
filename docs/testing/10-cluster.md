@@ -489,7 +489,8 @@ mqdb dev test --all --base-port 33601
 > already in use, so run them on a free block, not on top of a running `dev start-cluster`.
 > At the end they stop only the nodes they started. After an interrupted run, stop the
 > leftovers with `mqdb dev kill --db-prefix /tmp/mqdb-test-own-1883` (or `-share-`,
-> `-presence-`). They require `--license` to provide a valid Enterprise license for the
+> `-presence-`) and remove them with `mqdb dev clean --db-prefix /tmp/mqdb-test-own-1883`;
+> a plain `mqdb dev clean` leaves suite dirs alone. They require `--license` to provide a valid Enterprise license for the
 > nodes they spawn. `dev test` exits non-zero when any check fails.
 
 ### Dev Bench (Benchmarking with Auto-Start)

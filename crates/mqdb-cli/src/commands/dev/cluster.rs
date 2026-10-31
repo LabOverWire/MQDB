@@ -227,7 +227,7 @@ pub(crate) fn cmd_dev_start_cluster(
         match start_node(&exe, options, &db_prefix, node_id, passwd) {
             Ok(node) => started.push(node),
             Err(e) => {
-                return Err(match stop_started_nodes(&started) {
+                return Err(match stop_started_nodes(&mut started) {
                     Ok(()) => e,
                     Err(stop) => {
                         format!("{e}; could not stop the nodes already started: {stop}").into()
@@ -245,6 +245,15 @@ pub(crate) fn cmd_dev_start_cluster(
     Ok(started)
 }
 
+fn remove_pid_file(pid_path: &str) -> String {
+    match std::fs::remove_file(pid_path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            format!("; remove {pid_path}: {e}")
+        }
+        Ok(()) | Err(_) => String::new(),
+    }
+}
+
 fn start_node(
     exe: &Path,
     options: &StartClusterOptions,
@@ -260,9 +269,20 @@ fn start_node(
     let pid_path = format!("{db_path}/{NODE_PID_FILE}");
     let mut pid_file = std::fs::File::create(&pid_path)
         .map_err(|e| format!("record node {node_id} in {pid_path}: {e}"))?;
-    let log_file = std::fs::File::create(format!("{db_path}/mqdb.log"))?;
-    cmd.stdout(log_file.try_clone()?);
-    cmd.stderr(log_file);
+    let log_path = format!("{db_path}/mqdb.log");
+    let log_file = match std::fs::File::create(&log_path).and_then(|log| {
+        let clone = log.try_clone()?;
+        Ok((log, clone))
+    }) {
+        Ok(files) => files,
+        Err(e) => {
+            drop(pid_file);
+            let removed = remove_pid_file(&pid_path);
+            return Err(format!("open {log_path}: {e}{removed}").into());
+        }
+    };
+    cmd.stdout(log_file.1);
+    cmd.stderr(log_file.0);
 
     let transport_mode = if options.no_quic { " (TCP)" } else { " (QUIC)" };
     println!("Starting node {node_id} on port {port}{transport_mode}...");
@@ -271,18 +291,18 @@ fn start_node(
         Ok(child) => child,
         Err(e) => {
             drop(pid_file);
-            std::fs::remove_file(&pid_path).map_err(|remove| {
-                format!("start node {node_id}: {e}; remove {pid_path}: {remove}")
-            })?;
-            return Err(format!("start node {node_id}: {e}").into());
+            let removed = remove_pid_file(&pid_path);
+            return Err(format!("start node {node_id}: {e}{removed}").into());
         }
     };
     if let Err(e) = std::io::Write::write_all(&mut pid_file, child.id().to_string().as_bytes()) {
+        drop(pid_file);
         let stopped = child.kill().and_then(|()| child.wait());
+        let removed = remove_pid_file(&pid_path);
         return Err(match stopped {
-            Ok(_) => format!("record node {node_id} in {pid_path}: {e}; stopped it"),
+            Ok(_) => format!("record node {node_id} in {pid_path}: {e}; stopped it{removed}"),
             Err(stop) => format!(
-                "record node {node_id} in {pid_path}: {e}; could not stop pid {}: {stop}",
+                "record node {node_id} in {pid_path}: {e}; could not stop pid {}: {stop}{removed}",
                 child.id()
             ),
         }
@@ -290,7 +310,7 @@ fn start_node(
     }
     Ok(StartedNode {
         node_id,
-        pid: child.id(),
+        child,
         dir: PathBuf::from(db_path),
     })
 }

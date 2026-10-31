@@ -3,11 +3,28 @@
 
 #![cfg(feature = "cluster")]
 
+use std::io::Write;
 use std::net::{Ipv4Addr, TcpListener, UdpSocket};
 use std::path::Path;
-use std::process::{Child, Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 
 use tempfile::TempDir;
+
+fn install_shim(path: &Path, script: &str) {
+    let mut writer = Command::new("sh")
+        .args(["-c", "cat > \"$1\" && chmod +x \"$1\"", "install-shim"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("spawn shim writer");
+    writer
+        .stdin
+        .take()
+        .expect("shim writer stdin")
+        .write_all(script.as_bytes())
+        .expect("write shim");
+    assert!(writer.wait().expect("shim writer").success());
+}
 
 struct Shimmed {
     dir: TempDir,
@@ -27,14 +44,7 @@ impl Shimmed {
                 "#!/bin/sh\necho \"{name} $*\" >> '{}'\n{reply}\n",
                 log.display()
             );
-            let path = bin.join(name);
-            std::fs::write(&path, script).expect("write shim");
-            let status = Command::new("chmod")
-                .args(["+x"])
-                .arg(&path)
-                .status()
-                .expect("chmod shim");
-            assert!(status.success());
+            install_shim(&bin.join(name), &script);
         }
         Self { dir }
     }
@@ -205,7 +215,8 @@ fn a_suite_refuses_ports_another_process_holds() {
     assert!(!output.status.success(), "a refused suite exited 0");
     assert!(stdout.contains("already in use"), "{stdout}");
     assert!(!stdout.contains("Starting node"), "{stdout}");
-    assert!(!Path::new(&format!("{prefix_arg}-share-1")).exists());
+    assert!(!Path::new(&format!("{prefix_arg}-share-{base_port}-1")).exists());
+    assert!(!Path::new(&format!("{prefix_arg}-share-{base_port}-passwd")).exists());
     assert_eq!(shim.calls(), "");
     drop(listener);
 }
@@ -222,6 +233,13 @@ fn a_suite_leaves_another_runs_nodes_under_the_same_prefix_alone() {
     std::fs::write(other_dir.join("mqdb.pid"), &other_pid).expect("other run's pid file");
 
     let base_port = free_port_block().to_string();
+    let other_port = format!("{}", free_port_block());
+    let same_layout_dir = shim.path().join(format!("t-own-{other_port}-1"));
+    std::fs::create_dir_all(&same_layout_dir).expect("other port's node dir");
+    let mut same_layout = stand_in_node(&same_layout_dir);
+    let same_layout_pid = same_layout.0.id().to_string();
+    std::fs::write(same_layout_dir.join("mqdb.pid"), &same_layout_pid).expect("pid file");
+
     let output = shim.run(&[
         "dev",
         "test",
@@ -241,6 +259,14 @@ fn a_suite_leaves_another_runs_nodes_under_the_same_prefix_alone() {
     assert!(
         other.0.try_wait().expect("poll stand-in").is_none(),
         "the suite stopped another run's node"
+    );
+    assert!(
+        same_layout.0.try_wait().expect("poll stand-in").is_none(),
+        "the suite stopped the node of a run on another port"
+    );
+    assert_eq!(
+        std::fs::read_to_string(same_layout_dir.join("mqdb.pid")).expect("pid file"),
+        same_layout_pid
     );
     assert_eq!(
         std::fs::read_to_string(other_dir.join("mqdb.pid")).expect("other pid file"),
@@ -276,16 +302,7 @@ fn profile_stops_its_profiler_when_the_benchmark_cannot_start() {
             ),
         ),
     ] {
-        let path = bin.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write shim");
-        assert!(
-            Command::new("chmod")
-                .arg("+x")
-                .arg(&path)
-                .status()
-                .expect("chmod")
-                .success()
-        );
+        install_shim(&bin.join(name), &format!("#!/bin/sh\n{body}\n"));
     }
     let profiling = shim.path().join("target/profiling");
     std::fs::create_dir_all(&profiling).expect("profiling dir");
@@ -299,7 +316,12 @@ fn profile_stops_its_profiler_when_the_benchmark_cannot_start() {
         "db",
     ]);
     assert!(!output.status.success());
-    let pid = std::fs::read_to_string(&samply_pid).expect("the samply shim ran");
+    let Ok(pid) = std::fs::read_to_string(&samply_pid) else {
+        panic!(
+            "the samply shim never ran: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
     assert!(
         !alive(pid.trim()),
         "dev profile left its profiler (pid {}) running",

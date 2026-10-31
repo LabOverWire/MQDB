@@ -813,22 +813,41 @@ struct SuiteSetup<'a> {
 
 struct SuiteCluster {
     nodes: Vec<StartedNode>,
-    passwd: PathBuf,
+    passwd: Option<PathBuf>,
+}
+
+impl SuiteCluster {
+    fn stop(&mut self) -> Result<(), String> {
+        let mut nodes = std::mem::take(&mut self.nodes);
+        if let Err(e) = stop_started_nodes(&mut nodes) {
+            if let Some(passwd) = self.passwd.take() {
+                return Err(format!("{e}; kept {} for them", passwd.display()));
+            }
+            return Err(e);
+        }
+        match self.passwd.take().map(std::fs::remove_file) {
+            Some(Err(e)) if e.kind() != ErrorKind::NotFound => {
+                Err(format!("could not remove the suite passwd file: {e}"))
+            }
+            Some(Ok(()) | Err(_)) | None => Ok(()),
+        }
+    }
+
+    fn finish(mut self) -> u32 {
+        match self.stop() {
+            Ok(()) => 0,
+            Err(e) => {
+                println!("  could not stop the suite cluster cleanly: {e}");
+                1
+            }
+        }
+    }
 }
 
 impl Drop for SuiteCluster {
     fn drop(&mut self) {
-        if let Err(e) = stop_started_nodes(&self.nodes) {
-            eprintln!(
-                "  could not stop the suite nodes; kept {} for them: {e}",
-                self.passwd.display()
-            );
-            return;
-        }
-        if let Err(e) = std::fs::remove_file(&self.passwd)
-            && e.kind() != ErrorKind::NotFound
-        {
-            eprintln!("  could not remove {}: {e}", self.passwd.display());
+        if let Err(e) = self.stop() {
+            eprintln!("  could not stop the suite cluster cleanly: {e}");
         }
     }
 }
@@ -871,7 +890,7 @@ fn start_suite_cluster(
     let passwd = format!("{prefix}-passwd");
     let mut cluster = SuiteCluster {
         nodes: Vec::new(),
-        passwd: PathBuf::from(&passwd),
+        passwd: Some(PathBuf::from(&passwd)),
     };
     create_suite_passwd(exe, &passwd, setup.users)?;
 
@@ -1019,8 +1038,8 @@ fn run_test_ownership(options: &DevTestOptions, ports: &[u16]) -> u32 {
     record(&mut passed, &mut failed, "Create as alice", id.is_some());
     let Some(id) = id else {
         eprintln!("    stdout: {create_out}");
-        drop(cluster);
-        return report(passed, failed);
+        let stop_failures = cluster.finish();
+        return report(passed, failed + stop_failures);
     };
     std::thread::sleep(Duration::from_millis(500));
 
@@ -1102,8 +1121,8 @@ fn run_test_ownership(options: &DevTestOptions, ports: &[u16]) -> u32 {
         alice_delete == Some(true),
     );
 
-    drop(cluster);
-    report(passed, failed)
+    let stop_failures = cluster.finish();
+    report(passed, failed + stop_failures)
 }
 
 fn sharing_checks(exe: &Path, entity: &str, ports: &[u16], passed: &mut u32, failed: &mut u32) {
@@ -1272,8 +1291,8 @@ fn run_test_sharing(options: &DevTestOptions, ports: &[u16]) -> u32 {
 
     sharing_checks(&exe, &entity, ports, &mut passed, &mut failed);
 
-    drop(cluster);
-    report(passed, failed)
+    let stop_failures = cluster.finish();
+    report(passed, failed + stop_failures)
 }
 
 fn add_stress_constraint(exe: &Path, entity: &str, port: u16) -> bool {
@@ -1543,8 +1562,8 @@ fn run_test_presence(options: &DevTestOptions, ports: &[u16]) -> u32 {
         record(&mut passed, &mut failed, name, ok);
     });
 
-    drop(cluster);
-    report(passed, failed)
+    let stop_failures = cluster.finish();
+    report(passed, failed + stop_failures)
 }
 
 #[cfg(test)]
