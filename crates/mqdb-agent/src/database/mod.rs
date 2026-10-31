@@ -54,15 +54,11 @@ pub struct Database {
 }
 
 impl Database {
-    /// # Errors
-    /// Returns an error if the database cannot be opened.
     pub async fn open<P: AsRef<std::path::Path>>(path: P) -> mqdb_core::error::Result<Self> {
         let config = DatabaseConfig::new(path.as_ref().to_path_buf());
         Self::open_with_config(config).await
     }
 
-    /// # Errors
-    /// Returns an error if the database cannot be opened.
     pub async fn open_without_background_tasks<P: AsRef<std::path::Path>>(
         path: P,
     ) -> mqdb_core::error::Result<Self> {
@@ -70,8 +66,6 @@ impl Database {
         Self::open_with_config(config).await
     }
 
-    /// # Errors
-    /// Returns an error if the database cannot be opened.
     pub async fn open_with_config(config: DatabaseConfig) -> mqdb_core::error::Result<Self> {
         let storage = if let Some(ref passphrase) = config.passphrase {
             Arc::new(Storage::open_encrypted(
@@ -85,8 +79,6 @@ impl Database {
         Self::init_with_storage(storage, config).await
     }
 
-    /// # Errors
-    /// Returns an error if initialization fails.
     pub async fn open_with_backend(
         backend: Arc<dyn mqdb_core::storage::StorageBackend>,
         config: DatabaseConfig,
