@@ -1,10 +1,6 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// Multi-step share tests hold a NodeController across many awaits, so their
-// futures exceed the large-future threshold; irrelevant for one-shot test tasks.
-#![allow(clippy::large_futures)]
-
 use super::super::db::data_partition;
 use super::super::db_protocol::{DbReadRequest, DbResponse, DbStatus, DbWriteRequest};
 use super::super::node_controller::NodeController;
@@ -325,8 +321,6 @@ async fn unsealed_partition_reserve_is_retryable_not_a_conflict() {
             },
         );
     }
-    // The map (the quorum-group source) must be in place before become_primary computes the seal
-    // majority; a multi-node group => become_primary QUEUES a seal but does not complete it.
     ctrl.update_partition_map(map);
     for i in 0..NUM_PARTITIONS {
         ctrl.become_primary(PartitionId::new(i).unwrap(), Epoch::new(1));
@@ -335,7 +329,6 @@ async fn unsealed_partition_reserve_is_retryable_not_a_conflict() {
         .await
         .unwrap();
 
-    // The value is genuinely FREE; the create can only fail because the partition is not yet sealed.
     let payload =
         serde_json::to_vec(&serde_json::json!({"id": "u1", "email": "free@x.com"})).unwrap();
     let response = handler
@@ -586,7 +579,6 @@ async fn delete_releases_unique_claim() {
         .await
         .unwrap();
 
-    // A durable record owning a committed unique claim, as it would be after a create+commit.
     let data_bytes = serde_json::to_vec(&serde_json::json!({"email": "a@x.com"})).unwrap();
     let rec = ctrl
         .db_create("users", "u1", &data_bytes, 1000)
@@ -1795,7 +1787,6 @@ async fn cascade_delete_releases_child_unique_claim() {
     .unwrap();
     let rec = ctrl.db_create("posts", "p1", &post, 1000).await.unwrap();
 
-    // The child post owns a committed unique claim on its slug, as it would after create+commit.
     let slug = serde_json::to_vec(&serde_json::json!("post-1")).unwrap();
     ctrl.stores()
         .db_unique
@@ -2295,7 +2286,6 @@ async fn fk_create_with_absent_fk_field_allowed() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn fk_create_with_multiple_constraints_validates_all() {
     use super::super::db::{ClusterConstraint, OnDeleteAction};
 
@@ -2699,7 +2689,6 @@ async fn cluster_share_and_read_forward_to_resource_primary() {
     let mut ctrl = create_test_controller(node1, transport);
     ctrl.set_ownership(Arc::clone(&ownership));
 
-    // node2 is primary for the resource's partition; node1 is not.
     let rp = data_partition("diagrams", "d1");
     let mut map = PartitionMap::default();
     map.set(
@@ -2712,8 +2701,6 @@ async fn cluster_share_and_read_forward_to_resource_primary() {
     );
     ctrl.update_partition_map(map);
 
-    // A graded read of a non-local resource is forwarded to its primary (never
-    // graded/served locally on a non-primary), and so is a share.
     let read = handler
         .handle_publish(&mut ctrl, "$DB/diagrams/d1", &[], &share_ctx("bob"))
         .await;
@@ -2770,9 +2757,6 @@ async fn forwarded_read_response(
     }
 }
 
-/// A Read that arrives at the resource primary via forwarding is graded there
-/// against co-located grants (`check_forwarded_ownership`) — the actual cross-node
-/// grantee-read path.
 #[tokio::test]
 async fn cluster_forwarded_read_graded_against_grant_on_primary() {
     let node1 = NodeId::validated(1).unwrap();
@@ -3130,7 +3114,6 @@ async fn cluster_identity_nonowner_cannot_invalidate_resolution() {
     seed_identity_link(&mut ctrl, &crypto, "user@example.com", "canon-1").await;
     let grantee_key = suspended_resolution(&mut ctrl, &crypto, 44, "user@example.com");
 
-    // a non-owner, non-admin attempt to cancel the owner's in-flight share is ignored
     ctrl.invalidate_share_resolutions("diagrams", "d1", &grantee_key, Some("mallory"));
     ctrl.handle_scatter_list_response(44, vec![resolved_link_item(&crypto, "user@example.com")])
         .await;
