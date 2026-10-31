@@ -118,12 +118,12 @@ async fn try_commit(
     let bytes = serde_json::to_vec(&data).unwrap();
     let write = if n == 1 {
         ctrl.stores
-            .db_create_replicated(ENTITY, ID, &bytes, 0)
+            .db_create_write(ENTITY, ID, &bytes, 0)
             .unwrap()
             .1
     } else {
         ctrl.stores
-            .db_update_replicated(ENTITY, ID, &bytes, 0)
+            .db_update_write(ENTITY, ID, &bytes, 0)
             .unwrap()
             .1
     };
@@ -669,7 +669,7 @@ async fn a_partition_snapshot_carries_the_pending_events() {
     watch(&primary, "remote-watcher", node(2));
     upgraded(&mut primary, node(2));
     commit(&mut primary, 1).await;
-    let snapshot = primary.stores().export_partition(partition);
+    let snapshot = primary.stores().export_partition(partition).unwrap();
 
     let target_backend: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
     let target = controller_with_storage(3, &target_backend);

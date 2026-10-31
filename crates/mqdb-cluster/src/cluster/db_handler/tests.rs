@@ -203,7 +203,7 @@ async fn handle_create_success() {
     let request = DbWriteRequest::create(data, 1000);
     let payload = request.to_be_bytes();
 
-    let topic = format!("$DB/p{}/{}/create", partition.get(), entity);
+    let topic = format!("$DB/p{}/{entity}/create", partition.get());
 
     let response = handler
         .handle_publish(
@@ -242,7 +242,7 @@ async fn handle_read_not_found() {
     let request = DbReadRequest::create();
     let payload = request.to_be_bytes();
 
-    let topic = format!("$DB/p{}/{}/{}", partition.get(), entity, id);
+    let topic = format!("$DB/p{}/{entity}/{id}", partition.get());
 
     let response = handler
         .handle_publish(

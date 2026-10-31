@@ -15,7 +15,6 @@ use super::super::protocol::JsonDbOp;
 use super::super::transport::ClusterTransport;
 use super::DbRequestHandler;
 use super::helpers::{self, parse_projection};
-use mqdb_core::events::ChangeEvent;
 use mqdb_core::types::{
     AccessLevel, MAX_FILTERS, MAX_LIST_RESULTS, MAX_SORT_FIELDS, OwnershipDecision, SHARES_ENTITY,
 };
@@ -92,8 +91,8 @@ impl DbRequestHandler {
                 return Some(Self::json_error(
                     400,
                     &format!(
-                        "schema violation for '{}': filter field '{}' does not exist in schema",
-                        entity, filter.field
+                        "schema violation for '{entity}': filter field '{}' does not exist in schema",
+                        filter.field
                     ),
                 ));
             }
@@ -658,7 +657,6 @@ impl DbRequestHandler {
         if let Some(obj) = data.as_object_mut() {
             obj.remove("__mqdb_fk_expected");
         }
-        let now_ms = Self::current_time_ms();
         let request_id = uuid::Uuid::new_v4().to_string();
 
         let fk_result = match controller.start_fk_existence_check(entity, &data).await {
@@ -672,10 +670,9 @@ impl DbRequestHandler {
                 continuation: FkCheckContinuation::CreateFromDbHandler {
                     entity: entity.to_string(),
                     id: id.to_string(),
-                    data: data.clone(),
+                    data,
                     partition,
                     request_id,
-                    now_ms,
                     sender: sender.map(str::to_string),
                     client_id: client_id.map(str::to_string),
                     response_topic: response_topic.to_string(),
@@ -683,6 +680,27 @@ impl DbRequestHandler {
                 },
             }));
         }
+
+        self.reserve_unique_then_create(controller, ctx, data, vault_crypto, request_id)
+            .await
+    }
+
+    async fn reserve_unique_then_create<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        ctx: &JsonOpContext<'_>,
+        data: Value,
+        vault_crypto: Option<&mqdb_vault::VaultCrypto>,
+        request_id: String,
+    ) -> JsonOpResult {
+        let now_ms = Self::current_time_ms();
+        let entity = ctx.entity;
+        let id = ctx.id.unwrap_or("");
+        let partition = ctx.partition;
+        let sender = ctx.sender;
+        let client_id = ctx.client_id;
+        let response_topic = ctx.response_topic;
+        let correlation_data = ctx.correlation_data;
 
         let phase1 = match controller
             .start_unique_constraint_check(entity, id, &data, partition, &request_id, now_ms)
@@ -721,18 +739,9 @@ impl DbRequestHandler {
             }));
         }
 
-        let create_ctx = JsonOpContext {
-            entity,
-            id: Some(id),
-            partition,
-            sender,
-            client_id,
-            response_topic,
-            correlation_data,
-        };
         self.complete_create(
             controller,
-            &create_ctx,
+            ctx,
             &data,
             &constraint_data,
             &request_id,
@@ -856,7 +865,7 @@ impl DbRequestHandler {
                 tracing::info!(
                     node = node_id,
                     partition = partition.get(),
-                    elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX),
+                    elapsed_us = crate::cluster::elapsed_micros(start),
                     forwarded = true,
                     "json_read_forwarded"
                 );
@@ -865,7 +874,7 @@ impl DbRequestHandler {
             tracing::warn!(
                 node = node_id,
                 partition = partition.get(),
-                elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX),
+                elapsed_us = crate::cluster::elapsed_micros(start),
                 "json_read_forward_failed"
             );
             return JsonOpResult::Response(Self::json_error(
@@ -906,7 +915,7 @@ impl DbRequestHandler {
         tracing::info!(
             node = node_id,
             partition = partition.get(),
-            elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX),
+            elapsed_us = crate::cluster::elapsed_micros(start),
             forwarded = false,
             "json_read_complete"
         );
@@ -988,7 +997,6 @@ impl DbRequestHandler {
             return JsonOpResult::Response(err);
         }
 
-        let now_ms = Self::current_time_ms();
         let request_id = uuid::Uuid::new_v4().to_string();
         let partition = data_partition(entity, id);
 
@@ -1015,7 +1023,6 @@ impl DbRequestHandler {
                     merged_data,
                     partition,
                     request_id,
-                    now_ms,
                     new_diff,
                     old_diff,
                     sender: sender.map(str::to_string),
@@ -1026,6 +1033,43 @@ impl DbRequestHandler {
             }));
         }
 
+        let update_ctx = JsonOpContext {
+            entity,
+            id: Some(id),
+            partition,
+            sender,
+            client_id,
+            response_topic,
+            correlation_data,
+        };
+        self.reserve_unique_then_update(
+            controller,
+            &update_ctx,
+            merged_data,
+            new_diff,
+            old_diff,
+            request_id,
+        )
+        .await
+    }
+
+    async fn reserve_unique_then_update<T: ClusterTransport>(
+        &self,
+        controller: &mut NodeController<T>,
+        ctx: &JsonOpContext<'_>,
+        merged_data: Value,
+        new_diff: Value,
+        old_diff: Value,
+        request_id: String,
+    ) -> JsonOpResult {
+        let now_ms = Self::current_time_ms();
+        let entity = ctx.entity;
+        let id = ctx.id.unwrap_or("");
+        let partition = ctx.partition;
+        let sender = ctx.sender;
+        let client_id = ctx.client_id;
+        let response_topic = ctx.response_topic;
+        let correlation_data = ctx.correlation_data;
         let has_unique_changes = new_diff.as_object().is_some_and(|m| !m.is_empty());
 
         if has_unique_changes {
@@ -1072,15 +1116,6 @@ impl DbRequestHandler {
             }
         }
 
-        let update_ctx = JsonOpContext {
-            entity,
-            id: Some(id),
-            partition,
-            sender,
-            client_id,
-            response_topic,
-            correlation_data,
-        };
         let unique_diffs = UniqueDiffs {
             has_changes: has_unique_changes,
             new_diff: &new_diff,
@@ -1088,7 +1123,7 @@ impl DbRequestHandler {
         };
         self.complete_update(
             controller,
-            &update_ctx,
+            ctx,
             &merged_data,
             &request_id,
             now_ms,
@@ -1290,35 +1325,11 @@ impl DbRequestHandler {
         let sender = ctx.sender;
         let client_id = ctx.client_id;
 
-        match controller.db_delete_prepare(entity, id) {
-            Ok((db_entity, write)) => {
-                let data: Value = serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
-                let event = controller.change_event(
-                    ChangeEvent::delete(entity.to_string(), id.to_string(), data.clone()),
-                    EventOrigin::new(sender, client_id),
-                );
-                if let Err(error) = controller
-                    .commit_delete_with_change_event(write, event, &data, plan.cascade())
-                    .await
-                {
-                    return helpers::json_write_failure(error);
-                }
-                let ack_receivers = controller
-                    .run_fk_delete_plan(plan, EventOrigin::new(sender, client_id))
-                    .await;
-                if self.ownership.owner_field(entity).is_some()
-                    && let Err(e) = controller.clear_all_resource_grants(entity, id).await
-                {
-                    tracing::warn!(entity, id, %e, "grants of a deleted resource not removed");
-                }
-                if let Some(cas) = plan.cascade() {
-                    crate::cluster::node_controller::db_ops::spawn_cascade_ack_waiter(
-                        controller.stores().cluster_outbox().cloned(),
-                        cas.operation_id.clone(),
-                        ack_receivers,
-                        true,
-                    );
-                }
+        match controller
+            .delete_record_replicated(entity, id, plan, EventOrigin::new(sender, client_id))
+            .await
+        {
+            Ok(()) => {
                 let result = json!({
                     "status": "ok",
                     "data": {"id": id, "deleted": true}
@@ -1845,10 +1856,7 @@ impl DbRequestHandler {
                 correlation_data,
                 ..
             } => {
-                let now_ms = Self::current_time_ms();
-                let constraint_data = data.clone();
                 let crypto = self.resolve_vault_crypto(&entity, sender.as_deref());
-                let data = self.vault_encrypt_if_needed(crypto.as_ref(), &entity, &id, data);
                 let ctx = JsonOpContext {
                     entity: &entity,
                     id: Some(&id),
@@ -1859,14 +1867,7 @@ impl DbRequestHandler {
                     correlation_data: correlation_data.as_deref(),
                 };
                 let result = self
-                    .complete_create(
-                        controller,
-                        &ctx,
-                        &data,
-                        &constraint_data,
-                        &request_id,
-                        now_ms,
-                    )
+                    .reserve_unique_then_create(controller, &ctx, data, crypto.as_ref(), request_id)
                     .await;
                 match result {
                     JsonOpResult::Response(payload) => {
@@ -1904,8 +1905,6 @@ impl DbRequestHandler {
                 correlation_data,
                 ..
             } => {
-                let now_ms = Self::current_time_ms();
-                let has_unique_changes = new_diff.as_object().is_some_and(|m| !m.is_empty());
                 let ctx = JsonOpContext {
                     entity: &entity,
                     id: Some(&id),
@@ -1915,19 +1914,14 @@ impl DbRequestHandler {
                     response_topic: &response_topic,
                     correlation_data: correlation_data.as_deref(),
                 };
-                let unique_diffs = UniqueDiffs {
-                    has_changes: has_unique_changes,
-                    new_diff: &new_diff,
-                    old_diff: &old_diff,
-                };
                 let result = self
-                    .complete_update(
+                    .reserve_unique_then_update(
                         controller,
                         &ctx,
-                        &merged_data,
-                        &request_id,
-                        now_ms,
-                        &unique_diffs,
+                        merged_data,
+                        new_diff,
+                        old_diff,
+                        request_id,
                     )
                     .await;
                 match result {

@@ -125,8 +125,9 @@ impl<T: ClusterTransport> NodeController<T> {
         replicas: &[NodeId],
         event: Option<ChangeEventRecord>,
     ) -> Result<u64, ReplicationError> {
-        self.replicate_write_async_with_extra(write, replicas, event, &[])
+        self.replicate_primary_write(write, replicas, event, &[])
             .await
+            .map_err(|refused| refused.error)
     }
 
     fn apply_primary_write(
@@ -169,22 +170,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    /// # Errors
-    /// Returns `NotPrimary` if this node is not in the primary role for the partition, or
-    /// `StoreFailed` if the write cannot be persisted, in which case nothing is applied, logged
-    /// or replicated and its change event is dropped.
-    pub async fn replicate_write_async_with_extra(
-        &mut self,
-        write: ReplicationWrite,
-        replicas: &[NodeId],
-        event: Option<ChangeEventRecord>,
-        extra_outbox: &[(Vec<u8>, Vec<u8>)],
-    ) -> Result<u64, ReplicationError> {
-        self.replicate_primary_write(write, replicas, event, extra_outbox)
-            .await
-            .map_err(|refused| refused.error)
-    }
-
     pub(crate) async fn replicate_primary_write(
         &mut self,
         write: ReplicationWrite,
@@ -217,7 +202,7 @@ impl<T: ClusterTransport> NodeController<T> {
             write.data,
         )
         .with_event(event);
-        let t_state = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let t_state = crate::cluster::elapsed_micros(start);
 
         let change_event = Self::change_event_entry(&write_msg);
         if let Err(error) =
@@ -228,14 +213,14 @@ impl<T: ClusterTransport> NodeController<T> {
                 event: write_msg.event,
             });
         }
-        let t_apply = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let t_apply = crate::cluster::elapsed_micros(start);
 
         if let Some(state) = self.replicas.get_mut(&partition.get()) {
             state.advance_sequence();
         }
         self.write_log
             .append(partition, sequence, write_msg.clone());
-        let t_writelog = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let t_writelog = crate::cluster::elapsed_micros(start);
 
         for &replica in replicas {
             let _ = self
@@ -243,7 +228,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 .send(replica, ClusterMessage::Write(write_msg.clone()))
                 .await;
         }
-        let t_send = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let t_send = crate::cluster::elapsed_micros(start);
 
         tracing::trace!(
             node = self.node_id.get(),

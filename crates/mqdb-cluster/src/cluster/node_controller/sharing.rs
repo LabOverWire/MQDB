@@ -142,23 +142,20 @@ impl<T: ClusterTransport> NodeController<T> {
             .max()
     }
 
-    fn grant_ids(&self, entity: &str, id: &str, grantee_key: &str) -> Vec<String> {
-        self.shares_for_resource(entity, id)
-            .into_iter()
-            .filter_map(|(sid, value)| {
-                (value.get("grantee_key").and_then(Value::as_str) == Some(grantee_key))
-                    .then_some(sid)
-            })
-            .collect()
-    }
-
     async fn clear_grant(
         &mut self,
         entity: &str,
         id: &str,
         grantee_key: &str,
     ) -> Result<(), DbDataStoreError> {
-        let victims = self.grant_ids(entity, id, grantee_key);
+        let victims = self
+            .shares_for_resource(entity, id)
+            .into_iter()
+            .filter_map(|(sid, value)| {
+                (value.get("grantee_key").and_then(Value::as_str) == Some(grantee_key))
+                    .then_some(sid)
+            })
+            .collect();
         self.delete_grants(victims).await
     }
 

@@ -3134,6 +3134,7 @@ async fn forwarded_delete_cascade_events_carry_the_deleters_origin() {
 mod change_events;
 mod forwarded_write;
 mod partition_map;
+mod remote_fk_unique;
 mod store_failure;
 
 #[tokio::test]

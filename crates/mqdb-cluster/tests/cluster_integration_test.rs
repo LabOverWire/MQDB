@@ -139,7 +139,7 @@ impl TestCluster {
             .controller
             .replicate_write(write, &replicas, replicas.len())
             .await
-            .ok();
+            .unwrap();
         self.advance_ms(10);
         for node in &mut self.nodes {
             node.controller.process_messages().await;
@@ -2440,7 +2440,7 @@ async fn wildcard_broadcast_replication() {
         .transport()
         .broadcast(msg)
         .await
-        .ok();
+        .unwrap();
 
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -2502,7 +2502,7 @@ async fn cross_node_wildcard_publish_routing() {
         .transport()
         .broadcast(msg)
         .await
-        .ok();
+        .unwrap();
 
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -2562,7 +2562,7 @@ async fn drain_notification_triggers_partition_reassignment() {
         .transport()
         .broadcast(drain_msg)
         .await
-        .ok();
+        .unwrap();
 
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -2701,7 +2701,7 @@ async fn db_crud_replication_to_replicas() {
     let (entity, create_write) = cluster.nodes[0]
         .controller
         .stores()
-        .db_create_replicated(entity_type, entity_id, b"initial data", 1000)
+        .db_create_write(entity_type, entity_id, b"initial data", 1000)
         .expect("create should succeed");
     assert_eq!(entity.entity_str(), entity_type);
     assert_eq!(entity.id_str(), entity_id);
@@ -2715,7 +2715,7 @@ async fn db_crud_replication_to_replicas() {
     let (updated, update_write) = cluster.nodes[0]
         .controller
         .stores()
-        .db_update_replicated(entity_type, entity_id, b"updated data", 2000)
+        .db_update_write(entity_type, entity_id, b"updated data", 2000)
         .expect("update should succeed");
     assert_eq!(updated.data, b"updated data");
     cluster.replicate_from_first(update_write).await;
@@ -2728,7 +2728,7 @@ async fn db_crud_replication_to_replicas() {
     let (deleted, delete_write) = cluster.nodes[0]
         .controller
         .stores()
-        .db_delete_replicated(entity_type, entity_id)
+        .db_delete_write(entity_type, entity_id)
         .expect("delete should succeed");
     assert_eq!(deleted.id_str(), entity_id);
     cluster.replicate_from_first(delete_write).await;
@@ -3054,7 +3054,7 @@ async fn index_multiple_records_same_value() {
             .controller
             .replicate_write(write, &[n2, n3], 2)
             .await
-            .ok();
+            .unwrap();
     }
 
     cluster.advance_ms(20);
@@ -3104,7 +3104,7 @@ async fn unique_constraint_reserve_commit_release() {
             .controller
             .replicate_write(write, &[n2, n3], 2)
             .await
-            .ok();
+            .unwrap();
     }
     cluster.advance_ms(10);
     for node in &mut cluster.nodes {
@@ -3146,7 +3146,7 @@ async fn unique_constraint_reserve_commit_release() {
         .controller
         .replicate_write(commit_write, &[n2, n3], 2)
         .await
-        .ok();
+        .unwrap();
     cluster.advance_ms(10);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -3301,13 +3301,13 @@ async fn fk_validation_cleanup_expired() {
         .controller
         .stores()
         .fk_add_request_replicated(short_timeout_request)
-        .ok();
+        .unwrap();
 
     cluster.nodes[0]
         .controller
         .stores()
         .fk_add_request_replicated(long_timeout_request)
-        .ok();
+        .unwrap();
 
     assert!(
         cluster.nodes[0]

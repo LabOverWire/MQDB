@@ -127,6 +127,7 @@ pub enum StoreApplyError {
     ClientLocationError,
     ChangeEventError,
     PersistenceError,
+    SnapshotTooLarge,
 }
 
 impl std::fmt::Display for StoreApplyError {
@@ -151,6 +152,7 @@ impl std::fmt::Display for StoreApplyError {
             Self::ClientLocationError => write!(f, "client location store error"),
             Self::ChangeEventError => write!(f, "change event store error"),
             Self::PersistenceError => write!(f, "persistence error"),
+            Self::SnapshotTooLarge => write!(f, "partition snapshot exceeds the frame size limits"),
         }
     }
 }

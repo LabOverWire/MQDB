@@ -99,7 +99,7 @@ pub fn oversized_create_message(entity: &str, data: &serde_json::Value) -> Optio
 #[must_use]
 pub fn db_data_key(entity: &str, id: &str) -> String {
     let partition = data_partition(entity, id);
-    format!("_db_data/p{}/{}/{}", partition.get(), entity, id)
+    format!("_db_data/p{}/{entity}/{id}", partition.get())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,6 +181,13 @@ impl DbDataStore {
     pub fn get(&self, entity: &str, id: &str) -> Option<DbEntity> {
         let key = format!("{entity}/{id}");
         self.read_entities().get(&key).cloned()
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    #[must_use]
+    pub fn contains(&self, entity: &str, id: &str) -> bool {
+        self.read_entities().contains_key(&format!("{entity}/{id}"))
     }
 
     #[must_use]

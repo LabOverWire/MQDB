@@ -204,7 +204,7 @@ Each store implements idempotent `apply_replicated()` methods that handle Insert
 Stores expose paired methods for generating replicated writes:
 
 - `create_session_replicated()` → Returns `(SessionData, ReplicationWrite)`
-- `db_create_replicated()` → Returns `(DbEntity, ReplicationWrite)` without changing memory; the record is applied when the write is stored
+- `db_create_write()` → Returns `(DbEntity, ReplicationWrite)` without changing memory; the record is applied when the write is stored
 - `set_retained_replicated()` → Returns `(RetainedMessage, ReplicationWrite)`
 
 The caller uses the entity immediately and routes the write for cluster-wide replication.

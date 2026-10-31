@@ -299,7 +299,6 @@ pub enum FkCheckContinuation {
         data: serde_json::Value,
         partition: PartitionId,
         request_id: String,
-        now_ms: u64,
         sender: Option<String>,
         client_id: Option<String>,
         response_topic: String,
@@ -311,7 +310,6 @@ pub enum FkCheckContinuation {
         merged_data: serde_json::Value,
         partition: PartitionId,
         request_id: String,
-        now_ms: u64,
         new_diff: serde_json::Value,
         old_diff: serde_json::Value,
         sender: Option<String>,
@@ -1045,7 +1043,7 @@ impl<T: ClusterTransport> NodeController<T> {
             }
         }
         if count > 0 {
-            let elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+            let elapsed_us = crate::cluster::elapsed_micros(start);
             tracing::info!(
                 node = self.node_id.get(),
                 msg_count = count,

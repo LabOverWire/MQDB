@@ -23,7 +23,16 @@ impl<T: ClusterTransport> NodeController<T> {
             "received snapshot request, starting snapshot send"
         );
 
-        let data = self.stores.export_partition(partition);
+        let data = match self.stores.export_partition(partition) {
+            Ok(data) => data,
+            Err(error) => {
+                tracing::error!(?partition, requester = from.get(), %error, "partition snapshot not exported");
+                let complete = SnapshotComplete::failed(partition);
+                self.send_snapshot_message(from, ClusterMessage::SnapshotComplete(complete))
+                    .await;
+                return;
+            }
+        };
         let sequence = self.sequence(partition).unwrap_or(0);
         let sender = SnapshotSender::new(partition, data, sequence);
 
@@ -38,9 +47,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
         if let Some(chunk) = sender.next_chunk() {
             let is_last = chunk.is_last();
-            let _ = self
-                .transport
-                .send(to, ClusterMessage::SnapshotChunk(chunk))
+            self.send_snapshot_message(to, ClusterMessage::SnapshotChunk(chunk))
                 .await;
 
             if is_last {
@@ -67,9 +74,7 @@ impl<T: ClusterTransport> NodeController<T> {
         if !builder.add_chunk(chunk) {
             tracing::warn!(?partition, "failed to add snapshot chunk");
             let complete = SnapshotComplete::failed(partition);
-            let _ = self
-                .transport
-                .send(from, ClusterMessage::SnapshotComplete(complete))
+            self.send_snapshot_message(from, ClusterMessage::SnapshotComplete(complete))
                 .await;
             self.pending_snapshots.remove(&partition);
             self.requested_snapshots.remove(&partition);
@@ -86,9 +91,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 tracing::error!(?partition, "failed to assemble snapshot");
                 self.requested_snapshots.remove(&partition);
                 let complete = SnapshotComplete::failed(partition);
-                let _ = self
-                    .transport
-                    .send(from, ClusterMessage::SnapshotComplete(complete))
+                self.send_snapshot_message(from, ClusterMessage::SnapshotComplete(complete))
                     .await;
                 return;
             };
@@ -140,9 +143,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     self.requested_snapshots.remove(&partition);
 
                     let complete = SnapshotComplete::ok(partition, sequence);
-                    let _ = self
-                        .transport
-                        .send(from, ClusterMessage::SnapshotComplete(complete))
+                    self.send_snapshot_message(from, ClusterMessage::SnapshotComplete(complete))
                         .await;
                 }
                 Err(e) => {
@@ -150,9 +151,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     self.restore_change_events(partition, &saved_events);
                     self.requested_snapshots.remove(&partition);
                     let complete = SnapshotComplete::failed(partition);
-                    let _ = self
-                        .transport
-                        .send(from, ClusterMessage::SnapshotComplete(complete))
+                    self.send_snapshot_message(from, ClusterMessage::SnapshotComplete(complete))
                         .await;
                 }
             }
@@ -201,9 +200,13 @@ impl<T: ClusterTransport> NodeController<T> {
         self.requested_snapshots.insert(partition);
 
         let request = SnapshotRequest::create(partition, self.node_id);
-        let _ = self
-            .transport
-            .send(from, ClusterMessage::SnapshotRequest(request))
+        self.send_snapshot_message(from, ClusterMessage::SnapshotRequest(request))
             .await;
+    }
+
+    async fn send_snapshot_message(&self, to: NodeId, message: ClusterMessage) {
+        if let Err(error) = self.transport.send(to, message).await {
+            tracing::warn!(to = to.get(), %error, "snapshot message not sent");
+        }
     }
 }

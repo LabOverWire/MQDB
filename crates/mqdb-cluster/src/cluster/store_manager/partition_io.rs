@@ -6,8 +6,9 @@ use super::{StoreApplyError, StoreManager};
 use crate::cluster::{PartitionId, entity};
 
 impl StoreManager {
-    #[must_use]
-    pub fn export_partition(&self, partition: PartitionId) -> Vec<u8> {
+    /// # Errors
+    /// Returns `SnapshotTooLarge` if a store's export does not fit the snapshot length fields.
+    pub fn export_partition(&self, partition: PartitionId) -> Result<Vec<u8>, StoreApplyError> {
         let mut buf = Vec::new();
 
         let store_data = [
@@ -62,21 +63,18 @@ impl StoreManager {
             (entity::CHANGE_EVENTS, self.export_change_events(partition)),
         ];
 
-        buf.extend_from_slice(
-            &u8::try_from(store_data.len())
-                .unwrap_or(u8::MAX)
-                .to_be_bytes(),
-        );
+        let too_large = |_| StoreApplyError::SnapshotTooLarge;
+        buf.push(u8::try_from(store_data.len()).map_err(too_large)?);
 
         for (entity_name, data) in store_data {
             let name_bytes = entity_name.as_bytes();
-            buf.push(u8::try_from(name_bytes.len()).unwrap_or(u8::MAX));
+            buf.push(u8::try_from(name_bytes.len()).map_err(too_large)?);
             buf.extend_from_slice(name_bytes);
-            buf.extend_from_slice(&u32::try_from(data.len()).unwrap_or(u32::MAX).to_be_bytes());
+            buf.extend_from_slice(&u32::try_from(data.len()).map_err(too_large)?.to_be_bytes());
             buf.extend_from_slice(&data);
         }
 
-        buf
+        Ok(buf)
     }
 
     /// # Errors
@@ -247,7 +245,7 @@ mod tests {
 
         let partition = src.db_data.get("notes", "n1").unwrap().partition();
 
-        let payload = src.export_partition(partition);
+        let payload = src.export_partition(partition).unwrap();
         assert!(!payload.is_empty(), "snapshot payload must not be empty");
 
         let imported = dst.import_partition(&payload).expect("import");
@@ -273,7 +271,7 @@ mod tests {
         put_record(&src.db_data, "notes", "n1", b"{}", 1000);
         let partition = src.db_data.get("notes", "n1").unwrap().partition();
 
-        let payload = src.export_partition(partition);
+        let payload = src.export_partition(partition).unwrap();
 
         dst.import_partition(&payload).expect("import");
         assert!(dst.db_data.get("notes", "n1").is_some());
@@ -291,7 +289,7 @@ mod tests {
 
         let target = src.db_data.get("alpha", "rec-1").unwrap().partition();
 
-        let payload = src.export_partition(target);
+        let payload = src.export_partition(target).unwrap();
         assert!(!payload.is_empty());
         let total_imported = dst.import_partition(&payload).expect("import");
         assert!(total_imported >= 1);
@@ -453,7 +451,7 @@ mod tests {
 
         let child_partition = src.db_data.get("comments", "c1").unwrap().partition();
 
-        let payload = src.export_partition(child_partition);
+        let payload = src.export_partition(child_partition).unwrap();
         assert!(!payload.is_empty(), "snapshot payload must not be empty");
         let imported = dst.import_partition(&payload).expect("import");
         assert!(imported >= 1, "child record must survive import");
@@ -523,7 +521,7 @@ mod tests {
             "test prerequisite: constraints must span more than one partition"
         );
 
-        let payload = src.export_partition(any_partition);
+        let payload = src.export_partition(any_partition).unwrap();
         dst.import_partition(&payload).expect("import");
 
         for entity in &entities {

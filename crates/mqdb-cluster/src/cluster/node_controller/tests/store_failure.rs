@@ -13,33 +13,51 @@ fn node(id: u16) -> NodeId {
     NodeId::validated(id).unwrap()
 }
 
-fn primary_of_every_partition(backend: &Arc<FaultyBackend>) -> NodeController<MockTransport> {
-    let storage: Arc<dyn StorageBackend> = backend.clone();
+pub(super) fn controller_where(
+    backend: Option<&Arc<FaultyBackend>>,
+    primary_of: impl Fn(PartitionId) -> NodeId,
+    replicas: &[NodeId],
+) -> NodeController<MockTransport> {
+    let storage: Option<Arc<dyn StorageBackend>> = backend.cloned().map(|backend| backend as _);
     let mut ctrl = NodeController::new_with_storage(
         node(1),
         MockTransport::new(node(1)),
         TransportConfig::default(),
-        Some(storage),
+        storage,
         flume::unbounded().0,
         flume::unbounded().0,
     );
     let mut map = PartitionMap::default();
     for i in 0..NUM_PARTITIONS {
         let partition = PartitionId::new(i).unwrap();
+        let primary = primary_of(partition);
         map.set(
             partition,
             PartitionAssignment {
-                primary: Some(node(1)),
-                replicas: vec![node(2)],
+                primary: Some(primary),
+                replicas: replicas.to_vec(),
                 epoch: Epoch::new(1),
             },
         );
+        if primary == node(1) {
+            ctrl.become_primary(partition, Epoch::new(1));
+        }
     }
     ctrl.update_partition_map(map);
-    for i in 0..NUM_PARTITIONS {
-        ctrl.become_primary(PartitionId::new(i).unwrap(), Epoch::new(1));
-    }
     ctrl
+}
+
+fn primary_of_every_partition(backend: &Arc<FaultyBackend>) -> NodeController<MockTransport> {
+    controller_where(Some(backend), |_| node(1), &[node(2)])
+}
+
+pub(super) fn response_ctx(sender: Option<&str>) -> MqttRequestContext<'_> {
+    MqttRequestContext {
+        response_topic: Some("resp/t"),
+        correlation_data: None,
+        sender,
+        client_id: None,
+    }
 }
 
 async fn request(ctrl: &mut NodeController<MockTransport>, topic: &str, payload: &Value) -> Value {
@@ -53,12 +71,7 @@ async fn request_as(
     payload: &Value,
     sender: Option<&str>,
 ) -> Value {
-    let ctx = MqttRequestContext {
-        response_topic: Some("resp/t"),
-        correlation_data: None,
-        sender,
-        client_id: None,
-    };
+    let ctx = response_ctx(sender);
     let bytes = if payload.is_null() {
         Vec::new()
     } else {
@@ -178,6 +191,27 @@ async fn a_controller_write_the_primary_cannot_store_returns_an_error() {
     assert_eq!(deleted.err(), Some(DbDataStoreError::StoreFailed));
     assert!(ctrl.db_get("items", "r1").is_none());
     assert_eq!(ctrl.db_get("items", "kept").unwrap().data, b"{\"n\":1}");
+}
+
+#[tokio::test]
+async fn a_broadcast_write_this_node_cannot_store_reports_the_failure() {
+    use crate::cluster::protocol::Operation;
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_of_every_partition(&backend);
+    let write = ReplicationWrite::new(
+        PartitionId::new(0).unwrap(),
+        Operation::Insert,
+        Epoch::ZERO,
+        0,
+        crate::cluster::entity::DB_SCHEMA.to_string(),
+        "items".to_string(),
+        Vec::new(),
+    );
+    backend.fail_writes(true);
+
+    let broadcast = ctrl.write_or_forward_with_event(write, None, &[]).await;
+
+    assert_eq!(broadcast, Err(ReplicationError::StoreFailed));
 }
 
 async fn author_with_post(ctrl: &mut NodeController<MockTransport>) {
@@ -406,10 +440,10 @@ async fn a_downgrade_whose_old_grant_cannot_be_removed_is_refused() {
     assert_eq!(
         (
             &downgraded["status"],
-            &update["code"],
+            &update["status"],
             ctrl.db_list("_shares").len()
         ),
-        (&json!("error"), &json!(null), 1)
+        (&json!("error"), &json!("ok"), 1)
     );
 }
 
@@ -566,12 +600,7 @@ async fn a_binary_create_the_primary_cannot_store_is_refused() {
     backend.fail_writes(true);
     let partition = PartitionId::new(7).unwrap();
     let topic = format!("$DB/p{}/items/create", partition.get());
-    let ctx = MqttRequestContext {
-        response_topic: Some("resp/t"),
-        correlation_data: None,
-        sender: None,
-        client_id: None,
-    };
+    let ctx = response_ctx(None);
 
     let DbPublishResult::Response(response) = DbRequestHandler::new(node(1))
         .handle_publish(
@@ -666,19 +695,15 @@ async fn forwarded_writes_the_primary_cannot_store_are_refused() {
     );
 }
 
-async fn create_with_unique(ctrl: &mut NodeController<MockTransport>, payload: &Value) -> Value {
+pub(super) async fn publish_completing_unique(
+    ctrl: &mut NodeController<MockTransport>,
+    topic: &str,
+    payload: &Value,
+) -> Value {
     let handler = DbRequestHandler::new(node(1));
-    let ctx = MqttRequestContext {
-        response_topic: Some("resp/t"),
-        correlation_data: None,
-        sender: None,
-        client_id: None,
-    };
+    let ctx = response_ctx(None);
     let bytes = serde_json::to_vec(payload).unwrap();
-    let response = match handler
-        .handle_publish(ctrl, "$DB/users/create", &bytes, &ctx)
-        .await
-    {
+    let response = match handler.handle_publish(ctrl, topic, &bytes, &ctx).await {
         DbPublishResult::Response(response) => Some(response),
         DbPublishResult::PendingUniqueCheck(pending) => {
             handler
@@ -695,7 +720,7 @@ async fn create_with_unique(ctrl: &mut NodeController<MockTransport>, payload: &
         | DbPublishResult::PendingFkDelete(_) => None,
     };
     let Some(response) = response else {
-        panic!("create got no response");
+        panic!("{topic} got no response");
     };
     serde_json::from_slice(&response.payload).unwrap()
 }
@@ -703,38 +728,25 @@ async fn create_with_unique(ctrl: &mut NodeController<MockTransport>, payload: &
 #[tokio::test]
 async fn a_create_the_primary_cannot_store_releases_its_unique_reservation() {
     let backend = FaultyBackend::shared();
-    let storage: Arc<dyn StorageBackend> = backend.clone();
-    let mut ctrl = NodeController::new_with_storage(
-        node(1),
-        MockTransport::new(node(1)),
-        TransportConfig::default(),
-        Some(storage),
-        flume::unbounded().0,
-        flume::unbounded().0,
-    );
-    let mut map = PartitionMap::default();
-    for i in 0..NUM_PARTITIONS {
-        map.set(
-            PartitionId::new(i).unwrap(),
-            PartitionAssignment {
-                primary: Some(node(1)),
-                replicas: Vec::new(),
-                epoch: Epoch::new(1),
-            },
-        );
-    }
-    ctrl.update_partition_map(map);
-    for i in 0..NUM_PARTITIONS {
-        ctrl.become_primary(PartitionId::new(i).unwrap(), Epoch::new(1));
-    }
+    let mut ctrl = controller_where(Some(&backend), |_| node(1), &[]);
     ctrl.seed_unique_voters(std::iter::once(node(1)).collect());
     ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
         .await
         .unwrap();
     backend.fail_writes_to_keys_containing("users/u1");
 
-    let refused = create_with_unique(&mut ctrl, &json!({"id": "u1", "email": "a@x"})).await;
-    let second = create_with_unique(&mut ctrl, &json!({"id": "u2", "email": "a@x"})).await;
+    let refused = publish_completing_unique(
+        &mut ctrl,
+        "$DB/users/create",
+        &json!({"id": "u1", "email": "a@x"}),
+    )
+    .await;
+    let second = publish_completing_unique(
+        &mut ctrl,
+        "$DB/users/create",
+        &json!({"id": "u2", "email": "a@x"}),
+    )
+    .await;
 
     assert_eq!(
         (&refused["code"], &second["status"]),
@@ -746,37 +758,18 @@ fn remote_unique_controller(
     backend: &Arc<FaultyBackend>,
     value: &[u8],
 ) -> NodeController<MockTransport> {
-    let storage: Arc<dyn StorageBackend> = backend.clone();
-    let mut ctrl = NodeController::new_with_storage(
-        node(1),
-        MockTransport::new(node(1)),
-        TransportConfig::default(),
-        Some(storage),
-        flume::unbounded().0,
-        flume::unbounded().0,
-    );
     let unique_part = crate::cluster::db::unique_partition("users", "email", value);
-    let mut map = PartitionMap::default();
-    for i in 0..NUM_PARTITIONS {
-        let partition = PartitionId::new(i).unwrap();
-        let primary = if partition == unique_part {
-            node(2)
-        } else {
-            node(1)
-        };
-        map.set(
-            partition,
-            PartitionAssignment {
-                primary: Some(primary),
-                replicas: Vec::new(),
-                epoch: Epoch::new(1),
-            },
-        );
-        if primary == node(1) {
-            ctrl.become_primary(partition, Epoch::new(1));
-        }
-    }
-    ctrl.update_partition_map(map);
+    let mut ctrl = controller_where(
+        Some(backend),
+        |partition| {
+            if partition == unique_part {
+                node(2)
+            } else {
+                node(1)
+            }
+        },
+        &[],
+    );
     ctrl.seed_unique_voters([node(1), node(2)].into_iter().collect());
     ctrl
 }
@@ -788,12 +781,7 @@ async fn write_with_remote_unique(
     value: Vec<u8>,
 ) -> (Value, usize, usize) {
     let handler = DbRequestHandler::new(node(1));
-    let ctx = MqttRequestContext {
-        response_topic: Some("resp/t"),
-        correlation_data: None,
-        sender: None,
-        client_id: None,
-    };
+    let ctx = response_ctx(None);
     let bytes = serde_json::to_vec(payload).unwrap();
     let DbPublishResult::PendingUniqueCheck(pending) =
         handler.handle_publish(ctrl, topic, &bytes, &ctx).await

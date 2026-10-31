@@ -200,7 +200,7 @@ impl<T: ClusterTransport> NodeController<T> {
     ) -> Result<(super::db::DbEntity, ReplicationWrite), super::db::DbDataStoreError> {
         self.require_primary_role(entity_type, id)?;
         self.stores
-            .db_create_replicated(entity_type, id, data, timestamp_ms)
+            .db_create_write(entity_type, id, data, timestamp_ms)
     }
 
     fn require_primary_role(
@@ -240,7 +240,7 @@ impl<T: ClusterTransport> NodeController<T> {
     ) -> Result<(super::db::DbEntity, ReplicationWrite), super::db::DbDataStoreError> {
         self.require_primary_role(entity_type, id)?;
         self.stores
-            .db_update_replicated(entity_type, id, data, timestamp_ms)
+            .db_update_write(entity_type, id, data, timestamp_ms)
     }
 
     pub async fn db_update(
@@ -261,7 +261,7 @@ impl<T: ClusterTransport> NodeController<T> {
         id: &str,
     ) -> Result<(super::db::DbEntity, ReplicationWrite), super::db::DbDataStoreError> {
         self.require_primary_role(entity_type, id)?;
-        self.stores.db_delete_replicated(entity_type, id)
+        self.stores.db_delete_write(entity_type, id)
     }
 
     pub async fn db_delete(
@@ -1139,7 +1139,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    async fn delete_record_replicated(
+    pub(crate) async fn delete_record_replicated(
         &mut self,
         entity: &str,
         id: &str,
