@@ -480,10 +480,6 @@ impl<T: ClusterTransport> NodeController<T> {
             })
     }
 
-    /// # Errors
-    /// Returns `NotPrimary` if this node is named primary without the primary role or no
-    /// primary is known, and `StoreFailed` if this node is the primary and cannot persist the
-    /// write. A write forwarded to another primary returns `Ok`.
     pub(crate) async fn write_or_forward_with_event(
         &mut self,
         mut write: ReplicationWrite,

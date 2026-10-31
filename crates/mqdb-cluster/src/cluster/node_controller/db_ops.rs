@@ -1179,11 +1179,11 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    /// The effectful core of a delete, shared by the client-facing delete and the TTL
-    /// reap: prepare + replicate the delete, release the record's unique guards, emit the
-    /// change event, then run the FK cascade plan and clear resource grants. Returns
-    /// `NotFound` if the row is gone and `Commit` if the delete cannot be stored, in which
-    /// case nothing else runs.
+    /// The effectful core of a forwarded delete and the TTL reap: prepare and commit the
+    /// delete (which publishes its change event), release the record's unique guards, then
+    /// run the FK cascade plan and clear resource grants. Returns `NotFound` if the row is
+    /// gone, `NotPrimary` without the primary role, and `Commit` if the delete cannot be
+    /// stored, in which case nothing else runs.
     async fn delete_record_replicated(
         &mut self,
         entity: &str,
