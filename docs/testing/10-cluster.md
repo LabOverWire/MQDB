@@ -458,7 +458,7 @@ echo $! > /tmp/mqdb-test-4/mqdb.pid
 ### Run Built-in Tests
 
 ```bash
-# Run all cross-node tests (excludes ownership - see below)
+# Run the default suites (excludes --ownership, --sharing, --presence and --stress-constraints)
 mqdb dev test --all
 
 # Run specific test suites
@@ -520,9 +520,13 @@ mqdb dev bench --output results.json --baseline baseline.json db
 Profile the broker using `samply`, `flamegraph` or `sample`. Parent options (`--tool`, `--duration`, `--output`, `--port`) go before the subcommand.
 The profiled agent binds `--port` (default 1883), which must be free, and uses `--db`, which no
 other mqdb process may be using: `dev profile` refuses to start rather than stop another agent.
+It checks the port and the db again after the profiling build, just before it starts the agent.
 At the end it stops only what it started: with `samply` or `flamegraph` it sends SIGINT to the
-mqdb agent below the profiler and, if that does not end the profiler within 30 s, kills the
-profiler's process tree; with `sample` it kills the agent and benchmark it spawned.
+mqdb agent below the profiler and, if no agent is found there or the profiler does not exit
+within 30 s, kills the profiler's process tree; with `sample` it kills the agent and benchmark
+it spawned. Like `dev clean`, `dev bench` and `dev profile` refuse to start an agent when any
+mqdb process on the machine has a relative `--db` or `--passwd` whose directory cannot be
+resolved, because they cannot tell whether it uses the same `--db`.
 
 ```bash
 # Profile pub/sub with samply (default tool, 30s)

@@ -444,3 +444,18 @@ fn clean_keeps_a_live_node_dir_whose_path_contains_a_double_dash() {
     assert!(node.0.try_wait().expect("poll stand-in").is_none());
     assert_eq!(shim.calls(), "");
 }
+
+#[test]
+fn profile_rejects_a_privileged_port() {
+    let shim = Shimmed::new();
+    let db = shim.path().join("db");
+    let db_arg = db.to_str().expect("utf-8 path");
+    let output = shim.run(&[
+        "dev", "profile", "--tool", "bogus", "--db", db_arg, "--port", "0", "db",
+    ]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("--port"), "{stderr}");
+    assert!(!db.exists());
+    assert_eq!(shim.calls(), "");
+}

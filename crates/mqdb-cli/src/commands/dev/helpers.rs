@@ -95,7 +95,15 @@ fn flag_values<'a>(command: &'a str, flag: &str) -> Option<Vec<&'a str>> {
 
 fn locate_flag(pid: u32, command: &str, flag: &str) -> Option<PathLocation> {
     let values = flag_values(command, flag)?;
-    let located: Vec<PathLocation> = values.iter().map(|value| locate_path(pid, value)).collect();
+    let cwd = if values.iter().any(|value| Path::new(value).is_relative()) {
+        process_cwd(pid)
+    } else {
+        None
+    };
+    let located: Vec<PathLocation> = values
+        .iter()
+        .map(|value| locate_in(pid, cwd.as_deref(), value))
+        .collect();
     if located
         .iter()
         .any(|location| matches!(location, PathLocation::Unresolved))
@@ -109,6 +117,20 @@ fn locate_flag(pid: u32, command: &str, flag: &str) -> Option<PathLocation> {
             .find(|location| matches!(location, PathLocation::Dir(_)))
             .unwrap_or(PathLocation::Gone),
     )
+}
+
+fn locate_in(pid: u32, cwd: Option<&Path>, path: &str) -> PathLocation {
+    let path = Path::new(path);
+    let full = if path.is_absolute() {
+        Some(path.to_path_buf())
+    } else {
+        cwd.map(|cwd| cwd.join(path))
+    };
+    match full {
+        Some(full) => std::fs::canonicalize(full).map_or(PathLocation::Gone, PathLocation::Dir),
+        None if process_exists(pid) => PathLocation::Unresolved,
+        None => PathLocation::Gone,
+    }
 }
 
 fn is_node_command(command: &str) -> bool {
@@ -143,20 +165,6 @@ fn process_cwd(pid: u32) -> Option<PathBuf> {
         .lines()
         .find_map(|line| line.strip_prefix('n'))
         .map(PathBuf::from)
-}
-
-fn locate_path(pid: u32, path: &str) -> PathLocation {
-    let path = Path::new(path);
-    let full = if path.is_absolute() {
-        Some(path.to_path_buf())
-    } else {
-        process_cwd(pid).map(|cwd| cwd.join(path))
-    };
-    match full {
-        Some(full) => std::fs::canonicalize(full).map_or(PathLocation::Gone, PathLocation::Dir),
-        None if process_exists(pid) => PathLocation::Unresolved,
-        None => PathLocation::Gone,
-    }
 }
 
 fn is_zombie(state: &str) -> bool {

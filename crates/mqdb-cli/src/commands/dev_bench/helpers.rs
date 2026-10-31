@@ -53,7 +53,7 @@ struct ProcessEntry {
 
 fn process_table() -> Result<Vec<ProcessEntry>, String> {
     let output = Command::new("ps")
-        .args(["-ww", "-ax", "-o", "pid=,ppid=,comm="])
+        .args(["-ww", "-ax", "-o", "pid=,ppid=,ucomm="])
         .output()
         .map_err(|e| format!("run ps: {e}"))?;
     if !output.status.success() {

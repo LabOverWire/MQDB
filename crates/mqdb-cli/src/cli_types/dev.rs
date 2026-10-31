@@ -149,7 +149,12 @@ pub(crate) enum DevAction {
         baseline: Option<PathBuf>,
         #[arg(long, default_value = "/tmp/mqdb-dev-bench")]
         db: String,
-        #[arg(long, default_value = "1883", help = "Agent port to benchmark")]
+        #[arg(
+            long,
+            default_value = "1883",
+            value_parser = clap::value_parser!(u16).range(1024..),
+            help = "Agent port to benchmark"
+        )]
         port: u16,
     },
     #[command(about = "Profile with samply or flamegraph")]
@@ -171,6 +176,7 @@ pub(crate) enum DevAction {
         #[arg(
             long,
             default_value = "1883",
+            value_parser = clap::value_parser!(u16).range(1024..),
             help = "Port for the profiled agent; must be free"
         )]
         port: u16,

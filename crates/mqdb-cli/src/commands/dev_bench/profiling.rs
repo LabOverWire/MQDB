@@ -51,13 +51,7 @@ pub(crate) fn cmd_dev_profile(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let tool = ProfileTool::parse(run.tool)?;
     let port = run.port;
-    if broker_listening(port) {
-        return Err(
-            format!("port {port} is already in use; profile on a free port with --port").into(),
-        );
-    }
-
-    crate::commands::dev::refuse_db_in_use(run.db)?;
+    refuse_busy_target(run.db, port)?;
     std::fs::create_dir_all(run.db)?;
 
     let timestamp = chrono_timestamp();
@@ -90,6 +84,16 @@ pub(crate) fn cmd_dev_profile(
 }
 
 const PROFILER_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn refuse_busy_target(db: &str, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    if broker_listening(port) {
+        return Err(
+            format!("port {port} is already in use; profile on a free port with --port").into(),
+        );
+    }
+    crate::commands::dev::refuse_db_in_use(db)?;
+    Ok(())
+}
 
 fn build_profiling() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nBuilding with profiling profile (full DWARF symbols)...");
@@ -202,6 +206,7 @@ fn run_bench(profiling_exe: &Path, target: &ProfileTarget) -> std::io::Result<()
 
 fn profile_with_samply(target: &ProfileTarget) -> Result<(), Box<dyn std::error::Error>> {
     let profiling_exe = build_profiling_binary()?;
+    refuse_busy_target(target.db, target.port)?;
     let symbol_dir = std::env::current_dir()?.join("target/profiling");
     println!("Starting agent under samply profiler...");
 
@@ -235,6 +240,7 @@ fn profile_with_samply(target: &ProfileTarget) -> Result<(), Box<dyn std::error:
 
 fn profile_with_flamegraph(target: &ProfileTarget) -> Result<(), Box<dyn std::error::Error>> {
     build_profiling()?;
+    refuse_busy_target(target.db, target.port)?;
     let bench_exe = std::env::current_exe()?;
 
     println!("Starting agent under flamegraph profiler...\n");
@@ -263,6 +269,7 @@ fn profile_with_sample(
     duration: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let profiling_exe = build_profiling_binary()?;
+    refuse_busy_target(target.db, target.port)?;
 
     println!("Starting agent...");
     let agent = OwnedChild {
