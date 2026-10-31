@@ -1917,7 +1917,7 @@ impl<T: ClusterTransport> NodeController<T> {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs());
-            let expires_at = now + ttl_secs;
+            let expires_at = now.saturating_add(ttl_secs);
             obj.insert(
                 "_expires_at".to_string(),
                 serde_json::Value::Number(expires_at.into()),

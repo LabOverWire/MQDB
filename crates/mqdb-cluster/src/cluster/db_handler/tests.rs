@@ -727,6 +727,41 @@ async fn json_create_on_primary_turns_ttl_secs_into_expiry() {
 }
 
 #[tokio::test]
+async fn json_create_with_huge_ttl_secs_never_expires() {
+    let node1 = NodeId::validated(1).unwrap();
+    let handler = DbRequestHandler::new(node1);
+    let mut ctrl = setup_controller_all_partitions();
+
+    let payload =
+        serde_json::to_vec(&serde_json::json!({"id": "t1", "ttl_secs": u64::MAX})).unwrap();
+    let response = handler
+        .handle_publish(
+            &mut ctrl,
+            "$DB/ttldocs/create",
+            &payload,
+            &MqttRequestContext {
+                response_topic: Some("$DB/_resp/client1"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    let json = parse_json_response(&response.payload);
+    assert_eq!(json["status"], "ok", "create failed: {json}");
+
+    let stored = stored_json(&ctrl, "ttldocs", "t1");
+    assert_eq!(
+        stored["_expires_at"].as_u64(),
+        Some(u64::MAX),
+        "stored: {stored}"
+    );
+    assert_eq!(ctrl.reap_expired_ttl(unix_now_secs() + 1).await, 0);
+    assert!(ctrl.db_get("ttldocs", "t1").is_some());
+}
+
+#[tokio::test]
 async fn vault_json_create_forwarded_to_primary_keeps_ttl_expiry() {
     let node1 = NodeId::validated(1).unwrap();
     let node2 = NodeId::validated(2).unwrap();
@@ -766,6 +801,7 @@ async fn vault_json_create_forwarded_to_primary_keeps_ttl_expiry() {
         &serde_json::json!({"id": "n1", "userId": "alice", "body": "x", "ttl_secs": 5}),
     )
     .unwrap();
+    let before = unix_now_secs();
     let response = handler
         .handle_publish(
             &mut receiver,
@@ -799,11 +835,24 @@ async fn vault_json_create_forwarded_to_primary_keeps_ttl_expiry() {
         .handle_json_db_request(node1, partition, &request)
         .await;
 
+    let after = unix_now_secs();
+
     let stored = stored_json(&primary, "notes", "n1");
+    assert_ne!(
+        stored["body"], "x",
+        "vault must encrypt the forwarded body: {stored}"
+    );
     assert!(stored.get("ttl_secs").is_none(), "stored: {stored}");
     let expires_at = stored["_expires_at"]
         .as_u64()
         .unwrap_or_else(|| panic!("no numeric _expires_at in {stored}"));
+    assert!(
+        (before + 5..=after + 5).contains(&expires_at),
+        "expires_at {expires_at} outside [{}, {}]",
+        before + 5,
+        after + 5
+    );
+    assert_eq!(primary.reap_expired_ttl(expires_at - 1).await, 0);
     assert_eq!(primary.reap_expired_ttl(expires_at + 1).await, 1);
     assert!(primary.db_get("notes", "n1").is_none());
 }

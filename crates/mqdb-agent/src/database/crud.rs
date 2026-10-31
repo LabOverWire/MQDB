@@ -67,7 +67,7 @@ impl Database {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_err(|e| Error::SystemTime(format!("failed to get system time: {e}")))?
                 .as_secs();
-            let expires_at = now + ttl_secs;
+            let expires_at = now.saturating_add(ttl_secs);
             obj.insert("_expires_at".to_string(), Value::Number(expires_at.into()));
             obj.remove("ttl_secs");
         }
@@ -1059,6 +1059,31 @@ mod concurrency_tests {
         )
         .await
         .expect("seat must be reclaimable after the TTL sweep reaps the expired hold");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_with_huge_ttl_secs_never_expires() {
+        let (_tmp, db) = test_db().await;
+        let scope = ScopeConfig::default();
+
+        let created = db
+            .create(
+                "hold".to_string(),
+                json!({ "id": "a", "ttl_secs": u64::MAX }),
+                None,
+                None,
+                None,
+                &scope,
+            )
+            .await
+            .unwrap();
+        assert_eq!(created["_expires_at"].as_u64(), Some(u64::MAX));
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(db.ttl_cleanup_pass_for_test(now + 1).await, 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
