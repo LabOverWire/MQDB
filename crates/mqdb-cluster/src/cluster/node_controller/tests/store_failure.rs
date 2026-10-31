@@ -703,3 +703,128 @@ async fn a_create_the_primary_cannot_store_releases_its_unique_reservation() {
         (&json!(500), &json!("ok"))
     );
 }
+
+fn remote_unique_controller(
+    backend: &Arc<FaultyBackend>,
+    value: &[u8],
+) -> NodeController<MockTransport> {
+    let storage: Arc<dyn StorageBackend> = backend.clone();
+    let mut ctrl = NodeController::new_with_storage(
+        node(1),
+        MockTransport::new(node(1)),
+        TransportConfig::default(),
+        Some(storage),
+        flume::unbounded().0,
+        flume::unbounded().0,
+    );
+    let unique_part = crate::cluster::db::unique_partition("users", "email", value);
+    let mut map = PartitionMap::default();
+    for i in 0..NUM_PARTITIONS {
+        let partition = PartitionId::new(i).unwrap();
+        let primary = if partition == unique_part {
+            node(2)
+        } else {
+            node(1)
+        };
+        map.set(
+            partition,
+            PartitionAssignment {
+                primary: Some(primary),
+                replicas: Vec::new(),
+                epoch: Epoch::new(1),
+            },
+        );
+        if primary == node(1) {
+            ctrl.become_primary(partition, Epoch::new(1));
+        }
+    }
+    ctrl.update_partition_map(map);
+    ctrl.seed_unique_voters([node(1), node(2)].into_iter().collect());
+    ctrl
+}
+
+async fn write_with_remote_unique(
+    ctrl: &mut NodeController<MockTransport>,
+    topic: &str,
+    payload: &Value,
+    value: Vec<u8>,
+) -> (Value, usize) {
+    let handler = DbRequestHandler::new(node(1));
+    let ctx = MqttRequestContext {
+        response_topic: Some("resp/t"),
+        correlation_data: None,
+        sender: None,
+        client_id: None,
+    };
+    let bytes = serde_json::to_vec(payload).unwrap();
+    let DbPublishResult::PendingUniqueCheck(pending) =
+        handler.handle_publish(ctrl, topic, &bytes, &ctx).await
+    else {
+        panic!("the reserve should go to node 2");
+    };
+    let response = handler
+        .complete_pending_unique_check(
+            ctrl,
+            pending.phase1.local_reserved,
+            Ok(vec![("email".to_string(), value, node(2))]),
+            pending.continuation,
+        )
+        .await
+        .unwrap();
+    let commits = ctrl
+        .transport
+        .sent_messages()
+        .iter()
+        .filter(|(_, message)| matches!(message, ClusterMessage::UniqueCommitRequest(_)))
+        .count();
+    (serde_json::from_slice(&response.payload).unwrap(), commits)
+}
+
+#[tokio::test]
+async fn a_create_the_primary_cannot_store_commits_no_remote_unique_claim() {
+    let backend = FaultyBackend::shared();
+    let value = serde_json::to_vec(&json!("a@x")).unwrap();
+    let mut ctrl = remote_unique_controller(&backend, &value);
+    ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
+        .await
+        .unwrap();
+    backend.fail_writes_to_keys_containing("users/u1");
+
+    let (reply, commits) = write_with_remote_unique(
+        &mut ctrl,
+        "$DB/users/create",
+        &json!({"id": "u1", "email": "a@x"}),
+        value,
+    )
+    .await;
+
+    assert_eq!((&reply["code"], commits), (&json!(500), 0));
+}
+
+#[tokio::test]
+async fn an_update_the_primary_cannot_store_commits_no_remote_unique_claim() {
+    let backend = FaultyBackend::shared();
+    let value = serde_json::to_vec(&json!("a@x")).unwrap();
+    let mut ctrl = remote_unique_controller(&backend, &value);
+    let created = request(
+        &mut ctrl,
+        "$DB/users/create",
+        &json!({"id": "u1", "email": "old@x"}),
+    )
+    .await;
+    assert_eq!(created["status"], "ok");
+    ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
+        .await
+        .unwrap();
+    backend.fail_writes_to_keys_containing("users/u1");
+
+    let (reply, commits) = write_with_remote_unique(
+        &mut ctrl,
+        "$DB/users/u1/update",
+        &json!({"email": "a@x"}),
+        value,
+    )
+    .await;
+
+    assert_eq!((&reply["code"], commits), (&json!(500), 0));
+}

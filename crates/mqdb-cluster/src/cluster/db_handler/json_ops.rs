@@ -1584,17 +1584,6 @@ impl DbRequestHandler {
                         Self::json_error(failure.http_code(), &failure.message())
                     }
                     Ok(confirmed_remotes) => {
-                        for (f, v, target) in &confirmed_remotes {
-                            controller
-                                .send_unique_commit_fire_and_forget(
-                                    *target,
-                                    &entity,
-                                    f,
-                                    v,
-                                    &request_id,
-                                )
-                                .await;
-                        }
                         let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
                         match controller
                             .db_create_with_event(
@@ -1686,17 +1675,6 @@ impl DbRequestHandler {
                         Self::json_error(failure.http_code(), &failure.message())
                     }
                     Ok(confirmed_remotes) => {
-                        for (f, v, target) in &confirmed_remotes {
-                            controller
-                                .send_unique_commit_fire_and_forget(
-                                    *target,
-                                    &entity,
-                                    f,
-                                    v,
-                                    &request_id,
-                                )
-                                .await;
-                        }
                         let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
                         match controller
                             .db_update_with_event(

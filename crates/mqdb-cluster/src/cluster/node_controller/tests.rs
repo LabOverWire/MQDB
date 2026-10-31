@@ -1876,8 +1876,9 @@ async fn db_list_primary_only_excludes_replica_data() {
     let transport = MockTransport::new(node1);
     let mut ctrl = create_test_controller(node1, transport);
 
-    let (primary_id, _primary_part, replica_id, replica_part) =
+    let (primary_id, primary_part, replica_id, replica_part) =
         find_two_ids_on_different_partitions("items");
+    assert_ne!(primary_part, replica_part);
 
     put_record(&ctrl.stores.db_data, "items", &primary_id, b"{}", 1000);
     put_record(&ctrl.stores.db_data, "items", &replica_id, b"{}", 1000);
