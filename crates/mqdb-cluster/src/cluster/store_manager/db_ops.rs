@@ -16,8 +16,11 @@ impl StoreManager {
         data: &[u8],
         timestamp_ms: u64,
     ) -> Result<(DbEntity, ReplicationWrite), DbDataStoreError> {
-        let db_entity = self.db_data.create(entity_type, id, data, timestamp_ms)?;
-        self.update_fk_reverse_index(Operation::Insert, entity_type, id, Some(data), None);
+        if self.db_data.get(entity_type, id).is_some() {
+            return Err(DbDataStoreError::AlreadyExists);
+        }
+        let db_entity = DbEntity::create(entity_type, id, data, timestamp_ms)
+            .ok_or(DbDataStoreError::SerializationError)?;
         let partition = data_partition(entity_type, id);
         let serialized = DbDataStore::serialize(&db_entity);
         let write = ReplicationWrite::new(
@@ -41,47 +44,11 @@ impl StoreManager {
         data: &[u8],
         timestamp_ms: u64,
     ) -> Result<(DbEntity, ReplicationWrite), DbDataStoreError> {
-        let old = self.db_data.get(entity_type, id);
-        let db_entity = self.db_data.update(entity_type, id, data, timestamp_ms)?;
-        self.update_fk_reverse_index(
-            Operation::Update,
-            entity_type,
-            id,
-            Some(data),
-            old.as_ref().map(|e| e.data.as_slice()),
-        );
-        let partition = data_partition(entity_type, id);
-        let serialized = DbDataStore::serialize(&db_entity);
-        let write = ReplicationWrite::new(
-            partition,
-            Operation::Update,
-            Epoch::ZERO,
-            0,
-            entity::DB_DATA.to_string(),
-            db_entity.key(),
-            serialized,
-        );
-        Ok((db_entity, write))
-    }
-
-    /// # Errors
-    /// Returns `DbDataStoreError::SerializationError` if a length does not fit the record format.
-    pub fn db_upsert_replicated(
-        &self,
-        entity_type: &str,
-        id: &str,
-        data: &[u8],
-        timestamp_ms: u64,
-    ) -> Result<(DbEntity, ReplicationWrite), DbDataStoreError> {
-        let old = self.db_data.get(entity_type, id);
-        let db_entity = self.db_data.upsert(entity_type, id, data, timestamp_ms)?;
-        self.update_fk_reverse_index(
-            Operation::Update,
-            entity_type,
-            id,
-            Some(data),
-            old.as_ref().map(|e| e.data.as_slice()),
-        );
+        if self.db_data.get(entity_type, id).is_none() {
+            return Err(DbDataStoreError::NotFound);
+        }
+        let db_entity = DbEntity::create(entity_type, id, data, timestamp_ms)
+            .ok_or(DbDataStoreError::SerializationError)?;
         let partition = data_partition(entity_type, id);
         let serialized = DbDataStore::serialize(&db_entity);
         let write = ReplicationWrite::new(
@@ -103,14 +70,10 @@ impl StoreManager {
         entity_type: &str,
         id: &str,
     ) -> Result<(DbEntity, ReplicationWrite), DbDataStoreError> {
-        let db_entity = self.db_data.delete(entity_type, id)?;
-        self.update_fk_reverse_index(
-            Operation::Delete,
-            entity_type,
-            id,
-            None,
-            Some(&db_entity.data),
-        );
+        let db_entity = self
+            .db_data
+            .get(entity_type, id)
+            .ok_or(DbDataStoreError::NotFound)?;
         let partition = data_partition(entity_type, id);
         let write = ReplicationWrite::new(
             partition,

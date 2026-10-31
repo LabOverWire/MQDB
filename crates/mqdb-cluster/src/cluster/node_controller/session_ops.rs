@@ -171,8 +171,8 @@ impl<T: ClusterTransport> NodeController<T> {
 
     /// # Errors
     /// Returns `NotPrimary` if this node is not in the primary role for the partition, or
-    /// `StoreFailed` if the write cannot be persisted, in which case nothing is logged or
-    /// replicated and its change event is published untracked.
+    /// `StoreFailed` if the write cannot be persisted, in which case nothing is applied, logged
+    /// or replicated and its change event is dropped.
     pub async fn replicate_write_async_with_extra(
         &mut self,
         write: ReplicationWrite,
@@ -206,12 +206,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let t_state = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
         let change_event = Self::change_event_entry(&write_msg);
-        if let Err(e) = self.apply_primary_write(&write_msg, change_event.as_ref(), extra_outbox) {
-            if let Some(record) = write_msg.event {
-                self.publish_unowned_change_event(partition, record).await;
-            }
-            return Err(e);
-        }
+        self.apply_primary_write(&write_msg, change_event.as_ref(), extra_outbox)?;
         let t_apply = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
         if let Some(state) = self.replicas.get_mut(&partition.get()) {

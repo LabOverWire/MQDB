@@ -1,11 +1,13 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use super::db_ops::ForwardRequest;
 use super::*;
 use crate::cluster::NUM_PARTITIONS;
 use crate::cluster::protocol::{Heartbeat, Operation};
 use crate::cluster::quorum::QuorumResult;
 use crate::cluster::session_partition;
+use crate::cluster::test_support::{put_record, remove_record};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
@@ -13,8 +15,8 @@ fn create_test_controller(
     node_id: NodeId,
     transport: MockTransport,
 ) -> NodeController<MockTransport> {
-    let (tx_raft_messages, _rx_raft_messages) = flume::unbounded();
-    let (tx_raft_events, _rx_raft_events) = flume::unbounded();
+    let tx_raft_messages = flume::unbounded().0;
+    let tx_raft_events = flume::unbounded().0;
     NodeController::new(
         node_id,
         transport,
@@ -129,8 +131,8 @@ impl ClusterTransport for MockTransport {
 
     async fn send_to_partition_primary(
         &self,
-        _partition: PartitionId,
-        _message: ClusterMessage,
+        _: PartitionId,
+        _: ClusterMessage,
     ) -> Result<(), super::super::transport::TransportError> {
         Ok(())
     }
@@ -143,7 +145,7 @@ impl ClusterTransport for MockTransport {
         self.inbox.lock().unwrap().pop_front()
     }
 
-    fn try_recv_timeout(&self, _timeout_ms: u64) -> Option<InboundMessage> {
+    fn try_recv_timeout(&self, _: u64) -> Option<InboundMessage> {
         self.inbox.lock().unwrap().pop_front()
     }
 
@@ -180,8 +182,8 @@ impl ClusterTransport for MockTransport {
         true
     }
 
-    async fn queue_local_publish_retained(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
-    async fn queue_retained_refresh(&self, _topic: String) {}
+    async fn queue_local_publish_retained(&self, _: String, _: Vec<u8>, _: u8) {}
+    async fn queue_retained_refresh(&self, _: String) {}
 }
 
 fn forwarded_publish(origin: NodeId, topic: &str) -> ClusterMessage {
@@ -452,10 +454,13 @@ async fn reconcile_apply_skips_record_deleted_after_collection() {
         .db_constraints
         .add(ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
         .unwrap();
-    ctrl.stores()
-        .db_data
-        .create("users", "u1", br#"{"email":"a@x.com"}"#, 1000)
-        .unwrap();
+    put_record(
+        &ctrl.stores().db_data,
+        "users",
+        "u1",
+        br#"{"email":"a@x.com"}"#,
+        1000,
+    );
 
     let work = ctrl.collect_unique_reconcile_work();
     assert_eq!(
@@ -465,7 +470,7 @@ async fn reconcile_apply_skips_record_deleted_after_collection() {
     );
 
     // The lock is released between collect and apply; the record is deleted in that window.
-    ctrl.stores().db_data.delete("users", "u1").unwrap();
+    remove_record(&ctrl.stores().db_data, "users", "u1");
     ctrl.apply_unique_reconcile_chunk(&work).await;
 
     let value = serde_json::to_vec(&serde_json::json!("a@x.com")).unwrap();
@@ -541,17 +546,20 @@ async fn project_reconcile_work_skips_key_deleted_after_gather() {
         .db_constraints
         .add(ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
         .unwrap();
-    ctrl.stores()
-        .db_data
-        .create("users", "u1", br#"{"email":"a@x.com"}"#, 1000)
-        .unwrap();
+    put_record(
+        &ctrl.stores().db_data,
+        "users",
+        "u1",
+        br#"{"email":"a@x.com"}"#,
+        1000,
+    );
 
     let keys = ctrl.collect_unique_reconcile_keys();
     assert_eq!(keys.len(), 1, "one owned durable record gathered");
 
     // The read lock is released between key-gather and the per-chunk parse; the record is deleted in
     // that window, so projecting the stale key must yield no work rather than parse a gone record.
-    ctrl.stores().db_data.delete("users", "u1").unwrap();
+    remove_record(&ctrl.stores().db_data, "users", "u1");
     let work = ctrl.project_unique_reconcile_work(&keys);
     assert!(
         work.is_empty(),
@@ -1132,7 +1140,8 @@ async fn create_session_quorum_succeeds_as_primary() {
     let partition = session_partition("client1");
     ctrl.become_primary(partition, Epoch::new(1));
 
-    let (session, _rx) = ctrl.create_session_quorum("client1").await.unwrap();
+    let (session, completion) = ctrl.create_session_quorum("client1").await.unwrap();
+    assert_eq!(completion.await, Ok(QuorumResult::Success));
     assert_eq!(session.client_id_str(), "client1");
     assert!(ctrl.stores().sessions.get("client1").is_some());
 }
@@ -1549,29 +1558,6 @@ async fn db_delete_removes_entity() {
 }
 
 #[tokio::test]
-async fn db_upsert_creates_or_updates() {
-    let node1 = NodeId::validated(1).unwrap();
-    let transport = MockTransport::new(node1);
-    let mut ctrl = create_test_controller(node1, transport);
-
-    let partition = crate::cluster::db::data_partition("products", "p1");
-    ctrl.become_primary(partition, Epoch::new(1));
-
-    let entity1 = ctrl
-        .db_upsert("products", "p1", b"{\"price\":100}", 1000)
-        .await
-        .unwrap();
-    assert_eq!(entity1.data, b"{\"price\":100}");
-
-    let entity2 = ctrl
-        .db_upsert("products", "p1", b"{\"price\":200}", 2000)
-        .await
-        .unwrap();
-    assert_eq!(entity2.data, b"{\"price\":200}");
-    assert_eq!(entity2.timestamp_ms, 2000);
-}
-
-#[tokio::test]
 async fn db_list_returns_all_entities_of_type() {
     let node1 = NodeId::validated(1).unwrap();
     let transport = MockTransport::new(node1);
@@ -1893,14 +1879,8 @@ async fn db_list_primary_only_excludes_replica_data() {
     let (primary_id, _primary_part, replica_id, replica_part) =
         find_two_ids_on_different_partitions("items");
 
-    ctrl.stores
-        .db_data
-        .upsert("items", &primary_id, b"{}", 1000)
-        .unwrap();
-    ctrl.stores
-        .db_data
-        .upsert("items", &replica_id, b"{}", 1000)
-        .unwrap();
+    put_record(&ctrl.stores.db_data, "items", &primary_id, b"{}", 1000);
+    put_record(&ctrl.stores.db_data, "items", &replica_id, b"{}", 1000);
 
     assert_eq!(ctrl.db_list("items").len(), 2);
 
@@ -1946,17 +1926,21 @@ async fn fk_reverse_lookup_ignores_stale_replica_data() {
         "id": replica_post_id
     });
     let post_bytes = serde_json::to_vec(&post_data).unwrap();
-    ctrl.stores
-        .db_data
-        .upsert("posts", &replica_post_id, &post_bytes, 1000)
-        .unwrap();
+    put_record(
+        &ctrl.stores.db_data,
+        "posts",
+        &replica_post_id,
+        &post_bytes,
+        1000,
+    );
 
     assert_eq!(ctrl.db_list("posts").len(), 1);
 
-    let (local_results, _pending) = ctrl
+    let (local_results, pending) = ctrl
         .start_fk_reverse_lookup("users", "u1", None)
         .await
         .unwrap();
+    assert!(pending.is_empty());
     assert!(
         local_results.is_empty(),
         "stale replica data should not appear in FK reverse lookup"
@@ -2002,10 +1986,11 @@ async fn fk_reverse_lookup_finds_primary_partition_data() {
         .await
         .unwrap();
 
-    let (local_results, _pending) = ctrl
+    let (local_results, pending) = ctrl
         .start_fk_reverse_lookup("users", "u1", None)
         .await
         .unwrap();
+    assert!(pending.is_empty());
     assert_eq!(local_results.len(), 1);
     assert_eq!(local_results[0].referencing_ids.len(), 1);
     assert_eq!(local_results[0].referencing_ids[0], primary_post_id);
@@ -2058,15 +2043,13 @@ async fn fk_reverse_lookup_restrict_blocks_only_on_primary_data() {
     )
     .await
     .unwrap();
-    ctrl.stores
-        .db_data
-        .upsert(
-            "posts",
-            &replica_post_id,
-            &post_bytes(&replica_post_id),
-            1000,
-        )
-        .unwrap();
+    put_record(
+        &ctrl.stores.db_data,
+        "posts",
+        &replica_post_id,
+        &post_bytes(&replica_post_id),
+        1000,
+    );
 
     assert_eq!(ctrl.db_list("posts").len(), 2);
 
@@ -2208,7 +2191,8 @@ async fn cascade_set_nulls_cross_owned_ref_with_no_owned_siblings() {
 
     let mut visited = std::collections::HashSet::new();
     visited.insert(("users".to_string(), "u1".to_string()));
-    let (filtered, _queue) = filter_and_extract_cascade(vec![reply], &mut visited);
+    let (filtered, queue) = filter_and_extract_cascade(vec![reply], &mut visited);
+    assert!(queue.is_empty());
     assert_eq!(
         filtered.len(),
         1,
@@ -2261,7 +2245,8 @@ async fn cross_owned_set_null_blocked_on_typed_field() {
 
     let mut visited = std::collections::HashSet::new();
     visited.insert(("users".to_string(), "u1".to_string()));
-    let (filtered, _queue) = filter_and_extract_cascade(vec![reply], &mut visited);
+    let (filtered, queue) = filter_and_extract_cascade(vec![reply], &mut visited);
+    assert!(queue.is_empty());
 
     assert!(
         ctrl.prepare_fk_side_effects(&filtered).is_err(),
@@ -2471,7 +2456,7 @@ async fn cascade_delete_fan_out_propagates_sender_to_remote_primary() {
     );
     ctrl.update_partition_map(map);
 
-    let _rx = ctrl
+    let ack = ctrl
         .send_cascade_request(
             partition,
             JsonDbOp::Delete,
@@ -2481,6 +2466,7 @@ async fn cascade_delete_fan_out_propagates_sender_to_remote_primary() {
             EventOrigin::new(Some("alice"), None),
         )
         .await;
+    assert!(ack.is_some());
 
     let req = ctrl
         .transport
@@ -2601,10 +2587,11 @@ async fn circular_fk_cascade_terminates() {
     ctrl.db_create("alpha", "a1", &a_data, 1000).await.unwrap();
     ctrl.db_create("beta", "b1", &b_data, 1001).await.unwrap();
 
-    let (local, _pending) = ctrl
+    let (local, pending) = ctrl
         .start_fk_reverse_lookup("alpha", "a1", None)
         .await
         .unwrap();
+    assert!(pending.is_empty());
 
     let result = ctrl.collect_local_cascade("alpha", "a1", local, None);
     assert!(
@@ -2671,10 +2658,11 @@ async fn three_way_circular_fk_cascade_terminates() {
     ctrl.db_create("bbb", "b1", &b_data, 1001).await.unwrap();
     ctrl.db_create("ccc", "c1", &c_data, 1002).await.unwrap();
 
-    let (local, _pending) = ctrl
+    let (local, pending) = ctrl
         .start_fk_reverse_lookup("aaa", "a1", None)
         .await
         .unwrap();
+    assert!(pending.is_empty());
     let result = ctrl.collect_local_cascade("aaa", "a1", local, None);
     assert!(
         result.is_ok(),
@@ -2770,12 +2758,14 @@ async fn forwarded_write_without_a_response_topic_keeps_no_vault_decrypt() {
     assert!(
         ctrl.forward_json_db_request(
             partition,
-            JsonDbOp::Update,
-            "notes",
-            Some("n1"),
-            update,
-            "",
-            None,
+            &ForwardRequest {
+                op: JsonDbOp::Update,
+                entity: "notes",
+                id: Some("n1"),
+                payload: update,
+                response_topic: "",
+                correlation_data: None,
+            },
             EventOrigin::new(Some("alice"), None),
         )
         .await
@@ -2785,12 +2775,14 @@ async fn forwarded_write_without_a_response_topic_keeps_no_vault_decrypt() {
     assert!(
         ctrl.forward_json_db_request(
             partition,
-            JsonDbOp::Update,
-            "notes",
-            Some("n1"),
-            update,
-            "resp/t",
-            None,
+            &ForwardRequest {
+                op: JsonDbOp::Update,
+                entity: "notes",
+                id: Some("n1"),
+                payload: update,
+                response_topic: "resp/t",
+                correlation_data: None,
+            },
             EventOrigin::new(Some("alice"), None),
         )
         .await
@@ -2818,9 +2810,9 @@ struct RunningProcessor {
 }
 
 fn spawn_message_processor(node: NodeId, map: PartitionMap) -> RunningProcessor {
-    let (tx_raft_messages, _rx_raft_messages) = flume::unbounded();
-    let (tx_raft_events, _rx_raft_events) = flume::unbounded();
-    let (tx_main_queue, _rx_main_queue) = flume::unbounded();
+    let tx_raft_messages = flume::unbounded().0;
+    let tx_raft_events = flume::unbounded().0;
+    let tx_main_queue = flume::unbounded().0;
     let (inbox, rx_inbox) = flume::unbounded();
     let (tick, rx_tick) = flume::unbounded();
     let (tx_batch, batches) = flume::unbounded();
@@ -3171,6 +3163,7 @@ async fn forwarded_delete_cascade_events_carry_the_deleters_origin() {
 mod change_events;
 mod forwarded_write;
 mod partition_map;
+mod store_failure;
 
 #[tokio::test]
 async fn forwarded_create_refuses_an_id_longer_than_the_record_id_limit() {

@@ -46,7 +46,6 @@ use super::write_log::PartitionWriteLog;
 use super::{Epoch, NodeId, PartitionId, PartitionMap};
 use crate::cluster::db_handler::helpers::json_write_failure;
 use db_ops::EventOrigin;
-use mqdb_core::events::ChangeEvent;
 use mqdb_core::storage::StorageBackend;
 use mqdb_core::types::{MAX_LIST_RESULTS, OwnershipConfig, ScopeConfig};
 use mqdb_vault::VaultKeyStore;
@@ -1047,7 +1046,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    #[allow(clippy::cast_possible_truncation)]
     pub async fn process_messages(&mut self) {
         const BATCH_SIZE: u32 = 8;
         let queue_depth_start = self.transport.pending_count();
@@ -1078,7 +1076,7 @@ impl<T: ClusterTransport> NodeController<T> {
             }
         }
         if count > 0 {
-            let elapsed_us = start.elapsed().as_micros() as u64;
+            let elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
             tracing::info!(
                 node = self.node_id.get(),
                 msg_count = count,
@@ -1582,14 +1580,10 @@ impl<T: ClusterTransport> NodeController<T> {
         self.migration_manager.migration_count()
     }
 
-    #[allow(clippy::too_many_lines, clippy::type_complexity)]
     pub async fn complete_pending_unique_work(
         &mut self,
         local_reserved: Vec<(String, Vec<u8>)>,
-        remote_results: Result<
-            Vec<(String, Vec<u8>, NodeId)>,
-            (ReserveFailure, Vec<(String, Vec<u8>, NodeId)>),
-        >,
+        remote_results: RemoteReserveOutcome,
         continuation: UniqueCheckContinuation,
     ) {
         match continuation {
@@ -1620,13 +1614,18 @@ impl<T: ClusterTransport> NodeController<T> {
                         Self::json_error(failure.http_code(), &failure.message())
                     }
                     Ok(confirmed_remotes) => {
-                        match self.db_create_prepare(&entity, &id, &data_bytes, now_ms) {
-                            Ok((db_entity, write)) => {
-                                let event = self.change_event(
-                                    ChangeEvent::create(entity.clone(), id.clone(), data.clone()),
-                                    origin,
-                                );
-                                self.commit_with_change_event(write, event).await;
+                        match self
+                            .db_create_with_event(
+                                &entity,
+                                &id,
+                                &data_bytes,
+                                data.clone(),
+                                now_ms,
+                                origin,
+                            )
+                            .await
+                        {
+                            Ok(db_entity) => {
                                 self.commit_unique_constraints(
                                     &entity,
                                     &id,
@@ -1701,17 +1700,18 @@ impl<T: ClusterTransport> NodeController<T> {
                         Self::json_error(failure.http_code(), &failure.message())
                     }
                     Ok(confirmed_remotes) => {
-                        match self.db_update_prepare(&entity, &id, &data_bytes, now_ms) {
-                            Ok((db_entity, write)) => {
-                                let event = self.change_event(
-                                    ChangeEvent::update(
-                                        entity.clone(),
-                                        id.clone(),
-                                        merged_data.clone(),
-                                    ),
-                                    origin,
-                                );
-                                self.commit_with_change_event(write, event).await;
+                        match self
+                            .db_update_with_event(
+                                &entity,
+                                &id,
+                                &data_bytes,
+                                merged_data.clone(),
+                                now_ms,
+                                origin,
+                            )
+                            .await
+                        {
+                            Ok(db_entity) => {
                                 self.commit_unique_constraints(
                                     &entity,
                                     &id,
@@ -1770,7 +1770,10 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+pub type RemoteReserveOutcome =
+    Result<Vec<(String, Vec<u8>, NodeId)>, (ReserveFailure, Vec<(String, Vec<u8>, NodeId)>)>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplicationError {
     NotPrimary,
     TooManyPending,

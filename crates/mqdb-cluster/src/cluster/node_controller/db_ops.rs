@@ -95,6 +95,29 @@ fn change_event_user_properties(event: &ChangeEvent) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ForwardRequest<'a> {
+    pub(crate) op: JsonDbOp,
+    pub(crate) entity: &'a str,
+    pub(crate) id: Option<&'a str>,
+    pub(crate) payload: &'a [u8],
+    pub(crate) response_topic: &'a str,
+    pub(crate) correlation_data: Option<&'a [u8]>,
+}
+
+#[derive(Default)]
+pub(crate) struct FkDeletePlan {
+    effects: Vec<CascadeSideEffect>,
+    remote_ops: Vec<CascadeRemoteOp>,
+    cascade: Option<CascadeOutboxPayload>,
+}
+
+impl FkDeletePlan {
+    pub(crate) fn cascade(&self) -> Option<&CascadeOutboxPayload> {
+        self.cascade.as_ref()
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct EventOrigin<'a> {
     pub(crate) sender: Option<&'a str>,
@@ -206,7 +229,8 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     /// # Errors
-    /// Returns `DbDataStoreError::AlreadyExists` if an entity with the given ID already exists.
+    /// Returns `DbDataStoreError::AlreadyExists` if an entity with the given ID already exists,
+    /// or `Commit` if the write cannot be committed.
     pub async fn db_create(
         &mut self,
         entity_type: &str,
@@ -215,7 +239,7 @@ impl<T: ClusterTransport> NodeController<T> {
         timestamp_ms: u64,
     ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
         let (db_entity, write) = self.db_create_prepare(entity_type, id, data, timestamp_ms)?;
-        self.write_or_forward(write).await;
+        self.commit_write(write, None, &[]).await?;
         Ok(db_entity)
     }
 
@@ -234,7 +258,8 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     /// # Errors
-    /// Returns `DbDataStoreError::NotFound` if the entity does not exist.
+    /// Returns `DbDataStoreError::NotFound` if the entity does not exist, or `Commit` if the
+    /// write cannot be committed.
     pub async fn db_update(
         &mut self,
         entity_type: &str,
@@ -243,23 +268,7 @@ impl<T: ClusterTransport> NodeController<T> {
         timestamp_ms: u64,
     ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
         let (db_entity, write) = self.db_update_prepare(entity_type, id, data, timestamp_ms)?;
-        self.write_or_forward(write).await;
-        Ok(db_entity)
-    }
-
-    /// # Errors
-    /// Returns `DbDataStoreError::SerializationError` if a length does not fit the record format.
-    pub async fn db_upsert(
-        &mut self,
-        entity_type: &str,
-        id: &str,
-        data: &[u8],
-        timestamp_ms: u64,
-    ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
-        let (db_entity, write) =
-            self.stores
-                .db_upsert_replicated(entity_type, id, data, timestamp_ms)?;
-        self.write_or_forward(write).await;
+        self.commit_write(write, None, &[]).await?;
         Ok(db_entity)
     }
 
@@ -275,28 +284,39 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     /// # Errors
-    /// Returns `DbDataStoreError::NotFound` if the entity does not exist.
+    /// Returns `DbDataStoreError::NotFound` if the entity does not exist, or `Commit` if the
+    /// write cannot be committed.
     pub async fn db_delete(
         &mut self,
         entity_type: &str,
         id: &str,
     ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
         let (db_entity, write) = self.db_delete_prepare(entity_type, id)?;
-        self.write_or_forward(write).await;
+        self.commit_write(write, None, &[]).await?;
         Ok(db_entity)
     }
 
-    pub async fn db_commit(&mut self, write: ReplicationWrite, event: &ChangeEvent) {
-        self.write_or_forward_with_event(write, change_event_record(event), &[])
-            .await;
-    }
-
-    pub(crate) async fn commit_with_change_event(
+    async fn commit_write(
         &mut self,
         write: ReplicationWrite,
-        event: ChangeEvent,
-    ) {
-        self.db_commit(write, &event).await;
+        event: Option<ChangeEventRecord>,
+        extra_outbox: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<(), super::db::DbDataStoreError> {
+        self.write_or_forward_with_event(write, event, extra_outbox)
+            .await
+            .map_err(super::db::DbDataStoreError::Commit)
+    }
+
+    /// # Errors
+    /// Returns `DbDataStoreError::Commit` if the write cannot be committed, in which case
+    /// nothing is applied and no change event is published.
+    pub async fn db_commit(
+        &mut self,
+        write: ReplicationWrite,
+        event: &ChangeEvent,
+    ) -> Result<(), super::db::DbDataStoreError> {
+        self.commit_write(write, Some(change_event_record(event)), &[])
+            .await
     }
 
     pub(crate) async fn commit_delete_with_change_event(
@@ -305,13 +325,14 @@ impl<T: ClusterTransport> NodeController<T> {
         event: ChangeEvent,
         data: &Value,
         cascade: Option<&CascadeOutboxPayload>,
-    ) {
+    ) -> Result<(), super::db::DbDataStoreError> {
         match cascade {
-            Some(cascade) => self.db_commit_with_cascade(write, &event, cascade).await,
-            None => self.db_commit(write, &event).await,
+            Some(cascade) => self.db_commit_with_cascade(write, &event, cascade).await?,
+            None => self.db_commit(write, &event).await?,
         }
         self.release_unique_for_deleted_record(&event.entity, &event.id, data)
             .await;
+        Ok(())
     }
 
     pub(crate) async fn db_commit_with_cascade(
@@ -319,13 +340,57 @@ impl<T: ClusterTransport> NodeController<T> {
         write: ReplicationWrite,
         event: &ChangeEvent,
         cascade: &CascadeOutboxPayload,
-    ) {
-        self.write_or_forward_with_event(
+    ) -> Result<(), super::db::DbDataStoreError> {
+        self.commit_write(
             write,
-            change_event_record(event),
+            Some(change_event_record(event)),
             &[(cascade.key.clone(), cascade.value.clone())],
         )
-        .await;
+        .await
+    }
+
+    pub(crate) async fn db_create_with_event(
+        &mut self,
+        entity_type: &str,
+        id: &str,
+        data_bytes: &[u8],
+        data: Value,
+        now_ms: u64,
+        origin: EventOrigin<'_>,
+    ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
+        let (db_entity, write) = self.db_create_prepare(entity_type, id, data_bytes, now_ms)?;
+        let event = self.change_event(
+            ChangeEvent::create(
+                entity_type.to_string(),
+                db_entity.id_str().to_string(),
+                data,
+            ),
+            origin,
+        );
+        self.db_commit(write, &event).await?;
+        Ok(db_entity)
+    }
+
+    pub(crate) async fn db_update_with_event(
+        &mut self,
+        entity_type: &str,
+        id: &str,
+        data_bytes: &[u8],
+        data: Value,
+        now_ms: u64,
+        origin: EventOrigin<'_>,
+    ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
+        let (db_entity, write) = self.db_update_prepare(entity_type, id, data_bytes, now_ms)?;
+        let event = self.change_event(
+            ChangeEvent::update(
+                entity_type.to_string(),
+                db_entity.id_str().to_string(),
+                data,
+            ),
+            origin,
+        );
+        self.db_commit(write, &event).await?;
+        Ok(db_entity)
     }
 
     #[must_use]
@@ -468,7 +533,6 @@ impl<T: ClusterTransport> NodeController<T> {
             .await;
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(crate) async fn handle_json_db_request(
         &mut self,
         from: NodeId,
@@ -767,7 +831,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn handle_json_update_local(
         &mut self,
         entity: &str,
@@ -950,13 +1013,18 @@ impl<T: ClusterTransport> NodeController<T> {
 
         let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
 
-        let result = match self.db_update_prepare(entity, id, &data_bytes, now_ms) {
-            Ok((db_entity, write)) => {
-                let event = self.change_event(
-                    ChangeEvent::update(entity.to_string(), id.to_string(), merged_data.clone()),
-                    EventOrigin::of(request),
-                );
-                self.commit_with_change_event(write, event).await;
+        let result = match self
+            .db_update_with_event(
+                entity,
+                id,
+                &data_bytes,
+                merged_data.clone(),
+                now_ms,
+                EventOrigin::of(request),
+            )
+            .await
+        {
+            Ok(db_entity) => {
                 if has_unique_changes {
                     self.commit_unique_constraints(
                         entity,
@@ -1076,16 +1144,12 @@ impl<T: ClusterTransport> NodeController<T> {
             Err(msg) => return (Self::json_error(409, &msg), None),
         };
         let origin = EventOrigin::of(request);
-        let (cascade, ack_receivers) = match self
-            .apply_fk_delete_side_effects(entity, id, &all_results, origin)
-            .await
-        {
-            Ok(pair) => pair,
+        let plan = match self.plan_fk_delete(entity, id, &all_results, origin) {
+            Ok(plan) => plan,
             Err(payload) => return (payload, None),
         };
         (
-            self.execute_json_delete(entity, id, cascade.as_ref(), ack_receivers, origin)
-                .await,
+            self.execute_json_delete(entity, id, &plan, origin).await,
             None,
         )
     }
@@ -1094,12 +1158,11 @@ impl<T: ClusterTransport> NodeController<T> {
         &mut self,
         entity: &str,
         id: &str,
-        cascade: Option<&CascadeOutboxPayload>,
-        ack_receivers: Vec<oneshot::Receiver<bool>>,
+        plan: &FkDeletePlan,
         origin: EventOrigin<'_>,
     ) -> Vec<u8> {
         match self
-            .delete_record_replicated(entity, id, cascade, ack_receivers, origin)
+            .delete_record_replicated(entity, id, plan, origin)
             .await
         {
             Ok(()) => {
@@ -1123,8 +1186,7 @@ impl<T: ClusterTransport> NodeController<T> {
         &mut self,
         entity: &str,
         id: &str,
-        cascade: Option<&CascadeOutboxPayload>,
-        ack_receivers: Vec<oneshot::Receiver<bool>>,
+        plan: &FkDeletePlan,
         origin: EventOrigin<'_>,
     ) -> Result<(), super::db::DbDataStoreError> {
         let (db_entity, write) = self.db_delete_prepare(entity, id)?;
@@ -1133,12 +1195,15 @@ impl<T: ClusterTransport> NodeController<T> {
             ChangeEvent::delete(entity.to_string(), id.to_string(), data.clone()),
             origin,
         );
-        self.commit_delete_with_change_event(write, event, &data, cascade)
-            .await;
-        if self.ownership.owner_field(entity).is_some() {
-            self.clear_all_resource_grants(entity, id).await;
+        self.commit_delete_with_change_event(write, event, &data, plan.cascade())
+            .await?;
+        let ack_receivers = self.run_fk_delete_plan(plan, origin).await;
+        if self.ownership.owner_field(entity).is_some()
+            && let Err(e) = self.clear_all_resource_grants(entity, id).await
+        {
+            tracing::warn!(entity, id, %e, "grants of a deleted resource not removed");
         }
-        if let Some(cas) = cascade {
+        if let Some(cas) = plan.cascade() {
             spawn_cascade_ack_waiter(
                 self.stores.cluster_outbox().cloned(),
                 cas.operation_id.clone(),
@@ -1167,7 +1232,12 @@ impl<T: ClusterTransport> NodeController<T> {
                 continue;
             }
             if self
-                .delete_record_replicated(&entity, &id, None, Vec::new(), EventOrigin::default())
+                .delete_record_replicated(
+                    &entity,
+                    &id,
+                    &FkDeletePlan::default(),
+                    EventOrigin::default(),
+                )
                 .await
                 .is_ok()
             {
@@ -1177,19 +1247,49 @@ impl<T: ClusterTransport> NodeController<T> {
         reaped
     }
 
-    pub(crate) async fn apply_fk_delete_side_effects(
-        &mut self,
+    pub(crate) fn plan_fk_delete(
+        &self,
         entity: &str,
         id: &str,
         results: &[super::fk::FkReverseLookupResult],
         origin: EventOrigin<'_>,
-    ) -> Result<(Option<CascadeOutboxPayload>, Vec<oneshot::Receiver<bool>>), Vec<u8>> {
+    ) -> Result<FkDeletePlan, Vec<u8>> {
         self.require_primary_role(entity, id)
             .map_err(json_write_failure)?;
         let effects = self
             .prepare_fk_side_effects(results)
             .map_err(|msg| Self::json_error(409, &msg))?;
-        Ok(self.execute_fk_side_effects(&effects, origin).await)
+        let remote_ops: Vec<CascadeRemoteOp> = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                CascadeSideEffect::RemoteDelete { entity, id } => Some(CascadeRemoteOp::Delete {
+                    entity: entity.clone(),
+                    id: id.clone(),
+                    sender: origin.sender.map(String::from),
+                }),
+                CascadeSideEffect::RemoteSetNull {
+                    entity,
+                    id,
+                    field,
+                    expected_value,
+                } => Some(CascadeRemoteOp::SetNull {
+                    entity: entity.clone(),
+                    id: id.clone(),
+                    field: field.clone(),
+                    expected_value: expected_value.clone(),
+                }),
+                CascadeSideEffect::LocalDelete { .. } | CascadeSideEffect::LocalSetNull { .. } => {
+                    None
+                }
+            })
+            .collect();
+        let cascade = (!remote_ops.is_empty())
+            .then(|| CascadeOutboxPayload::new(uuid::Uuid::new_v4().to_string(), &remote_ops));
+        Ok(FkDeletePlan {
+            effects,
+            remote_ops,
+            cascade,
+        })
     }
 
     pub(crate) fn prepare_fk_side_effects(
@@ -1294,83 +1394,73 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
-    pub(crate) async fn execute_fk_side_effects(
+    pub(crate) async fn run_fk_delete_plan(
         &mut self,
-        effects: &[CascadeSideEffect],
+        plan: &FkDeletePlan,
         origin: EventOrigin<'_>,
-    ) -> (Option<CascadeOutboxPayload>, Vec<oneshot::Receiver<bool>>) {
+    ) -> Vec<oneshot::Receiver<bool>> {
         let now_ms = Self::current_time_ms();
-        let mut remote_ops = Vec::new();
-
-        for effect in effects {
+        for effect in &plan.effects {
             match effect {
                 CascadeSideEffect::LocalDelete { entity, id } => {
-                    if let Ok((db_entity, write)) = self.db_delete_prepare(entity, id) {
-                        let data: Value =
-                            serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
-                        let event = self.change_event(
-                            ChangeEvent::delete(entity.clone(), id.clone(), data.clone()),
-                            origin,
-                        );
-                        self.commit_delete_with_change_event(write, event, &data, None)
-                            .await;
-                    }
+                    self.run_local_cascade_delete(entity, id, origin).await;
                 }
                 CascadeSideEffect::LocalSetNull {
                     entity,
                     id,
                     updated_data,
                 } => {
-                    if let Ok((_, write)) = self.db_update_prepare(entity, id, updated_data, now_ms)
-                    {
-                        let data_json: serde_json::Value =
-                            serde_json::from_slice(updated_data).unwrap_or(Value::Null);
-                        let event = self.change_event(
-                            ChangeEvent::update(entity.clone(), id.clone(), data_json),
-                            origin,
-                        );
-                        self.commit_with_change_event(write, event).await;
-                    }
+                    self.run_local_cascade_set_null(entity, id, updated_data, now_ms, origin)
+                        .await;
                 }
-                CascadeSideEffect::RemoteDelete { entity, id, .. } => {
-                    remote_ops.push(CascadeRemoteOp::Delete {
-                        entity: entity.clone(),
-                        id: id.clone(),
-                        sender: origin.sender.map(String::from),
-                    });
-                }
-                CascadeSideEffect::RemoteSetNull {
-                    entity,
-                    id,
-                    field,
-                    expected_value,
-                } => {
-                    remote_ops.push(CascadeRemoteOp::SetNull {
-                        entity: entity.clone(),
-                        id: id.clone(),
-                        field: field.clone(),
-                        expected_value: expected_value.clone(),
-                    });
-                }
+                CascadeSideEffect::RemoteDelete { .. }
+                | CascadeSideEffect::RemoteSetNull { .. } => {}
             }
         }
-
-        if remote_ops.is_empty() {
-            return (None, Vec::new());
-        }
-
-        let cascade_outbox =
-            CascadeOutboxPayload::new(uuid::Uuid::new_v4().to_string(), &remote_ops);
-
-        let mut ack_receivers = Vec::with_capacity(remote_ops.len());
-        for op in &remote_ops {
+        let mut ack_receivers = Vec::with_capacity(plan.remote_ops.len());
+        for op in &plan.remote_ops {
             if let Some(rx) = self.dispatch_cascade_op(op, now_ms, origin).await {
                 ack_receivers.push(rx);
             }
         }
+        ack_receivers
+    }
 
-        (Some(cascade_outbox), ack_receivers)
+    async fn run_local_cascade_delete(&mut self, entity: &str, id: &str, origin: EventOrigin<'_>) {
+        let Ok((db_entity, write)) = self.db_delete_prepare(entity, id) else {
+            return;
+        };
+        let data: Value = serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
+        let event = self.change_event(
+            ChangeEvent::delete(entity.to_string(), id.to_string(), data.clone()),
+            origin,
+        );
+        if let Err(e) = self
+            .commit_delete_with_change_event(write, event, &data, None)
+            .await
+        {
+            tracing::warn!(%entity, %id, %e, "cascade delete not committed");
+        }
+    }
+
+    async fn run_local_cascade_set_null(
+        &mut self,
+        entity: &str,
+        id: &str,
+        updated_data: &[u8],
+        now_ms: u64,
+        origin: EventOrigin<'_>,
+    ) {
+        let data_json: Value = serde_json::from_slice(updated_data).unwrap_or(Value::Null);
+        match self
+            .db_update_with_event(entity, id, updated_data, data_json, now_ms, origin)
+            .await
+        {
+            Ok(_) | Err(super::db::DbDataStoreError::NotFound) => {}
+            Err(e) => {
+                tracing::warn!(%entity, %id, %e, "cascade set-null not committed");
+            }
+        }
     }
 
     async fn dispatch_cascade_op(
@@ -1660,15 +1750,11 @@ impl<T: ClusterTransport> NodeController<T> {
         }
         obj.insert(field.to_string(), Value::Null);
         let updated_bytes = serde_json::to_vec(&record).unwrap_or_default();
-        match self.db_update_prepare(entity, id, &updated_bytes, now_ms) {
-            Ok((_, write)) => {
-                let event = self.change_event(
-                    ChangeEvent::update(entity.to_string(), id.to_string(), record),
-                    origin,
-                );
-                self.commit_with_change_event(write, event).await;
-                true
-            }
+        match self
+            .db_update_with_event(entity, id, &updated_bytes, record, now_ms, origin)
+            .await
+        {
+            Ok(_) => true,
             Err(super::db::DbDataStoreError::NotFound) => true,
             Err(_) => false,
         }
@@ -1688,15 +1774,14 @@ impl<T: ClusterTransport> NodeController<T> {
                     origin,
                 );
                 self.commit_delete_with_change_event(write, event, &data, None)
-                    .await;
-                true
+                    .await
+                    .is_ok()
             }
             Err(super::db::DbDataStoreError::NotFound) => true,
             Err(_) => false,
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn handle_json_create_local(
         &mut self,
         partition: PartitionId,
@@ -1869,8 +1954,18 @@ impl<T: ClusterTransport> NodeController<T> {
 
         let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
 
-        let result = match self.db_create_prepare(entity, &id, &data_bytes, now_ms) {
-            Ok((db_entity, write)) => {
+        let result = match self
+            .db_create_with_event(
+                entity,
+                &id,
+                &data_bytes,
+                data.clone(),
+                now_ms,
+                EventOrigin::of(request),
+            )
+            .await
+        {
+            Ok(db_entity) => {
                 self.commit_all_reservations(
                     entity,
                     &request_id,
@@ -1878,11 +1973,6 @@ impl<T: ClusterTransport> NodeController<T> {
                     &remote_reserved,
                 )
                 .await;
-                let event = self.change_event(
-                    ChangeEvent::create(entity.to_string(), id.clone(), data.clone()),
-                    EventOrigin::of(request),
-                );
-                self.commit_with_change_event(write, event).await;
                 crate::cluster::db_handler::helpers::json_ok_with_id(db_entity.id_str(), &data)
             }
             Err(super::db::DbDataStoreError::AlreadyExists) => {
@@ -2020,7 +2110,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(crate) async fn complete_pending_fk_work(
         &mut self,
         fk_ok: bool,
@@ -2224,11 +2313,8 @@ impl<T: ClusterTransport> NodeController<T> {
         };
         let origin = EventOrigin::new(sender.as_deref(), client_id.as_deref());
 
-        let (cascade, ack_receivers) = match self
-            .apply_fk_delete_side_effects(&entity, &id, &side_effects, origin)
-            .await
-        {
-            Ok(pair) => pair,
+        let plan = match self.plan_fk_delete(&entity, &id, &side_effects, origin) {
+            Ok(plan) => plan,
             Err(payload) => {
                 if !response_topic.is_empty() {
                     let response =
@@ -2241,9 +2327,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 return;
             }
         };
-        let response_payload = self
-            .execute_json_delete(&entity, &id, cascade.as_ref(), ack_receivers, origin)
-            .await;
+        let response_payload = self.execute_json_delete(&entity, &id, &plan, origin).await;
         if !response_topic.is_empty() {
             let response =
                 JsonDbResponse::new(0, response_payload, response_topic, correlation_data);
@@ -2341,18 +2425,20 @@ impl<T: ClusterTransport> NodeController<T> {
         .unwrap_or(u64::MAX)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn forward_json_db_request(
         &mut self,
         partition: PartitionId,
-        op: JsonDbOp,
-        entity: &str,
-        id: Option<&str>,
-        payload: &[u8],
-        response_topic: &str,
-        correlation_data: Option<&[u8]>,
+        request: &ForwardRequest<'_>,
         origin: EventOrigin<'_>,
     ) -> bool {
+        let ForwardRequest {
+            op,
+            entity,
+            id,
+            payload,
+            response_topic,
+            correlation_data,
+        } = *request;
         let start = std::time::Instant::now();
         let node_id = self.node_id.get();
 
