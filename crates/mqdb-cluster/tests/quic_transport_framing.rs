@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mqdb_cluster::{
-    ClusterMessage, ClusterTransport, ForwardedPublish, Heartbeat, NodeId, QuicDirectTransport,
-    TransportError,
+    ClusterMessage, ClusterTransport, ForwardedPublish, Heartbeat, NodeId, PartitionId,
+    QuicDirectTransport, SnapshotChunk, TransportError,
 };
 use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig, TransportConfig, VarInt};
 use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
@@ -305,6 +305,81 @@ async fn control_plane_survives_a_full_bulk_queue() {
     assert!(
         heartbeat_delivered,
         "control-plane heartbeat was accepted but never delivered"
+    );
+
+    far_handle.abort();
+}
+
+fn snapshot_chunk(index: u32) -> ClusterMessage {
+    ClusterMessage::SnapshotChunk(
+        SnapshotChunk::new(PartitionId::ZERO, index, u32::MAX, 0, vec![0u8; 1024])
+            .with_transfer_id(1),
+    )
+}
+
+#[tokio::test]
+async fn bulk_messages_survive_a_full_snapshot_lane() {
+    let StalledPeer {
+        transport,
+        local,
+        peer,
+        frame_rx,
+        release_tx,
+        far_handle,
+    } = setup_stalled_peer().await;
+
+    let mut chunks_dropped = false;
+    for index in 0..SEND_ATTEMPTS {
+        match tokio::time::timeout(
+            Duration::from_millis(500),
+            transport.send(peer, snapshot_chunk(index)),
+        )
+        .await
+        {
+            Err(_) => panic!("snapshot chunk send blocked under backpressure"),
+            Ok(Ok(())) => {}
+            Ok(Err(TransportError::SendQueueFull(_))) => {
+                chunks_dropped = true;
+                break;
+            }
+            Ok(Err(other)) => panic!("unexpected snapshot send error: {other}"),
+        }
+    }
+    assert!(
+        chunks_dropped,
+        "snapshot chunks should eventually fill their lane"
+    );
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(500),
+        transport.send(peer, bulk_message(local)),
+    )
+    .await
+    .expect("bulk send blocked under backpressure");
+    assert!(
+        matches!(result, Ok(())),
+        "a bulk message was refused while snapshot chunks filled the queue: {result:?}"
+    );
+
+    release_tx.send(()).ok();
+
+    let bulk_type = bulk_message(local).message_type();
+    let mut bulk_delivered = false;
+    for _ in 0..SEND_ATTEMPTS {
+        let frame = collect_frame(&frame_rx).await;
+        assert_eq!(
+            &frame[0..2],
+            &local.get().to_be_bytes(),
+            "stream mis-framed"
+        );
+        if frame[2] == bulk_type {
+            bulk_delivered = true;
+            break;
+        }
+    }
+    assert!(
+        bulk_delivered,
+        "the bulk message was accepted but never delivered"
     );
 
     far_handle.abort();

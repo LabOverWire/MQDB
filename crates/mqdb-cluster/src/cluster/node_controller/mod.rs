@@ -654,9 +654,6 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     /// Pick a local partition for creating new entities (round-robin).
-    ///
-    /// # Panics
-    /// Panics if no valid partition can be created.
     #[must_use]
     pub fn pick_partition_for_create(&self) -> PartitionId {
         use std::sync::atomic::{AtomicU16, Ordering};
@@ -722,6 +719,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .entry(partition.get())
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
         state.become_primary(epoch);
+        self.incoming_snapshots.remove(&partition);
         self.seal_or_queue_unique(partition, epoch);
         self.start_sending_change_events(partition);
     }
@@ -732,6 +730,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .entry(partition.get())
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
         state.become_replica(epoch, sequence);
+        self.incoming_snapshots.remove(&partition);
         self.stop_sending_change_events(partition);
     }
 
@@ -763,6 +762,7 @@ impl<T: ClusterTransport> NodeController<T> {
         if let Some(state) = self.replicas.get_mut(&partition.get()) {
             state.step_down();
         }
+        self.incoming_snapshots.remove(&partition);
         self.stop_sending_change_events(partition);
     }
 
@@ -778,10 +778,6 @@ impl<T: ClusterTransport> NodeController<T> {
         self.heartbeat.update_partition_map(map);
     }
 
-    /// Synchronous tick used only by tests (`send_tick_output` drives the collected output). The
-    /// production cluster-agent event loop uses its own async `handle_tick`, which additionally runs
-    /// `manage_unique_voters`, `sweep_unique_quorum`, `sweep_unique_seals`, and `drive_snapshots` — this path does NOT,
-    /// so a test exercising unique voter management must invoke those explicitly.
     pub fn tick(&mut self, now: u64) -> TickOutput {
         let start = std::time::Instant::now();
 
@@ -975,6 +971,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let _ = self.tx_raft_events.try_send(RaftEvent::NodeDead(dead_node));
         self.dead_nodes_for_session_update.push_back(dead_node);
         self.change_events_node_gone(dead_node);
+        self.snapshots_node_gone(dead_node);
 
         for partition in super::PartitionId::all() {
             let assignment = self.partition_map.get(partition);

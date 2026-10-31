@@ -13,7 +13,8 @@
 (*     transfer id, fresh chunk count) and starts at chunk 0;                *)
 (*   * chunks are queued in index order; a full queue only delays (never     *)
 (*     skips) a chunk (Cap);                                                *)
-(*   * a "cancel" (SnapshotComplete failed from R) drops the transfer.       *)
+(*   * a SnapshotComplete failed from R is only logged: it carries no       *)
+(*     transfer id, so after a reconnect it could name a newer transfer.     *)
 (*   SendAll = FALSE is main: only chunk 0 is ever sent.                     *)
 (*                                                                          *)
 (* Receiver (handle_snapshot_chunk + drive_snapshots):                      *)
@@ -22,11 +23,12 @@
 (*   * chunk 0 starts a fresh builder; a later chunk is accepted only if it  *)
 (*     extends the builder in order (same transfer id when UseTransferId,    *)
 (*     same total, index == next); a duplicate/stale chunk is dropped; a     *)
-(*     gap in the same transfer aborts (clear + cancel to the sender);       *)
+(*     gap in the same transfer aborts (clear, and ask again later);        *)
 (*   * StallTimeout: when nothing more can arrive the request is abandoned  *)
 (*     and re-issued to the current primary (Retry). PrematureTimeout        *)
 (*     models a slow sender tripping the timer while chunks are still in    *)
-(*     flight.                                                              *)
+(*     flight; it also stands for the receiver abandoning a request when its *)
+(*     role changes or the primary moves (both clear the request).          *)
 (*   Retry = FALSE is main: the production loop never retries.               *)
 (*                                                                          *)
 (* Configs:                                                                 *)
@@ -44,7 +46,8 @@
 (*                                      exports into one import.             *)
 (*   ClusterSnapshotTransfer_noretry.cfg Retry=FALSE with sending fixed ->  *)
 (*                                      EventuallyImported violated after a *)
-(*                                      single lost chunk.                  *)
+(*                                      single lost message (request or     *)
+(*                                      chunk).                             *)
 (*                                                                          *)
 (* NOT MODELLED: the content of an export (an import is "whole" when all   *)
 (* its chunks come from one export); sequence numbers and role changes on  *)
@@ -97,7 +100,7 @@ TypeOK ==
     /\ out \in [Senders -> [active : BOOLEAN, id : 0..MaxExports,
                             next : 0..MaxChunks, total : 1..MaxChunks]]
     /\ \A s \in Senders : chan[s] \in Seq(Chunk) /\ Len(chan[s]) <= Cap
-    /\ \A s \in Senders : reqChan[s] \in Seq({"req", "cancel"})
+    /\ \A s \in Senders : reqChan[s] \in Seq({"req"})
     /\ req \in Senders \cup {None}
     /\ bld.active \in BOOLEAN
     /\ primary \in Senders
@@ -134,14 +137,11 @@ Request ==
 SenderRecv(s) ==
     /\ reqChan[s] # <<>>
     /\ reqChan' = [reqChan EXCEPT ![s] = Tail(@)]
-    /\ IF Head(reqChan[s]) = "req"
-       THEN /\ exports < MaxExports
-            /\ \E t \in 1..MaxChunks :
-                 out' = [out EXCEPT ![s] = [active |-> TRUE, id |-> exports + 1,
-                                            next |-> 0, total |-> t]]
-            /\ exports' = exports + 1
-       ELSE /\ out' = [out EXCEPT ![s] = NoTransfer]
-            /\ UNCHANGED exports
+    /\ exports < MaxExports
+    /\ \E t \in 1..MaxChunks :
+         out' = [out EXCEPT ![s] = [active |-> TRUE, id |-> exports + 1,
+                                    next |-> 0, total |-> t]]
+    /\ exports' = exports + 1
     /\ UNCHANGED <<chan, req, bld, primary, requests, losses, premature,
                    reassigns, imports, done>>
 
@@ -171,8 +171,7 @@ Import(ids) ==
 Abort(s) ==
     /\ req' = None
     /\ bld' = NoBuilder
-    /\ reqChan' = [reqChan EXCEPT ![s] = Append(@, "cancel")]
-    /\ UNCHANGED <<imports, done>>
+    /\ UNCHANGED <<reqChan, imports, done>>
 
 Drop ==
     UNCHANGED <<req, bld, reqChan, imports, done>>

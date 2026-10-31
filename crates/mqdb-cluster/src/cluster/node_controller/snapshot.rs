@@ -9,6 +9,7 @@ use super::super::snapshot::{
 use super::super::transport::{ClusterMessage, ClusterTransport, TransportError};
 use super::super::{NodeId, PartitionId};
 use super::NodeController;
+use std::collections::HashSet;
 
 pub(crate) const SNAPSHOT_CHUNKS_PER_PUMP: u32 = 8;
 pub(crate) const SNAPSHOT_STALL_TIMEOUT_MS: u64 = 30_000;
@@ -17,7 +18,8 @@ pub(crate) const SNAPSHOT_RETRY_BACKOFF_MS: u64 = 5_000;
 #[derive(Debug)]
 pub(crate) struct OutgoingSnapshot {
     to: NodeId,
-    sender: SnapshotSender,
+    partition: PartitionId,
+    pub(super) sender: Option<SnapshotSender>,
 }
 
 #[derive(Debug)]
@@ -36,8 +38,17 @@ pub(crate) struct IncomingSnapshot {
 }
 
 impl IncomingSnapshot {
-    fn expired(&mut self, now: u64) -> bool {
-        let since = *self.since_ms.get_or_insert(now);
+    fn requested_from(&self) -> Option<NodeId> {
+        match self.state {
+            IncomingState::Requested { source, .. } => Some(source),
+            IncomingState::BackingOff => None,
+        }
+    }
+
+    fn expired(&self, now: u64) -> bool {
+        let Some(since) = self.since_ms else {
+            return false;
+        };
         let limit = match self.state {
             IncomingState::Requested { .. } => SNAPSHOT_STALL_TIMEOUT_MS,
             IncomingState::BackingOff => SNAPSHOT_RETRY_BACKOFF_MS,
@@ -57,67 +68,99 @@ impl<T: ClusterTransport> NodeController<T> {
             return;
         };
 
-        let data = self.stores.export_partition(partition);
-        let sequence = self.sequence(partition).unwrap_or(0);
-        let transfer_id = uuid::Uuid::new_v4().as_u64_pair().0;
-        let sender = SnapshotSender::new(partition, data, sequence).with_transfer_id(transfer_id);
-
         tracing::info!(
             ?partition,
             requester = from.get(),
-            total_chunks = sender.total_chunks(),
-            transfer_id,
-            "received snapshot request, starting snapshot send"
+            "received snapshot request, queueing snapshot send"
         );
 
         match self
             .outgoing_snapshots
             .iter_mut()
-            .find(|outgoing| outgoing.to == from && outgoing.sender.partition() == partition)
+            .find(|outgoing| outgoing.to == from && outgoing.partition == partition)
         {
-            Some(existing) => existing.sender = sender,
-            None => self
-                .outgoing_snapshots
-                .push_back(OutgoingSnapshot { to: from, sender }),
+            Some(existing) => existing.sender = None,
+            None => self.outgoing_snapshots.push_back(OutgoingSnapshot {
+                to: from,
+                partition,
+                sender: None,
+            }),
         }
         self.pump_outgoing_snapshots().await;
     }
 
+    fn export_snapshot(&self, partition: PartitionId) -> Option<SnapshotSender> {
+        let data = self.stores.export_partition(partition);
+        let sequence = self.sequence(partition).unwrap_or(0);
+        let transfer_id = uuid::Uuid::new_v4().as_u64_pair().0;
+        let sender = SnapshotSender::new(partition, data, sequence)?.with_transfer_id(transfer_id);
+        tracing::info!(
+            ?partition,
+            total_chunks = sender.total_chunks(),
+            transfer_id,
+            "exported partition snapshot"
+        );
+        Some(sender)
+    }
+
     async fn pump_outgoing_snapshots(&mut self) {
         let mut budget = SNAPSHOT_CHUNKS_PER_PUMP;
+        let mut blocked = HashSet::new();
         let mut index = 0;
         while budget > 0 && index < self.outgoing_snapshots.len() {
+            let to = self.outgoing_snapshots[index].to;
+            if blocked.contains(&to) {
+                index += 1;
+                continue;
+            }
+            if self.outgoing_snapshots[index].sender.is_none() {
+                let partition = self.outgoing_snapshots[index].partition;
+                let exported = self.export_snapshot(partition);
+                if exported.is_none() {
+                    tracing::warn!(?partition, to = to.get(), "partition too large to send");
+                    self.outgoing_snapshots.remove(index);
+                    continue;
+                }
+                self.outgoing_snapshots[index].sender = exported;
+            }
             let outgoing = &mut self.outgoing_snapshots[index];
+            let Some(sender) = outgoing.sender.as_mut() else {
+                index += 1;
+                continue;
+            };
             let keep = loop {
                 if budget == 0 {
                     break true;
                 }
-                let Some(chunk) = outgoing.sender.current_chunk() else {
+                let Some(chunk) = sender.current_chunk() else {
                     break false;
                 };
                 match self
                     .transport
-                    .send(outgoing.to, ClusterMessage::SnapshotChunk(chunk))
+                    .send(to, ClusterMessage::SnapshotChunk(chunk))
                     .await
                 {
                     Ok(()) => {
-                        outgoing.sender.advance();
+                        sender.advance();
                         budget -= 1;
-                        if outgoing.sender.is_complete() {
+                        if sender.is_complete() {
                             tracing::info!(
-                                partition = ?outgoing.sender.partition(),
-                                to = outgoing.to.get(),
-                                total_chunks = outgoing.sender.total_chunks(),
+                                partition = ?outgoing.partition,
+                                to = to.get(),
+                                total_chunks = sender.total_chunks(),
                                 "snapshot send complete"
                             );
                             break false;
                         }
                     }
-                    Err(TransportError::SendQueueFull(_)) => break true,
+                    Err(TransportError::SendQueueFull(_)) => {
+                        blocked.insert(to);
+                        break true;
+                    }
                     Err(error) => {
                         tracing::warn!(
-                            partition = ?outgoing.sender.partition(),
-                            to = outgoing.to.get(),
+                            partition = ?outgoing.partition,
+                            to = to.get(),
                             %error,
                             "abandoning snapshot send"
                         );
@@ -135,12 +178,33 @@ impl<T: ClusterTransport> NodeController<T> {
 
     pub async fn drive_snapshots(&mut self, now: u64) {
         self.snapshot_clock_ms = now;
+        for incoming in self.incoming_snapshots.values_mut() {
+            incoming.since_ms.get_or_insert(now);
+        }
+        let replicas = &self.replicas;
+        let partition_map = &self.partition_map;
         self.incoming_snapshots.retain(|partition, incoming| {
-            let expired = incoming.expired(now);
-            if expired && matches!(incoming.state, IncomingState::Requested { .. }) {
-                tracing::warn!(?partition, "snapshot transfer stalled, abandoning request");
+            if incoming.expired(now) {
+                if incoming.requested_from().is_some() {
+                    tracing::warn!(?partition, "snapshot transfer stalled, abandoning request");
+                }
+                return false;
             }
-            !expired
+            let awaiting = replicas
+                .get(&partition.get())
+                .is_some_and(|state| state.role() == ReplicaRole::AwaitingSnapshot);
+            let moved = incoming
+                .requested_from()
+                .zip(partition_map.primary(*partition))
+                .is_some_and(|(source, primary)| source != primary);
+            if awaiting && moved {
+                tracing::info!(
+                    ?partition,
+                    "partition primary moved, abandoning snapshot request"
+                );
+                return false;
+            }
+            true
         });
 
         for partition in PartitionId::all() {
@@ -180,10 +244,20 @@ impl<T: ClusterTransport> NodeController<T> {
     async fn refuse_snapshot(&mut self, from: NodeId, partition: PartitionId) {
         self.back_off_snapshot(partition);
         let complete = SnapshotComplete::failed(partition);
-        let _ = self
+        if let Err(error) = self
             .transport
             .send(from, ClusterMessage::SnapshotComplete(complete))
-            .await;
+            .await
+        {
+            tracing::debug!(?partition, to = from.get(), %error, "snapshot failure notice not sent");
+        }
+    }
+
+    pub(crate) fn snapshots_node_gone(&mut self, node: NodeId) {
+        self.outgoing_snapshots
+            .retain(|outgoing| outgoing.to != node);
+        self.incoming_snapshots
+            .retain(|_, incoming| incoming.requested_from() != Some(node));
     }
 
     pub(crate) async fn handle_snapshot_chunk(&mut self, from: NodeId, chunk: &SnapshotChunk) {
@@ -257,20 +331,13 @@ impl<T: ClusterTransport> NodeController<T> {
         }
 
         incoming.since_ms = stamp;
-        if !builder.as_ref().is_some_and(SnapshotBuilder::is_complete) {
-            return;
-        }
-        let Some(finished) = builder.take() else {
+        let Some(finished) = builder.take_if(|current| current.is_complete()) else {
             return;
         };
         self.incoming_snapshots.remove(&partition);
 
         let sequence = finished.sequence_at_snapshot();
-        let Some(data) = finished.assemble() else {
-            tracing::error!(?partition, "failed to assemble snapshot");
-            self.refuse_snapshot(from, partition).await;
-            return;
-        };
+        let data = finished.into_data();
 
         let saved_events = self.set_aside_change_events(partition);
         match self.stores.import_partition(&data) {
@@ -316,10 +383,13 @@ impl<T: ClusterTransport> NodeController<T> {
                 }
 
                 let complete = SnapshotComplete::ok(partition, sequence);
-                let _ = self
+                if let Err(error) = self
                     .transport
                     .send(from, ClusterMessage::SnapshotComplete(complete))
-                    .await;
+                    .await
+                {
+                    tracing::debug!(?partition, to = from.get(), %error, "snapshot completion notice not sent");
+                }
             }
             Err(e) => {
                 tracing::error!(?partition, ?e, "failed to import snapshot");
@@ -356,15 +426,26 @@ impl<T: ClusterTransport> NodeController<T> {
             }
         } else {
             tracing::warn!(?partition, ?status, "snapshot transfer failed");
-            self.outgoing_snapshots
-                .retain(|outgoing| outgoing.to != from || outgoing.sender.partition() != partition);
         }
     }
 
     pub async fn request_snapshot(&mut self, partition: PartitionId, from: NodeId) {
-        if self.incoming_snapshots.contains_key(&partition) {
-            tracing::debug!(?partition, "snapshot already requested or pending");
-            return;
+        if let Some(existing) = self.incoming_snapshots.get(&partition) {
+            match existing.requested_from() {
+                Some(source) if source != from => {
+                    tracing::info!(
+                        ?partition,
+                        old_source = source.get(),
+                        source = from.get(),
+                        "snapshot source changed, abandoning earlier request"
+                    );
+                    self.incoming_snapshots.remove(&partition);
+                }
+                _ => {
+                    tracing::debug!(?partition, "snapshot already requested or pending");
+                    return;
+                }
+            }
         }
 
         tracing::info!(?partition, source = from.get(), "requesting snapshot");

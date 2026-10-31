@@ -83,6 +83,11 @@ pub enum ClusterMessage {
 
 impl ClusterMessage {
     #[must_use]
+    pub fn is_snapshot_transfer(&self) -> bool {
+        matches!(self, Self::SnapshotChunk(_))
+    }
+
+    #[must_use]
     pub fn is_control_plane(&self) -> bool {
         matches!(
             self,

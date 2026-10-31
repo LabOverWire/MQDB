@@ -52,11 +52,6 @@ impl SnapshotRequest {
     pub fn partition(&self) -> Option<PartitionId> {
         PartitionId::new(self.partition)
     }
-
-    #[must_use]
-    pub fn requester_id(&self) -> Option<NodeId> {
-        NodeId::validated(self.requester_id)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -96,11 +91,6 @@ impl SnapshotChunk {
     pub fn with_transfer_id(mut self, transfer_id: u64) -> Self {
         self.transfer_id = Some(transfer_id);
         self
-    }
-
-    #[must_use]
-    pub fn is_last(&self) -> bool {
-        self.chunk_index + 1 >= self.total_chunks
     }
 
     #[must_use]
@@ -190,16 +180,6 @@ impl SnapshotComplete {
     }
 
     #[must_use]
-    pub fn no_data(partition: PartitionId) -> Self {
-        Self {
-            version: Self::VERSION,
-            partition: partition.get(),
-            status: SnapshotStatus::NoData as u8,
-            final_sequence: 0,
-        }
-    }
-
-    #[must_use]
     pub fn partition(&self) -> Option<PartitionId> {
         PartitionId::new(self.partition)
     }
@@ -274,18 +254,13 @@ impl SnapshotBuilder {
     }
 
     #[must_use]
-    pub fn partition(&self) -> PartitionId {
-        self.partition
-    }
-
-    #[must_use]
     pub fn sequence_at_snapshot(&self) -> u64 {
         self.sequence_at_snapshot
     }
 
     #[must_use]
-    pub fn assemble(self) -> Option<Vec<u8>> {
-        self.is_complete().then_some(self.data)
+    pub fn into_data(self) -> Vec<u8> {
+        self.data
     }
 }
 
@@ -304,32 +279,32 @@ impl SnapshotSender {
     pub const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
 
     #[must_use]
-    pub fn new(partition: PartitionId, data: Vec<u8>, sequence_at_snapshot: u64) -> Self {
+    pub fn new(partition: PartitionId, data: Vec<u8>, sequence_at_snapshot: u64) -> Option<Self> {
         let chunk_size = Self::DEFAULT_CHUNK_SIZE;
-        Self {
+        Some(Self {
             partition,
-            total_chunks: Self::chunk_count(data.len(), chunk_size),
+            total_chunks: Self::chunk_count(data.len(), chunk_size)?,
             data,
             chunk_size,
             current_chunk: 0,
             sequence_at_snapshot,
             transfer_id: None,
-        }
+        })
     }
 
-    fn chunk_count(len: usize, chunk_size: usize) -> u32 {
+    fn chunk_count(len: usize, chunk_size: usize) -> Option<u32> {
         if len == 0 {
-            1
+            Some(1)
         } else {
-            u32::try_from(len.div_ceil(chunk_size)).unwrap_or(u32::MAX)
+            u32::try_from(len.div_ceil(chunk_size)).ok()
         }
     }
 
     #[must_use]
-    pub fn with_chunk_size(mut self, chunk_size: usize) -> Self {
+    pub fn with_chunk_size(mut self, chunk_size: usize) -> Option<Self> {
         self.chunk_size = chunk_size.max(1);
-        self.total_chunks = Self::chunk_count(self.data.len(), self.chunk_size);
-        self
+        self.total_chunks = Self::chunk_count(self.data.len(), self.chunk_size)?;
+        Some(self)
     }
 
     #[must_use]
@@ -371,13 +346,6 @@ impl SnapshotSender {
     }
 
     #[must_use]
-    pub fn next_chunk(&mut self) -> Option<SnapshotChunk> {
-        let chunk = self.current_chunk()?;
-        self.advance();
-        Some(chunk)
-    }
-
-    #[must_use]
     pub fn is_complete(&self) -> bool {
         self.current_chunk >= self.total_chunks
     }
@@ -391,11 +359,6 @@ impl SnapshotSender {
     pub fn total_chunks(&self) -> u32 {
         self.total_chunks
     }
-
-    #[must_use]
-    pub fn chunks_sent(&self) -> u32 {
-        self.current_chunk
-    }
 }
 
 #[cfg(test)]
@@ -404,6 +367,12 @@ mod tests {
 
     fn partition(id: u16) -> PartitionId {
         PartitionId::new(id).unwrap()
+    }
+
+    fn drain_one(sender: &mut SnapshotSender) -> Option<SnapshotChunk> {
+        let chunk = sender.current_chunk()?;
+        sender.advance();
+        Some(chunk)
     }
 
     fn node(id: u16) -> NodeId {
@@ -417,7 +386,6 @@ mod tests {
         let (decoded, _) = SnapshotRequest::try_from_be_bytes(&bytes).unwrap();
 
         assert_eq!(decoded.partition(), Some(partition(10)));
-        assert_eq!(decoded.requester_id(), Some(node(5)));
     }
 
     #[test]
@@ -432,16 +400,6 @@ mod tests {
         assert_eq!(decoded.total_chunks, 5);
         assert_eq!(decoded.sequence_at_snapshot, 12345);
         assert_eq!(decoded.data, b"test data");
-        assert!(!decoded.is_last());
-    }
-
-    #[test]
-    fn snapshot_chunk_is_last() {
-        let last = SnapshotChunk::new(partition(0), 4, 5, 100, vec![]);
-        assert!(last.is_last());
-
-        let not_last = SnapshotChunk::new(partition(0), 3, 5, 100, vec![]);
-        assert!(!not_last.is_last());
     }
 
     #[test]
@@ -483,7 +441,7 @@ mod tests {
         );
         assert!(builder.is_complete());
 
-        let data = builder.assemble().unwrap();
+        let data = builder.into_data();
         assert_eq!(data, b"AAABBBCCC");
     }
 
@@ -513,7 +471,7 @@ mod tests {
             builder.offer(&chunk(2, 3, 9, b"CCC")),
             ChunkOutcome::Accepted
         );
-        assert_eq!(builder.assemble().unwrap(), b"AAABBBCCC");
+        assert_eq!(builder.into_data(), b"AAABBBCCC");
     }
 
     #[test]
@@ -558,7 +516,9 @@ mod tests {
     #[test]
     fn snapshot_sender_repeats_the_current_chunk_until_advanced() {
         let mut sender = SnapshotSender::new(partition(5), b"Hello, World!".to_vec(), 1)
+            .unwrap()
             .with_chunk_size(5)
+            .unwrap()
             .with_transfer_id(77);
 
         let first = sender.current_chunk().unwrap();
@@ -574,43 +534,46 @@ mod tests {
         assert!(sender.is_complete());
         assert!(sender.current_chunk().is_none());
         sender.advance();
-        assert_eq!(sender.chunks_sent(), 3);
+        assert!(sender.is_complete());
     }
 
     #[test]
     fn snapshot_sender_generates_chunks() {
         let data = b"Hello, World!".to_vec();
-        let mut sender = SnapshotSender::new(partition(5), data.clone(), 1000).with_chunk_size(5);
+        let mut sender = SnapshotSender::new(partition(5), data.clone(), 1000)
+            .unwrap()
+            .with_chunk_size(5)
+            .unwrap();
 
         assert_eq!(sender.total_chunks(), 3);
         assert!(!sender.is_complete());
 
-        let c0 = sender.next_chunk().unwrap();
+        let c0 = drain_one(&mut sender).unwrap();
         assert_eq!(c0.chunk_index, 0);
         assert_eq!(c0.data, b"Hello");
         assert_eq!(c0.total_chunks, 3);
 
-        let c1 = sender.next_chunk().unwrap();
+        let c1 = drain_one(&mut sender).unwrap();
         assert_eq!(c1.chunk_index, 1);
         assert_eq!(c1.data, b", Wor");
 
-        let c2 = sender.next_chunk().unwrap();
+        let c2 = drain_one(&mut sender).unwrap();
         assert_eq!(c2.chunk_index, 2);
         assert_eq!(c2.data, b"ld!");
-        assert!(c2.is_last());
+        assert_eq!(c2.chunk_index + 1, c2.total_chunks);
 
         assert!(sender.is_complete());
-        assert!(sender.next_chunk().is_none());
+        assert!(drain_one(&mut sender).is_none());
     }
 
     #[test]
     fn snapshot_sender_empty_data() {
-        let mut sender = SnapshotSender::new(partition(0), vec![], 0);
+        let mut sender = SnapshotSender::new(partition(0), vec![], 0).unwrap();
         assert_eq!(sender.total_chunks(), 1);
 
-        let chunk = sender.next_chunk().unwrap();
+        let chunk = drain_one(&mut sender).unwrap();
         assert!(chunk.data.is_empty());
-        assert!(chunk.is_last());
+        assert_eq!(chunk.total_chunks, 1);
         assert!(sender.is_complete());
     }
 

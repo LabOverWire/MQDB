@@ -636,13 +636,23 @@ async fn a_failed_snapshot_import_keeps_the_replica_copy() {
     malformed.extend_from_slice(&2u32.to_be_bytes());
     malformed.extend_from_slice(&[0, 0]);
     let chunk = crate::cluster::snapshot::SnapshotSender::new(partition, malformed, 0)
-        .next_chunk()
+        .unwrap()
+        .current_chunk()
         .unwrap();
     replica
         .transport
         .inject_message(node(1), ClusterMessage::SnapshotChunk(chunk));
     replica.process_messages().await;
 
+    let refused = replica
+        .transport
+        .sent_messages()
+        .into_iter()
+        .filter(|(_, message)| {
+            matches!(message, ClusterMessage::SnapshotComplete(complete) if !complete.is_ok())
+        })
+        .count();
+    assert_eq!(refused, 1);
     assert_eq!(replica.pending_change_events(partition), 1);
     let stored = replica
         .stores()
