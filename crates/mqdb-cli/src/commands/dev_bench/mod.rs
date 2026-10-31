@@ -44,6 +44,7 @@ pub(crate) async fn cmd_dev_bench(
     };
 
     if !broker_listening(port) {
+        crate::commands::dev::refuse_db_in_use(db)?;
         println!("Starting agent for benchmark on port {port}...");
         start_agent_for_bench(&exe, db, port)?;
         tokio::time::sleep(Duration::from_secs(2)).await;

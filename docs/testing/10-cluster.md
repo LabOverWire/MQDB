@@ -346,8 +346,7 @@ also stop nodes and agents started by anything else on the machine. `--db-prefix
 only the PIDs that `dev start-cluster` recorded, after checking that each one still runs an
 `mqdb cluster start` or `mqdb agent start` whose `--db` resolves to `<prefix>-N`.
 The `dev test` suites that start their own cluster (`--ownership`, `--sharing`, `--presence`)
-also run `pkill -f "mqdb cluster"` and use ports 1883+, whatever `--db-prefix` or `--base-port`
-another cluster was started with.
+stop only the nodes they started, on their own `--base-port` block (see Dev Test below).
 
 ### Clean Test Data
 

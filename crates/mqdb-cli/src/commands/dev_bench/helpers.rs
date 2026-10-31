@@ -82,32 +82,63 @@ fn is_mqdb_binary(executable: &str) -> bool {
         .is_some_and(|name| name == "mqdb")
 }
 
-fn mqdb_processes_below(table: &[ProcessEntry], root: u32) -> Vec<u32> {
+fn descendants_of(table: &[ProcessEntry], root: u32) -> Vec<&ProcessEntry> {
     let mut frontier = vec![root];
     let mut found = Vec::new();
     while let Some(parent) = frontier.pop() {
         for entry in table.iter().filter(|entry| entry.ppid == parent) {
             frontier.push(entry.pid);
-            if is_mqdb_binary(&entry.executable) {
-                found.push(entry.pid);
-            }
+            found.push(entry);
         }
     }
     found
 }
 
+fn mqdb_processes_below(table: &[ProcessEntry], root: u32) -> Vec<u32> {
+    descendants_of(table, root)
+        .into_iter()
+        .filter(|entry| is_mqdb_binary(&entry.executable))
+        .map(|entry| entry.pid)
+        .collect()
+}
+
+fn send(signal: &str, pid: u32) -> Result<(), String> {
+    let status = Command::new("kill")
+        .args([signal, &pid.to_string()])
+        .status()
+        .map_err(|e| format!("run kill: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("kill {signal} {pid}: {status}"))
+    }
+}
+
+fn send_each(signal: &str, pids: &[u32]) -> Result<(), String> {
+    let failures: Vec<String> = pids
+        .iter()
+        .filter_map(|&pid| send(signal, pid).err())
+        .collect();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
 pub(super) fn interrupt_agents_under(root: u32) -> Result<Vec<u32>, String> {
     let agents = mqdb_processes_below(&process_table()?, root);
-    for pid in &agents {
-        let status = Command::new("kill")
-            .args(["-INT", &pid.to_string()])
-            .status()
-            .map_err(|e| format!("run kill: {e}"))?;
-        if !status.success() {
-            return Err(format!("kill -INT {pid}: {status}"));
-        }
-    }
+    send_each("-INT", &agents)?;
     Ok(agents)
+}
+
+pub(super) fn kill_processes_below(root: u32) -> Result<(), String> {
+    let table = process_table()?;
+    let below: Vec<u32> = descendants_of(&table, root)
+        .into_iter()
+        .map(|entry| entry.pid)
+        .collect();
+    send_each("-KILL", &below)
 }
 
 pub(super) async fn wait_for_broker_ready(

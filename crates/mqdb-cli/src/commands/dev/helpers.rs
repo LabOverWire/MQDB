@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, ExitStatus};
 use std::time::{Duration, Instant};
 
 pub(crate) const NODE_PID_FILE: &str = "mqdb.pid";
@@ -225,6 +225,17 @@ fn paths_in_use(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
         .collect())
 }
 
+pub(crate) fn refuse_db_in_use(db: &str) -> Result<(), String> {
+    let dir = PathBuf::from(db);
+    if paths_in_use(std::slice::from_ref(&dir))?.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "another mqdb process uses --db {db}; pass a different --db"
+        ))
+    }
+}
+
 fn listed(dirs: &[PathBuf]) -> String {
     dirs.iter()
         .map(|dir| dir.display().to_string())
@@ -382,11 +393,14 @@ impl StartedNode {
         }
     }
 
-    fn exited(&mut self) -> Result<bool, String> {
+    pub(crate) fn exit_status(&mut self) -> Result<Option<ExitStatus>, String> {
         self.child
             .try_wait()
-            .map(|status| status.is_some())
             .map_err(|e| format!("node {}: {e}", self.node_id))
+    }
+
+    fn exited(&mut self) -> Result<bool, String> {
+        self.exit_status().map(|status| status.is_some())
     }
 }
 
@@ -405,18 +419,11 @@ pub(crate) fn stop_started_nodes(nodes: &mut [StartedNode]) -> Result<(), String
     }
 
     let start = Instant::now();
-    loop {
-        let mut running = 0;
-        for node in nodes.iter_mut() {
-            match node.exited() {
-                Ok(false) => running += 1,
-                Ok(true) => {}
-                Err(e) => failures.push(e),
-            }
-        }
-        if running == 0 || start.elapsed() > NODE_STOP_TIMEOUT {
-            break;
-        }
+    while start.elapsed() <= NODE_STOP_TIMEOUT
+        && nodes
+            .iter_mut()
+            .any(|node| matches!(node.exited(), Ok(false)))
+    {
         std::thread::sleep(Duration::from_millis(100));
     }
 
@@ -424,15 +431,16 @@ pub(crate) fn stop_started_nodes(nodes: &mut [StartedNode]) -> Result<(), String
         let pid = node.child.id();
         match node.exited() {
             Ok(true) => println!("Node {} (pid {pid}) stopped", node.node_id),
-            Ok(false) => {
-                failures.push(format!(
+            Ok(false) => match node.child.kill().and_then(|()| node.child.wait()) {
+                Ok(_) => failures.push(format!(
                     "node {} (pid {pid}) did not stop within {NODE_STOP_TIMEOUT:?}; killed it",
                     node.node_id
-                ));
-                if let Err(e) = node.child.kill().and_then(|()| node.child.wait().map(drop)) {
-                    failures.push(format!("node {} (pid {pid}): {e}", node.node_id));
-                }
-            }
+                )),
+                Err(e) => failures.push(format!(
+                    "node {} (pid {pid}) did not stop within {NODE_STOP_TIMEOUT:?} and could not be killed: {e}",
+                    node.node_id
+                )),
+            },
             Err(e) => failures.push(e),
         }
         if let Err(e) = node.forget() {
@@ -786,11 +794,14 @@ mod tests {
             child,
             dir: dir.clone(),
         }];
-        assert_eq!(super::stop_started_nodes(&mut nodes), Ok(()));
-        assert!(
-            nodes[0].child.try_wait().expect("poll").is_some(),
-            "the stand-in is still running"
-        );
+        let stopped = super::stop_started_nodes(&mut nodes);
+        let still_running = nodes[0].child.try_wait().expect("poll").is_none();
+        if still_running {
+            let _ = nodes[0].child.kill();
+            let _ = nodes[0].child.wait();
+        }
+        assert_eq!(stopped, Ok(()));
+        assert!(!still_running, "the stand-in was still running");
         assert!(!dir.join(super::NODE_PID_FILE).exists());
     }
 

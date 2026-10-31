@@ -915,13 +915,32 @@ fn start_suite_cluster(
     .map_err(|e| e.to_string())?;
 
     println!("  Waiting for authenticated cluster...");
-    wait_for_suite_cluster(ports, 30)?;
+    wait_for_suite_cluster(&mut cluster.nodes, ports, 30)?;
     Ok(cluster)
 }
 
-fn wait_for_suite_cluster(ports: &[u16], timeout_secs: u64) -> Result<(), String> {
+fn exited_node(nodes: &mut [StartedNode]) -> Option<String> {
+    nodes.iter_mut().find_map(|node| match node.exit_status() {
+        Ok(Some(status)) => Some(format!(
+            "node {} exited ({status}); see {}",
+            node.node_id,
+            node.dir.join("mqdb.log").display()
+        )),
+        Ok(None) => None,
+        Err(e) => Some(e),
+    })
+}
+
+fn wait_for_suite_cluster(
+    nodes: &mut [StartedNode],
+    ports: &[u16],
+    timeout_secs: u64,
+) -> Result<(), String> {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(timeout_secs) {
+        if let Some(exited) = exited_node(nodes) {
+            return Err(exited);
+        }
         if ports.iter().all(|&port| node_accepts_admin(port)) {
             return if wait_for_partitions_settled(ports, timeout_secs * 2) {
                 Ok(())

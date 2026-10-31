@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 use std::time::{Duration, Instant};
 
-use super::helpers::{agent_args, broker_listening, chrono_timestamp, interrupt_agents_under};
+use super::helpers::{
+    agent_args, broker_listening, chrono_timestamp, interrupt_agents_under, kill_processes_below,
+};
 use super::runners::build_bench_args;
 use crate::cli_types::DevBenchScenario;
 
@@ -55,6 +57,7 @@ pub(crate) fn cmd_dev_profile(
         );
     }
 
+    crate::commands::dev::refuse_db_in_use(run.db)?;
     std::fs::create_dir_all(run.db)?;
 
     let timestamp = chrono_timestamp();
@@ -88,7 +91,7 @@ pub(crate) fn cmd_dev_profile(
 
 const PROFILER_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
 
-fn build_profiling_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn build_profiling() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nBuilding with profiling profile (full DWARF symbols)...");
     let build_status = Command::new("cargo")
         .args(["build", "--profile=profiling"])
@@ -96,6 +99,11 @@ fn build_profiling_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
     if !build_status.success() {
         return Err("Failed to build with profiling profile".into());
     }
+    Ok(())
+}
+
+fn build_profiling_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    build_profiling()?;
     let profiling_exe = std::env::current_dir()?.join("target/profiling/mqdb");
     if !profiling_exe.is_file() {
         return Err(format!(
@@ -165,10 +173,18 @@ impl Drop for Profiler {
         };
         match exited {
             Ok(Some(status)) => println!("{} exited with: {status}", self.name),
-            Ok(None) | Err(_) => match self.child.kill().and_then(|()| self.child.wait()) {
-                Ok(status) => println!("{} stopped: {status}", self.name),
-                Err(e) => println!("Warning: could not stop {} (pid {pid}): {e}", self.name),
-            },
+            Ok(None) | Err(_) => {
+                if let Err(e) = kill_processes_below(pid) {
+                    println!(
+                        "Warning: could not stop the processes under {}: {e}",
+                        self.name
+                    );
+                }
+                match self.child.kill().and_then(|()| self.child.wait()) {
+                    Ok(status) => println!("{} stopped: {status}", self.name),
+                    Err(e) => println!("Warning: could not stop {} (pid {pid}): {e}", self.name),
+                }
+            }
         }
     }
 }
@@ -218,7 +234,8 @@ fn profile_with_samply(target: &ProfileTarget) -> Result<(), Box<dyn std::error:
 }
 
 fn profile_with_flamegraph(target: &ProfileTarget) -> Result<(), Box<dyn std::error::Error>> {
-    let profiling_exe = build_profiling_binary()?;
+    build_profiling()?;
+    let bench_exe = std::env::current_exe()?;
 
     println!("Starting agent under flamegraph profiler...\n");
 
@@ -233,7 +250,7 @@ fn profile_with_flamegraph(target: &ProfileTarget) -> Result<(), Box<dyn std::er
     };
 
     std::thread::sleep(Duration::from_secs(2));
-    let bench = run_bench(&profiling_exe, target);
+    let bench = run_bench(&bench_exe, target);
     drop(flamegraph);
     bench?;
 

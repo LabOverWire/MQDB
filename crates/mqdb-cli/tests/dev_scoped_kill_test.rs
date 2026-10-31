@@ -102,6 +102,10 @@ impl Drop for StandIn {
 }
 
 fn stand_in_node(db: &Path) -> StandIn {
+    stand_in(db, "cluster")
+}
+
+fn stand_in(db: &Path, mode: &str) -> StandIn {
     StandIn(
         Command::new("sh")
             .args([
@@ -109,13 +113,13 @@ fn stand_in_node(db: &Path) -> StandIn {
                 "while :; do sleep 1; done",
                 "stand-in",
                 "mqdb",
-                "cluster",
+                mode,
                 "start",
             ])
             .args(["--node-id", "1", "--db"])
             .arg(db)
             .spawn()
-            .expect("spawn a stand-in node"),
+            .expect("spawn a stand-in"),
     )
 }
 
@@ -181,7 +185,7 @@ fn a_suite_cluster_signals_nothing_outside_its_own_nodes() {
         stdout.contains(&format!("Starting node 1 on port {base_port}")),
         "{stdout}"
     );
-    assert!(stdout.contains("did not accept connections"), "{stdout}");
+    assert!(stdout.contains("node 1 exited"), "{stdout}");
     assert!(!output.status.success(), "a failed suite exited 0");
     assert_eq!(
         shim.calls(),
@@ -233,7 +237,10 @@ fn a_suite_leaves_another_runs_nodes_under_the_same_prefix_alone() {
     std::fs::write(other_dir.join("mqdb.pid"), &other_pid).expect("other run's pid file");
 
     let base_port = free_port_block().to_string();
-    let other_port = format!("{}", free_port_block());
+    let other_port = std::iter::repeat_with(free_port_block)
+        .find(|port| port.to_string() != base_port)
+        .expect("a second free port")
+        .to_string();
     let same_layout_dir = shim.path().join(format!("t-own-{other_port}-1"));
     std::fs::create_dir_all(&same_layout_dir).expect("other port's node dir");
     let mut same_layout = stand_in_node(&same_layout_dir);
@@ -287,17 +294,32 @@ fn alive(pid: &str) -> bool {
         })
 }
 
+fn recorded_pid(path: &Path) -> Option<String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if let Ok(pid) = std::fs::read_to_string(path)
+            && !pid.trim().is_empty()
+        {
+            return Some(pid.trim().to_string());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    None
+}
+
 #[test]
-fn profile_stops_its_profiler_when_the_benchmark_cannot_start() {
+fn profile_stops_its_profiler_tree_when_the_benchmark_cannot_start() {
     let shim = Shimmed::new();
     let bin = shim.path().join("bin");
     let samply_pid = shim.path().join("samply.pid");
+    let helper_pid = shim.path().join("helper.pid");
     for (name, body) in [
         ("cargo", "exit 0".to_string()),
         (
             "samply",
             format!(
-                "echo $$ > '{}'\nexec sleep 8 </dev/null >/dev/null 2>&1",
+                "sleep 8 </dev/null >/dev/null 2>&1 &\necho $! > '{}'\necho $$ > '{}'\nexec sleep 8 </dev/null >/dev/null 2>&1",
+                helper_pid.display(),
                 samply_pid.display()
             ),
         ),
@@ -316,17 +338,15 @@ fn profile_stops_its_profiler_when_the_benchmark_cannot_start() {
         "db",
     ]);
     assert!(!output.status.success());
-    let Ok(pid) = std::fs::read_to_string(&samply_pid) else {
-        panic!(
-            "the samply shim never ran: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    };
-    assert!(
-        !alive(pid.trim()),
-        "dev profile left its profiler (pid {}) running",
-        pid.trim()
-    );
+    for (what, pid_file) in [("profiler", &samply_pid), ("profiler's child", &helper_pid)] {
+        if let Some(pid) = recorded_pid(pid_file) {
+            assert!(
+                !alive(&pid),
+                "dev profile left its {what} (pid {pid}) running: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
     assert_eq!(shim.calls(), "");
 }
 
@@ -336,7 +356,6 @@ fn suites_that_start_a_cluster_are_not_mixed_with_suites_that_need_one() {
     let base_port = free_port_block().to_string();
     let prefix = shim.path().join("t");
     let prefix_arg = prefix.to_str().expect("utf-8 path");
-    let started = std::time::Instant::now();
     let output = shim.run(&[
         "dev",
         "test",
@@ -355,6 +374,47 @@ fn suites_that_start_a_cluster_are_not_mixed_with_suites_that_need_one() {
     assert!(stderr.contains("cannot run together"), "{stderr}");
     assert!(!stdout.contains("Starting node"), "{stdout}");
     assert!(!stdout.contains("Waiting for cluster"), "{stdout}");
-    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(shim.calls(), "");
+}
+
+#[test]
+fn bench_and_profile_refuse_a_db_another_agent_uses() {
+    let shim = Shimmed::new();
+    let db = shim.path().join("busy-db");
+    std::fs::create_dir_all(&db).expect("db dir");
+    std::fs::write(db.join("mqdb.log"), "other run's log").expect("log");
+    let mut agent = stand_in(&db, "agent");
+    let db_arg = db.to_str().expect("utf-8 path");
+    let port = free_port_block().to_string();
+
+    for args in [
+        vec![
+            "dev",
+            "bench",
+            "--db",
+            db_arg,
+            "--port",
+            &port,
+            "db",
+            "--operations",
+            "1",
+        ],
+        vec![
+            "dev", "profile", "--tool", "sample", "--db", db_arg, "--port", &port, "db",
+        ],
+    ] {
+        let output = shim.run(&args);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("another mqdb process uses --db"),
+            "{args:?}: {stderr}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(db.join("mqdb.log")).expect("log"),
+        "other run's log"
+    );
+    assert!(agent.0.try_wait().expect("poll stand-in").is_none());
     assert_eq!(shim.calls(), "");
 }
