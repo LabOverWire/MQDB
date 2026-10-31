@@ -1001,13 +1001,14 @@ fn data_len(out: &str) -> usize {
         .unwrap_or(0)
 }
 
-fn denied((ok, out): &(Option<bool>, String)) -> bool {
-    let out = out.to_lowercase();
-    match ok {
-        Some(false) => !out.contains("connectionerror"),
-        Some(true) => out.contains("forbidden") || out.contains("error"),
-        None => false,
-    }
+fn denied(outcome: &(Option<bool>, String)) -> bool {
+    serde_json::Deserializer::from_str(&outcome.1)
+        .into_iter::<serde_json::Value>()
+        .next()
+        .and_then(Result::ok)
+        .is_some_and(|answer| {
+            answer["status"] == "error" && matches!(answer["code"].as_u64(), Some(403 | 404))
+        })
 }
 
 fn suite_entity(kind: &str) -> String {
@@ -1546,19 +1547,21 @@ fn presence_checks(ports: &[u16], check: &mut dyn FnMut(&str, bool)) {
         late.contains(&retained_id),
     );
 
-    shell_output(
-        "5",
+    let canary_id = format!("seat-holder-canary-{ts}");
+    let watched = shell_output(
+        "12",
         &format!(
-            "mosquitto_pub -i 'attacker' -h 127.0.0.1 -p {first} -u alice -P alice -t '$DB/_presence/victim' -m '{{\"forged\":true}}'"
+            "mosquitto_sub -i 'janitor-forge' -h 127.0.0.1 -p {first} -u alice -P alice -t '$DB/_presence/#' -v -W 8 & \
+             sleep 2; \
+             mosquitto_pub -i 'attacker' -h 127.0.0.1 -p {first} -u alice -P alice -t '$DB/_presence/victim' -m '{{\"forged\":true}}'; \
+             mosquitto_pub -i '{canary_id}' -h 127.0.0.1 -p {first} -u alice -P alice -t 'presence/noop' -m 'x'; \
+             wait"
         ),
     );
-    let victim = shell_output(
-        "5",
-        &format!(
-            "mosquitto_sub -i 'janitor-forge' -h 127.0.0.1 -p {first} -u alice -P alice -t '$DB/_presence/victim' -v -W 3"
-        ),
+    check(
+        "a client cannot forge presence",
+        watched.contains(&canary_id) && !watched.contains("forged"),
     );
-    check("a client cannot forge presence", !victim.contains("forged"));
 }
 
 fn run_test_presence(options: &DevTestOptions, ports: &[u16]) -> u32 {
@@ -1627,19 +1630,45 @@ mod port_tests {
         assert!(output.contains("on-stderr"), "{output}");
     }
 
+    fn shell_failure(stderr: &str) -> (Option<bool>, String) {
+        run_as(
+            Path::new("/bin/sh"),
+            "127.0.0.1:1",
+            "bob",
+            &["-c", &format!("echo '{stderr}' >&2; exit 1")],
+        )
+    }
+
     #[test]
-    fn an_unreachable_broker_is_not_counted_as_denied() {
-        let unreachable = run_as(
+    fn only_a_server_refusal_is_counted_as_denied() {
+        for stderr in [
+            "Error: ConnectionError(\"TCP connect failed\")",
+            "Error: ConnectionRefused(BadUsernameOrPassword)",
+            "Error: \"connect to 127.0.0.1:1 timed out after 2s\"",
+            "Error: request timed out after 5s",
+        ] {
+            let failed = shell_failure(stderr);
+            assert_eq!(failed.0, Some(false));
+            assert!(!denied(&failed), "{}", failed.1);
+        }
+        let refused = run_as(
             Path::new("/bin/sh"),
             "127.0.0.1:1",
             "bob",
             &[
                 "-c",
-                "echo 'Error: ConnectionError(\"TCP connect failed\")' >&2; exit 1",
+                "printf '{\\n  \"code\": 403,\\n  \"message\": \"permission denied\",\\n  \"status\": \"error\"\\n}\\n'; echo 'Error: permission denied' >&2; exit 1",
             ],
         );
-        assert_eq!(unreachable.0, Some(false));
-        assert!(!denied(&unreachable), "{}", unreachable.1);
+        assert!(denied(&refused), "{}", refused.1);
+        assert!(denied(&(
+            Some(false),
+            r#"{"status":"error","code":404,"message":"not found"}"#.to_string()
+        )));
+        assert!(!denied(&(
+            Some(false),
+            r#"{"status":"error","code":500,"message":"internal"}"#.to_string()
+        )));
     }
 
     #[test]
@@ -1652,11 +1681,7 @@ mod port_tests {
         );
         assert_eq!(never_ran.0, None);
         assert!(!denied(&never_ran));
-        assert!(denied(&(Some(false), String::new())));
-        assert!(denied(&(
-            Some(true),
-            r#"{"error":"forbidden"}"#.to_string()
-        )));
+        assert!(!denied(&(Some(false), String::new())));
         assert!(!denied(&(Some(true), r#"{"status":"ok"}"#.to_string())));
     }
 

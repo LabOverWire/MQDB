@@ -400,7 +400,7 @@ fn profile_with_sample(
     println!("Agent started with PID: {agent_pid}");
 
     println!("\nRunning benchmark in background...");
-    let bench = OwnedChild {
+    let mut bench = OwnedChild {
         child: Command::new(&profiling_exe)
             .args(&target.bench_args)
             .stdout(std::process::Stdio::null())
@@ -419,12 +419,18 @@ fn profile_with_sample(
         .status();
 
     println!("\nStopping benchmark and agent...");
+    let bench_exited = bench.child.try_wait();
     drop(bench);
     drop(agent);
 
     let sample_status = sample_status?;
     if !sample_status.success() {
-        println!("Warning: sample command failed with status: {sample_status}");
+        return Err(
+            format!("sample failed ({sample_status}), so its output may be missing").into(),
+        );
+    }
+    if let Some(bench_status) = bench_exited?.filter(|status| !status.success()) {
+        return Err(format!("benchmark: failed with {bench_status}").into());
     }
 
     println!("\nProfile saved: {}", sample_output.display());
