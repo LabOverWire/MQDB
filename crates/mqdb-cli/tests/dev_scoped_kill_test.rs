@@ -337,7 +337,13 @@ fn profile_stops_its_profiler_tree_when_the_benchmark_cannot_start() {
         "dev", "profile", "--tool", "samply", "--db", db_arg, "--port", &port, "--output", "out",
         "db",
     ]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(!output.status.success());
+    assert!(
+        stdout.contains("Starting agent under samply profiler")
+            && stdout.contains("Stopping agent to save profile"),
+        "the profiler was never started and stopped: {stdout}"
+    );
     for (what, pid_file) in [("profiler", &samply_pid), ("profiler's child", &helper_pid)] {
         if let Some(pid) = recorded_pid(pid_file) {
             assert!(
@@ -416,5 +422,25 @@ fn bench_and_profile_refuse_a_db_another_agent_uses() {
         "other run's log"
     );
     assert!(agent.0.try_wait().expect("poll stand-in").is_none());
+    assert_eq!(shim.calls(), "");
+}
+
+#[test]
+fn clean_keeps_a_live_node_dir_whose_path_contains_a_double_dash() {
+    let shim = Shimmed::new();
+    let parent = shim.path().join("odd --dir");
+    let node_dir = parent.join("c-1");
+    std::fs::create_dir_all(&node_dir).expect("node dir");
+    let mut node = stand_in_node(&node_dir);
+    let prefix = parent.join("c");
+    let prefix_arg = prefix.to_str().expect("utf-8 path");
+
+    let output = shim.run(&["dev", "clean", "--db-prefix", prefix_arg]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stdout}{stderr}");
+    assert!(stderr.contains("still use"), "{stdout}{stderr}");
+    assert!(node_dir.is_dir(), "dev clean removed a live node's dir");
+    assert!(node.0.try_wait().expect("poll stand-in").is_none());
     assert_eq!(shim.calls(), "");
 }

@@ -81,6 +81,36 @@ fn db_argument(command: &str) -> Option<&str> {
     flag_argument(command, "--db")
 }
 
+fn flag_values<'a>(command: &'a str, flag: &str) -> Option<Vec<&'a str>> {
+    let (_, rest) = command
+        .split_once(&format!(" {flag}="))
+        .or_else(|| command.split_once(&format!(" {flag} ")))?;
+    let mut values: Vec<&str> = rest
+        .match_indices(" --")
+        .map(|(cut, _)| rest[..cut].trim())
+        .collect();
+    values.push(rest.trim());
+    Some(values)
+}
+
+fn locate_flag(pid: u32, command: &str, flag: &str) -> Option<PathLocation> {
+    let values = flag_values(command, flag)?;
+    let located: Vec<PathLocation> = values.iter().map(|value| locate_path(pid, value)).collect();
+    if located
+        .iter()
+        .any(|location| matches!(location, PathLocation::Unresolved))
+    {
+        return Some(PathLocation::Unresolved);
+    }
+    Some(
+        located
+            .into_iter()
+            .rev()
+            .find(|location| matches!(location, PathLocation::Dir(_)))
+            .unwrap_or(PathLocation::Gone),
+    )
+}
+
 fn is_node_command(command: &str) -> bool {
     let padded = format!(" {command} ");
     padded.contains(" cluster start ") || padded.contains(" agent start ")
@@ -162,11 +192,11 @@ fn node_processes() -> Result<Vec<NodeProcess>, String> {
             let (pid, rest) = line.trim_start().split_once(char::is_whitespace)?;
             let (state, command) = rest.trim_start().split_once(char::is_whitespace)?;
             let pid = pid.parse().ok().filter(|_| !is_zombie(state))?;
-            let db = db_argument(command).filter(|_| is_node_command(command))?;
+            db_argument(command).filter(|_| is_node_command(command))?;
             Some(NodeProcess {
                 pid,
-                db: locate_path(pid, db),
-                passwd: flag_argument(command, "--passwd").map(|passwd| locate_path(pid, passwd)),
+                db: locate_flag(pid, command, "--db")?,
+                passwd: locate_flag(pid, command, "--passwd"),
             })
         })
         .collect())

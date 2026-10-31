@@ -359,9 +359,10 @@ mqdb dev clean --db-prefix /tmp/my-test
 ```
 
 `dev clean` removes the `<prefix>-N` node directories and `<prefix>-passwd`. With the default
-prefix `/tmp/mqdb-test` it also removes what `dev test` leaves, which always lives there:
+prefix `/tmp/mqdb-test` it also removes what older `dev test` versions left there:
 `/tmp/mqdb-test-{own,share,presence}-N` directories and `/tmp/mqdb-test-{ownership,sharing,presence}-passwd`
-files. It waits up to 10s while an `mqdb cluster start` or `mqdb agent start` process still uses
+files. Current `dev test` suites keep their nodes under `<db-prefix>-{own,share,presence}-<base-port>`,
+which a plain `dev clean` leaves alone (see Dev Test below). It waits up to 10s while an `mqdb cluster start` or `mqdb agent start` process still uses
 one of those directories as its `--db` or one of those files as its `--passwd`, then refuses. `dev start-cluster` without `--clean` refuses right away
 if a node still runs on one of its `<prefix>-N` directories, or, when no `--passwd` is given, still
 uses the `<prefix>-passwd` file it would regenerate. A process is matched by its
@@ -486,10 +487,11 @@ mqdb dev test --all --base-port 33601
 > `-presence-<base-port>`. They cannot be combined with suites that test a running cluster,
 > and they refuse to start if any of their ports (or the `+50` cluster transport ports) is
 > already in use, so run them on a free block, not on top of a running `dev start-cluster`.
-> At the end they stop only the nodes they started. After an interrupted run, stop the
-> leftovers with `mqdb dev kill --db-prefix /tmp/mqdb-test-own-1883` (or `-share-`,
-> `-presence-`) and remove them with `mqdb dev clean --db-prefix /tmp/mqdb-test-own-1883`;
-> a plain `mqdb dev clean` leaves suite dirs alone. They require `--license` to provide a valid Enterprise license for the
+> At the end they stop only the nodes they started and remove their password file; the node
+> directories stay, and the next run of the same suite on the same `--base-port` replaces them.
+> Remove them with `mqdb dev clean --db-prefix /tmp/mqdb-test-own-1883` (or `-share-`,
+> `-presence-`); a plain `mqdb dev clean` leaves suite dirs alone. After an interrupted run,
+> first stop the leftover nodes with `mqdb dev kill --db-prefix /tmp/mqdb-test-own-1883`. They require `--license` to provide a valid Enterprise license for the
 > nodes they spawn. `dev test` exits non-zero when any check fails.
 
 ### Dev Bench (Benchmarking with Auto-Start)
@@ -516,8 +518,11 @@ mqdb dev bench --output results.json --baseline baseline.json db
 ### Dev Profile (Performance Profiling)
 
 Profile the broker using `samply`, `flamegraph` or `sample`. Parent options (`--tool`, `--duration`, `--output`, `--port`) go before the subcommand.
-The profiled agent binds `--port` (default 1883), which must be free: `dev profile` refuses to
-start rather than stop another agent, and at the end it interrupts only the agent it started.
+The profiled agent binds `--port` (default 1883), which must be free, and uses `--db`, which no
+other mqdb process may be using: `dev profile` refuses to start rather than stop another agent.
+At the end it stops only what it started: with `samply` or `flamegraph` it sends SIGINT to the
+mqdb agent below the profiler and, if that does not end the profiler within 30 s, kills the
+profiler's process tree; with `sample` it kills the agent and benchmark it spawned.
 
 ```bash
 # Profile pub/sub with samply (default tool, 30s)
