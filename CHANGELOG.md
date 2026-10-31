@@ -4,6 +4,55 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-10-30 — mqdb-core 0.8.0, mqdb-agent 0.10.0, mqdb-cluster 0.5.0, mqdb-vault 0.2.0, mqdb-wasm 0.4.0, mqdb-cli 0.8.67
+
+### Security
+
+- **A long record id or unique value no longer crashes a cluster node or stops an agent from answering DB requests** (#209). The storage engine panics on any key over 65535 bytes, and both the record id and the hex-encoded unique value go into storage keys. A cluster create with a body `id` over 65535 bytes, or with a unique value over about 32 KB, crashed the node that stored it. In agent mode the same create panicked the task that answers DB requests. Any user allowed to create a record could do this. Now cluster creates refuse with 400 an entity name over 128 bytes or a body `id` over 512 bytes, the limits agent topics already had; the receiving node checks, and so does the primary of a forwarded create. Agent creates refuse a body `id` over 512 bytes. In a cluster, a unique value too large to store gets 400 on create and update, an FK reference too long to be an id gets 409 instead of panicking the node, and `constraint add` answers 400 for a constraint too large to store. The storage layer refuses a key over 65535 bytes with 400 (`value too large to store`) instead of panicking, in agent and cluster mode. A cluster entity whose name is over 128 bytes can still be read, listed, updated and deleted, but gets no new records. Agent restore still accepts longer ids written by older versions. No stored, wire or snapshot format changed. During a rolling upgrade, a create that the receiving node and the primary both still run on an older version is accepted as before, and an id over 65535 bytes still crashes an older node.
+- Dependencies with open advisories were updated in `Cargo.lock`: rustls 0.23.46, rustls-webpki 0.103.16, quinn-proto 0.11.19, quinn 0.11.12, h2 0.4.20, webpki-roots and webpki-root-certs 1.0.11, and crossbeam-epoch 0.9.21. `cargo audit` reported 14 vulnerabilities in the v0.8.66 lockfile and reports none now.
+
+### Fixed
+
+- **Shared subscriptions work across cluster nodes** (#191). The cluster had no `$share` handling: a group was served by the broker of each node that handled a publish, and a member's subscription never made its node a forwarding target. A group whose members were all on other nodes than the publisher received nothing, and a group with members on several nodes could receive a message once per node that handled it. Now each publish is served once per group. The publishing node serves a group when it holds a member of that group and filter; otherwise it assigns the group to one node with an online member, preferring nodes that are alive over suspected ones and rotating between them, and that node delivers it to its members only. Wills, including wills recovered after a crash, are assigned to share groups the same way. Modelled in `specs/ClusterShareRouting.tla`.
+- **Password logins are no longer locked out by the auth rate limiter when JWT or SCRAM is enabled** (#224). mqtt5 rate-limited only the JWT or SCRAM provider, which MQDB put in front of the password fallback, so every password login counted as a failed attempt. In password-only mode MQDB replaced mqtt5's rate-limited provider with an unlimited one, so wrong passwords were never limited. The limit now wraps MQDB's whole auth chain, in agent and cluster mode: a failed password login counts once and a valid one never does. MQDB's internal service user is exempt, so failed logins from loopback cannot lock out the internal clients. Expired limiter entries are removed every lockout period, and the limits are logged at startup.
+- **Broker-assigned client ids no longer collide across cluster nodes** (#201). mqtt5 0.48 named a client that connected with an empty client id `auto-N`, from a counter each process kept on its own and restarted at 0. Clients on different nodes could get the same id and overwrite each other's subscription and location entries. MQDB now uses mqtt5 0.49, which assigns `auto-` followed by 32 random hex digits.
+- Presence events and Sparkplug device certificates are published as system messages, so they keep their exemption from the retained-message limits, which mqtt5 0.49 now enforces inside the router.
+
+### Added
+
+- **The agent answers a plain HTTP `GET /health` on its WebSocket port** (#131). `--ws-bind` replies `200 {"status":"ok"}` before any WebSocket upgrade, so a load balancer can health-check the port that serves MQTT over WebSocket. MQTT over WebSocket stays on `/mqtt`. The agent now runs this listener itself: it binds the port at startup, and a bind failure fails startup with an error naming the address. It starts accepting only once the agent is ready (broker, internal DB handler and event publisher), so unlike MQTT over TCP, MQTT over WebSocket now waits for that readiness, and a `/health` reply means startup finished, not that the agent is still healthy. Each connection has 10 s to send its request and finish the handshake, and at most 128 connections can be waiting for their CONNACK at once. On shutdown, connections without a CONNACK are closed at once, MQTT 5 sessions get a DISCONNECT, and connections still open after 5 s are closed. Cluster mode still uses mqtt5's WebSocket listener and has no `/health` on that port.
+- **`mqdb dev start-cluster --base-port N`** (#234) starts node K on port N+K-1 (N at least 1024, default 1883) with its cluster transport on N+50+K-1. Every dev node now passes `--cluster-port-offset 50`, so the dev transport ports move from the node port plus 100 to plus 50. `start-cluster` writes `<prefix>-K/mqdb.pid` for each node and refuses a prefix whose nodes or password file are in use.
+- **`mqdb dev kill --db-prefix P [--node K]`** stops only the nodes `start-cluster` recorded for that prefix, and only a process whose `--db` is that node's directory. It waits up to 10 s and reports an error instead of a stopped node when `ps` or `kill` fails. `dev kill` without `--db-prefix` still kills every matching `mqdb` process on the machine. `dev clean` removes that prefix's node directories and password file (plus the `dev test` leftovers for the default `/tmp/mqdb-test`), and refuses while a node still uses them. `dev logs -f` follows every node and matches `--pattern` literally.
+
+### Documentation
+
+- README and the design docs describe cluster sharing support and its gaps (#213), and `docs/testing/17-sharing.md` and `docs/testing/18-websocket.md` add E2E scenarios for sharing and the WebSocket `/health` route.
+
+### Breaking changes
+
+- `mqdb-core` 0.7.12 → **0.8.0**: `Error` has a new variant, `KeyTooLarge(usize)`, returned by `FjallBackend` for a key over 65535 bytes and mapped to `ErrorCode::BadRequest`. `Error` is not `#[non_exhaustive]`, so an exhaustive `match` needs an arm for it. `protocol::MAX_ENTITY_NAME_LEN` and `protocol::MAX_RECORD_ID_LEN` are now public.
+- `mqdb-agent` 0.9.0 → **0.10.0**: it now depends on `mqdb-core` 0.8 and returns its `Error` (for example from `Database::open`), so use `mqdb-core` 0.8 alongside it. New in `auth_config`: `AuthRateLimit`, `take_auth_rate_limit` and `rate_limited`, which an embedder that builds its own auth chain can use to rate-limit the whole chain the way the agent does.
+- `mqdb-cluster` 0.4.38 → **0.5.0**: `DbEntity::create`, `ClusterConstraint::unique`, `ClusterConstraint::foreign_key`, `IndexEntry::create` and `UniqueReservation::create` return `None` instead of truncating a length that does not fit; `DbDataStore::upsert` returns `Result<DbEntity, DbDataStoreError>`. `ReserveResult` and `ReassertResult` have a new `Unencodable` variant and `ConstraintStoreError` a new `TooLarge` variant. `ForwardedPublish` has a new public field, `share_groups: Option<Vec<String>>`; struct literals must set it, or build the value with `ForwardedPublish::new`.
+- `mqdb-vault` 0.1.9 → **0.2.0** and `mqdb-wasm` 0.3.6 → **0.4.0**: no code changes; they depend on `mqdb-agent` 0.10 and `mqdb-core` 0.8, whose types are part of their public API. The `mqdb-wasm` JavaScript API is unchanged.
+
+### Known limitations
+
+- During a rolling upgrade, nodes older than this release ignore the share-group assignment and serve every local share group, so a group can receive a message twice until every node is upgraded.
+- A share group whose only members are offline on other nodes is not served across nodes, and an offline member on the publishing node is served (queued) even when another node has an online member.
+- Change events serve share groups once per node that handles them (#249), and the retained-message sync serves every local share group on each node that runs it. A retained publish is delivered twice to live subscribers on the nodes that hold its retained copy (#192).
+- With JWT or SCRAM, failed enhanced-auth attempts are not counted by the auth rate limiter; only CONNECT logins are.
+- An internal write forwarded by a node whose partition map is behind the receiver's is still dropped, and a held write is dropped if more than 1024 are held, if the receiver does not reach its epoch within 30 s, or if the receiver restarts.
+- A client is told a DB write succeeded when the primary fails to persist it; the record stays only in the primary's memory (#231).
+- A cluster loses every constraint after all of its nodes restart, so unique and FK checks stop until the constraints are added again (#250).
+- Share grants survive an FK cascade delete in agent mode, and in a cluster when the cascade delete runs on the cascading node, so a record re-created with the same id is readable by the old grantee (#253).
+- In a cluster, `ttl_secs` is ignored when the node that receives the create is the record's primary; the record never expires (#254).
+- In a cluster with `--ownership`, a non-owner's read or update of a missing record answers 403 or 404 depending on the node that receives it; agent mode answers 404 (#259).
+- A wildcard subscription whose filter is close to MQTT's 65535-byte limit breaks its partition's wildcard snapshot, and other subscriptions in that partition can be lost when the snapshot is imported (#258).
+- After a node restarts, change events for writes sent through it can miss watchers on other nodes for a while after it reports ready (#260). A client can also stay unreachable from other nodes after a session takeover, after moving between nodes, or after a node rejoins (#171).
+- A node reads only the latest partition map from the Raft task, so it can skip an intermediate assignment and miss that another node was primary in between (#219).
+- ACL rules changed at runtime through `$DB/_admin/acl/*` do not apply to federated JWT clients until restart (#225).
+- The `mqdb dev test` cluster suites stop clusters with a machine-wide `pkill -f "mqdb cluster"` and use the fixed ports 1883 and up (#252).
+
 ## 2026-10-28 — mqdb-cluster 0.4.38, mqdb-cli 0.8.66
 
 ### Fixed
