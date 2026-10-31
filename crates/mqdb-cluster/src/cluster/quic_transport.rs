@@ -683,6 +683,28 @@ struct PeerLanes {
     snapshot: flume::Receiver<Vec<u8>>,
 }
 
+enum Lane {
+    Control,
+    Bulk,
+    Snapshot,
+}
+
+impl PeerLanes {
+    async fn next_frame(&self, snapshot_first: bool) -> Option<(Lane, Vec<u8>)> {
+        let (first, first_lane, second, second_lane) = if snapshot_first {
+            (&self.snapshot, Lane::Snapshot, &self.bulk, Lane::Bulk)
+        } else {
+            (&self.bulk, Lane::Bulk, &self.snapshot, Lane::Snapshot)
+        };
+        tokio::select! {
+            biased;
+            control = self.control.recv_async() => control.ok().map(|frame| (Lane::Control, frame)),
+            data = first.recv_async() => data.ok().map(|frame| (first_lane, frame)),
+            data = second.recv_async() => data.ok().map(|frame| (second_lane, frame)),
+        }
+    }
+}
+
 async fn peer_writer_task(
     mut send_stream: SendStream,
     lanes: PeerLanes,
@@ -692,22 +714,16 @@ async fn peer_writer_task(
 ) {
     trace!(peer = peer_node.get(), "peer writer task started");
 
+    let mut snapshot_turn = false;
     loop {
-        let frame = tokio::select! {
-            biased;
-            control = lanes.control.recv_async() => match control {
-                Ok(frame) => frame,
-                Err(_) => break,
-            },
-            bulk = lanes.bulk.recv_async() => match bulk {
-                Ok(frame) => frame,
-                Err(_) => break,
-            },
-            snapshot = lanes.snapshot.recv_async() => match snapshot {
-                Ok(frame) => frame,
-                Err(_) => break,
-            },
+        let Some((lane, frame)) = lanes.next_frame(snapshot_turn).await else {
+            break;
         };
+        match lane {
+            Lane::Control => {}
+            Lane::Bulk => snapshot_turn = true,
+            Lane::Snapshot => snapshot_turn = false,
+        }
 
         if let Err(e) = send_stream.write_all(&frame).await {
             warn!(peer = peer_node.get(), error = %e, "peer writer failed, removing dead peer");

@@ -543,3 +543,51 @@ async fn a_failed_writer_closes_the_peer_connection() {
 
     far_handle.abort();
 }
+
+#[tokio::test]
+async fn a_snapshot_chunk_is_not_held_behind_a_full_bulk_lane() {
+    let StalledPeer {
+        transport,
+        local,
+        peer,
+        frame_rx,
+        release_tx,
+        far_handle,
+    } = setup_stalled_peer().await;
+
+    let mut bulk_full = false;
+    let mut bulk_accepted = 0;
+    for _ in 0..SEND_ATTEMPTS {
+        match transport.send(peer, bulk_message(local)).await {
+            Ok(()) => bulk_accepted += 1,
+            Err(TransportError::SendQueueFull(_)) => {
+                bulk_full = true;
+                break;
+            }
+            Err(other) => panic!("unexpected bulk send error: {other}"),
+        }
+    }
+    assert!(bulk_full, "bulk messages should eventually fill their lane");
+    transport
+        .send(peer, snapshot_chunk(0))
+        .await
+        .expect("snapshot chunk refused while only the bulk lane was full");
+
+    release_tx.send(()).ok();
+
+    let snapshot_type = snapshot_chunk(0).message_type();
+    let mut frames_before = 0;
+    loop {
+        let frame = collect_frame(&frame_rx).await;
+        if frame[2] == snapshot_type {
+            break;
+        }
+        frames_before += 1;
+    }
+    assert!(
+        frames_before < bulk_accepted,
+        "the snapshot chunk waited behind all {bulk_accepted} queued bulk frames"
+    );
+
+    far_handle.abort();
+}
