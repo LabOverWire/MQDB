@@ -281,6 +281,7 @@ pub enum FkDeleteContinuation {
         client_id: Option<String>,
         response_topic: String,
         correlation_data: Option<Vec<u8>>,
+        fk_guard: Option<(String, String)>,
     },
 }
 

@@ -154,7 +154,6 @@ pub(crate) enum CascadeSideEffect {
         id: String,
         field: String,
         expected_value: String,
-        updated_data: Vec<u8>,
     },
     RemoteDelete {
         entity: String,
@@ -196,7 +195,6 @@ impl CascadeSideEffect {
                 id,
                 field,
                 expected_value,
-                ..
             }
             | Self::RemoteSetNull {
                 entity,
@@ -391,6 +389,30 @@ impl<T: ClusterTransport> NodeController<T> {
     ) -> Result<(), super::db::DbDataStoreError> {
         self.commit_write(write, Some(change_event_record(event)), &[])
             .await
+    }
+
+    fn cascade_delete_applies(
+        &self,
+        entity: &str,
+        id: &str,
+        field: &str,
+        expected_value: &str,
+    ) -> bool {
+        let record = self.stores.db_get(entity, id);
+        if entity != SHARES_ENTITY {
+            return fk_field_matches(record, field, expected_value);
+        }
+        let grant = record.and_then(|grant| serde_json::from_slice::<Value>(&grant.data).ok());
+        let resource = grant.as_ref().and_then(|grant| {
+            grant
+                .get("resource_entity")
+                .and_then(Value::as_str)
+                .zip(grant.get("resource_id").and_then(Value::as_str))
+        });
+        resource.is_some_and(|(resource_entity, resource_id)| {
+            resource_id == expected_value
+                && self.stores.db_get(resource_entity, resource_id).is_none()
+        })
     }
 
     async fn commit_record_delete(
@@ -1186,7 +1208,7 @@ impl<T: ClusterTransport> NodeController<T> {
             Err(msg) => return (Self::json_error(400, &msg), None),
         };
         if let Some((field, expected_value)) = fk_guard_from_payload(&request.payload)
-            && !fk_field_matches(self.db_get(entity, id), &field, &expected_value)
+            && !self.cascade_delete_applies(entity, id, &field, &expected_value)
         {
             return (
                 Self::json_error(
@@ -1237,6 +1259,7 @@ impl<T: ClusterTransport> NodeController<T> {
                             client_id: request.client_id.clone(),
                             response_topic: request.response_topic.clone(),
                             correlation_data: request.correlation_data.clone(),
+                            fk_guard: fk_guard_from_payload(&request.payload),
                         },
                     },
                 )),
@@ -1461,30 +1484,11 @@ impl<T: ClusterTransport> NodeController<T> {
     ) {
         use crate::cluster::db::data_partition;
         if self.holds_primary_role(data_partition(&r.source_entity, child_id)) {
-            let Some(existing) = self.db_get(&r.source_entity, child_id) else {
-                return;
-            };
-            let Ok(mut data) = serde_json::from_slice::<serde_json::Value>(&existing.data) else {
-                return;
-            };
-            if let Some(obj) = data.as_object_mut() {
-                obj.insert(r.source_field.clone(), serde_json::Value::Null);
-                let v = obj
-                    .get("_version")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0);
-                obj.insert(
-                    "_version".to_string(),
-                    serde_json::Value::Number((v + 1).into()),
-                );
-            }
-            let updated_data = serde_json::to_vec(&data).unwrap_or_default();
             effects.push(CascadeSideEffect::LocalSetNull {
                 entity: r.source_entity.clone(),
                 id: child_id.to_string(),
                 field: r.source_field.clone(),
                 expected_value: r.target_id.clone(),
-                updated_data,
             });
         } else {
             effects.push(CascadeSideEffect::RemoteSetNull {
@@ -1511,7 +1515,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     field,
                     expected_value,
                 } => {
-                    if !fk_field_matches(self.stores.db_get(entity, id), field, expected_value) {
+                    if !self.cascade_delete_applies(entity, id, field, expected_value) {
                         continue;
                     }
                     (!self.run_local_cascade_delete(entity, id, origin).await)
@@ -1522,16 +1526,17 @@ impl<T: ClusterTransport> NodeController<T> {
                     id,
                     field,
                     expected_value,
-                    updated_data,
-                } => {
-                    if !fk_field_matches(self.stores.db_get(entity, id), field, expected_value) {
-                        continue;
-                    }
-                    (!self
-                        .run_local_cascade_set_null(entity, id, updated_data, now_ms, origin)
-                        .await)
-                        .then(unresolved_cascade_ack)
-                }
+                } => (!self
+                    .execute_local_cascade_set_null(
+                        entity,
+                        id,
+                        field,
+                        expected_value,
+                        now_ms,
+                        origin,
+                    )
+                    .await)
+                    .then(unresolved_cascade_ack),
                 CascadeSideEffect::RemoteDelete { .. }
                 | CascadeSideEffect::RemoteSetNull { .. } => {
                     self.dispatch_cascade_op(&effect.outbox_op(origin.sender), now_ms, origin)
@@ -1569,27 +1574,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    async fn run_local_cascade_set_null(
-        &mut self,
-        entity: &str,
-        id: &str,
-        updated_data: &[u8],
-        now_ms: u64,
-        origin: EventOrigin<'_>,
-    ) -> bool {
-        let data_json: Value = serde_json::from_slice(updated_data).unwrap_or(Value::Null);
-        match self
-            .db_update_with_event(entity, id, updated_data, data_json, now_ms, origin)
-            .await
-        {
-            Ok(_) | Err(super::db::DbDataStoreError::NotFound) => true,
-            Err(e) => {
-                tracing::warn!(%entity, %id, %e, "cascade set-null not committed");
-                false
-            }
-        }
-    }
-
     async fn dispatch_cascade_op(
         &mut self,
         op: &CascadeRemoteOp,
@@ -1606,7 +1590,7 @@ impl<T: ClusterTransport> NodeController<T> {
             } => {
                 let partition = super::db::data_partition(entity, id);
                 if self.holds_primary_role(partition) {
-                    if !fk_field_matches(self.stores.db_get(entity, id), field, expected_value) {
+                    if !self.cascade_delete_applies(entity, id, field, expected_value) {
                         return None;
                     }
                     (!self.execute_local_cascade_delete(entity, id, origin).await)
@@ -1896,19 +1880,12 @@ impl<T: ClusterTransport> NodeController<T> {
         let Ok(mut record) = serde_json::from_slice::<Value>(&existing.data) else {
             return true;
         };
+        if !fk_field_matches(Some(existing), field, expected_value) {
+            return true;
+        }
         let Some(obj) = record.as_object_mut() else {
             return true;
         };
-        let current = obj.get(field).and_then(|v| {
-            if v.is_string() {
-                v.as_str().map(String::from)
-            } else {
-                Some(v.to_string())
-            }
-        });
-        if current.as_deref() != Some(expected_value) {
-            return true;
-        }
         obj.insert(field.to_string(), Value::Null);
         let version = obj.get("_version").and_then(Value::as_u64).unwrap_or(0);
         obj.insert("_version".to_string(), Value::Number((version + 1).into()));
@@ -2450,13 +2427,28 @@ impl<T: ClusterTransport> NodeController<T> {
             client_id,
             response_topic,
             correlation_data,
+            fk_guard,
         } = continuation
         else {
             return;
         };
         let origin = EventOrigin::new(sender.as_deref(), client_id.as_deref());
 
-        let plan = match self.plan_fk_delete(&entity, &id, &side_effects, origin) {
+        let guard_refusal = fk_guard
+            .filter(|(field, expected_value)| {
+                !self.cascade_delete_applies(&entity, &id, field, expected_value)
+            })
+            .map(|_| {
+                Self::json_error(
+                    404,
+                    &format!("{entity}/{id} no longer references the deleted record"),
+                )
+            });
+        let planned = match guard_refusal {
+            Some(refusal) => Err(refusal),
+            None => self.plan_fk_delete(&entity, &id, &side_effects, origin),
+        };
+        let plan = match planned {
             Ok(plan) => plan,
             Err(payload) => {
                 if !response_topic.is_empty() {

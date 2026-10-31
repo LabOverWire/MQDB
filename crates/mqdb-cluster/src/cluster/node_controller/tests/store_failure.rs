@@ -998,12 +998,13 @@ async fn a_guarded_cascade_delete_spares_a_re_pointed_child() {
 }
 
 #[tokio::test]
-async fn a_guarded_cascade_delete_of_a_grant_is_applied() {
+async fn a_guarded_cascade_delete_of_an_orphaned_grant_is_applied() {
     let mut ctrl = primary_of_every_partition(&FaultyBackend::shared());
     let handler = sharing_handler(&mut ctrl);
     shared_diagram(&mut ctrl, &handler).await;
     let grant = ctrl.db_list("_shares")[0].id_str().to_string();
     let partition = crate::cluster::db::data_partition("_shares", &grant);
+    crate::cluster::test_support::remove_record(&ctrl.stores().db_data, "diagrams", "d1");
 
     ctrl.handle_json_db_request(
         node(2),
@@ -1085,5 +1086,173 @@ async fn removing_the_grants_of_a_deleted_resource_publishes_no_grant_events() {
             grant_events(&ctrl)
         ),
         (&json!(true), 0, 0)
+    );
+}
+
+#[tokio::test]
+async fn a_cascade_nulls_every_reference_a_child_holds() {
+    let mut ctrl = primary_of_every_partition(&FaultyBackend::shared());
+    let user = request(
+        &mut ctrl,
+        "$DB/users/create",
+        &json!({"id": "u1", "name": "a"}),
+    )
+    .await;
+    let task = request(
+        &mut ctrl,
+        "$DB/tasks/create",
+        &json!({"id": "t1", "assignee": "u1", "reviewer": "u1"}),
+    )
+    .await;
+    assert_eq!(
+        (&user["status"], &task["status"]),
+        (&json!("ok"), &json!("ok"))
+    );
+    for field in ["assignee", "reviewer"] {
+        ctrl.constraint_add(&ClusterConstraint::foreign_key(
+            "tasks",
+            &format!("tasks_{field}_fk"),
+            field,
+            "users",
+            "id",
+            OnDeleteAction::SetNull,
+        ))
+        .await
+        .unwrap();
+    }
+
+    let deleted = request(&mut ctrl, "$DB/users/u1/delete", &Value::Null).await;
+    let read = request(&mut ctrl, "$DB/tasks/t1", &Value::Null).await;
+
+    assert_eq!(
+        (
+            &deleted["data"]["deleted"],
+            &read["data"]["assignee"],
+            &read["data"]["reviewer"]
+        ),
+        (&json!(true), &Value::Null, &Value::Null)
+    );
+}
+
+#[tokio::test]
+async fn a_guarded_cascade_delete_is_rechecked_after_its_lookups() {
+    use crate::cluster::message_processor::HeartbeatUpdate;
+    use crate::cluster::protocol::Heartbeat;
+    let mut ctrl = primary_of_every_partition(&FaultyBackend::shared());
+    author_with_post(&mut ctrl).await;
+    let other = request(
+        &mut ctrl,
+        "$DB/users/create",
+        &json!({"id": "u9", "name": "b"}),
+    )
+    .await;
+    let comment = request(
+        &mut ctrl,
+        "$DB/comments/create",
+        &json!({"id": "c1", "post_id": "p1"}),
+    )
+    .await;
+    assert_eq!(
+        (&other["status"], &comment["status"]),
+        (&json!("ok"), &json!("ok"))
+    );
+    ctrl.constraint_add(&ClusterConstraint::foreign_key(
+        "comments",
+        "comments_post_fk",
+        "post_id",
+        "posts",
+        "id",
+        OnDeleteAction::Cascade,
+    ))
+    .await
+    .unwrap();
+    ctrl.apply_heartbeat_updates(&[HeartbeatUpdate {
+        from: node(2),
+        heartbeat: Heartbeat::create(node(2), 1),
+        received_at: 1,
+    }]);
+    let partition = crate::cluster::db::data_partition("posts", "p1");
+    let elsewhere = (0..NUM_PARTITIONS)
+        .map(|i| PartitionId::new(i).unwrap())
+        .find(|candidate| {
+            *candidate != partition
+                && *candidate != crate::cluster::db::data_partition("users", "u9")
+                && *candidate != crate::cluster::db::data_partition("comments", "c1")
+        })
+        .unwrap();
+    hand_partition_to(&mut ctrl, elsewhere, node(2));
+
+    let pending = ctrl
+        .handle_json_db_request(
+            node(2),
+            partition,
+            &cascade_delete_request(
+                "posts",
+                "p1",
+                &json!({"__mqdb_fk_expected": "author_id=u1"}),
+            ),
+        )
+        .await;
+    let Some(crate::cluster::node_controller::PendingConstraintWork::FkDelete(work)) = pending
+    else {
+        panic!("the delete should wait for remote reverse lookups");
+    };
+    let moved = request(
+        &mut ctrl,
+        "$DB/posts/p1/update",
+        &json!({"author_id": "u9"}),
+    )
+    .await;
+    assert_eq!(moved["status"], "ok");
+    ctrl.complete_pending_fk_delete_work(None, work.local_results, work.continuation)
+        .await;
+
+    assert!(ctrl.db_get("posts", "p1").is_some());
+}
+
+#[tokio::test]
+async fn a_spared_cascade_child_keeps_its_grants() {
+    let mut ctrl = primary_of_every_partition(&FaultyBackend::shared());
+    let mut fields = std::collections::HashMap::new();
+    fields.insert("posts".to_string(), "owner".to_string());
+    let ownership = Arc::new(mqdb_core::types::OwnershipConfig::new(fields));
+    ctrl.set_ownership(Arc::clone(&ownership));
+    let handler = DbRequestHandler::new(node(1)).with_ownership(ownership);
+    for (topic, payload) in [
+        ("$DB/users/create", json!({"id": "u1", "name": "a"})),
+        ("$DB/users/create", json!({"id": "u9", "name": "b"})),
+        (
+            "$DB/posts/create",
+            json!({"id": "p1", "author_id": "u1", "owner": "alice"}),
+        ),
+        (
+            "$DB/posts/p1/share",
+            json!({"grantee": "bob", "permission": "view"}),
+        ),
+        ("$DB/posts/p1/update", json!({"author_id": "u9"})),
+    ] {
+        let done = request_as(&mut ctrl, &handler, topic, &payload, Some("alice")).await;
+        assert_eq!(done["status"], "ok", "{topic}");
+    }
+    ctrl.constraint_add(&ClusterConstraint::foreign_key(
+        "posts",
+        "posts_author_fk",
+        "author_id",
+        "users",
+        "id",
+        OnDeleteAction::Cascade,
+    ))
+    .await
+    .unwrap();
+
+    let deleted = finish_author_delete(&mut ctrl, vec![cascade_of("u1", &["p1"])]).await;
+
+    assert_eq!(
+        (
+            &deleted["data"]["deleted"],
+            ctrl.db_get("posts", "p1").is_some(),
+            ctrl.db_list("_shares").len()
+        ),
+        (&json!(true), true, 1)
     );
 }
