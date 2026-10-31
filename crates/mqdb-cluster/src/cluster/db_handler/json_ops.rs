@@ -942,9 +942,9 @@ impl DbRequestHandler {
         payload: &[u8],
         mqtt_ctx: &super::MqttRequestContext<'_>,
     ) -> JsonOpResult {
-        let updates: Value = match serde_json::from_slice(payload) {
+        let updates = match helpers::update_fields(payload) {
             Ok(v) => v,
-            Err(_) => return JsonOpResult::Response(Self::json_error(400, "invalid JSON payload")),
+            Err(message) => return JsonOpResult::Response(Self::json_error(400, &message)),
         };
 
         let ctx = JsonOpContext {

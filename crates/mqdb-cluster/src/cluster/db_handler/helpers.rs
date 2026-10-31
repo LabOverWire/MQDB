@@ -39,12 +39,17 @@ pub(crate) fn delete_expected_version(payload: &[u8]) -> Result<Option<u64>, Str
     mqdb_core::protocol::take_expected_version(&mut value).map_err(|e| e.to_string())
 }
 
-pub(crate) fn update_payload_error(payload: &[u8]) -> Option<String> {
+pub(crate) fn update_fields(payload: &[u8]) -> Result<Value, String> {
     if payload.is_empty() {
-        return None;
+        return Ok(Value::Null);
     }
-    let Ok(mut value) = serde_json::from_slice::<Value>(payload) else {
-        return Some("invalid JSON payload".to_string());
+    serde_json::from_slice(payload).map_err(|_| "invalid JSON payload".to_string())
+}
+
+pub(crate) fn update_payload_error(payload: &[u8]) -> Option<String> {
+    let mut value = match update_fields(payload) {
+        Ok(value) => value,
+        Err(message) => return Some(message),
     };
     mqdb_core::protocol::take_expected_version(&mut value)
         .err()

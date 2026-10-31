@@ -398,6 +398,39 @@ async fn empty_update_payload_is_graded_by_ownership_first_on_every_path() {
     assert_eq!(existing, [json!(403), json!(403)]);
 }
 
+fn stored_version(ctrl: &NodeController<MockTransport>, id: &str) -> u64 {
+    let record: Value = serde_json::from_slice(&ctrl.db_get("docs", id).unwrap().data).unwrap();
+    record["_version"].as_u64().unwrap_or(0)
+}
+
+#[tokio::test]
+async fn empty_update_payload_from_owner_or_admin_bumps_the_version_like_agent_mode() {
+    let mut ctrl = docs_primary().await;
+    let before = stored_version(&ctrl, "owned-by-alice");
+
+    let mut answers = Vec::new();
+    for sender in ["alice", "root"] {
+        let local =
+            local_response(&mut ctrl, JsonDbOp::Update, "owned-by-alice", sender, b"").await;
+        let forwarded =
+            forwarded_response(&mut ctrl, JsonDbOp::Update, "owned-by-alice", sender, b"").await;
+        answers.push((sender, local["status"].clone(), forwarded["status"].clone()));
+    }
+
+    assert_eq!(
+        answers,
+        [
+            ("alice", json!("ok"), json!("ok")),
+            ("root", json!("ok"), json!("ok")),
+        ]
+    );
+    let record: Value =
+        serde_json::from_slice(&ctrl.db_get("docs", "owned-by-alice").unwrap().data).unwrap();
+    assert_eq!(record["title"], "a");
+    assert_eq!(record["userId"], "alice");
+    assert_eq!(stored_version(&ctrl, "owned-by-alice"), before + 4);
+}
+
 fn not_yet_primary(partition: PartitionId) -> NodeController<MockTransport> {
     let mut ctrl = create_test_controller(node(1), MockTransport::new(node(1)));
     ctrl.set_ownership(ownership());

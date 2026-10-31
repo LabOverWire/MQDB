@@ -20,8 +20,8 @@ use serde_json::Value;
 use tokio::sync::oneshot;
 
 use crate::cluster::db_handler::helpers::{
-    delete_expected_version, json_write_failure, parse_projection, update_payload_error,
-    validate_projection_against_schema,
+    delete_expected_version, json_write_failure, parse_projection, update_fields,
+    update_payload_error, validate_projection_against_schema,
 };
 
 const CASCADE_ACK_TIMEOUT_SECS: u64 = 5;
@@ -752,9 +752,9 @@ impl<T: ClusterTransport> NodeController<T> {
         request: &JsonDbRequest,
         from: NodeId,
     ) -> (Vec<u8>, Option<super::PendingConstraintWork>) {
-        let mut data: Value = match serde_json::from_slice(payload) {
+        let mut data = match update_fields(payload) {
             Ok(v) => v,
-            Err(_) => return (Self::json_error(400, "invalid JSON payload"), None),
+            Err(message) => return (Self::json_error(400, &message), None),
         };
 
         let fk_expected = data
