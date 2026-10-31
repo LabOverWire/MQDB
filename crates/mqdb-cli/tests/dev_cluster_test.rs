@@ -376,6 +376,11 @@ fn dev_start_cluster_leaves_no_pid_file_when_it_cannot_open_the_log() {
 
     assert!(!output.status.success(), "{}", output_text(&output));
     assert!(
+        output_text(&output).contains("mqdb.log"),
+        "start-cluster failed for another reason: {}",
+        output_text(&output)
+    );
+    assert!(
         !node_dir.join("mqdb.pid").exists(),
         "a node that never started left a pid file: {}",
         output_text(&output)

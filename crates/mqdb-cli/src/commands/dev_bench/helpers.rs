@@ -126,10 +126,12 @@ fn send_each(signal: &str, pids: &[u32]) -> Result<(), String> {
     }
 }
 
-pub(super) fn interrupt_agents_under(root: u32) -> Result<Vec<u32>, String> {
-    let agents = mqdb_processes_below(&process_table()?, root);
-    send_each("-INT", &agents)?;
-    Ok(agents)
+pub(super) fn mqdb_agents_below(root: u32) -> Result<Vec<u32>, String> {
+    Ok(mqdb_processes_below(&process_table()?, root))
+}
+
+pub(super) fn signal_pids(signal: &str, pids: &[u32]) -> Result<(), String> {
+    send_each(signal, pids)
 }
 
 pub(super) fn kill_processes_below(root: u32) -> Result<(), String> {

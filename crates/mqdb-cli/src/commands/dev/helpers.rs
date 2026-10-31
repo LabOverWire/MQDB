@@ -263,6 +263,17 @@ fn paths_in_use(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
         .collect())
 }
 
+pub(crate) fn pids_using_db(db: &str) -> Result<Vec<u32>, String> {
+    let Ok(dir) = std::fs::canonicalize(db) else {
+        return Ok(Vec::new());
+    };
+    Ok(node_processes()?
+        .into_iter()
+        .filter(|process| matches!(&process.db, PathLocation::Dir(used) if *used == dir))
+        .map(|process| process.pid)
+        .collect())
+}
+
 pub(crate) fn refuse_db_in_use(db: &str) -> Result<(), String> {
     let dir = PathBuf::from(db);
     if paths_in_use(std::slice::from_ref(&dir))?.is_empty() {
@@ -467,21 +478,33 @@ pub(crate) fn stop_started_nodes(nodes: &mut [StartedNode]) -> Result<(), String
 
     for node in nodes.iter_mut() {
         let pid = node.child.id();
-        match node.exited() {
-            Ok(true) => println!("Node {} (pid {pid}) stopped", node.node_id),
+        let stopped = match node.exited() {
+            Ok(true) => {
+                println!("Node {} (pid {pid}) stopped", node.node_id);
+                true
+            }
             Ok(false) => match node.child.kill().and_then(|()| node.child.wait()) {
-                Ok(_) => failures.push(format!(
-                    "node {} (pid {pid}) did not stop within {NODE_STOP_TIMEOUT:?}; killed it",
-                    node.node_id
-                )),
-                Err(e) => failures.push(format!(
-                    "node {} (pid {pid}) did not stop within {NODE_STOP_TIMEOUT:?} and could not be killed: {e}",
-                    node.node_id
-                )),
+                Ok(_) => {
+                    failures.push(format!(
+                        "node {} (pid {pid}) did not stop within {NODE_STOP_TIMEOUT:?}; killed it",
+                        node.node_id
+                    ));
+                    true
+                }
+                Err(e) => {
+                    failures.push(format!(
+                        "node {} (pid {pid}) did not stop within {NODE_STOP_TIMEOUT:?} and could not be killed: {e}",
+                        node.node_id
+                    ));
+                    false
+                }
             },
-            Err(e) => failures.push(e),
-        }
-        if let Err(e) = node.forget() {
+            Err(e) => {
+                failures.push(e);
+                false
+            }
+        };
+        if stopped && let Err(e) = node.forget() {
             failures.push(e);
         }
     }

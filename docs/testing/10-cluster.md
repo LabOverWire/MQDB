@@ -346,7 +346,7 @@ also stop nodes and agents started by anything else on the machine. `--db-prefix
 only the PIDs that `dev start-cluster` recorded, after checking that each one still runs an
 `mqdb cluster start` or `mqdb agent start` whose `--db` resolves to `<prefix>-N`.
 The `dev test` suites that start their own cluster (`--ownership`, `--sharing`, `--presence`)
-stop only the nodes they started, on their own `--base-port` block (see Dev Test below).
+stop only the nodes they started, on their own `--base-port` block (see Run Built-in Tests below).
 
 ### Clean Test Data
 
@@ -362,7 +362,7 @@ mqdb dev clean --db-prefix /tmp/my-test
 prefix `/tmp/mqdb-test` it also removes what older `dev test` versions left there:
 `/tmp/mqdb-test-{own,share,presence}-N` directories and `/tmp/mqdb-test-{ownership,sharing,presence}-passwd`
 files. Current `dev test` suites keep their nodes under `<db-prefix>-{own,share,presence}-<base-port>`,
-which a plain `dev clean` leaves alone (see Dev Test below). It waits up to 10s while an `mqdb cluster start` or `mqdb agent start` process still uses
+which a plain `dev clean` leaves alone (see Run Built-in Tests below). It waits up to 10s while an `mqdb cluster start` or `mqdb agent start` process still uses
 one of those directories as its `--db` or one of those files as its `--passwd`, then refuses. `dev start-cluster` without `--clean` refuses right away
 if a node still runs on one of its `<prefix>-N` directories, or, when no `--passwd` is given, still
 uses the `<prefix>-passwd` file it would regenerate. A process is matched by its

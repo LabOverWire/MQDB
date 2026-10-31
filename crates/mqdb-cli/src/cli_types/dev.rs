@@ -60,7 +60,10 @@ pub(crate) enum DevAction {
         presence: bool,
         #[arg(long, help = "Run constraint stress tests")]
         stress_constraints: bool,
-        #[arg(long, help = "Run all test suites")]
+        #[arg(
+            long,
+            help = "Run the default suites (not ownership, sharing, presence or stress-constraints)"
+        )]
         all: bool,
         #[arg(
             long,
@@ -82,7 +85,10 @@ pub(crate) enum DevAction {
             help = "Prefix for the data dirs and passwd files of the nodes the suites start"
         )]
         db_prefix: String,
-        #[arg(long, help = "Path to license key file (required for ownership tests)")]
+        #[arg(
+            long,
+            help = "Path to license key file (required for the ownership, sharing and presence suites)"
+        )]
         license: Option<PathBuf>,
     },
     StartCluster {

@@ -200,8 +200,9 @@ fn a_suite_cluster_signals_nothing_outside_its_own_nodes() {
 #[test]
 fn a_suite_refuses_ports_another_process_holds() {
     let shim = Shimmed::new();
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("occupy a port");
-    let base_port = listener.local_addr().expect("addr").port().to_string();
+    let held = free_port_block();
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, held)).expect("occupy a port");
+    let base_port = held.to_string();
     let prefix = shim.path().join("t");
     let prefix_arg = prefix.to_str().expect("utf-8 path");
     let output = shim.run(&[
@@ -456,6 +457,87 @@ fn profile_rejects_a_privileged_port() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(2), "{stderr}");
     assert!(stderr.contains("--port"), "{stderr}");
+    assert!(stderr.contains("1024"), "{stderr}");
     assert!(!db.exists());
     assert_eq!(shim.calls(), "");
+}
+
+fn profile_with_samply_shim(shim: &Shimmed, samply_body: &str) -> (Output, std::path::PathBuf) {
+    let bin = shim.path().join("bin");
+    install_shim(&bin.join("cargo"), "#!/bin/sh\nexit 0\n");
+    install_shim(&bin.join("samply"), &format!("#!/bin/sh\n{samply_body}\n"));
+    let profiling = shim.path().join("target/profiling");
+    std::fs::create_dir_all(&profiling).expect("profiling dir");
+    install_shim(&profiling.join("mqdb"), "#!/bin/sh\nexit 0\n");
+    let db = shim.path().join("db");
+    let db_arg = db.to_str().expect("utf-8 path").to_string();
+    let port = free_port_block().to_string();
+    let output = shim.run(&[
+        "dev", "profile", "--tool", "samply", "--db", &db_arg, "--port", &port, "--output", "out",
+        "db",
+    ]);
+    (output, db)
+}
+
+#[test]
+fn profile_stops_its_agent_after_the_profiler_exits_first() {
+    let shim = Shimmed::new();
+    let agent_pid = shim.path().join("agent.pid");
+    let db = shim.path().join("db");
+    let (output, _) = profile_with_samply_shim(
+        &shim,
+        &format!(
+            "sh -c 'i=0; while [ $i -lt 20 ]; do sleep 1; i=$((i+1)); done' stand-in mqdb agent start --db '{}' </dev/null >/dev/null 2>&1 &\necho $! > '{}'\nexit 0",
+            db.display(),
+            agent_pid.display()
+        ),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Stopping agent to save profile"),
+        "the profiler was never started and stopped: {stdout}"
+    );
+    let pid = recorded_pid(&agent_pid).expect("the shim started an agent");
+    assert!(
+        !alive(&pid),
+        "dev profile left its agent (pid {pid}) running after the profiler exited: {stdout}"
+    );
+    assert_eq!(shim.calls(), "");
+}
+
+#[test]
+fn profile_does_not_report_a_saved_profile_after_killing_the_profiler() {
+    let shim = Shimmed::new();
+    let (output, _) = profile_with_samply_shim(&shim, "exec sleep 8 </dev/null >/dev/null 2>&1");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("Stopping agent to save profile"),
+        "the profiler was never started and stopped: {stdout}{stderr}"
+    );
+    assert!(!output.status.success(), "{stdout}{stderr}");
+    assert!(!stdout.contains("Profile saved"), "{stdout}");
+    assert!(stderr.contains("its output may be missing"), "{stderr}");
+    assert_eq!(shim.calls(), "");
+}
+
+#[test]
+fn the_e2e_task_stops_only_the_cluster_it_started() {
+    let makefile =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Makefile.toml"))
+            .expect("read Makefile.toml");
+    let kills: Vec<&str> = makefile
+        .lines()
+        .filter(|line| line.contains("dev kill"))
+        .collect();
+    assert!(
+        !kills.is_empty(),
+        "the e2e task no longer stops its cluster"
+    );
+    for line in kills {
+        assert!(
+            line.contains("--db-prefix"),
+            "machine-wide kill in Makefile.toml: {line}"
+        );
+    }
 }

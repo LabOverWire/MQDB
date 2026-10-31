@@ -6,7 +6,8 @@ use std::process::{Child, Command, ExitStatus};
 use std::time::{Duration, Instant};
 
 use super::helpers::{
-    agent_args, broker_listening, chrono_timestamp, interrupt_agents_under, kill_processes_below,
+    agent_args, broker_listening, chrono_timestamp, kill_processes_below, mqdb_agents_below,
+    signal_pids,
 };
 use super::runners::build_bench_args;
 use crate::cli_types::DevBenchScenario;
@@ -153,42 +154,105 @@ impl Drop for OwnedChild {
 struct Profiler {
     child: Child,
     name: &'static str,
+    db: String,
+    stopped: bool,
+}
+
+impl Profiler {
+    fn agents(&self) -> Result<Vec<u32>, String> {
+        let mut agents = mqdb_agents_below(self.child.id())?;
+        for pid in crate::commands::dev::pids_using_db(&self.db)? {
+            if !agents.contains(&pid) {
+                agents.push(pid);
+            }
+        }
+        Ok(agents)
+    }
+
+    fn force_stop(&mut self) -> Vec<String> {
+        let pid = self.child.id();
+        let mut problems = Vec::new();
+        if let Err(e) = kill_processes_below(pid) {
+            problems.push(format!(
+                "could not stop the processes under {}: {e}",
+                self.name
+            ));
+        }
+        if let Err(e) = self.child.kill().and_then(|()| self.child.wait().map(drop)) {
+            problems.push(format!("could not stop {} (pid {pid}): {e}", self.name));
+        }
+        match crate::commands::dev::pids_using_db(&self.db)
+            .and_then(|left| signal_pids("-KILL", &left))
+        {
+            Ok(()) => {}
+            Err(e) => problems.push(format!("could not stop the agent on --db {}: {e}", self.db)),
+        }
+        problems
+    }
+
+    fn stop(&mut self) -> Result<(), String> {
+        if self.stopped {
+            return Ok(());
+        }
+        self.stopped = true;
+        println!("\nStopping agent to save profile...");
+        let agents = match self.agents() {
+            Ok(agents) if agents.is_empty() => Err(format!(
+                "no agent found under {} or on --db {}",
+                self.name, self.db
+            )),
+            Ok(agents) => signal_pids("-INT", &agents)
+                .map_err(|e| format!("could not interrupt the profiled agent: {e}")),
+            Err(e) => Err(e),
+        };
+        let exited = match agents {
+            Ok(()) => wait_with_timeout(&mut self.child, PROFILER_EXIT_TIMEOUT)
+                .map_err(|e| format!("could not wait for {}: {e}", self.name))
+                .and_then(|status| {
+                    status.ok_or_else(|| {
+                        format!(
+                            "{} did not exit within {PROFILER_EXIT_TIMEOUT:?}",
+                            self.name
+                        )
+                    })
+                }),
+            Err(e) => Err(e),
+        };
+        match exited {
+            Ok(status) => {
+                println!("{} exited with: {status}", self.name);
+                let left = crate::commands::dev::pids_using_db(&self.db)?;
+                if !left.is_empty() {
+                    signal_pids("-KILL", &left)?;
+                    println!(
+                        "Warning: killed the agent still running on --db {}",
+                        self.db
+                    );
+                }
+                Ok(())
+            }
+            Err(e) => {
+                let problems = self.force_stop();
+                Err(std::iter::once(format!(
+                    "{e}; killed {} before it finished, so its output may be missing",
+                    self.name
+                ))
+                .chain(problems)
+                .collect::<Vec<_>>()
+                .join("; "))
+            }
+        }
+    }
+
+    fn finish(mut self) -> Result<(), String> {
+        self.stop()
+    }
 }
 
 impl Drop for Profiler {
     fn drop(&mut self) {
-        println!("\nStopping agent to save profile...");
-        let pid = self.child.id();
-        let interrupted = match interrupt_agents_under(pid) {
-            Ok(agents) if agents.is_empty() => {
-                println!("Warning: no agent found under {} (pid {pid})", self.name);
-                false
-            }
-            Ok(_) => true,
-            Err(e) => {
-                println!("Warning: could not interrupt the profiled agent: {e}");
-                false
-            }
-        };
-        let exited = if interrupted {
-            wait_with_timeout(&mut self.child, PROFILER_EXIT_TIMEOUT)
-        } else {
-            Ok(None)
-        };
-        match exited {
-            Ok(Some(status)) => println!("{} exited with: {status}", self.name),
-            Ok(None) | Err(_) => {
-                if let Err(e) = kill_processes_below(pid) {
-                    println!(
-                        "Warning: could not stop the processes under {}: {e}",
-                        self.name
-                    );
-                }
-                match self.child.kill().and_then(|()| self.child.wait()) {
-                    Ok(status) => println!("{} stopped: {status}", self.name),
-                    Err(e) => println!("Warning: could not stop {} (pid {pid}): {e}", self.name),
-                }
-            }
+        if let Err(e) = self.stop() {
+            println!("Warning: {e}");
         }
     }
 }
@@ -226,12 +290,15 @@ fn profile_with_samply(target: &ProfileTarget) -> Result<(), Box<dyn std::error:
             .args(agent_args(target.db, target.port))
             .spawn()?,
         name: "Samply",
+        db: target.db.to_string(),
+        stopped: false,
     };
 
     std::thread::sleep(Duration::from_secs(3));
     let bench = run_bench(&profiling_exe, target);
-    drop(samply);
+    let stopped = samply.finish();
     bench?;
+    stopped?;
 
     println!("\nProfile saved: {}", target.output_path.display());
     println!("Load with: samply load {}", target.output_path.display());
@@ -253,12 +320,15 @@ fn profile_with_flamegraph(target: &ProfileTarget) -> Result<(), Box<dyn std::er
             .args(agent_args(target.db, target.port))
             .spawn()?,
         name: "Flamegraph",
+        db: target.db.to_string(),
+        stopped: false,
     };
 
     std::thread::sleep(Duration::from_secs(2));
     let bench = run_bench(&bench_exe, target);
-    drop(flamegraph);
+    let stopped = flamegraph.finish();
     bench?;
+    stopped?;
 
     println!("\nFlamegraph saved: {}", target.output_path.display());
     Ok(())

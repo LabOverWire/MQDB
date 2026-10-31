@@ -238,11 +238,16 @@ fi
 description = "Run E2E cluster tests (requires release build)"
 dependencies = ["build-release"]
 script = '''
-./target/release/mqdb dev start-cluster --nodes 3 --clean
+PREFIX=/tmp/mqdb-e2e
+LICENSE_ARG=""
+if [ -n "$MQDB_LICENSE" ]; then
+    LICENSE_ARG="--license $MQDB_LICENSE"
+fi
+./target/release/mqdb dev start-cluster --nodes 3 --clean --db-prefix "$PREFIX" $LICENSE_ARG
 sleep 3
 ./target/release/mqdb dev test --all
 RESULT=$?
-./target/release/mqdb dev kill
+./target/release/mqdb dev kill --db-prefix "$PREFIX"
 exit $RESULT
 '''
 
