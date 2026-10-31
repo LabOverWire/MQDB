@@ -37,10 +37,12 @@
 (* waiting to become primary keeps a live source it already asked, even  *)
 (* when a newer assignment names another replica: that source still holds *)
 (* the data, while a replica added during the wait does not. With        *)
-(* RefuseWhileWaiting, a node that is itself waiting for a snapshot       *)
-(* answers a request only once it holds the partition (the code defers the *)
-(* request), unless it waits on the requester (two empty nodes of a fresh *)
-(* partition).                                                             *)
+(* TakerKeepsSource, only a request made while waiting to become primary  *)
+(* keeps its source (taker), and it keeps it also when the node is        *)
+(* swapped to replica during the wait. With RefuseWhileWaiting, a node    *)
+(* that is itself waiting for a snapshot answers a request only once it   *)
+(* holds the partition (the code defers the request), unless it waits on  *)
+(* the requester (two empty nodes of a fresh partition).                  *)
 (*                                                                          *)
 (* A node keeps records in memory (mem) and on disk. A write reaches both; *)
 (* a snapshot import reaches memory only (import_partition does not        *)
@@ -54,9 +56,11 @@
 (* for sequence-gap catch-up. One failure at a time (RF=2): a node crashes *)
 (* only while every other node is up and every assigned node holds every  *)
 (* acked write, and the primary only while a replica has the Replica role.*)
-(* With Lag = FALSE the rebalancer moves only a primary that holds the     *)
-(* Primary role, and it steps down in the same step; a replica moved away  *)
-(* also applies its removal in the same step. Lag = TRUE lets the          *)
+(* With Lag = FALSE the old primary of a rebalance applies the swap in the *)
+(* same step; with SwapWhileWaiting that old primary may still be waiting  *)
+(* for its snapshot (the rebalancer reads the map, not roles), otherwise  *)
+(* it must hold the Primary role. A replica moved away also applies its  *)
+(* removal in the same step. Lag = TRUE lets the                          *)
 (* old primary (or a node still waiting to become primary) act on its old *)
 (* map until its own ApplyMap.                                              *)
 (*                                                                          *)
@@ -66,18 +70,24 @@
 (* modelled.                                                               *)
 (*                                                                          *)
 (* RESULTS (3 nodes, MaxWrites 2, MaxWipes 1, MaxSwaps 1; MaxCrashes 2 and *)
-(* MaxMoves 0 unless noted):                                               *)
+(* MaxMoves 0 unless noted; every "fix" cfg sets SwapWhileWaiting and     *)
+(* TakerKeepsSource):                                                     *)
 (*  _current:        ServeCorrect fails in 3 steps: the primary crashes    *)
 (*                   with a wipe, restarts before Detect, takes the role.  *)
 (*  _current_live:   liveness holds (the bug is a safety one).             *)
 (*  _current_move_nowipe (1 crash, 1 move): ServeCorrect fails without a   *)
 (*                   crash: a replica moved in is promoted before its      *)
 (*                   snapshot lands.                                        *)
-(*  _fix:            all invariants and both properties hold (254,506).   *)
+(*  _fix:            all invariants and both properties hold (256,526).   *)
 (*  _fix_move (1 crash, 1 move): all invariants and both properties hold  *)
-(*                   (34,398).                                              *)
+(*                   (34,516).                                              *)
+(*  _fix_move_anykeep (TakerKeepsSource FALSE): ServeCorrect fails: the   *)
+(*                   replica moves while the wiped primary waits, then the *)
+(*                   primary is swapped to replica and asks the new,       *)
+(*                   empty primary, and the two empty nodes serve each    *)
+(*                   other.                                                 *)
 (*  _fix_move_nowipe (1 crash without a wipe, 1 move): invariants hold    *)
-(*                   (22,020); the same setting fails for _current.        *)
+(*                   (22,072); the same setting fails for _current.        *)
 (*  _fix_noretry:    EventuallyServing fails: a request lost with its     *)
 (*                   source is never sent again.                            *)
 (*  _fix_switchsource (KeepSource FALSE, 1 crash, 1 move): ServeCorrect    *)
@@ -114,17 +124,17 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
-CONSTANTS Design, MaxWrites, MaxCrashes, MaxWipes, MaxSwaps, MaxMoves, Lag, RetryLost, KeepSource, EarlyMove, RefuseWhileWaiting
+CONSTANTS Design, MaxWrites, MaxCrashes, MaxWipes, MaxSwaps, MaxMoves, Lag, RetryLost, KeepSource, EarlyMove, RefuseWhileWaiting, SwapWhileWaiting, TakerKeepsSource
 
 Nodes == {1, 2, 3}
 Keys == {1}
 None == 0
 Roles == {"none", "primary", "replica", "awaiting"}
 
-VARIABLES up, mem, disk, role, applied, requested, src, live, imported,
+VARIABLES up, mem, disk, role, applied, requested, src, live, taker, imported,
           marker, hist, dead, truth, writes, crashes, wipes, swaps, moves
 
-vars == <<up, mem, disk, role, applied, requested, src, live, imported,
+vars == <<up, mem, disk, role, applied, requested, src, live, taker, imported,
           marker, hist, dead, truth, writes, crashes, wipes, swaps, moves>>
 
 Empty == [k \in Keys |-> 0]
@@ -142,6 +152,7 @@ TypeOK ==
     /\ requested \in [Nodes -> BOOLEAN]
     /\ src \in [Nodes -> Nodes \cup {None}]
     /\ live \in [Nodes -> BOOLEAN]
+    /\ taker \in [Nodes -> BOOLEAN]
     /\ dead \subseteq Nodes
 
 Init ==
@@ -153,6 +164,7 @@ Init ==
     /\ requested = [n \in Nodes |-> FALSE]
     /\ src = [n \in Nodes |-> None]
     /\ live = [n \in Nodes |-> FALSE]
+    /\ taker = [n \in Nodes |-> FALSE]
     /\ imported = [n \in Nodes |-> FALSE]
     /\ marker = [n \in Nodes |-> IF n = 1 THEN 1 ELSE 0]
     /\ hist = <<[p |-> 1, r |-> 2]>>
@@ -164,16 +176,17 @@ Init ==
     /\ swaps = 0
     /\ moves = 0
 
-Ask(n, from) ==
+Ask(n, from, t) ==
     /\ requested' = [requested EXCEPT ![n] = TRUE]
     /\ src' = [src EXCEPT ![n] = from]
     /\ live' = [live EXCEPT ![n] = up[from]]
+    /\ taker' = [taker EXCEPT ![n] = t]
 
-KeepRequest == UNCHANGED <<requested, src, live>>
+KeepRequest == UNCHANGED <<requested, src, live, taker>>
 
-AwaitFrom(n, from) ==
+AwaitFrom(n, from, t) ==
     /\ role' = [role EXCEPT ![n] = "awaiting"]
-    /\ IF Design # "current" \/ ~requested[n] THEN Ask(n, from) ELSE KeepRequest
+    /\ IF Design # "current" \/ ~requested[n] THEN Ask(n, from, t) ELSE KeepRequest
 
 TakeRole(n, r) ==
     /\ role' = [role EXCEPT ![n] = r]
@@ -181,6 +194,7 @@ TakeRole(n, r) ==
            /\ requested' = [requested EXCEPT ![n] = FALSE]
            /\ live' = [live EXCEPT ![n] = FALSE]
            /\ src' = [src EXCEPT ![n] = None]
+           /\ taker' = [taker EXCEPT ![n] = FALSE]
        ELSE KeepRequest
 
 HeldData(n) == role[n] \in {"primary", "replica"}
@@ -195,6 +209,7 @@ KeepsLiveSource(n) ==
     /\ role[n] = "awaiting"
     /\ requested[n]
     /\ live[n]
+    /\ TakerKeepsSource => taker[n]
 
 ApplyAsPrimary(n, m) ==
     IF Design = "current" \/ HeldData(n) \/ TrustDisk(n) \/ m.r = None
@@ -202,10 +217,18 @@ ApplyAsPrimary(n, m) ==
     ELSE IF KeepsLiveSource(n)
          THEN /\ role' = role
               /\ KeepRequest
-         ELSE AwaitFrom(n, m.r)
+         ELSE IF TakerKeepsSource /\ Design = "fix" /\ requested[n] /\ src[n] = m.r
+              THEN /\ role' = [role EXCEPT ![n] = "awaiting"]
+                   /\ taker' = [taker EXCEPT ![n] = TRUE]
+                   /\ UNCHANGED <<requested, src, live>>
+              ELSE AwaitFrom(n, m.r, TRUE)
 
 ApplyAsReplica(n, m) ==
-    IF HeldData(n) THEN TakeRole(n, "replica") ELSE AwaitFrom(n, m.p)
+    IF HeldData(n) THEN TakeRole(n, "replica")
+    ELSE IF TakerKeepsSource /\ KeepsLiveSource(n)
+         THEN /\ role' = role
+              /\ KeepRequest
+         ELSE AwaitFrom(n, m.p, FALSE)
 
 ApplyMap(n) ==
     /\ up[n]
@@ -240,6 +263,7 @@ ServeSnapshot(n) ==
     /\ requested' = [requested EXCEPT ![n] = FALSE]
     /\ live' = [live EXCEPT ![n] = FALSE]
     /\ src' = [src EXCEPT ![n] = None]
+    /\ taker' = [taker EXCEPT ![n] = FALSE]
     /\ imported' = [imported EXCEPT ![n] =
                         imported[n] \/ (Design \in {"fix", "recovered"} /\ \E k \in Keys : mem[src[n]][k] # 0)]
     /\ marker' = [marker EXCEPT ![n] =
@@ -254,11 +278,13 @@ Retry(n) ==
     /\ role[n] = "awaiting"
     /\ ~live[n]
     /\ LET m == LocalMap(n)
-           from == IF m.p = n THEN m.r ELSE m.p
+           mapFrom == IF m.p = n THEN m.r ELSE m.p
+           keep == TakerKeepsSource /\ taker[n] /\ src[n] \in Nodes /\ src[n] \notin dead
+           from == IF keep THEN src[n] ELSE mapFrom
        IN /\ from \in Nodes
           /\ from # n
           /\ up[from]
-          /\ Ask(n, from)
+          /\ Ask(n, from, m.p = n \/ keep)
     /\ UNCHANGED <<up, mem, disk, role, applied, imported, marker, hist, dead, truth, writes, crashes, wipes, swaps, moves>>
 
 Write(k) ==
@@ -273,7 +299,7 @@ Write(k) ==
               /\ disk' = [n \in Nodes |-> IF gets(n) THEN [disk[n] EXCEPT ![k] = v] ELSE disk[n]]
               /\ truth' = [truth EXCEPT ![k] = v]
               /\ writes' = v
-    /\ UNCHANGED <<up, role, applied, requested, src, live, imported, marker, hist, dead, crashes, wipes, swaps, moves>>
+    /\ UNCHANGED <<up, role, applied, requested, src, live, taker, imported, marker, hist, dead, crashes, wipes, swaps, moves>>
 
 Crash(n, wipe) ==
     /\ up[n]
@@ -291,6 +317,7 @@ Crash(n, wipe) ==
     /\ requested' = [requested EXCEPT ![n] = FALSE]
     /\ src' = [src EXCEPT ![n] = None]
     /\ live' = [m \in Nodes |-> IF m = n \/ src[m] = n THEN FALSE ELSE live[m]]
+    /\ taker' = [taker EXCEPT ![n] = FALSE]
     /\ crashes' = crashes + 1
     /\ wipes' = IF wipe THEN wipes + 1 ELSE wipes
     /\ UNCHANGED <<hist, dead, truth, writes, swaps, moves>>
@@ -299,7 +326,7 @@ Restart(n) ==
     /\ ~up[n]
     /\ up' = [up EXCEPT ![n] = TRUE]
     /\ dead' = dead \ {n}
-    /\ UNCHANGED <<mem, disk, marker, role, applied, requested, src, live, imported, hist, truth, writes, crashes, wipes, swaps, moves>>
+    /\ UNCHANGED <<mem, disk, marker, role, applied, requested, src, live, taker, imported, hist, truth, writes, crashes, wipes, swaps, moves>>
 
 Detect(n) ==
     /\ ~up[n]
@@ -313,7 +340,7 @@ Detect(n) ==
                  ELSE \E q \in alive : hist' = Append(hist, [p |-> q, r |-> None])
             [] m.r = n -> hist' = Append(hist, [p |-> m.p, r |-> None])
             [] OTHER -> UNCHANGED hist
-    /\ UNCHANGED <<up, mem, disk, role, applied, requested, src, live, imported, marker, truth, writes, crashes, wipes, swaps, moves>>
+    /\ UNCHANGED <<up, mem, disk, role, applied, requested, src, live, taker, imported, marker, truth, writes, crashes, wipes, swaps, moves>>
 
 AddReplica(n) ==
     /\ up[n]
@@ -321,7 +348,7 @@ AddReplica(n) ==
     /\ Latest.r = None
     /\ Latest.p # n
     /\ hist' = Append(hist, [p |-> Latest.p, r |-> n])
-    /\ UNCHANGED <<up, mem, disk, role, applied, requested, src, live, imported, marker, dead, truth, writes, crashes, wipes, swaps, moves>>
+    /\ UNCHANGED <<up, mem, disk, role, applied, requested, src, live, taker, imported, marker, dead, truth, writes, crashes, wipes, swaps, moves>>
 
 Swap ==
     /\ swaps < MaxSwaps
@@ -331,13 +358,21 @@ Swap ==
        /\ m.p \notin dead /\ m.r \notin dead
        /\ hist' = Append(hist, [p |-> m.r, r |-> m.p])
        /\ IF Lag
-          THEN UNCHANGED <<role, applied>>
-          ELSE /\ role[m.p] = "primary"
-               /\ applied[m.p] = Len(hist)
-               /\ role' = [role EXCEPT ![m.p] = "replica"]
-               /\ applied' = [applied EXCEPT ![m.p] = Len(hist) + 1]
+          THEN UNCHANGED <<role, applied, requested, src, live, taker>>
+          ELSE /\ applied[m.p] = Len(hist)
+               /\ \/ /\ role[m.p] = "primary"
+                     /\ role' = [role EXCEPT ![m.p] = "replica"]
+                     /\ applied' = [applied EXCEPT ![m.p] = Len(hist) + 1]
+                     /\ UNCHANGED <<requested, src, live, taker>>
+                  \/ /\ SwapWhileWaiting
+                     /\ role[m.p] = "awaiting"
+                     /\ applied' = [applied EXCEPT ![m.p] = Len(hist) + 1]
+                     /\ IF TakerKeepsSource /\ KeepsLiveSource(m.p)
+                        THEN UNCHANGED <<role, requested, src, live, taker>>
+                        ELSE /\ role' = role
+                             /\ Ask(m.p, m.r, FALSE)
     /\ swaps' = swaps + 1
-    /\ UNCHANGED <<up, mem, disk, requested, src, live, imported, marker, dead, truth, writes, crashes, wipes, moves>>
+    /\ UNCHANGED <<up, mem, disk, imported, marker, dead, truth, writes, crashes, wipes, moves>>
 
 MoveReplica(z) ==
     /\ moves < MaxMoves
@@ -348,12 +383,13 @@ MoveReplica(z) ==
        /\ EarlyMove \/ applied[m.p] = Len(hist)
        /\ hist' = Append(hist, [p |-> m.p, r |-> z])
        /\ IF Lag
-          THEN UNCHANGED <<role, applied, requested, src, live>>
+          THEN UNCHANGED <<role, applied, requested, src, live, taker>>
           ELSE /\ role' = [role EXCEPT ![m.r] = "none"]
                /\ applied' = [applied EXCEPT ![m.r] = Len(hist) + 1]
                /\ requested' = [requested EXCEPT ![m.r] = FALSE]
                /\ src' = [src EXCEPT ![m.r] = None]
                /\ live' = [live EXCEPT ![m.r] = FALSE]
+               /\ taker' = [taker EXCEPT ![m.r] = FALSE]
     /\ moves' = moves + 1
     /\ UNCHANGED <<up, mem, disk, imported, marker, dead, truth, writes, crashes, wipes, swaps>>
 
