@@ -195,17 +195,13 @@ impl DbRequestHandler {
                 if let Some(message) = helpers::update_payload_error(payload) {
                     return JsonOpResult::Response(Self::json_error(400, &message));
                 }
+                let partition = data_partition(entity, id);
                 let stripped_payload;
                 let effective_payload = if let OwnershipDecision::Check { owner_field, .. } =
                     self.ownership.evaluate(entity, sender)
                 {
-                    let partition = data_partition(entity, id);
-                    if controller.is_primary_for_partition(partition)
-                        && !controller.holds_primary_role(partition)
-                    {
-                        return JsonOpResult::Response(helpers::json_write_failure(
-                            db::DbDataStoreError::NotPrimary,
-                        ));
+                    if let Some(err) = Self::refuse_until_primary_role(controller, partition) {
+                        return JsonOpResult::Response(err);
                     }
                     if controller.is_primary_for_partition(partition)
                         && let Some(err) = controller.check_local_share_access(
@@ -223,7 +219,6 @@ impl DbRequestHandler {
                 } else {
                     payload
                 };
-                let partition = data_partition(entity, id);
                 if !controller.is_primary_for_partition(partition) {
                     let forward_payload =
                         self.vault_encrypt_update_delta(entity, id, effective_payload, sender);
@@ -263,16 +258,18 @@ impl DbRequestHandler {
                     Ok(v) => v,
                     Err(msg) => return JsonOpResult::Response(Self::json_error(400, &msg)),
                 };
+                let partition = data_partition(entity, id);
                 if let OwnershipDecision::Check {
                     owner_field,
                     sender: uid,
                 } = self.ownership.evaluate(entity, sender)
-                    && let Some(err) =
-                        self.check_cluster_ownership(controller, entity, id, owner_field, uid)
+                    && let Some(err) = Self::refuse_until_primary_role(controller, partition)
+                        .or_else(|| {
+                            self.check_cluster_ownership(controller, entity, id, owner_field, uid)
+                        })
                 {
                     return JsonOpResult::Response(err);
                 }
-                let partition = data_partition(entity, id);
                 if !controller.is_primary_for_partition(partition) {
                     let forwarded = controller
                         .forward_json_db_request(
@@ -531,6 +528,15 @@ impl DbRequestHandler {
             return serde_json::to_vec(&data).ok();
         }
         None
+    }
+
+    fn refuse_until_primary_role<T: ClusterTransport>(
+        controller: &NodeController<T>,
+        partition: PartitionId,
+    ) -> Option<Vec<u8>> {
+        (controller.is_primary_for_partition(partition)
+            && !controller.holds_primary_role(partition))
+        .then(|| helpers::json_write_failure(db::DbDataStoreError::NotPrimary))
     }
 
     fn check_cluster_ownership<T: ClusterTransport>(

@@ -546,7 +546,7 @@ async fn deleting_a_missing_record_touches_no_referencing_rows_on_every_path() {
 }
 
 #[tokio::test]
-async fn a_node_that_is_not_primary_forwards_a_delete_it_cannot_see() {
+async fn a_node_that_is_not_primary_forwards_writes_it_cannot_see() {
     let partition = data_partition("docs", "held-elsewhere");
     let mut ctrl = create_test_controller(node(1), MockTransport::new(node(1)));
     ctrl.set_ownership(ownership());
@@ -556,21 +556,29 @@ async fn a_node_that_is_not_primary_forwards_a_delete_it_cannot_see() {
         crate::cluster::PartitionAssignment::new(node(2), vec![], Epoch::new(1)),
     );
     ctrl.update_partition_map(map);
+    let update = serde_json::to_vec(&json!({"title": "x"})).unwrap();
 
-    let result = DbRequestHandler::new(node(1))
-        .with_ownership(ownership())
-        .handle_publish(
-            &mut ctrl,
-            "$DB/docs/held-elsewhere/delete",
-            &[],
-            &MqttRequestContext {
-                response_topic: Some("resp/local"),
-                correlation_data: None,
-                sender: Some("bob"),
-                client_id: None,
-            },
-        )
-        .await;
+    let mut answered_locally = Vec::new();
+    for (topic, payload) in [
+        ("$DB/docs/held-elsewhere/update", update.as_slice()),
+        ("$DB/docs/held-elsewhere/delete", &[]),
+    ] {
+        let result = DbRequestHandler::new(node(1))
+            .with_ownership(ownership())
+            .handle_publish(
+                &mut ctrl,
+                topic,
+                payload,
+                &MqttRequestContext {
+                    response_topic: Some("resp/local"),
+                    correlation_data: None,
+                    sender: Some("bob"),
+                    client_id: None,
+                },
+            )
+            .await;
+        answered_locally.push(!matches!(result, DbPublishResult::NoResponse));
+    }
 
     let forwarded: Vec<JsonDbOp> = ctrl
         .transport()
@@ -581,6 +589,38 @@ async fn a_node_that_is_not_primary_forwards_a_delete_it_cannot_see() {
             _ => None,
         })
         .collect();
-    assert!(matches!(result, DbPublishResult::NoResponse));
-    assert_eq!(forwarded, [JsonDbOp::Delete]);
+    assert_eq!(answered_locally, [false, false]);
+    assert_eq!(forwarded, [JsonDbOp::Update, JsonDbOp::Delete]);
+}
+
+#[tokio::test]
+async fn a_not_yet_primary_refuses_malformed_payloads_and_stale_copy_writes_alike() {
+    let partition = data_partition("docs", "child-1");
+    let mut ctrl = not_yet_primary(partition);
+    let stale = serde_json::to_vec(&json!({"userId": "alice", "title": "a"})).unwrap();
+    ctrl.stores
+        .db_create_replicated("docs", "child-1", &stale, 1000)
+        .unwrap();
+    let update = serde_json::to_vec(&json!({"title": "x"})).unwrap();
+    let cases: [(JsonDbOp, &[u8], u16); 4] = [
+        (JsonDbOp::Update, b"not json", 400),
+        (JsonDbOp::Delete, b"not json", 400),
+        (JsonDbOp::Update, &update, 503),
+        (JsonDbOp::Delete, &[], 503),
+    ];
+
+    let mut codes = Vec::new();
+    for (op, payload, _) in cases {
+        codes.push((
+            op,
+            codes_for_payload(&mut ctrl, op, "child-1", "bob", payload).await,
+        ));
+    }
+
+    let expected: Vec<(JsonDbOp, [Value; 2])> = cases
+        .iter()
+        .map(|&(op, _, code)| (op, [json!(code), json!(code)]))
+        .collect();
+    assert_eq!(codes, expected);
+    assert!(ctrl.db_get("docs", "child-1").is_some());
 }
