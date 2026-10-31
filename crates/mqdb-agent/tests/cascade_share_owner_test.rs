@@ -274,3 +274,18 @@ async fn pending_cascade_share_does_not_reach_a_foreign_record_after_the_sweep()
     assert_eq!(carol_access(&db, "bob-d").await, (json!(403), json!(403)));
     assert_eq!(filled, 1);
 }
+
+#[tokio::test]
+async fn cascade_share_stops_at_the_same_bound_as_cluster_mode() {
+    let chain: Vec<Value> = (0..300)
+        .map(|i| json!({"id": format!("c{i}"), "userId": "alice", "title": "c", "parent_id": format!("c{}", i + 1)}))
+        .collect();
+    let (_tmp, db) = diagrams(&chain).await;
+
+    let shared = data(publish(&db, "$DB/diagrams/c0/share", CAROL_EDIT_CASCADE, "alice").await);
+
+    assert_eq!(
+        (&shared["resources_shared"], &shared["resources_skipped"]),
+        (&json!(256), &json!(0))
+    );
+}

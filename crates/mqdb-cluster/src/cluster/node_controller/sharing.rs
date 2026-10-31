@@ -258,7 +258,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     .collect()
             };
             for child in children {
-                if visited.len() > MAX_CASCADE_RESOURCES || !visited.insert(child.clone()) {
+                if visited.len() >= MAX_CASCADE_RESOURCES || !visited.insert(child.clone()) {
                     continue;
                 }
                 if !self.holds_primary_role(data_partition(entity, &child)) {

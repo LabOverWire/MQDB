@@ -312,3 +312,30 @@ async fn pending_cascade_share_writes_no_grant_on_a_foreign_record() {
     );
     assert_eq!(counts(&reply), (json!(1), json!(1)));
 }
+
+#[tokio::test]
+async fn cascade_share_stops_at_the_same_bound_as_agent_mode() {
+    let chain: Vec<(String, Value)> = (0..300)
+        .map(|i| {
+            let id = format!("c{i}");
+            let record =
+                json!({"userId": "alice", "title": id, "parent_id": format!("c{}", i + 1)});
+            (id, record)
+        })
+        .collect();
+    let records: Vec<(&str, Value)> = chain
+        .iter()
+        .map(|(id, record)| (id.as_str(), record.clone()))
+        .collect();
+    let mut ctrl = primary_with(&records).await;
+
+    let shared = local(
+        &mut ctrl,
+        "$DB/diagrams/c0/share",
+        &carol_edit_cascade(),
+        "alice",
+    )
+    .await;
+
+    assert_eq!(counts(&shared), (json!(256), json!(0)));
+}
