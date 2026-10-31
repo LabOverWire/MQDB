@@ -522,9 +522,10 @@ The profiled agent binds `--port` (default 1883), which must be free, and uses `
 other mqdb process may be using: `dev profile` refuses to start rather than stop another agent.
 It checks the port and the db again after the profiling build, just before it starts the agent.
 At the end it stops only what it started: with `samply` or `flamegraph` it sends SIGINT to the
-mqdb agent below the profiler and, if no agent is found there or the profiler does not exit
-within 30 s, kills the profiler's process tree; with `sample` it kills the agent and benchmark
-it spawned. Like `dev clean`, `dev bench` and `dev profile` refuse to start an agent when any
+mqdb agent, found below the profiler or, if the profiler already exited, by its `--db`. If no
+agent is found, a signal cannot be delivered, or the profiler does not exit within 30 s, it kills
+the profiler's process tree and the agent and exits with an error instead of reporting a saved
+profile; with `sample` it kills the agent and benchmark it spawned. Like `dev clean`, `dev bench` and `dev profile` refuse to start an agent when any
 mqdb process on the machine has a relative `--db` or `--passwd` whose directory cannot be
 resolved, because they cannot tell whether it uses the same `--db`.
 

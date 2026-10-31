@@ -102,12 +102,24 @@ fn mqdb_processes_below(table: &[ProcessEntry], root: u32) -> Vec<u32> {
         .collect()
 }
 
+fn is_running(pid: u32) -> bool {
+    Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "stat="])
+        .output()
+        .is_ok_and(|output| {
+            let state = String::from_utf8_lossy(&output.stdout);
+            let state = state.trim();
+            !state.is_empty() && !state.starts_with('Z')
+        })
+}
+
 fn send(signal: &str, pid: u32) -> Result<(), String> {
     let status = Command::new("kill")
         .args([signal, &pid.to_string()])
+        .stderr(std::process::Stdio::null())
         .status()
         .map_err(|e| format!("run kill: {e}"))?;
-    if status.success() {
+    if status.success() || !is_running(pid) {
         Ok(())
     } else {
         Err(format!("kill {signal} {pid}: {status}"))
@@ -128,6 +140,19 @@ fn send_each(signal: &str, pids: &[u32]) -> Result<(), String> {
 
 pub(super) fn mqdb_agents_below(root: u32) -> Result<Vec<u32>, String> {
     Ok(mqdb_processes_below(&process_table()?, root))
+}
+
+pub(super) fn only_mqdb_binaries(pids: &[u32]) -> Result<Vec<u32>, String> {
+    let table = process_table()?;
+    Ok(pids
+        .iter()
+        .copied()
+        .filter(|pid| {
+            table
+                .iter()
+                .any(|entry| entry.pid == *pid && is_mqdb_binary(&entry.executable))
+        })
+        .collect())
 }
 
 pub(super) fn signal_pids(signal: &str, pids: &[u32]) -> Result<(), String> {

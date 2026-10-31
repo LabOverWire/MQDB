@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use super::helpers::{
     agent_args, broker_listening, chrono_timestamp, kill_processes_below, mqdb_agents_below,
-    signal_pids,
+    only_mqdb_binaries, signal_pids,
 };
 use super::runners::build_bench_args;
 use crate::cli_types::DevBenchScenario;
@@ -159,9 +159,13 @@ struct Profiler {
 }
 
 impl Profiler {
+    fn db_agents(&self) -> Result<Vec<u32>, String> {
+        only_mqdb_binaries(&crate::commands::dev::pids_using_db(&self.db)?)
+    }
+
     fn agents(&self) -> Result<Vec<u32>, String> {
         let mut agents = mqdb_agents_below(self.child.id())?;
-        for pid in crate::commands::dev::pids_using_db(&self.db)? {
+        for pid in self.db_agents()? {
             if !agents.contains(&pid) {
                 agents.push(pid);
             }
@@ -181,7 +185,8 @@ impl Profiler {
         if let Err(e) = self.child.kill().and_then(|()| self.child.wait().map(drop)) {
             problems.push(format!("could not stop {} (pid {pid}): {e}", self.name));
         }
-        match crate::commands::dev::pids_using_db(&self.db)
+        match self
+            .db_agents()
             .and_then(|left| signal_pids("-KILL", &left))
         {
             Ok(()) => {}
@@ -221,7 +226,7 @@ impl Profiler {
         match exited {
             Ok(status) => {
                 println!("{} exited with: {status}", self.name);
-                let left = crate::commands::dev::pids_using_db(&self.db)?;
+                let left = self.db_agents()?;
                 if !left.is_empty() {
                     signal_pids("-KILL", &left)?;
                     println!(

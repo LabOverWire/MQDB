@@ -456,14 +456,10 @@ impl StartedNode {
 pub(crate) fn stop_started_nodes(nodes: &mut [StartedNode]) -> Result<(), String> {
     let mut failures = Vec::new();
     for node in nodes.iter_mut() {
-        match node.exited() {
-            Ok(false) => {
-                if let Err(e) = signal(node.child.id()) {
-                    failures.push(format!("node {}: {e}", node.node_id));
-                }
-            }
-            Ok(true) => {}
-            Err(e) => failures.push(e),
+        if matches!(node.exited(), Ok(false))
+            && let Err(e) = signal(node.child.id())
+        {
+            failures.push(format!("node {}: {e}", node.node_id));
         }
     }
 
