@@ -5,7 +5,7 @@ use super::protocol::Operation;
 use super::{NUM_PARTITIONS, NodeId, PartitionId};
 use bebytes::BeBytes;
 use mqtt5::parse_shared_subscription;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::ops::Deref;
 use std::sync::{PoisonError, RwLock};
 
@@ -82,70 +82,20 @@ impl TopicIndexEntry {
         }
         self.subscribers
             .push(SubscriberLocation::create(client_id, client_partition, qos));
-        self.subscriber_count = u16::try_from(self.subscribers.len()).unwrap_or(u16::MAX);
-    }
-
-    #[must_use]
-    pub fn encode(&self) -> Vec<u8> {
-        if u16::try_from(self.subscribers.len()).is_ok() {
-            return self.to_be_bytes();
-        }
-        tracing::warn!(
-            topic = self.topic_str(),
-            subscribers = self.subscribers.len(),
-            "topic index entry has more subscribers than its encoding holds, encoding the first 65535"
-        );
-        let mut encoded = Self {
-            subscriber_count: u16::MAX,
-            subscribers: self.subscribers[..usize::from(u16::MAX)].to_vec(),
-            ..self.clone()
-        }
-        .to_be_bytes();
-        encoded.push(TRUNCATED_ENCODING_MARKER);
-        encoded
+        self.subscriber_count = self.subscribers.len() as u16;
     }
 
     #[must_use]
     pub fn remove_subscriber(&mut self, client_id: &str) -> bool {
         let len_before = self.subscribers.len();
         self.subscribers.retain(|s| s.client_id_str() != client_id);
-        self.subscriber_count = u16::try_from(self.subscribers.len()).unwrap_or(u16::MAX);
+        self.subscriber_count = self.subscribers.len() as u16;
         self.subscribers.len() != len_before
     }
 
     pub fn next_seq(&mut self) -> u64 {
         self.last_seq += 1;
         self.last_seq
-    }
-}
-
-const TRUNCATED_ENCODING_MARKER: u8 = 1;
-
-fn keep_local_subscribers_past_encoding(
-    imported: TopicIndexEntry,
-    truncated: bool,
-    local: Option<&TopicIndexEntry>,
-) -> TopicIndexEntry {
-    let Some(local) = local.filter(|_| truncated) else {
-        return imported;
-    };
-    let known: HashSet<&[u8]> = imported
-        .subscribers
-        .iter()
-        .map(|s| s.client_id.as_slice())
-        .collect();
-    let missing: Vec<SubscriberLocation> = local
-        .subscribers
-        .iter()
-        .filter(|s| !known.contains(s.client_id.as_slice()))
-        .cloned()
-        .collect();
-    let mut subscribers = imported.subscribers;
-    subscribers.extend(missing);
-    TopicIndexEntry {
-        subscriber_count: u16::try_from(subscribers.len()).unwrap_or(u16::MAX),
-        subscribers,
-        ..imported
     }
 }
 
@@ -444,7 +394,7 @@ impl TopicIndex {
 
     #[must_use]
     pub fn serialize(entry: &TopicIndexEntry) -> Vec<u8> {
-        entry.encode()
+        super::store_utils::serialize(entry)
     }
 
     #[must_use]
@@ -516,7 +466,7 @@ impl TopicIndex {
             buf.extend_from_slice(&(id_bytes.len() as u16).to_be_bytes());
             buf.extend_from_slice(id_bytes);
 
-            let data = entry.encode();
+            let data = entry.to_be_bytes();
             buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
             buf.extend_from_slice(&data);
         }
@@ -566,17 +516,16 @@ impl TopicIndex {
             let entry_data = &data[offset..offset + data_len];
             offset += data_len;
 
-            if let Ok((entry, consumed)) = TopicIndexEntry::try_from_be_bytes(entry_data) {
-                let truncated = consumed < entry_data.len();
+            if let Some(entry) = Self::deserialize(entry_data) {
                 tracing::debug!(
                     topic,
                     subscribers = entry.subscribers.len(),
                     "import_entries: replacing entry"
                 );
-                let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
-                let merged =
-                    keep_local_subscribers_past_encoding(entry, truncated, entries.get(topic));
-                entries.insert(topic.to_string(), merged);
+                self.entries
+                    .write()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(topic.to_string(), entry);
                 imported += 1;
             }
         }
@@ -791,87 +740,5 @@ mod tests {
 
         let subs = index.get_subscribers("topic/a");
         assert_eq!(subs.len(), 1);
-    }
-
-    #[test]
-    fn entry_keeps_routing_past_its_count_and_encodes_a_consistent_prefix() {
-        let subscribers: Vec<SubscriberLocation> = (0..u16::MAX)
-            .map(|i| SubscriberLocation::create(&format!("c{i}"), partition(1), 0))
-            .collect();
-        let mut entry = TopicIndexEntry {
-            subscriber_count: u16::MAX,
-            subscribers,
-            ..TopicIndexEntry::create("topic/a")
-        };
-
-        entry.add_subscriber("one-past-the-count", partition(1), 0);
-
-        assert_eq!(entry.subscribers.len(), usize::from(u16::MAX) + 1);
-        assert!(
-            entry
-                .subscribers
-                .iter()
-                .any(|s| s.client_id_str() == "one-past-the-count")
-        );
-        let parsed = TopicIndex::deserialize(&TopicIndex::serialize(&entry)).unwrap();
-        assert_eq!(parsed.subscribers.len(), usize::from(u16::MAX));
-        assert_eq!(
-            parsed.subscribers[..],
-            entry.subscribers[..usize::from(u16::MAX)]
-        );
-    }
-
-    #[test]
-    fn import_keeps_local_subscribers_a_saturated_entry_could_not_carry() {
-        let total = usize::from(u16::MAX) + 10;
-        let full = TopicIndexEntry {
-            subscriber_count: u16::MAX,
-            subscribers: (0..total)
-                .map(|i| SubscriberLocation::create(&format!("c{i}"), partition(1), 0))
-                .collect(),
-            ..TopicIndexEntry::create("x/y")
-        };
-        let src = TopicIndex::new(node(1));
-        let dst = TopicIndex::new(node(2));
-        src.entries
-            .write()
-            .unwrap()
-            .insert("x/y".to_string(), full.clone());
-        dst.entries.write().unwrap().insert("x/y".to_string(), full);
-
-        let snapshot = src.export_for_partition(topic_partition("x/y"));
-        dst.import_entries(&snapshot).unwrap();
-
-        assert_eq!(dst.get_subscribers("x/y").len(), total);
-    }
-
-    #[test]
-    fn import_of_an_entry_holding_exactly_its_count_drops_stale_local_subscribers() {
-        let exact = TopicIndexEntry {
-            subscriber_count: u16::MAX,
-            subscribers: (0..u16::MAX)
-                .map(|i| SubscriberLocation::create(&format!("c{i}"), partition(1), 0))
-                .collect(),
-            ..TopicIndexEntry::create("$share/g/x/y")
-        };
-        let mut with_stale = exact.clone();
-        with_stale.add_subscriber("stale", partition(1), 0);
-        let src = TopicIndex::new(node(1));
-        let dst = TopicIndex::new(node(2));
-        src.entries
-            .write()
-            .unwrap()
-            .insert("$share/g/x/y".to_string(), exact);
-        dst.entries
-            .write()
-            .unwrap()
-            .insert("$share/g/x/y".to_string(), with_stale);
-
-        let snapshot = src.export_for_partition(topic_partition("$share/g/x/y"));
-        dst.import_entries(&snapshot).unwrap();
-
-        let subscribers = dst.get_subscribers("$share/g/x/y");
-        assert_eq!(subscribers.len(), usize::from(u16::MAX));
-        assert!(subscribers.iter().all(|s| s.client_id_str() != "stale"));
     }
 }
