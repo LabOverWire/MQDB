@@ -503,7 +503,9 @@ async fn unreadable_stored_record_is_never_treated_as_owned() {
         JsonDbOp::Read,
         JsonDbOp::Update,
         JsonDbOp::Share,
+        JsonDbOp::Unshare,
         JsonDbOp::Shares,
+        JsonDbOp::Delete,
     ] {
         codes.push((
             op,
@@ -517,6 +519,7 @@ async fn unreadable_stored_record_is_never_treated_as_owned() {
             .all(|(_, answers)| answers == &[json!(403), json!(403)]),
         "{codes:?}"
     );
+    assert!(ctrl.db_get("docs", "garbled").is_some());
 }
 
 #[tokio::test]

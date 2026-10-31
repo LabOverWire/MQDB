@@ -2,46 +2,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 mod common;
+#[path = "../../mqdb-agent/tests/running_agent/mod.rs"]
+mod running_agent;
 
 use common::next_test_port;
 use mqdb_agent::{Database, MqdbAgent};
+use running_agent::RunningAgent;
 use serde_json::Value;
-use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 use tokio::process::Command;
-
-struct TestAgent {
-    dir: TempDir,
-    handle: tokio::task::JoinHandle<()>,
-    shutdown: tokio::sync::broadcast::Sender<()>,
-}
-
-impl TestAgent {
-    async fn start(agent: MqdbAgent, dir: TempDir) -> Self {
-        let (handle, mut ready_rx, shutdown) = agent.start().await.expect("the agent starts");
-        ready_rx
-            .changed()
-            .await
-            .expect("the agent signals readiness");
-        Self {
-            dir,
-            handle,
-            shutdown,
-        }
-    }
-
-    async fn stop(self) {
-        self.shutdown.send(()).expect(
-            "the agent stopped before the test did; its broker error is in the tracing output",
-        );
-        tokio::time::timeout(Duration::from_secs(10), self.handle)
-            .await
-            .expect("the agent should stop after shutdown")
-            .expect("the agent task should not panic");
-        drop(self.dir);
-    }
-}
 
 async fn open_db() -> (TempDir, Database) {
     let dir = TempDir::new().expect("agent database dir");
@@ -51,23 +21,19 @@ async fn open_db() -> (TempDir, Database) {
     (dir, db)
 }
 
-async fn start_agent_background(port: u16) -> TestAgent {
+async fn start_agent_background(port: u16) -> RunningAgent {
     let (dir, db) = open_db().await;
-    let agent = MqdbAgent::new(db)
-        .with_bind_address(SocketAddr::from(([127, 0, 0, 1], port)))
-        .with_anonymous(true);
-    TestAgent::start(agent, dir).await
+    RunningAgent::start(MqdbAgent::new(db).with_anonymous(true), port, dir).await
 }
 
-async fn start_agent_with_ownership(port: u16, passwd: &std::path::Path) -> TestAgent {
+async fn start_agent_with_ownership(port: u16, passwd: &std::path::Path) -> RunningAgent {
     let (dir, db) = open_db().await;
     let ownership = mqdb_core::types::OwnershipConfig::parse("diagrams=userId")
         .expect("valid ownership config");
     let agent = MqdbAgent::new(db)
-        .with_bind_address(SocketAddr::from(([127, 0, 0, 1], port)))
         .with_password_file(passwd.to_path_buf())
         .with_ownership_config(ownership);
-    TestAgent::start(agent, dir).await
+    RunningAgent::start(agent, port, dir).await
 }
 
 fn mqdb_bin() -> String {

@@ -1,12 +1,6 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Cluster-side diagram sharing (#75). Reimplements the agent's `_shares` grant
-//! primitives (`crates/mqdb-agent/src/database/sharing.rs`) against the cluster
-//! `StoreManager`. A grant for resource `(entity, id)` is co-located on the
-//! resource's partition by minting its id with `generate_id_for_partition`, so
-//! grant scans and access checks run on the resource's primary.
-
 use super::{ClusterTransport, NodeController};
 use crate::cluster::db::{DbDataStoreError, data_partition, generate_id_for_partition};
 use crate::cluster::db_handler::helpers::json_write_failure;
@@ -15,7 +9,7 @@ use serde_json::{Value, json};
 use std::collections::{HashSet, VecDeque};
 
 #[cfg(feature = "http-api")]
-use super::db_ops::EventOrigin;
+use super::db_ops::{EventOrigin, ForwardedJsonRequest};
 #[cfg(feature = "http-api")]
 use super::protocol::{JsonDbOp, JsonDbRequest};
 #[cfg(feature = "http-api")]
@@ -103,9 +97,6 @@ impl<T: ClusterTransport> NodeController<T> {
             .collect()
     }
 
-    /// Highest access level granted to `sender` on `(entity, id)` (owner-or-grant
-    /// gate scans the co-located `_shares`). Matches on the resolved `grantee` or
-    /// the stable `grantee_key`, so it works for resolved and password-mode grants.
     #[must_use]
     pub(crate) fn cluster_share_level(
         &self,
@@ -190,7 +181,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    /// Remove every grant on a resource (called when the resource is deleted).
     pub(crate) async fn clear_all_resource_grants(&mut self, entity: &str, id: &str) {
         let victims: Vec<String> = self
             .shares_for_resource(entity, id)
@@ -234,8 +224,6 @@ impl<T: ClusterTransport> NodeController<T> {
         Ok(())
     }
 
-    /// Self-reference fields on `entity` (FK constraints whose target is the same
-    /// entity) — the edges a cascade share walks.
     fn self_ref_fields(&self, entity: &str) -> Vec<String> {
         self.stores
             .constraint_get_fk_constraints(entity)
@@ -245,11 +233,6 @@ impl<T: ClusterTransport> NodeController<T> {
             .collect()
     }
 
-    /// Grant `grant` across every resource reachable from `root_id` via
-    /// self-references, at max-of-levels (never downgrading an existing grant).
-    /// Walks only the locally-held closure — cross-partition closure members are a
-    /// follow-up (they need cycle-safe cross-node fan-out); complete on a node that
-    /// is primary for the whole closure.
     async fn cascade_share(&mut self, entity: &str, root_id: &str, grant: GrantWrite<'_>) -> usize {
         let fields = self.self_ref_fields(entity);
         if fields.is_empty() {
@@ -387,9 +370,6 @@ impl<T: ClusterTransport> NodeController<T> {
         serde_json::to_vec(&json!({ "status": "ok", "data": data })).unwrap_or_default()
     }
 
-    /// Primary-side handler for `$DB/{entity}/{id}/unshare` (single resource).
-    /// Revokes by every carried key so a grant is removed whether it was stored
-    /// under the input identifier or a resolved canonical id.
     pub(crate) async fn handle_unshare_local(
         &mut self,
         entity: &str,
@@ -460,11 +440,6 @@ impl<T: ClusterTransport> NodeController<T> {
 
 #[cfg(feature = "http-api")]
 impl<T: ClusterTransport> NodeController<T> {
-    /// Look up the locally-held `_identity_links` record whose `email_hash` matches
-    /// and return its canonical id. Filters at the store rather than materializing
-    /// the whole entity (parity with the agent's filtered lookup). Identity records
-    /// are partitioned, so a miss here only means the link lives on another
-    /// partition (resolve it via a scatter).
     #[must_use]
     pub(crate) fn local_identity_canonical(&self, email_hash: &str) -> Option<String> {
         let payload = Self::email_hash_filter_payload(email_hash);
@@ -576,10 +551,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    /// Complete a resolved (or unresolved) email share: pick the canonical id from
-    /// the gathered `_identity_links`, build the grant payload, and route it to the
-    /// resource primary. An unresolved grantee is written as a pending grant. A
-    /// resolution invalidated by an intervening unshare writes nothing.
     pub(crate) async fn complete_share_resolution(
         &mut self,
         items: Vec<Value>,
@@ -636,13 +607,15 @@ impl<T: ClusterTransport> NodeController<T> {
         } else {
             self.forward_json_db_request(
                 partition,
-                JsonDbOp::Share,
-                &cont.entity,
-                Some(&cont.id),
-                &payload,
-                &cont.response_topic,
-                cont.correlation_data.as_deref(),
-                EventOrigin::new(Some(cont.granted_by.as_str()), None),
+                ForwardedJsonRequest {
+                    op: JsonDbOp::Share,
+                    entity: &cont.entity,
+                    id: Some(&cont.id),
+                    payload: &payload,
+                    response_topic: &cont.response_topic,
+                    correlation_data: cont.correlation_data.as_deref(),
+                    origin: EventOrigin::new(Some(cont.granted_by.as_str()), None),
+                },
             )
             .await;
         }
