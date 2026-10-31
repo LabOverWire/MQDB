@@ -199,7 +199,15 @@ impl DbRequestHandler {
                 let effective_payload = if let OwnershipDecision::Check { owner_field, .. } =
                     self.ownership.evaluate(entity, sender)
                 {
-                    if controller.is_primary_for_partition(data_partition(entity, id))
+                    let partition = data_partition(entity, id);
+                    if controller.is_primary_for_partition(partition)
+                        && !controller.holds_primary_role(partition)
+                    {
+                        return JsonOpResult::Response(helpers::json_write_failure(
+                            db::DbDataStoreError::NotPrimary,
+                        ));
+                    }
+                    if controller.is_primary_for_partition(partition)
                         && let Some(err) = controller.check_local_share_access(
                             entity,
                             id,

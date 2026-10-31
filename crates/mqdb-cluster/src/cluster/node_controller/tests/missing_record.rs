@@ -397,3 +397,91 @@ async fn empty_update_payload_is_graded_by_ownership_first_on_every_path() {
     assert_eq!(missing, [json!(404), json!(404)]);
     assert_eq!(existing, [json!(403), json!(403)]);
 }
+
+fn not_yet_primary(partition: PartitionId) -> NodeController<MockTransport> {
+    let mut ctrl = create_test_controller(node(1), MockTransport::new(node(1)));
+    ctrl.set_ownership(ownership());
+    let mut map = PartitionMap::default();
+    map.set(
+        partition,
+        crate::cluster::PartitionAssignment::new(node(1), vec![], Epoch::new(1)),
+    );
+    ctrl.update_partition_map(map);
+    assert!(!ctrl.holds_primary_role(partition));
+    ctrl
+}
+
+#[tokio::test]
+async fn writes_reaching_a_not_yet_primary_stay_retryable_on_every_path() {
+    let partition = data_partition("docs", "child-1");
+    let mut ctrl = not_yet_primary(partition);
+    let update = serde_json::to_vec(&json!({"title": "x"})).unwrap();
+
+    let mut codes = Vec::new();
+    for (op, payload) in [
+        (JsonDbOp::Update, update.as_slice()),
+        (JsonDbOp::Delete, &[]),
+    ] {
+        codes.push((
+            op,
+            codes_for_payload(&mut ctrl, op, "child-1", "bob", payload).await,
+        ));
+    }
+
+    assert_eq!(
+        codes,
+        [
+            (JsonDbOp::Update, [json!(503), json!(503)]),
+            (JsonDbOp::Delete, [json!(503), json!(503)]),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn cascade_delete_answered_by_a_not_yet_primary_is_not_acknowledged() {
+    let partition = data_partition("docs", "child-1");
+    let mut origin = create_test_controller(node(2), MockTransport::new(node(2)));
+    let mut map = PartitionMap::default();
+    map.set(
+        partition,
+        crate::cluster::PartitionAssignment::new(node(1), vec![], Epoch::new(1)),
+    );
+    origin.update_partition_map(map);
+    let acked = origin
+        .send_cascade_request(
+            partition,
+            JsonDbOp::Delete,
+            "docs",
+            "child-1",
+            &[],
+            super::super::db_ops::EventOrigin::new(Some("alice"), None),
+        )
+        .await
+        .unwrap();
+    let request = origin
+        .transport()
+        .sent_messages()
+        .into_iter()
+        .find_map(|(_, message)| match message {
+            ClusterMessage::JsonDbRequest { request, .. } => Some(request),
+            _ => None,
+        })
+        .unwrap();
+
+    let mut receiver = not_yet_primary(partition);
+    receiver
+        .handle_json_db_request(node(2), partition, &request)
+        .await;
+    let reply = receiver
+        .transport()
+        .sent_messages()
+        .into_iter()
+        .find_map(|(to, message)| match message {
+            ClusterMessage::JsonDbResponse(response) if to == node(2) => Some(response),
+            _ => None,
+        })
+        .unwrap();
+    origin.handle_json_db_response(&reply).await;
+
+    assert!(!acked.await.unwrap());
+}

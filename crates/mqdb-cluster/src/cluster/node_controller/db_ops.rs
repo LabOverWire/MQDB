@@ -490,11 +490,6 @@ impl<T: ClusterTransport> NodeController<T> {
             return None;
         }
 
-        if let Some(err) = self.check_forwarded_ownership(request) {
-            self.reply_to_json_db_request(from, request, err).await;
-            return None;
-        }
-
         if matches!(
             request.op,
             JsonDbOp::Create | JsonDbOp::Update | JsonDbOp::Delete
@@ -506,6 +501,11 @@ impl<T: ClusterTransport> NodeController<T> {
                 json_write_failure(super::db::DbDataStoreError::NotPrimary),
             )
             .await;
+            return None;
+        }
+
+        if let Some(err) = self.check_forwarded_ownership(request) {
+            self.reply_to_json_db_request(from, request, err).await;
             return None;
         }
 
