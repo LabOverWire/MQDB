@@ -661,36 +661,57 @@ async fn internal_writes_reaching_a_not_yet_primary_stay_retryable_on_every_path
 
 #[tokio::test]
 async fn internal_delete_of_a_missing_record_touches_no_referencing_rows_on_every_path() {
-    let mut ctrl = note_referencing_a_missing_doc(OnDeleteAction::SetNull).await;
-
-    let local = internal_local_code(&mut ctrl, JsonDbOp::Delete, "ghost", &[]).await;
-    let after_local = parent_of_note(&ctrl);
-    let forwarded = internal_forwarded_code(&mut ctrl, JsonDbOp::Delete, "ghost", &[]).await;
-    let after_forwarded = parent_of_note(&ctrl);
+    let mut local_ctrl = note_referencing_a_missing_doc(OnDeleteAction::SetNull).await;
+    let local = internal_local_code(&mut local_ctrl, JsonDbOp::Delete, "ghost", &[]).await;
+    let mut forwarded_ctrl = note_referencing_a_missing_doc(OnDeleteAction::SetNull).await;
+    let forwarded =
+        internal_forwarded_code(&mut forwarded_ctrl, JsonDbOp::Delete, "ghost", &[]).await;
 
     assert_eq!(
-        [local, after_local, forwarded, after_forwarded],
+        [
+            local,
+            parent_of_note(&local_ctrl),
+            forwarded,
+            parent_of_note(&forwarded_ctrl)
+        ],
         [json!(404), json!("ghost"), json!(404), json!("ghost")]
     );
 }
 
 #[tokio::test]
-async fn deleting_a_missing_record_cascades_to_no_referencing_rows() {
-    let mut ctrl = note_referencing_a_missing_doc(OnDeleteAction::Cascade).await;
-
-    let admin = local_response(&mut ctrl, JsonDbOp::Delete, "ghost", "root", &[]).await;
-    let after_admin = ctrl.db_get("notes", "n1").is_some();
-    let internal = internal_local_code(&mut ctrl, JsonDbOp::Delete, "ghost", &[]).await;
-    let after_internal = ctrl.db_get("notes", "n1").is_some();
+async fn deleting_a_missing_record_cascades_to_no_referencing_rows_on_every_path() {
+    let mut answers = Vec::new();
+    for path in [
+        "admin local",
+        "admin forwarded",
+        "internal local",
+        "internal forwarded",
+    ] {
+        let mut ctrl = note_referencing_a_missing_doc(OnDeleteAction::Cascade).await;
+        let code = match path {
+            "admin local" => local_response(&mut ctrl, JsonDbOp::Delete, "ghost", "root", &[])
+                .await["code"]
+                .clone(),
+            "admin forwarded" => {
+                forwarded_response(&mut ctrl, JsonDbOp::Delete, "ghost", "root", &[]).await["code"]
+                    .clone()
+            }
+            "internal local" => {
+                internal_local_code(&mut ctrl, JsonDbOp::Delete, "ghost", &[]).await
+            }
+            _ => internal_forwarded_code(&mut ctrl, JsonDbOp::Delete, "ghost", &[]).await,
+        };
+        answers.push((path, code, ctrl.db_get("notes", "n1").is_some()));
+    }
 
     assert_eq!(
+        answers,
         [
-            admin["code"].clone(),
-            json!(after_admin),
-            internal,
-            json!(after_internal)
-        ],
-        [json!(404), json!(true), json!(404), json!(true)]
+            ("admin local", json!(404), true),
+            ("admin forwarded", json!(404), true),
+            ("internal local", json!(404), true),
+            ("internal forwarded", json!(404), true),
+        ]
     );
 }
 
