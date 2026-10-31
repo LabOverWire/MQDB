@@ -10,6 +10,7 @@ mod index_ops;
 mod mqtt_state;
 pub(crate) mod outbox;
 mod partition_io;
+mod primary_marker;
 mod query;
 mod recovery;
 mod schema_ops;
@@ -36,6 +37,8 @@ use super::topic_index::TopicIndex;
 use super::wildcard_store::WildcardStore;
 use mqdb_core::storage::StorageBackend;
 use std::sync::Arc;
+
+pub(crate) use primary_marker::HeldPrimaries;
 
 #[derive(Debug, Default, Clone)]
 pub struct RecoveryStats {

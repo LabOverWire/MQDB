@@ -161,6 +161,9 @@ impl DbRequestHandler {
                 }
             }
             DbTopicOperation::JsonRead { entity, id } => {
+                if controller.waits_for_primary_data(data_partition(entity, id)) {
+                    return JsonOpResult::Response(Self::partition_not_ready());
+                }
                 if let OwnershipDecision::Check { owner_field, .. } =
                     self.ownership.evaluate(entity, sender)
                 {
@@ -204,6 +207,9 @@ impl DbRequestHandler {
                     .await
             }
             DbTopicOperation::JsonUpdate { entity, id } => {
+                if controller.waits_for_primary_data(data_partition(entity, id)) {
+                    return JsonOpResult::Response(Self::partition_not_ready());
+                }
                 let stripped_payload;
                 let effective_payload = if let OwnershipDecision::Check { owner_field, .. } =
                     self.ownership.evaluate(entity, sender)
@@ -262,6 +268,9 @@ impl DbRequestHandler {
                 }
             }
             DbTopicOperation::JsonDelete { entity, id } => {
+                if controller.waits_for_primary_data(data_partition(entity, id)) {
+                    return JsonOpResult::Response(Self::partition_not_ready());
+                }
                 if let OwnershipDecision::Check {
                     owner_field,
                     sender: uid,
