@@ -104,19 +104,29 @@ async fn forwarded_response(
         sender: Some(sender.to_string()),
         client_id: None,
     };
+    let already_sent = forwarded_replies(ctrl).len();
     ctrl.handle_json_db_request(node(2), data_partition("docs", id), &request)
         .await;
-    let response = ctrl
-        .transport()
+    let replies = forwarded_replies(ctrl);
+    assert_eq!(
+        replies.len(),
+        already_sent + 1,
+        "{op:?} {id} forwarded must answer exactly once"
+    );
+    replies[already_sent].clone()
+}
+
+fn forwarded_replies(ctrl: &NodeController<MockTransport>) -> Vec<Value> {
+    ctrl.transport()
         .sent_messages()
         .into_iter()
-        .rev()
-        .find_map(|(to, message)| match message {
-            ClusterMessage::JsonDbResponse(response) if to == node(2) => Some(response),
+        .filter_map(|(to, message)| match message {
+            ClusterMessage::JsonDbResponse(response) if to == node(2) => {
+                Some(serde_json::from_slice(&response.payload).unwrap())
+            }
             _ => None,
         })
-        .unwrap_or_else(|| panic!("{op:?} {id} forwarded without a response"));
-    serde_json::from_slice(&response.payload).unwrap()
+        .collect()
 }
 
 async fn codes_on_both_paths(
