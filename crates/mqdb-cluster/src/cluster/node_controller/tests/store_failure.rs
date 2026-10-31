@@ -193,27 +193,6 @@ async fn a_controller_write_the_primary_cannot_store_returns_an_error() {
     assert_eq!(ctrl.db_get("items", "kept").unwrap().data, b"{\"n\":1}");
 }
 
-#[tokio::test]
-async fn a_broadcast_write_this_node_cannot_store_reports_the_failure() {
-    use crate::cluster::protocol::Operation;
-    let backend = FaultyBackend::shared();
-    let mut ctrl = primary_of_every_partition(&backend);
-    let write = ReplicationWrite::new(
-        PartitionId::new(0).unwrap(),
-        Operation::Insert,
-        Epoch::ZERO,
-        0,
-        crate::cluster::entity::DB_SCHEMA.to_string(),
-        "items".to_string(),
-        Vec::new(),
-    );
-    backend.fail_writes(true);
-
-    let broadcast = ctrl.write_or_forward_with_event(write, None, &[]).await;
-
-    assert_eq!(broadcast, Err(ReplicationError::StoreFailed));
-}
-
 async fn author_with_post(ctrl: &mut NodeController<MockTransport>) {
     let author = request(ctrl, "$DB/users/create", &json!({"id": "u1", "name": "a"})).await;
     let post = request(

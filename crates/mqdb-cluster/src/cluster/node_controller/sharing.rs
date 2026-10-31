@@ -148,7 +148,7 @@ impl<T: ClusterTransport> NodeController<T> {
         id: &str,
         grantee_key: &str,
     ) -> Result<(), DbDataStoreError> {
-        let victims = self
+        let victims: Vec<String> = self
             .shares_for_resource(entity, id)
             .into_iter()
             .filter_map(|(sid, value)| {
@@ -156,7 +156,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     .then_some(sid)
             })
             .collect();
-        self.delete_grants(victims).await
+        self.delete_grants(&victims).await
     }
 
     pub(crate) async fn clear_all_resource_grants(
@@ -169,13 +169,13 @@ impl<T: ClusterTransport> NodeController<T> {
             .into_iter()
             .map(|(sid, _)| sid)
             .collect();
-        self.delete_grants(victims).await
+        self.delete_grants(&victims).await
     }
 
-    async fn delete_grants(&mut self, share_ids: Vec<String>) -> Result<(), DbDataStoreError> {
+    async fn delete_grants(&mut self, share_ids: &[String]) -> Result<(), DbDataStoreError> {
         let mut first_failure = None;
         for sid in share_ids {
-            match self.db_delete(SHARES_ENTITY, &sid).await {
+            match self.db_delete(SHARES_ENTITY, sid).await {
                 Ok(_) | Err(DbDataStoreError::NotFound) => {}
                 Err(e) => {
                     first_failure.get_or_insert(e);

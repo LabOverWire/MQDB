@@ -163,7 +163,7 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
         debug!(topic = %event.topic, "handling $DB/ request");
         let start = std::time::Instant::now();
         let mut ctrl = self.controller.write().await;
-        let t_lock = crate::cluster::elapsed_micros(start);
+        let t_lock = crate::cluster::node_controller::elapsed_micros(start);
         let ctx = MqttRequestContext {
             response_topic: event.response_topic.as_deref(),
             correlation_data: event.correlation_data.as_deref(),
@@ -178,11 +178,11 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
 
         match result {
             DbPublishResult::Response(response) => {
-                let t_handle = crate::cluster::elapsed_micros(start);
+                let t_handle = crate::cluster::node_controller::elapsed_micros(start);
                 ctrl.transport()
                     .queue_local_publish(response.topic, response.payload, qos)
                     .await;
-                let t_queue = crate::cluster::elapsed_micros(start);
+                let t_queue = crate::cluster::node_controller::elapsed_micros(start);
                 tracing::info!(
                     node = node_id.get(),
                     t_lock,

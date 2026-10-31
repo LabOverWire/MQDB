@@ -83,3 +83,27 @@ async fn a_replica_serves_reads_only_after_its_snapshot_arrives() {
 
     assert!(ctrl.can_serve_reads(partition));
 }
+
+fn snapshot_requests_sent(ctrl: &NodeController<MockTransport>) -> usize {
+    ctrl.transport
+        .sent_messages()
+        .iter()
+        .filter(|(_, message)| matches!(message, ClusterMessage::SnapshotRequest(_)))
+        .count()
+}
+
+#[tokio::test]
+async fn a_replica_asks_again_after_its_snapshot_fails() {
+    use crate::cluster::snapshot::SnapshotComplete;
+    let partition = PartitionId::new(201).unwrap();
+    let mut ctrl = controller(2);
+    ctrl.apply_raft_partition_map(map_with(partition, node(1), &[node(2)], 1))
+        .await;
+    ctrl.request_snapshot(partition, node(1)).await;
+    let asked = snapshot_requests_sent(&ctrl);
+
+    ctrl.handle_snapshot_complete(node(1), &SnapshotComplete::failed(partition));
+    ctrl.request_snapshot(partition, node(1)).await;
+
+    assert_eq!((asked, snapshot_requests_sent(&ctrl)), (1, 2));
+}

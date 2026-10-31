@@ -1364,8 +1364,9 @@ pub async fn write_or_forward_with_event(
         // We're primary - persist, apply to memory, then replicate.
         // A persistence failure returns StoreFailed and nothing is applied or sent.
         let replicas = self.partition_map.replicas(partition).to_vec();
-        self.replicate_write_async_with_extra(write, &replicas, event, extra_outbox)
-            .await?;
+        self.replicate_primary_write(write, &replicas, event, extra_outbox)
+            .await
+            .map_err(|refused| refused.error)?;
         Ok(())
     } else if let Some((primary, epoch)) = self.believed_primary(partition) {
         // Forward to primary (heartbeat map as fallback), stamped with the

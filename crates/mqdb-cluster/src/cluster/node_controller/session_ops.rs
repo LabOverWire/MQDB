@@ -202,7 +202,7 @@ impl<T: ClusterTransport> NodeController<T> {
             write.data,
         )
         .with_event(event);
-        let t_state = crate::cluster::elapsed_micros(start);
+        let t_state = crate::cluster::node_controller::elapsed_micros(start);
 
         let change_event = Self::change_event_entry(&write_msg);
         if let Err(error) =
@@ -213,14 +213,14 @@ impl<T: ClusterTransport> NodeController<T> {
                 event: write_msg.event,
             });
         }
-        let t_apply = crate::cluster::elapsed_micros(start);
+        let t_apply = crate::cluster::node_controller::elapsed_micros(start);
 
         if let Some(state) = self.replicas.get_mut(&partition.get()) {
             state.advance_sequence();
         }
         self.write_log
             .append(partition, sequence, write_msg.clone());
-        let t_writelog = crate::cluster::elapsed_micros(start);
+        let t_writelog = crate::cluster::node_controller::elapsed_micros(start);
 
         for &replica in replicas {
             let _ = self
@@ -228,7 +228,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 .send(replica, ClusterMessage::Write(write_msg.clone()))
                 .await;
         }
-        let t_send = crate::cluster::elapsed_micros(start);
+        let t_send = crate::cluster::node_controller::elapsed_micros(start);
 
         tracing::trace!(
             node = self.node_id.get(),

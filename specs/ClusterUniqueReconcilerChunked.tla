@@ -48,7 +48,7 @@
 \*     cfg documents a real FRAGILITY -- the value site has no recheck and no epoch fence, and only
 \*     message ordering prevents the wedge -- exercisable only under failover of the data primary.
 \*   - The reorder trigger via record DELETE does not exist at all: cluster-mode delete
-\*     (db_delete_replicated) emits NO unique release. That is a SEPARATE, confirmed pre-existing bug
+\*     (db_delete_write) emits NO unique release. That is a SEPARATE, confirmed pre-existing bug
 \*     (agent mode releases on delete via release_unique_guards + test delete_releases_unique_guard;
 \*     the cluster delete path never does), which permanently leaks the unique value. DeleteRecord
 \*     below therefore models UPDATE-AWAY / agent-mode-delete release semantics, not cluster delete.

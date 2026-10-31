@@ -725,7 +725,7 @@ impl DbRequestHandler {
                 continuation: UniqueCheckContinuation::CreateFromDbHandler {
                     entity: entity.to_string(),
                     id: id.to_string(),
-                    data: data.clone(),
+                    data,
                     constraint_data,
                     data_bytes,
                     partition,
@@ -792,19 +792,6 @@ impl DbRequestHandler {
                         .await;
                     helpers::json_ok_with_id(db_entity.id_str(), data)
                 }
-                Err(db::DbDataStoreError::AlreadyExists) => {
-                    controller
-                        .release_unique_constraints(
-                            entity,
-                            id,
-                            constraint_data,
-                            partition,
-                            request_id,
-                            now_ms,
-                        )
-                        .await;
-                    Self::json_error(409, "entity already exists")
-                }
                 Err(error) => {
                     controller
                         .release_unique_constraints(
@@ -816,7 +803,12 @@ impl DbRequestHandler {
                             now_ms,
                         )
                         .await;
-                    helpers::json_write_failure(error)
+                    match error {
+                        db::DbDataStoreError::AlreadyExists => {
+                            Self::json_error(409, "entity already exists")
+                        }
+                        error => helpers::json_write_failure(error),
+                    }
                 }
             },
         )
@@ -865,7 +857,7 @@ impl DbRequestHandler {
                 tracing::info!(
                     node = node_id,
                     partition = partition.get(),
-                    elapsed_us = crate::cluster::elapsed_micros(start),
+                    elapsed_us = crate::cluster::node_controller::elapsed_micros(start),
                     forwarded = true,
                     "json_read_forwarded"
                 );
@@ -874,7 +866,7 @@ impl DbRequestHandler {
             tracing::warn!(
                 node = node_id,
                 partition = partition.get(),
-                elapsed_us = crate::cluster::elapsed_micros(start),
+                elapsed_us = crate::cluster::node_controller::elapsed_micros(start),
                 "json_read_forward_failed"
             );
             return JsonOpResult::Response(Self::json_error(
@@ -915,7 +907,7 @@ impl DbRequestHandler {
         tracing::info!(
             node = node_id,
             partition = partition.get(),
-            elapsed_us = crate::cluster::elapsed_micros(start),
+            elapsed_us = crate::cluster::node_controller::elapsed_micros(start),
             forwarded = false,
             "json_read_complete"
         );
@@ -998,7 +990,7 @@ impl DbRequestHandler {
         }
 
         let request_id = uuid::Uuid::new_v4().to_string();
-        let partition = data_partition(entity, id);
+        let partition = ctx.partition;
 
         let fk_result = match controller
             .start_fk_existence_check(entity, &merged_data)
@@ -1033,18 +1025,9 @@ impl DbRequestHandler {
             }));
         }
 
-        let update_ctx = JsonOpContext {
-            entity,
-            id: Some(id),
-            partition,
-            sender,
-            client_id,
-            response_topic,
-            correlation_data,
-        };
         self.reserve_unique_then_update(
             controller,
-            &update_ctx,
+            ctx,
             merged_data,
             new_diff,
             old_diff,
@@ -1177,16 +1160,6 @@ impl DbRequestHandler {
                     }
                     helpers::json_ok_with_id(db_entity.id_str(), merged_data)
                 }
-                Err(db::DbDataStoreError::NotFound) => {
-                    if has_unique_changes {
-                        controller
-                            .release_unique_constraints(
-                                entity, id, new_diff, partition, request_id, now_ms,
-                            )
-                            .await;
-                    }
-                    Self::json_error(404, &format!("entity not found: {entity} id={id}"))
-                }
                 Err(error) => {
                     if has_unique_changes {
                         controller
@@ -1195,7 +1168,12 @@ impl DbRequestHandler {
                             )
                             .await;
                     }
-                    helpers::json_write_failure(error)
+                    match error {
+                        db::DbDataStoreError::NotFound => {
+                            Self::json_error(404, &format!("entity not found: {entity} id={id}"))
+                        }
+                        error => helpers::json_write_failure(error),
+                    }
                 }
             },
         )

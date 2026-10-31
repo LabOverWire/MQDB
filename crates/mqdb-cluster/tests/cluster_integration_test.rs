@@ -146,42 +146,11 @@ impl TestCluster {
         }
     }
 
-    async fn run_rounds_from(&mut self, idx: usize, rounds: usize) {
-        for _ in 0..rounds {
-            let output = self.nodes[idx].controller.tick(0);
-            self.nodes[idx].controller.send_tick_output(output).await;
-            self.advance_ms(1);
-            for (other, node) in self.nodes.iter_mut().enumerate() {
-                if other != idx {
-                    node.controller.process_messages().await;
-                }
-            }
-            self.advance_ms(1);
-            self.nodes[idx].controller.process_messages().await;
-        }
-    }
-
     fn data_on_each_node(&self, entity: &str, id: &str) -> Vec<Option<Vec<u8>>> {
         self.nodes
             .iter()
             .map(|n| n.controller.db_get(entity, id).map(|e| e.data))
             .collect()
-    }
-
-    fn elect_first_node(&mut self) {
-        let leader = self.nodes[0].id;
-        self.nodes[0].raft.tick(0);
-        let outputs = self.nodes[0].raft.tick(1000);
-        assert_eq!(self.nodes[0].raft.role(), RaftRole::Candidate);
-        for output in outputs {
-            if let RaftOutput::SendRequestVote { to, request } = output
-                && let Some(follower) = self.nodes.iter_mut().find(|n| n.id == to)
-            {
-                let (resp, _) = follower.raft.handle_request_vote(leader, request, 1000);
-                self.nodes[0].raft.handle_request_vote_response(to, resp);
-            }
-        }
-        assert_eq!(self.nodes[0].raft.role(), RaftRole::Leader);
     }
 
     async fn setup_all_primaries(&mut self) {
@@ -195,10 +164,8 @@ impl TestCluster {
             }
         }
         for node in &mut self.nodes {
-            {
-                let output = node.controller.tick(0);
-                node.controller.send_tick_output(output).await;
-            }
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
         }
         self.advance_ms(5);
         for node in &mut self.nodes {
@@ -2317,7 +2284,19 @@ async fn raft_command_application_updates_partition_map() {
     let n2 = cluster.nodes[1].id;
     let n3 = cluster.nodes[2].id;
 
-    cluster.elect_first_node();
+    let leader = cluster.nodes[0].id;
+    cluster.nodes[0].raft.tick(0);
+    let outputs = cluster.nodes[0].raft.tick(1000);
+    assert_eq!(cluster.nodes[0].raft.role(), RaftRole::Candidate);
+    for output in outputs {
+        if let RaftOutput::SendRequestVote { to, request } = output
+            && let Some(follower) = cluster.nodes.iter_mut().find(|n| n.id == to)
+        {
+            let (resp, _) = follower.raft.handle_request_vote(leader, request, 1000);
+            cluster.nodes[0].raft.handle_request_vote_response(to, resp);
+        }
+    }
+    assert_eq!(cluster.nodes[0].raft.role(), RaftRole::Leader);
 
     let partition = PartitionId::new(10).unwrap();
     let cmd = RaftCommand::update_partition(partition, n2, &[n3], Epoch::new(1));
@@ -3867,7 +3846,18 @@ async fn no_oversell_when_new_primary_missed_a_reservation() {
     cluster.nodes[1]
         .controller
         .become_primary(unique_part, Epoch::new(2));
-    cluster.run_rounds_from(1, 4).await;
+    for _ in 0..4 {
+        let output = cluster.nodes[1].controller.tick(0);
+        cluster.nodes[1].controller.send_tick_output(output).await;
+        cluster.advance_ms(1);
+        for (other, node) in cluster.nodes.iter_mut().enumerate() {
+            if other != 1 {
+                node.controller.process_messages().await;
+            }
+        }
+        cluster.advance_ms(1);
+        cluster.nodes[1].controller.process_messages().await;
+    }
 
     let learned = cluster.nodes[1]
         .controller

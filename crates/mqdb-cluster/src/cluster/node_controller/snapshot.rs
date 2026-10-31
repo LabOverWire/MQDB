@@ -185,6 +185,8 @@ impl<T: ClusterTransport> NodeController<T> {
             }
         } else {
             tracing::warn!(?partition, ?status, "snapshot transfer failed");
+            self.requested_snapshots.remove(&partition);
+            self.pending_snapshots.remove(&partition);
         }
     }
 

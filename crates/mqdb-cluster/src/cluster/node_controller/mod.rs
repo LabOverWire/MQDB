@@ -1043,7 +1043,7 @@ impl<T: ClusterTransport> NodeController<T> {
             }
         }
         if count > 0 {
-            let elapsed_us = crate::cluster::elapsed_micros(start);
+            let elapsed_us = crate::cluster::node_controller::elapsed_micros(start);
             tracing::info!(
                 node = self.node_id.get(),
                 msg_count = count,
@@ -1735,6 +1735,10 @@ impl<T: ClusterTransport> NodeController<T> {
             | UniqueCheckContinuation::UpdateFromDbHandler { .. } => {}
         }
     }
+}
+
+pub(crate) fn elapsed_micros(start: std::time::Instant) -> u64 {
+    u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
 pub(crate) type RemoteReservations = Vec<(String, Vec<u8>, NodeId)>;
