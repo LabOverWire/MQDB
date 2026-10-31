@@ -5,7 +5,7 @@ use super::protocol::Operation;
 use super::{NUM_PARTITIONS, NodeId, PartitionId};
 use bebytes::BeBytes;
 use mqtt5::parse_shared_subscription;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::{PoisonError, RwLock};
 
@@ -114,6 +114,33 @@ impl TopicIndexEntry {
     pub fn next_seq(&mut self) -> u64 {
         self.last_seq += 1;
         self.last_seq
+    }
+}
+
+fn keep_local_subscribers_past_encoding(
+    imported: TopicIndexEntry,
+    local: Option<&TopicIndexEntry>,
+) -> TopicIndexEntry {
+    let Some(local) = local.filter(|_| imported.subscribers.len() == usize::from(u16::MAX)) else {
+        return imported;
+    };
+    let known: HashSet<&[u8]> = imported
+        .subscribers
+        .iter()
+        .map(|s| s.client_id.as_slice())
+        .collect();
+    let missing: Vec<SubscriberLocation> = local
+        .subscribers
+        .iter()
+        .filter(|s| !known.contains(s.client_id.as_slice()))
+        .cloned()
+        .collect();
+    let mut subscribers = imported.subscribers;
+    subscribers.extend(missing);
+    TopicIndexEntry {
+        subscriber_count: u16::try_from(subscribers.len()).unwrap_or(u16::MAX),
+        subscribers,
+        ..imported
     }
 }
 
@@ -540,10 +567,9 @@ impl TopicIndex {
                     subscribers = entry.subscribers.len(),
                     "import_entries: replacing entry"
                 );
-                self.entries
-                    .write()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(topic.to_string(), entry);
+                let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
+                let merged = keep_local_subscribers_past_encoding(entry, entries.get(topic));
+                entries.insert(topic.to_string(), merged);
                 imported += 1;
             }
         }
@@ -786,5 +812,29 @@ mod tests {
             parsed.subscribers[..],
             entry.subscribers[..usize::from(u16::MAX)]
         );
+    }
+
+    #[test]
+    fn import_keeps_local_subscribers_a_saturated_entry_could_not_carry() {
+        let total = usize::from(u16::MAX) + 10;
+        let full = TopicIndexEntry {
+            subscriber_count: u16::MAX,
+            subscribers: (0..total)
+                .map(|i| SubscriberLocation::create(&format!("c{i}"), partition(1), 0))
+                .collect(),
+            ..TopicIndexEntry::create("x/y")
+        };
+        let src = TopicIndex::new(node(1));
+        let dst = TopicIndex::new(node(2));
+        src.entries
+            .write()
+            .unwrap()
+            .insert("x/y".to_string(), full.clone());
+        dst.entries.write().unwrap().insert("x/y".to_string(), full);
+
+        let snapshot = src.export_for_partition(topic_partition("x/y"));
+        dst.import_entries(&snapshot).unwrap();
+
+        assert_eq!(dst.get_subscribers("x/y").len(), total);
     }
 }

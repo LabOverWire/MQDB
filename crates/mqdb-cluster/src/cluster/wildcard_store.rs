@@ -349,7 +349,13 @@ impl WildcardStore {
             .unwrap_or_else(PoisonError::into_inner)
             .remove(pattern, client_id);
         if removed {
-            Ok(Vec::new())
+            Ok(Self::serialize_entry(&WildcardEntry::create(
+                pattern,
+                client_id,
+                super::session_partition(client_id),
+                0,
+                SubscriptionType::Mqtt,
+            )))
         } else {
             Err(WildcardStoreError::NotFound)
         }
@@ -371,10 +377,14 @@ impl WildcardStore {
                 Ok(())
             }
             Operation::Delete => {
+                let mut trie = self.trie.write().unwrap_or_else(PoisonError::into_inner);
+                if let Some(entry) = Self::deserialize_entry(data) {
+                    trie.remove(entry.pattern_str(), entry.client_id_str());
+                    return Ok(());
+                }
                 if !id.contains(':') {
                     return Err(WildcardStoreError::InvalidPattern);
                 }
-                let mut trie = self.trie.write().unwrap_or_else(PoisonError::into_inner);
                 for (at, _) in id.match_indices(':') {
                     if trie.remove(&id[..at], &id[at + 1..]) {
                         break;
@@ -825,6 +835,26 @@ mod tests {
         assert_eq!(
             store.get_client_patterns("dev:x"),
             vec![("urn/+".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn replicated_delete_removes_the_named_pair_when_two_pairs_share_an_id() {
+        let src = WildcardStore::new(node(1));
+        src.subscribe_mqtt("+/b:x", "c", 1).unwrap();
+        let data = src.unsubscribe_with_data("+/b:x", "c").unwrap();
+        let replica = WildcardStore::new(node(2));
+        replica.subscribe_mqtt("+/b", "x:c", 1).unwrap();
+        replica.subscribe_mqtt("+/b:x", "c", 1).unwrap();
+
+        replica
+            .apply_replicated(Operation::Delete, "+/b:x:c", &data)
+            .unwrap();
+
+        assert!(replica.get_client_patterns("c").is_empty());
+        assert_eq!(
+            replica.get_client_patterns("x:c"),
+            vec![("+/b".to_string(), 1)]
         );
     }
 }

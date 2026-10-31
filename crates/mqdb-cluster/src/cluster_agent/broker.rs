@@ -174,7 +174,6 @@ impl ClusteredAgent {
             bind_addresses: vec![self.bind_address],
             max_clients: BROKER_MAX_CLIENTS,
             max_packet_size: BROKER_MAX_PACKET_SIZE,
-            max_subscriptions_per_client: usize::from(u16::MAX),
             session_expiry_interval: Duration::from_secs(SESSION_EXPIRY_SECS),
             maximum_qos: 2,
             retain_available: true,
