@@ -608,6 +608,9 @@ fn profile_stops_its_agent_after_the_profiler_exits_first() {
         !alive(&pid),
         "dev profile left its agent (pid {pid}) running after the profiler exited: {stdout}"
     );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}{stderr}");
+    assert!(stdout.contains("Profile saved"), "{stdout}");
     assert_eq!(shim.calls(), "");
     drop(agent_block);
 }
