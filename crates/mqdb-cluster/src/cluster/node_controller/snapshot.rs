@@ -31,15 +31,15 @@ impl SnapshotRequests {
         Self([None; NUM_PARTITIONS as usize])
     }
 
-    pub(crate) fn get(&self, partition: &PartitionId) -> Option<&SnapshotRequestState> {
+    pub(crate) fn get(&self, partition: PartitionId) -> Option<&SnapshotRequestState> {
         self.0[usize::from(partition.get())].as_ref()
     }
 
-    pub(crate) fn get_mut(&mut self, partition: &PartitionId) -> Option<&mut SnapshotRequestState> {
+    pub(crate) fn get_mut(&mut self, partition: PartitionId) -> Option<&mut SnapshotRequestState> {
         self.0[usize::from(partition.get())].as_mut()
     }
 
-    pub(crate) fn contains_key(&self, partition: &PartitionId) -> bool {
+    pub(crate) fn contains_key(&self, partition: PartitionId) -> bool {
         self.get(partition).is_some()
     }
 
@@ -47,7 +47,7 @@ impl SnapshotRequests {
         self.0[usize::from(partition.get())] = Some(request);
     }
 
-    pub(crate) fn remove(&mut self, partition: &PartitionId) {
+    pub(crate) fn remove(&mut self, partition: PartitionId) {
         self.0[usize::from(partition.get())] = None;
     }
 }
@@ -61,7 +61,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
         let waits_on_requester = self
             .requested_snapshots
-            .get(&partition)
+            .get(partition)
             .is_some_and(|request| request.source == from);
         if self.role(partition) == ReplicaRole::AwaitingSnapshot && !waits_on_requester {
             self.defer_snapshot_request(from, partition);
@@ -96,10 +96,20 @@ impl<T: ClusterTransport> NodeController<T> {
     pub(super) async fn serve_deferred_snapshots(&mut self) {
         let deferred = std::mem::take(&mut self.deferred_snapshot_requests);
         for (from, partition) in deferred {
-            if self.role(partition) == ReplicaRole::AwaitingSnapshot {
-                self.deferred_snapshot_requests.push_back((from, partition));
-            } else {
-                self.start_snapshot_send(from, partition).await;
+            match self.role(partition) {
+                ReplicaRole::AwaitingSnapshot => {
+                    self.deferred_snapshot_requests.push_back((from, partition));
+                }
+                ReplicaRole::Primary | ReplicaRole::Replica => {
+                    self.start_snapshot_send(from, partition).await;
+                }
+                ReplicaRole::None => {
+                    tracing::info!(
+                        ?partition,
+                        requester = from.get(),
+                        "deferred snapshot request dropped: left the partition without its data"
+                    );
+                }
             }
         }
     }
@@ -148,7 +158,7 @@ impl<T: ClusterTransport> NodeController<T> {
             "received snapshot chunk"
         );
 
-        match self.requested_snapshots.get_mut(&partition) {
+        match self.requested_snapshots.get_mut(partition) {
             Some(request) if request.source == from => {
                 request.last_activity = Instant::now();
             }
@@ -214,7 +224,7 @@ impl<T: ClusterTransport> NodeController<T> {
                         tracing::debug!(?partition, ?e, "no active migration for snapshot");
                     }
 
-                    self.requested_snapshots.remove(&partition);
+                    self.requested_snapshots.remove(partition);
                     self.reload_change_events(partition);
                     if let Some(epoch) = self.epoch(partition) {
                         self.take_role_after_import(partition, epoch, sequence);
@@ -323,12 +333,16 @@ impl<T: ClusterTransport> NodeController<T> {
     ) {
         let kept_source = self
             .requested_snapshots
-            .get(&partition)
-            .filter(|request| {
-                (taking_primary || request.taking_primary) && self.source_is_alive(request.source)
-            })
+            .get(partition)
+            .filter(|request| request.taking_primary && self.source_is_alive(request.source))
             .map(|request| request.source);
         let source = kept_source.unwrap_or(source);
+        if taking_primary
+            && let Some(request) = self.requested_snapshots.get_mut(partition)
+            && request.source == source
+        {
+            request.taking_primary = true;
+        }
         self.replicas
             .entry(partition.get())
             .or_insert_with(|| {
@@ -338,10 +352,10 @@ impl<T: ClusterTransport> NodeController<T> {
         self.stop_sending_change_events(partition);
         if self
             .requested_snapshots
-            .get(&partition)
+            .get(partition)
             .is_some_and(|request| request.source != source)
         {
-            self.requested_snapshots.remove(&partition);
+            self.requested_snapshots.remove(partition);
             self.pending_snapshots.remove(&partition);
         }
         tracing::info!(
@@ -376,20 +390,20 @@ impl<T: ClusterTransport> NodeController<T> {
         for partition in PartitionId::all() {
             let Some((stalled_source, stalled_taking_primary)) = self
                 .requested_snapshots
-                .get(&partition)
+                .get(partition)
                 .filter(|request| request.last_activity.elapsed() >= SNAPSHOT_RETRY_AFTER)
                 .map(|request| (request.source, request.taking_primary))
             else {
                 continue;
             };
-            self.requested_snapshots.remove(&partition);
+            self.requested_snapshots.remove(partition);
             self.pending_snapshots.remove(&partition);
             if self.role(partition) != ReplicaRole::AwaitingSnapshot {
                 continue;
             }
             let waiting_to_take = self.partition_map.primary(partition) == Some(self.node_id);
             let keep_stalled_source =
-                (waiting_to_take || stalled_taking_primary) && self.source_is_alive(stalled_source);
+                stalled_taking_primary && self.source_is_alive(stalled_source);
             let source = if keep_stalled_source {
                 Some(stalled_source)
             } else {
@@ -420,7 +434,7 @@ impl<T: ClusterTransport> NodeController<T> {
         from: NodeId,
         taking_primary: bool,
     ) {
-        if self.requested_snapshots.contains_key(&partition)
+        if self.requested_snapshots.contains_key(partition)
             || self.pending_snapshots.contains_key(&partition)
         {
             tracing::debug!(?partition, "snapshot already requested or pending");

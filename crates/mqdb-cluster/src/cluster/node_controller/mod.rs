@@ -73,7 +73,6 @@ const HELD_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3
 pub(super) struct HeldWrite {
     pub(super) from: NodeId,
     pub(super) write: ReplicationWrite,
-    pub(super) waiting: bool,
     pub(super) since: std::time::Instant,
 }
 
@@ -707,7 +706,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .entry(partition.get())
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
         state.become_primary(epoch);
-        self.requested_snapshots.remove(&partition);
+        self.requested_snapshots.remove(partition);
         self.pending_snapshots.remove(&partition);
         if !self.imported_partitions[usize::from(partition.get())]
             && let Err(e) = self.stores.record_held_primary(partition, epoch)
@@ -724,7 +723,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .entry(partition.get())
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
         state.become_replica(epoch, sequence);
-        self.requested_snapshots.remove(&partition);
+        self.requested_snapshots.remove(partition);
         self.pending_snapshots.remove(&partition);
         self.stop_sending_change_events(partition);
     }
@@ -742,7 +741,7 @@ impl<T: ClusterTransport> NodeController<T> {
         if let Some(state) = self.replicas.get_mut(&partition.get()) {
             state.step_down();
         }
-        self.requested_snapshots.remove(&partition);
+        self.requested_snapshots.remove(partition);
         self.pending_snapshots.remove(&partition);
         self.stop_sending_change_events(partition);
     }
@@ -957,7 +956,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 continue;
             };
 
-            if self.requested_snapshots.contains_key(&partition)
+            if self.requested_snapshots.contains_key(partition)
                 || self.pending_snapshots.contains_key(&partition)
             {
                 continue;

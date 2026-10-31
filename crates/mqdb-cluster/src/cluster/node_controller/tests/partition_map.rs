@@ -244,7 +244,7 @@ async fn a_stalled_snapshot_request_is_sent_again() {
     let stalled_since = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(11))
         .unwrap();
-    if let Some(request) = ctrl.requested_snapshots.get_mut(&partition) {
+    if let Some(request) = ctrl.requested_snapshots.get_mut(partition) {
         request.last_activity = stalled_since;
     }
     ctrl.apply_raft_partition_map(map).await;
@@ -427,7 +427,7 @@ async fn a_failed_snapshot_transfer_is_requested_again() {
     let stalled_since = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(11))
         .unwrap();
-    if let Some(request) = ctrl.requested_snapshots.get_mut(&partition) {
+    if let Some(request) = ctrl.requested_snapshots.get_mut(partition) {
         request.last_activity = stalled_since;
     }
     ctrl.apply_raft_partition_map(map).await;
@@ -765,7 +765,7 @@ async fn a_stalled_request_keeps_a_live_source_that_left_the_assignment() {
     let stalled_since = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(11))
         .unwrap();
-    if let Some(request) = ctrl.requested_snapshots.get_mut(&partition) {
+    if let Some(request) = ctrl.requested_snapshots.get_mut(partition) {
         request.last_activity = stalled_since;
     }
     ctrl.apply_raft_partition_map(moved).await;
@@ -903,7 +903,7 @@ async fn a_stalled_request_of_a_waiting_primary_swapped_to_replica_keeps_its_sou
     let stalled_since = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(11))
         .unwrap();
-    if let Some(request) = wiped.requested_snapshots.get_mut(&partition) {
+    if let Some(request) = wiped.requested_snapshots.get_mut(partition) {
         request.last_activity = stalled_since;
     }
 
@@ -913,4 +913,258 @@ async fn a_stalled_request_of_a_waiting_primary_swapped_to_replica_keeps_its_sou
 
     assert_eq!(snapshot_requests_to(&wiped, node(2)), 2);
     assert_eq!(snapshot_requests_to(&wiped, node(3)), 0);
+}
+
+async fn a_waiting_primary_removed_while_a_request_is_deferred() -> (
+    NodeController<MockTransport>,
+    NodeController<MockTransport>,
+    NodeController<MockTransport>,
+    PartitionId,
+) {
+    let partition = session_partition("c1");
+    let mut holder = controller(2);
+    holder.become_replica(partition, Epoch::new(1), 0);
+    holder.stores().create_session_replicated("c1").unwrap();
+    let mut wiped = controller(1);
+    let mut joiner = controller(3);
+    wiped
+        .apply_raft_partition_map(map_with(partition, node(1), &[node(2)], 1))
+        .await;
+    let moved = map_with(partition, node(1), &[node(3)], 2);
+    wiped.apply_raft_partition_map(moved.clone()).await;
+    joiner.apply_raft_partition_map(moved).await;
+    wiped.transport.inject_message(
+        node(3),
+        ClusterMessage::SnapshotRequest(SnapshotRequest::create(partition, node(3))),
+    );
+    wiped.process_messages().await;
+    (holder, wiped, joiner, partition)
+}
+
+fn deliver_chunks(from: &NodeController<MockTransport>, to: &NodeController<MockTransport>) {
+    for (target, message) in from.transport.sent_messages() {
+        if target == to.node_id() && matches!(message, ClusterMessage::SnapshotChunk(_)) {
+            to.transport.inject_message(from.node_id(), message);
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_waiting_node_that_leaves_the_assignment_does_not_serve_its_deferred_requests() {
+    let (_, mut wiped, mut joiner, partition) =
+        a_waiting_primary_removed_while_a_request_is_deferred().await;
+
+    wiped
+        .apply_raft_partition_map(map_with(partition, node(3), &[node(2)], 3))
+        .await;
+    deliver_chunks(&wiped, &joiner);
+    joiner.process_messages().await;
+    joiner
+        .apply_raft_partition_map(map_with(partition, node(3), &[node(2)], 3))
+        .await;
+
+    assert_ne!(joiner.role(partition), ReplicaRole::Primary);
+}
+
+#[tokio::test]
+async fn a_replica_promoted_while_its_source_waits_asks_the_new_replica() {
+    let (mut holder, mut wiped, mut joiner, partition) =
+        a_waiting_primary_removed_while_a_request_is_deferred().await;
+    let removed = map_with(partition, node(3), &[node(2)], 3);
+
+    joiner.apply_raft_partition_map(removed.clone()).await;
+    wiped.apply_raft_partition_map(removed).await;
+    deliver_chunks(&wiped, &joiner);
+    joiner.process_messages().await;
+    serve_snapshot(&mut holder, &mut joiner, partition).await;
+
+    assert_eq!(joiner.role(partition), ReplicaRole::Primary);
+    assert!(joiner.stores().sessions.get("c1").is_some());
+}
+
+fn chunks_to(ctrl: &NodeController<MockTransport>, to: NodeId) -> usize {
+    ctrl.transport
+        .sent_messages()
+        .into_iter()
+        .filter(|(target, message)| {
+            *target == to && matches!(message, ClusterMessage::SnapshotChunk(_))
+        })
+        .count()
+}
+
+fn stall_request(ctrl: &mut NodeController<MockTransport>, partition: PartitionId) {
+    let stalled_since = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(11))
+        .unwrap();
+    if let Some(request) = ctrl.requested_snapshots.get_mut(partition) {
+        request.last_activity = stalled_since;
+    }
+}
+
+async fn waiting_with_a_deferred_request() -> (NodeController<MockTransport>, PartitionId) {
+    let partition = session_partition("c1");
+    let mut waiting = controller(1);
+    waiting
+        .apply_raft_partition_map(map_with(partition, node(1), &[node(2)], 1))
+        .await;
+    waiting.transport.inject_message(
+        node(3),
+        ClusterMessage::SnapshotRequest(SnapshotRequest::create(partition, node(3))),
+    );
+    waiting.process_messages().await;
+    (waiting, partition)
+}
+
+#[tokio::test]
+async fn a_deferred_request_stays_deferred_while_the_node_still_waits() {
+    let (mut waiting, partition) = waiting_with_a_deferred_request().await;
+
+    waiting
+        .apply_raft_partition_map(map_with(partition, node(1), &[node(2)], 1))
+        .await;
+
+    assert_eq!(chunks_to(&waiting, node(3)), 0);
+    assert_eq!(waiting.deferred_snapshot_requests.len(), 1);
+}
+
+#[tokio::test]
+async fn a_repeated_request_is_deferred_once() {
+    let (mut waiting, partition) = waiting_with_a_deferred_request().await;
+    waiting.transport.inject_message(
+        node(3),
+        ClusterMessage::SnapshotRequest(SnapshotRequest::create(partition, node(3))),
+    );
+    waiting.process_messages().await;
+
+    assert_eq!(waiting.deferred_snapshot_requests.len(), 1);
+}
+
+#[tokio::test]
+async fn a_waiting_node_given_the_primary_role_by_the_map_serves_its_deferred_requests() {
+    let (mut waiting, partition) = waiting_with_a_deferred_request().await;
+
+    waiting
+        .apply_raft_partition_map(map_with(partition, node(1), &[], 2))
+        .await;
+
+    assert_eq!(waiting.role(partition), ReplicaRole::Primary);
+    assert_eq!(chunks_to(&waiting, node(3)), 1);
+}
+
+#[tokio::test]
+async fn a_chunk_from_the_source_keeps_the_request_from_stalling() {
+    let partition = session_partition("c1");
+    let mut ctrl = controller(2);
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
+        .await;
+    stall_request(&mut ctrl, partition);
+    ctrl.transport.inject_message(
+        node(3),
+        ClusterMessage::SnapshotChunk(crate::cluster::snapshot::SnapshotChunk::new(
+            partition,
+            0,
+            2,
+            0,
+            Vec::new(),
+        )),
+    );
+    ctrl.process_messages().await;
+
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
+        .await;
+
+    assert_eq!(snapshot_requests_to(&ctrl, node(3)), 1);
+}
+
+#[tokio::test]
+async fn a_stalled_request_is_sent_again_when_another_partition_changes() {
+    let partition = session_partition("c1");
+    let other = PartitionId::new((partition.get() + 1) % 256).unwrap();
+    let mut ctrl = controller(2);
+    let map = map_with(partition, node(2), &[node(3)], 1);
+    ctrl.apply_raft_partition_map(map.clone()).await;
+    stall_request(&mut ctrl, partition);
+
+    let mut changed = map;
+    changed.set(
+        other,
+        PartitionAssignment::new(node(3), vec![node(1)], Epoch::new(1)),
+    );
+    ctrl.apply_raft_partition_map(changed).await;
+
+    assert_eq!(snapshot_requests_to(&ctrl, node(3)), 2);
+}
+
+#[tokio::test]
+async fn a_stalled_request_to_a_dead_source_asks_the_current_replica() {
+    let partition = session_partition("c1");
+    let mut ctrl = controller(1);
+    ctrl.heartbeat.receive_heartbeat(
+        node(2),
+        &crate::cluster::protocol::Heartbeat::create(node(2), 0),
+        0,
+    );
+    ctrl.apply_raft_partition_map(map_with(partition, node(1), &[node(2)], 1))
+        .await;
+    let moved = map_with(partition, node(1), &[node(3)], 2);
+    ctrl.apply_raft_partition_map(moved.clone()).await;
+    assert_eq!(snapshot_requests_to(&ctrl, node(3)), 0);
+    ctrl.apply_dead_nodes(&[node(2)]);
+    stall_request(&mut ctrl, partition);
+
+    ctrl.apply_raft_partition_map(moved).await;
+
+    assert_eq!(snapshot_requests_to(&ctrl, node(3)), 1);
+}
+
+async fn waiting_with_a_partial_snapshot() -> (NodeController<MockTransport>, PartitionId) {
+    let partition = session_partition("c1");
+    let mut ctrl = controller(2);
+    ctrl.apply_raft_partition_map(map_with(partition, node(3), &[node(2)], 1))
+        .await;
+    ctrl.transport.inject_message(
+        node(3),
+        ClusterMessage::SnapshotChunk(crate::cluster::snapshot::SnapshotChunk::new(
+            partition,
+            0,
+            2,
+            0,
+            Vec::new(),
+        )),
+    );
+    ctrl.process_messages().await;
+    assert!(ctrl.pending_snapshots.contains_key(&partition));
+    (ctrl, partition)
+}
+
+#[tokio::test]
+async fn taking_a_role_directly_drops_the_snapshot_in_progress() {
+    let (mut primary, partition) = waiting_with_a_partial_snapshot().await;
+    primary.become_primary(partition, Epoch::new(2));
+    let (mut replica, _) = waiting_with_a_partial_snapshot().await;
+    replica.become_replica(partition, Epoch::new(2), 0);
+    let (mut stepped_down, _) = waiting_with_a_partial_snapshot().await;
+    stepped_down.step_down(partition);
+
+    for ctrl in [&primary, &replica, &stepped_down] {
+        assert!(!ctrl.pending_snapshots.contains_key(&partition));
+        assert!(!ctrl.requested_snapshots.contains_key(partition));
+    }
+}
+
+#[tokio::test]
+async fn a_waiting_replica_swapped_to_primary_keeps_its_source_when_the_replica_moves() {
+    let partition = session_partition("c1");
+    let mut ctrl = controller(2);
+    ctrl.apply_raft_partition_map(map_with(partition, node(1), &[node(2)], 1))
+        .await;
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(1)], 2))
+        .await;
+
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 3))
+        .await;
+
+    assert_eq!(ctrl.role(partition), ReplicaRole::AwaitingSnapshot);
+    assert_eq!(snapshot_requests_to(&ctrl, node(1)), 1);
+    assert_eq!(snapshot_requests_to(&ctrl, node(3)), 0);
 }
