@@ -74,24 +74,30 @@ impl MqttSubscriptionSnapshot {
         std::str::from_utf8(&self.client_id).unwrap_or("")
     }
 
-    #[allow(clippy::cast_possible_truncation)]
     pub fn add_subscription(&mut self, topic: &str, qos: u8) {
         let is_wildcard = topic.contains('+') || topic.contains('#');
         if self.topics.iter().any(|t| t.topic_str() == topic) {
             return;
         }
+        let Ok(topic_count) = u16::try_from(self.topics.len() + 1) else {
+            tracing::warn!(
+                client_id = self.client_id_str(),
+                topic,
+                "subscription snapshot is full, subscription not recorded"
+            );
+            return;
+        };
         self.topics
             .push(MqttTopicEntry::create(topic, qos, is_wildcard));
-        self.topic_count = self.topics.len() as u16;
+        self.topic_count = topic_count;
         self.snapshot_version += 1;
     }
 
-    #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub fn remove_subscription(&mut self, topic: &str) -> bool {
         let len_before = self.topics.len();
         self.topics.retain(|t| t.topic_str() != topic);
-        self.topic_count = self.topics.len() as u16;
+        self.topic_count = u16::try_from(self.topics.len()).unwrap_or(u16::MAX);
         let removed = self.topics.len() < len_before;
         if removed {
             self.snapshot_version += 1;
@@ -888,5 +894,25 @@ mod tests {
         assert!(!cache.needs_reconciliation(200_000));
         assert!(!cache.needs_reconciliation(399_999));
         assert!(cache.needs_reconciliation(400_001));
+    }
+
+    #[test]
+    fn snapshot_refuses_a_topic_its_count_cannot_hold() {
+        let topics: Vec<MqttTopicEntry> = (0..u16::MAX)
+            .map(|i| MqttTopicEntry::create(&format!("t/{i}"), 0, false))
+            .collect();
+        let mut snapshot = MqttSubscriptionSnapshot {
+            topic_count: u16::MAX,
+            topics,
+            ..MqttSubscriptionSnapshot::create("client1")
+        };
+
+        snapshot.add_subscription("one/too/many", 0);
+
+        assert_eq!(snapshot.topics.len(), usize::from(u16::MAX));
+        assert_eq!(snapshot.topic_count, u16::MAX);
+        let parsed =
+            SubscriptionCache::deserialize(&SubscriptionCache::serialize(&snapshot)).unwrap();
+        assert_eq!(parsed.topics.len(), usize::from(u16::MAX));
     }
 }

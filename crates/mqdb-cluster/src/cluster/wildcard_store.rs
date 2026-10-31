@@ -99,6 +99,28 @@ pub fn wildcard_key(pattern: &str, client_id: &str) -> String {
     format!("_wildcards/{hash:08x}/{client_id}")
 }
 
+fn snapshot_frame(pattern: &str, client_id: &str, data: &[u8]) -> Vec<u8> {
+    let id = format!("{pattern}:{client_id}");
+    let (id_len, id_bytes) = match u16::try_from(id.len()) {
+        Ok(len) => (len, id.as_bytes()),
+        Err(_) => {
+            tracing::warn!(
+                pattern_len = pattern.len(),
+                client_id,
+                "wildcard id too long for the snapshot id field, sent without it"
+            );
+            (0, &[][..])
+        }
+    };
+    let data_len = u32::try_from(data.len()).unwrap_or(u32::MAX);
+    let mut frame = Vec::with_capacity(6 + id_bytes.len() + data.len());
+    frame.extend_from_slice(&id_len.to_be_bytes());
+    frame.extend_from_slice(id_bytes);
+    frame.extend_from_slice(&data_len.to_be_bytes());
+    frame.extend_from_slice(data);
+    frame
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WildcardStoreError {
     InvalidPattern,
@@ -341,30 +363,17 @@ impl WildcardStore {
         id: &str,
         data: &[u8],
     ) -> Result<(), WildcardStoreError> {
-        let parts: Vec<&str> = id.splitn(2, ':').collect();
-        if parts.len() != 2 {
-            return Err(WildcardStoreError::InvalidPattern);
-        }
-        let pattern = parts[0];
-        let client_id = parts[1];
-
         match operation {
             Operation::Insert | Operation::Update => {
                 let entry =
                     Self::deserialize_entry(data).ok_or(WildcardStoreError::SerializationError)?;
-                let subscriber = WildcardSubscriber {
-                    client_id: client_id.to_string(),
-                    client_partition: entry.partition().unwrap_or(PartitionId::ZERO),
-                    qos: entry.qos,
-                    subscription_type: entry.sub_type(),
-                };
-                self.trie
-                    .write()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(pattern, subscriber);
+                self.insert_entry(&entry);
                 Ok(())
             }
             Operation::Delete => {
+                let (pattern, client_id) = id
+                    .split_once(':')
+                    .ok_or(WildcardStoreError::InvalidPattern)?;
                 self.trie
                     .write()
                     .unwrap_or_else(PoisonError::into_inner)
@@ -372,6 +381,19 @@ impl WildcardStore {
                 Ok(())
             }
         }
+    }
+
+    fn insert_entry(&self, entry: &WildcardEntry) {
+        let subscriber = WildcardSubscriber {
+            client_id: entry.client_id_str().to_string(),
+            client_partition: entry.partition().unwrap_or(PartitionId::ZERO),
+            qos: entry.qos,
+            subscription_type: entry.sub_type(),
+        };
+        self.trie
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(entry.pattern_str(), subscriber);
     }
 
     #[must_use]
@@ -383,10 +405,13 @@ impl WildcardStore {
             .filter(|(_, sub)| sub.client_partition == partition)
             .collect();
 
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&(partition_entries.len() as u32).to_be_bytes());
+        let count = u32::try_from(partition_entries.len()).unwrap_or(u32::MAX);
+        let mut buf = count.to_be_bytes().to_vec();
 
-        for (pattern, sub) in partition_entries {
+        for (pattern, sub) in partition_entries
+            .into_iter()
+            .take(usize::try_from(count).unwrap_or(usize::MAX))
+        {
             let entry = WildcardEntry::create(
                 &pattern,
                 &sub.client_id,
@@ -394,15 +419,8 @@ impl WildcardStore {
                 sub.qos,
                 sub.subscription_type,
             );
-
-            let id = format!("{}:{}", pattern, sub.client_id);
-            let id_bytes = id.as_bytes();
-            buf.extend_from_slice(&(id_bytes.len() as u16).to_be_bytes());
-            buf.extend_from_slice(id_bytes);
-
             let data = Self::serialize_entry(&entry);
-            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
-            buf.extend_from_slice(&data);
+            buf.extend_from_slice(&snapshot_frame(&pattern, &sub.client_id, &data));
         }
 
         buf
@@ -429,8 +447,6 @@ impl WildcardStore {
             if offset + id_len > data.len() {
                 break;
             }
-            let id = std::str::from_utf8(&data[offset..offset + id_len])
-                .map_err(|_| WildcardStoreError::SerializationError)?;
             offset += id_len;
 
             if offset + 4 > data.len() {
@@ -450,24 +466,8 @@ impl WildcardStore {
             let entry_data = &data[offset..offset + data_len];
             offset += data_len;
 
-            let parts: Vec<&str> = id.splitn(2, ':').collect();
-            if parts.len() != 2 {
-                continue;
-            }
-            let pattern = parts[0];
-            let client_id = parts[1];
-
             if let Some(entry) = Self::deserialize_entry(entry_data) {
-                let subscriber = WildcardSubscriber {
-                    client_id: client_id.to_string(),
-                    client_partition: entry.partition().unwrap_or(PartitionId::ZERO),
-                    qos: entry.qos,
-                    subscription_type: entry.sub_type(),
-                };
-                self.trie
-                    .write()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(pattern, subscriber);
+                self.insert_entry(&entry);
                 imported += 1;
             }
         }
@@ -531,6 +531,7 @@ impl std::fmt::Debug for WildcardStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cluster::session_partition;
 
     fn node(id: u16) -> NodeId {
         NodeId::validated(id).unwrap()
@@ -699,5 +700,110 @@ mod tests {
 
         let matches = store.match_topic("users/123/profile");
         assert_eq!(matches.len(), 1);
+    }
+
+    fn snapshot_ids(snapshot: &[u8]) -> Vec<String> {
+        let count = u32::from_be_bytes([snapshot[0], snapshot[1], snapshot[2], snapshot[3]]);
+        let mut offset = 4;
+        let mut ids = Vec::new();
+        for _ in 0..count {
+            let id_len = usize::from(u16::from_be_bytes([snapshot[offset], snapshot[offset + 1]]));
+            offset += 2;
+            ids.push(String::from_utf8(snapshot[offset..offset + id_len].to_vec()).unwrap());
+            offset += id_len;
+            let data_len = u32::from_be_bytes([
+                snapshot[offset],
+                snapshot[offset + 1],
+                snapshot[offset + 2],
+                snapshot[offset + 3],
+            ]);
+            offset += 4 + usize::try_from(data_len).unwrap();
+        }
+        assert_eq!(offset, snapshot.len());
+        ids
+    }
+
+    fn long_filter() -> String {
+        format!("{}/#", "a".repeat(65_450))
+    }
+
+    #[test]
+    fn snapshot_keeps_a_filter_whose_id_does_not_fit_and_the_entries_after_it() {
+        let src = WildcardStore::new(node(1));
+        let client = "c".repeat(100);
+        src.subscribe_mqtt(&long_filter(), &client, 1).unwrap();
+        src.subscribe_mqtt("short/+", &client, 0).unwrap();
+        src.subscribe_mqtt("other/#", &client, 2).unwrap();
+
+        let snapshot = src.export_for_partition(session_partition(&client));
+        let dst = WildcardStore::new(node(2));
+
+        assert_eq!(dst.import_wildcards(&snapshot), Ok(3));
+        let long_topic = format!("{}/x", "a".repeat(65_450));
+        assert_eq!(dst.match_topic(&long_topic).len(), 1);
+        assert_eq!(dst.match_topic("short/x").len(), 1);
+        assert_eq!(dst.match_topic("other/x/y").len(), 1);
+        let mut patterns = dst.get_client_patterns(&client);
+        patterns.sort();
+        let mut expected = src.get_client_patterns(&client);
+        expected.sort();
+        assert_eq!(patterns, expected);
+    }
+
+    #[test]
+    fn snapshot_framing_stays_readable_by_id_based_importers() {
+        let src = WildcardStore::new(node(1));
+        let client = "c".repeat(100);
+        src.subscribe_mqtt(&long_filter(), &client, 1).unwrap();
+        src.subscribe_mqtt("short/+", &client, 0).unwrap();
+
+        let snapshot = src.export_for_partition(session_partition(&client));
+        let mut ids = snapshot_ids(&snapshot);
+        ids.sort();
+
+        assert_eq!(ids, vec![String::new(), format!("short/+:{client}")]);
+    }
+
+    #[test]
+    fn snapshot_keeps_a_filter_containing_a_colon() {
+        let src = WildcardStore::new(node(1));
+        src.subscribe_mqtt("urn:dev/+", "client1", 1).unwrap();
+
+        let snapshot = src.export_for_partition(session_partition("client1"));
+        let dst = WildcardStore::new(node(2));
+
+        assert_eq!(dst.import_wildcards(&snapshot), Ok(1));
+        assert_eq!(
+            dst.get_client_patterns("client1"),
+            vec![("urn:dev/+".to_string(), 1)]
+        );
+        let matches = dst.match_topic("urn:dev/x");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].client_id_str(), "client1");
+    }
+
+    #[test]
+    fn replicated_insert_keeps_a_filter_containing_a_colon() {
+        let store = WildcardStore::new(node(1));
+        let entry = WildcardEntry::create(
+            "urn:dev/+",
+            "client1",
+            session_partition("client1"),
+            1,
+            SubscriptionType::Mqtt,
+        );
+
+        store
+            .apply_replicated(
+                Operation::Insert,
+                "urn:dev/+:client1",
+                &WildcardStore::serialize_entry(&entry),
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.get_client_patterns("client1"),
+            vec![("urn:dev/+".to_string(), 1)]
+        );
     }
 }

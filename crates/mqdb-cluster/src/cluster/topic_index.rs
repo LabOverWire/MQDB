@@ -80,16 +80,24 @@ impl TopicIndexEntry {
         {
             return;
         }
+        let Ok(subscriber_count) = u16::try_from(self.subscribers.len() + 1) else {
+            tracing::warn!(
+                topic = self.topic_str(),
+                client_id,
+                "topic index entry is full, subscriber not recorded"
+            );
+            return;
+        };
         self.subscribers
             .push(SubscriberLocation::create(client_id, client_partition, qos));
-        self.subscriber_count = self.subscribers.len() as u16;
+        self.subscriber_count = subscriber_count;
     }
 
     #[must_use]
     pub fn remove_subscriber(&mut self, client_id: &str) -> bool {
         let len_before = self.subscribers.len();
         self.subscribers.retain(|s| s.client_id_str() != client_id);
-        self.subscriber_count = self.subscribers.len() as u16;
+        self.subscriber_count = u16::try_from(self.subscribers.len()).unwrap_or(u16::MAX);
         self.subscribers.len() != len_before
     }
 
@@ -740,5 +748,24 @@ mod tests {
 
         let subs = index.get_subscribers("topic/a");
         assert_eq!(subs.len(), 1);
+    }
+
+    #[test]
+    fn entry_refuses_a_subscriber_its_count_cannot_hold() {
+        let subscribers: Vec<SubscriberLocation> = (0..u16::MAX)
+            .map(|i| SubscriberLocation::create(&format!("c{i}"), partition(1), 0))
+            .collect();
+        let mut entry = TopicIndexEntry {
+            subscriber_count: u16::MAX,
+            subscribers,
+            ..TopicIndexEntry::create("topic/a")
+        };
+
+        entry.add_subscriber("one-too-many", partition(1), 0);
+
+        assert_eq!(entry.subscribers.len(), usize::from(u16::MAX));
+        assert_eq!(entry.subscriber_count, u16::MAX);
+        let parsed = TopicIndex::deserialize(&TopicIndex::serialize(&entry)).unwrap();
+        assert_eq!(parsed.subscribers.len(), usize::from(u16::MAX));
     }
 }
