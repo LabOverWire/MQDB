@@ -442,6 +442,45 @@ async fn a_resource_delete_the_primary_cannot_store_keeps_its_grants() {
 }
 
 #[tokio::test]
+async fn a_grant_that_cannot_be_removed_does_not_stop_removing_the_others() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_of_every_partition(&backend);
+    let handler = sharing_handler(&mut ctrl);
+    shared_diagram(&mut ctrl, &handler).await;
+    for grantee in ["carol", "dave"] {
+        let shared = request_as(
+            &mut ctrl,
+            &handler,
+            "$DB/diagrams/d1/share",
+            &json!({"grantee": grantee, "permission": "view"}),
+            Some("alice"),
+        )
+        .await;
+        assert_eq!(shared["status"], json!("ok"));
+    }
+    let grants = ctrl.db_list("_shares");
+    assert_eq!(grants.len(), 3);
+    let stuck = grants[0].id_str().to_string();
+    backend.fail_writes_to_keys_containing(&stuck);
+
+    let deleted = request_as(
+        &mut ctrl,
+        &handler,
+        "$DB/diagrams/d1/delete",
+        &Value::Null,
+        Some("alice"),
+    )
+    .await;
+
+    let left: Vec<String> = ctrl
+        .db_list("_shares")
+        .iter()
+        .map(|grant| grant.id_str().to_string())
+        .collect();
+    assert_eq!((&deleted["status"], left), (&json!("ok"), vec![stuck]));
+}
+
+#[tokio::test]
 async fn a_regrant_whose_new_grant_cannot_be_stored_is_refused() {
     let backend = FaultyBackend::shared();
     let mut ctrl = primary_of_every_partition(&backend);

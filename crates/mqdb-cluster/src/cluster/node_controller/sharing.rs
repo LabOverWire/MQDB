@@ -176,13 +176,16 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     async fn delete_grants(&mut self, share_ids: Vec<String>) -> Result<(), DbDataStoreError> {
+        let mut first_failure = None;
         for sid in share_ids {
             match self.db_delete(SHARES_ENTITY, &sid).await {
                 Ok(_) | Err(DbDataStoreError::NotFound) => {}
-                Err(e) => return Err(e),
+                Err(e) => {
+                    first_failure.get_or_insert(e);
+                }
             }
         }
-        Ok(())
+        first_failure.map_or(Ok(()), Err)
     }
 
     async fn write_grant(

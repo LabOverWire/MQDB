@@ -3693,8 +3693,6 @@ async fn unique_constraint_cross_node_message_flow() {
             .become_replica(partition, Epoch::new(1), 0);
     }
 
-    // Establish the unique-voter set (what the leader founds from membership) so reserves/seals use a
-    // concrete majority; without it a multi-node cluster fails closed until the set is founded.
     let voters: std::collections::BTreeSet<_> = cluster.nodes.iter().map(|n| n.id).collect();
     for node in &mut cluster.nodes {
         node.controller.seed_unique_voters(voters.clone());
@@ -3711,7 +3709,6 @@ async fn unique_constraint_cross_node_message_flow() {
         node.controller.process_messages().await;
     }
 
-    // Complete the promotion seal handshake so node 0 may serve reserves for the value partition.
     for _ in 0..3 {
         cluster.advance_ms(1);
         cluster.nodes[0].controller.process_messages().await;
@@ -3737,16 +3734,13 @@ async fn unique_constraint_cross_node_message_flow() {
         message: ClusterMessage::UniqueReserveRequest(request),
         received_at: 0,
     };
-    // Node 1 (value primary) applies the reserve and group-replicates it, deferring its response.
     cluster.nodes[0].controller.transport().requeue(request_msg);
     cluster.advance_ms(1);
     cluster.nodes[0].controller.process_messages().await;
 
-    // Node 2 (the other group member) accepts the replicate and acks it.
     cluster.advance_ms(1);
     cluster.nodes[1].controller.process_messages().await;
 
-    // Node 1 sees the majority ack and only now sends the deferred reserve response.
     cluster.advance_ms(1);
     cluster.nodes[0].controller.process_messages().await;
 
@@ -3916,8 +3910,6 @@ async fn unique_seal_fences_superseded_primary_reserve() {
     let unique_part = mqdb_cluster::cluster::db::unique_partition("products", "sku", value);
     let node0_id = cluster.nodes[0].id;
 
-    // A newly promoted primary seals the partition at epoch 2 by promising it at the group: each
-    // member records the promise on receiving the seal request.
     for i in 1..cluster.nodes.len() {
         cluster.nodes[i]
             .controller
@@ -3935,8 +3927,6 @@ async fn unique_seal_fences_superseded_primary_reserve() {
         cluster.nodes[i].controller.process_messages().await;
     }
 
-    // The superseded epoch-1 primary tries to replicate a reservation to the group; sealed members
-    // must reject it (epoch below their promise).
     let params = UniqueReserveParams {
         entity: "products",
         field: "sku",
