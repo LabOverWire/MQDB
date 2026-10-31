@@ -7,9 +7,7 @@ use crate::cluster::session::session_partition;
 use crate::cluster::{Epoch, SubscriptionType, entity, is_response_topic};
 
 impl StoreManager {
-    /// # Errors
-    /// Returns `StoreApplyError::PersistenceError` if no storage backend is configured.
-    pub fn recover(&self) -> Result<RecoveryStats, StoreApplyError> {
+    pub(crate) fn recover(&self) -> Result<RecoveryStats, StoreApplyError> {
         let storage = self
             .storage
             .as_ref()
@@ -30,6 +28,7 @@ impl StoreManager {
             (entity::DB_INDEX, RecoveryField::DbIndex),
             (entity::DB_UNIQUE, RecoveryField::DbUnique),
             (entity::DB_FK, RecoveryField::DbFk),
+            (entity::DB_CONSTRAINT, RecoveryField::DbConstraint),
         ];
 
         for (entity_name, field) in entities_to_recover {
