@@ -1158,14 +1158,18 @@ impl<T: ClusterTransport> NodeController<T> {
     /// expiry cannot hold the lock long enough to stall heartbeats/Raft; the remainder is
     /// reaped on the next sweep. Returns the number reaped.
     pub(crate) async fn reap_expired_ttl(&mut self, now_secs: u64) -> usize {
-        let mut expired = self.stores.db_data.scan_expired_ttl(now_secs);
-        expired.truncate(TTL_REAP_MAX_PER_PASS);
+        let expired: Vec<(String, String)> = self
+            .stores
+            .db_data
+            .scan_expired_ttl(now_secs)
+            .into_iter()
+            .filter(|(entity, id)| {
+                self.is_primary_for_partition(crate::cluster::db::data_partition(entity, id))
+            })
+            .take(TTL_REAP_MAX_PER_PASS)
+            .collect();
         let mut reaped = 0usize;
         for (entity, id) in expired {
-            let partition = crate::cluster::db::data_partition(&entity, &id);
-            if !self.is_primary_for_partition(partition) {
-                continue;
-            }
             if self
                 .delete_record_replicated(&entity, &id, None, Vec::new(), EventOrigin::default())
                 .await

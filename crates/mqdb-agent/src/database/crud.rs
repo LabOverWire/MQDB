@@ -1063,7 +1063,7 @@ mod concurrency_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn create_with_huge_ttl_secs_never_expires() {
-        let (_tmp, db) = test_db().await;
+        let (tmp_dir, db) = test_db().await;
         let scope = ScopeConfig::default();
 
         let created = db
@@ -1084,6 +1084,7 @@ mod concurrency_tests {
             .unwrap()
             .as_secs();
         assert_eq!(db.ttl_cleanup_pass_for_test(now + 1).await, 0);
+        drop(tmp_dir);
     }
 
     #[tokio::test(flavor = "multi_thread")]

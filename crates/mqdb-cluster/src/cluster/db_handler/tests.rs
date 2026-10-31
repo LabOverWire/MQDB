@@ -858,6 +858,46 @@ async fn vault_json_create_forwarded_to_primary_keeps_ttl_expiry() {
 }
 
 #[tokio::test]
+async fn ttl_reap_pass_fills_its_budget_with_rows_it_owns() {
+    let node1 = NodeId::validated(1).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    let half = NUM_PARTITIONS / 2;
+    let mut map = PartitionMap::default();
+    for i in 0..half {
+        let partition = PartitionId::new(i).unwrap();
+        ctrl.become_primary(partition, Epoch::new(1));
+        map.set(
+            partition,
+            crate::cluster::PartitionAssignment {
+                primary: Some(node1),
+                replicas: vec![],
+                epoch: Epoch::new(1),
+            },
+        );
+    }
+    ctrl.update_partition_map(map);
+
+    let expired = serde_json::to_vec(&serde_json::json!({"_expires_at": 100})).unwrap();
+    let ids: Vec<String> = (0..6000).map(|i| format!("row-{i}")).collect();
+    let owned = ids
+        .iter()
+        .filter(|id| data_partition("ttldocs", id).get() < half)
+        .count();
+    assert!(
+        owned > 2048,
+        "need more owned rows than two passes: {owned}"
+    );
+    for id in &ids {
+        ctrl.stores()
+            .db_create_replicated("ttldocs", id, &expired, 1000)
+            .unwrap();
+    }
+
+    assert_eq!(ctrl.reap_expired_ttl(1_000).await, 1024);
+    assert_eq!(ctrl.reap_expired_ttl(1_000).await, 1024);
+}
+
+#[tokio::test]
 async fn cluster_update_delete_expected_version_cas() {
     let node1 = NodeId::validated(1).unwrap();
     let handler = DbRequestHandler::new(node1);
