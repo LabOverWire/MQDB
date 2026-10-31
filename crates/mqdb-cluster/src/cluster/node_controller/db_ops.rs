@@ -4,7 +4,7 @@
 use super::{
     ClusterMessage, ClusterTransport, Epoch, FkCheckContinuation, FkDeleteContinuation, JsonDbOp,
     JsonDbRequest, JsonDbResponse, NodeController, NodeId, PartitionId, PendingFkDeleteWork,
-    PendingFkWork, PendingUniqueWork, ReplicationWrite, UniqueCheckContinuation,
+    PendingFkWork, PendingUniqueWork, ReplicationError, ReplicationWrite, UniqueCheckContinuation,
     UniqueReservationParams, entity,
 };
 use crate::cluster::protocol::ChangeEventRecord;
@@ -282,7 +282,13 @@ impl<T: ClusterTransport> NodeController<T> {
     ) -> Result<(), super::db::DbDataStoreError> {
         self.write_or_forward_with_event(write, event, extra_outbox)
             .await
-            .map_err(super::db::DbDataStoreError::Commit)
+            .map_err(|error| match error {
+                ReplicationError::NotPrimary => super::db::DbDataStoreError::NotPrimary,
+                ReplicationError::TooManyPending
+                | ReplicationError::QuorumFailed
+                | ReplicationError::Timeout
+                | ReplicationError::StoreFailed => super::db::DbDataStoreError::StoreFailed,
+            })
     }
 
     pub async fn db_commit(

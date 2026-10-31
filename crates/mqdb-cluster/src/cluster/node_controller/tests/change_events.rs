@@ -561,10 +561,7 @@ async fn a_commit_refused_without_the_primary_role_publishes_no_event() {
 
     let (_, committed) = try_commit(&mut ctrl, 1).await;
 
-    assert_eq!(
-        committed,
-        Err(DbDataStoreError::Commit(ReplicationError::NotPrimary))
-    );
+    assert_eq!(committed, Err(DbDataStoreError::NotPrimary));
     assert!(delivered_locally(&ctrl).is_empty());
     assert!(replication_writes_sent(&ctrl).is_empty());
 }
@@ -724,10 +721,7 @@ async fn a_write_with_an_event_the_primary_cannot_store_publishes_no_event() {
 
     let (_, committed) = try_commit(&mut primary, 1).await;
 
-    assert_eq!(
-        committed,
-        Err(DbDataStoreError::Commit(ReplicationError::StoreFailed))
-    );
+    assert_eq!(committed, Err(DbDataStoreError::StoreFailed));
     assert!(delivered_locally(&primary).is_empty());
     assert!(replication_writes_sent(&primary).is_empty());
     assert_eq!(backend.keys_containing(ID).unwrap(), 0);

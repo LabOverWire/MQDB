@@ -105,10 +105,6 @@ pub struct PendingScatterRequest {
     pub continuation: Option<ShareResolveContinuation>,
 }
 
-/// A share whose grantee is an email awaiting cross-partition identity
-/// resolution. Carried on the scatter that lists `_identity_links` by
-/// `email_hash`; on completion the grant is written to the resolved canonical id
-/// (or left pending when unresolved) and routed to the resource primary.
 #[cfg(feature = "http-api")]
 pub struct ShareResolveContinuation {
     pub email_hash: String,
@@ -121,10 +117,6 @@ pub struct ShareResolveContinuation {
     pub granted_by: String,
     pub response_topic: String,
     pub correlation_data: Option<Vec<u8>>,
-    /// Set when an unshare/clear for this `(entity, id, grantee_key)` lands on
-    /// this node while the resolution is still in flight; the completing write
-    /// is then skipped so a revoked grant is not resurrected (see
-    /// `specs/ShareResolveRace.tla`).
     pub invalidated: bool,
 }
 
@@ -145,8 +137,6 @@ pub struct PendingUniqueReserve {
     pub receiver: oneshot::Receiver<UniqueReserveStatus>,
 }
 
-/// Identity of a unique claim, enough to release it: the reservation is keyed by
-/// `(entity, field, value)` and owned by `idempotency_key`.
 pub(crate) struct UniqueClaimId {
     pub entity: String,
     pub field: String,
@@ -184,9 +174,6 @@ pub struct UniqueCheckPhase1Result {
     pub pending_quorum: Vec<(String, oneshot::Receiver<bool>)>,
 }
 
-/// Why a unique reserve failed, so the create can return the right status: a real conflict is a
-/// permanent `409`, while a not-yet-durable reserve (partition unsealed, no primary/quorum) is a
-/// transient `503` the client should retry.
 pub enum ReserveFailure {
     Conflict(String),
     NotDurable(String),
@@ -227,10 +214,6 @@ pub struct PendingUniqueWork {
     pub continuation: UniqueCheckContinuation,
 }
 
-/// Result of completing an FK check whose entity also has unique constraints. `Done` means the
-/// response was already sent (FK failed, or the reserve failed synchronously). `NeedUnique` means
-/// the unique reserve has started and its majority-await must run **outside the controller lock**
-/// (via `spawn_unique_completion`), which is why this is returned rather than awaited inline.
 pub enum FkThenUniqueOutcome {
     Done,
     NeedUnique(Box<PendingUniqueWork>),
@@ -653,8 +636,6 @@ impl<T: ClusterTransport> NodeController<T> {
             && self.role(partition) == ReplicaRole::Replica
     }
 
-    /// Pick a local partition for creating new entities (round-robin).
-    ///
     /// # Panics
     /// Panics if no valid partition can be created.
     #[must_use]
@@ -685,9 +666,6 @@ impl<T: ClusterTransport> NodeController<T> {
         self.heartbeat.alive_or_suspected_nodes()
     }
 
-    /// Cluster members this node knows about, excluding itself: every node that owns a partition
-    /// as primary or replica, plus any node named in voter gossip. A node can appear here without
-    /// being reachable, which is exactly the case `unlinked_nodes` reports.
     pub fn known_members(&self) -> Vec<NodeId> {
         let mut members: std::collections::BTreeSet<NodeId> =
             self.partition_map().all_nodes().into_iter().collect();
@@ -696,15 +674,10 @@ impl<T: ClusterTransport> NodeController<T> {
         members.into_iter().collect()
     }
 
-    /// Known cluster members this node has no direct link to. Broadcasts are a single hop and
-    /// targeted sends are not routed, so any node listed here silently misses subscriptions,
-    /// presence, client locations and forwarded publishes.
     pub async fn unlinked_nodes(&self) -> Vec<NodeId> {
         self.unlinked_from(&self.known_members()).await
     }
 
-    /// `unlinked_nodes` against an already-computed member set, so a caller that needs both does
-    /// not walk every partition twice.
     pub async fn unlinked_from(&self, members: &[NodeId]) -> Vec<NodeId> {
         let Some(linked) = self.transport().direct_peers().await else {
             return Vec::new();
@@ -778,10 +751,6 @@ impl<T: ClusterTransport> NodeController<T> {
         self.heartbeat.update_partition_map(map);
     }
 
-    /// Synchronous tick used only by tests (`send_tick_output` drives the collected output). The
-    /// production cluster-agent event loop uses its own async `handle_tick`, which additionally runs
-    /// `manage_unique_voters`, `sweep_unique_quorum`, and `sweep_unique_seals` — this path does NOT,
-    /// so a test exercising unique voter management must invoke those explicitly.
     pub fn tick(&mut self, now: u64) -> TickOutput {
         let start = std::time::Instant::now();
 
@@ -1583,7 +1552,7 @@ impl<T: ClusterTransport> NodeController<T> {
     pub async fn complete_pending_unique_work(
         &mut self,
         local_reserved: Vec<(String, Vec<u8>)>,
-        remote_results: RemoteReserveOutcome,
+        remote_results: RemoteReserveResult,
         continuation: UniqueCheckContinuation,
     ) {
         match continuation {
@@ -1770,8 +1739,14 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 }
 
-pub type RemoteReserveOutcome =
-    Result<Vec<(String, Vec<u8>, NodeId)>, (ReserveFailure, Vec<(String, Vec<u8>, NodeId)>)>;
+pub(crate) type RemoteReservations = Vec<(String, Vec<u8>, NodeId)>;
+pub(crate) type RemoteReserveResult =
+    Result<RemoteReservations, (ReserveFailure, RemoteReservations)>;
+
+pub(crate) struct RefusedWrite {
+    pub(crate) error: ReplicationError,
+    pub(crate) event: Option<crate::cluster::protocol::ChangeEventRecord>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplicationError {

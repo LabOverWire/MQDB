@@ -216,10 +216,12 @@ impl<T: ClusterTransport> NodeController<T> {
         let retained_topic = (write.entity == entity::RETAINED).then(|| write.id.clone());
         let replicas: Vec<NodeId> = self.partition_map.replicas(partition).to_vec();
         let event = write.event.take();
-        let unstored_event = event.clone();
-        if let Err(e) = self.replicate_write_async(write, &replicas, event).await {
-            tracing::warn!(?partition, ?e, "failed to replicate write request");
-            if let Some(record) = unstored_event {
+        if let Err(refused) = self
+            .replicate_primary_write(write, &replicas, event, &[])
+            .await
+        {
+            tracing::warn!(?partition, error = ?refused.error, "failed to replicate write request");
+            if let Some(record) = refused.event {
                 self.publish_unowned_change_event(partition, record).await;
             }
             return;

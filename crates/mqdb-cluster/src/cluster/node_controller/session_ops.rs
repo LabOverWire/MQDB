@@ -10,7 +10,7 @@ use super::super::session::session_partition;
 use super::super::store_manager::StoreApplyError;
 use super::super::transport::{ClusterMessage, ClusterTransport};
 use super::super::{Epoch, NodeId, PartitionId};
-use super::{NodeController, ReplicationError};
+use super::{NodeController, RefusedWrite, ReplicationError};
 
 impl<T: ClusterTransport> NodeController<T> {
     /// # Errors
@@ -180,17 +180,31 @@ impl<T: ClusterTransport> NodeController<T> {
         event: Option<ChangeEventRecord>,
         extra_outbox: &[(Vec<u8>, Vec<u8>)],
     ) -> Result<u64, ReplicationError> {
+        self.replicate_primary_write(write, replicas, event, extra_outbox)
+            .await
+            .map_err(|refused| refused.error)
+    }
+
+    pub(crate) async fn replicate_primary_write(
+        &mut self,
+        write: ReplicationWrite,
+        replicas: &[NodeId],
+        event: Option<ChangeEventRecord>,
+        extra_outbox: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<u64, RefusedWrite> {
         let start = std::time::Instant::now();
         let partition = write.partition;
 
-        let state = self
+        let Some(state) = self
             .replicas
             .get(&partition.get())
-            .ok_or(ReplicationError::NotPrimary)?;
-
-        if state.role() != ReplicaRole::Primary {
-            return Err(ReplicationError::NotPrimary);
-        }
+            .filter(|state| state.role() == ReplicaRole::Primary)
+        else {
+            return Err(RefusedWrite {
+                error: ReplicationError::NotPrimary,
+                event,
+            });
+        };
 
         let sequence = state.sequence() + 1;
         let write_msg = ReplicationWrite::new(
@@ -206,7 +220,14 @@ impl<T: ClusterTransport> NodeController<T> {
         let t_state = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
         let change_event = Self::change_event_entry(&write_msg);
-        self.apply_primary_write(&write_msg, change_event.as_ref(), extra_outbox)?;
+        if let Err(error) =
+            self.apply_primary_write(&write_msg, change_event.as_ref(), extra_outbox)
+        {
+            return Err(RefusedWrite {
+                error,
+                event: write_msg.event,
+            });
+        }
         let t_apply = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
         if let Some(state) = self.replicas.get_mut(&partition.get()) {

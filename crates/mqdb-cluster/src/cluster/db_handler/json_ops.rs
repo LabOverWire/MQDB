@@ -9,7 +9,7 @@ use super::super::node_controller::ShareResolveContinuation;
 use super::super::node_controller::db_ops::{EventOrigin, FkDeletePlan, ForwardedJsonRequest};
 use super::super::node_controller::{
     FkCheckContinuation, FkDeleteContinuation, NodeController, PendingFkDeleteWork, PendingFkWork,
-    PendingUniqueWork, UniqueCheckContinuation,
+    PendingUniqueWork, RemoteReserveResult, UniqueCheckContinuation,
 };
 use super::super::protocol::JsonDbOp;
 use super::super::transport::ClusterTransport;
@@ -20,15 +20,6 @@ use mqdb_core::types::{
     AccessLevel, MAX_FILTERS, MAX_LIST_RESULTS, MAX_SORT_FIELDS, OwnershipDecision, SHARES_ENTITY,
 };
 use serde_json::{Value, json};
-
-type RemoteReservations = Vec<(String, Vec<u8>, super::NodeId)>;
-type RemoteReserveResult = Result<
-    RemoteReservations,
-    (
-        super::super::node_controller::ReserveFailure,
-        RemoteReservations,
-    ),
->;
 
 pub(super) enum JsonOpResult {
     Response(Vec<u8>),

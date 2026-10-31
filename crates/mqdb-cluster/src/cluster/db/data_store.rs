@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::partition::data_partition;
-use crate::cluster::node_controller::ReplicationError;
 use crate::cluster::protocol::Operation;
 use crate::cluster::{NodeId, PartitionId};
 use bebytes::BeBytes;
@@ -109,7 +108,7 @@ pub enum DbDataStoreError {
     AlreadyExists,
     SerializationError,
     NotPrimary,
-    Commit(ReplicationError),
+    StoreFailed,
 }
 
 impl std::fmt::Display for DbDataStoreError {
@@ -119,7 +118,7 @@ impl std::fmt::Display for DbDataStoreError {
             Self::AlreadyExists => write!(f, "entity already exists"),
             Self::SerializationError => write!(f, "serialization error"),
             Self::NotPrimary => write!(f, "this node is not the partition primary"),
-            Self::Commit(e) => write!(f, "commit failed: {e}"),
+            Self::StoreFailed => write!(f, "the write could not be stored"),
         }
     }
 }
@@ -206,9 +205,6 @@ impl DbDataStore {
             .collect()
     }
 
-    /// Runs `f` over every record of `entity_type` under the read guard, without cloning the
-    /// records. Use for read-only scans (e.g. reconciliation) that only need a projection.
-    ///
     /// # Panics
     /// Panics if the internal lock is poisoned.
     pub fn for_each_record(&self, entity_type: &str, mut f: impl FnMut(&DbEntity)) {
@@ -436,9 +432,6 @@ impl DbDataStore {
     /// # Panics
     /// Panics if the internal lock is poisoned.
     #[must_use]
-    /// Return `(entity, id)` for every row whose `_expires_at` has passed. Read-only:
-    /// the actual delete is routed through the replicated delete path (so it releases
-    /// unique guards, emits a change event, and replicates) by the caller.
     pub fn scan_expired_ttl(&self, now_secs: u64) -> Vec<(String, String)> {
         let entities = self.read_entities();
         entities

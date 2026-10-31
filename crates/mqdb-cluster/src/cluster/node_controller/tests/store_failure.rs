@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::*;
-use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+use crate::cluster::db::{ClusterConstraint, DbDataStoreError, OnDeleteAction};
 use crate::cluster::db_handler::{DbPublishResult, DbRequestHandler, MqttRequestContext};
 use crate::cluster::test_support::FaultyBackend;
 use crate::cluster::{NUM_PARTITIONS, PartitionAssignment, PartitionMap};
@@ -173,10 +173,9 @@ async fn a_controller_write_the_primary_cannot_store_returns_an_error() {
     let updated = ctrl.db_update("items", "kept", b"{\"n\":2}", 2000).await;
     let deleted = ctrl.db_delete("items", "kept").await;
 
-    let refused = Some("commit failed: failed to apply write to the local store".to_string());
-    assert_eq!(created.err().map(|e| e.to_string()), refused);
-    assert_eq!(updated.err().map(|e| e.to_string()), refused);
-    assert_eq!(deleted.err().map(|e| e.to_string()), refused);
+    assert_eq!(created.err(), Some(DbDataStoreError::StoreFailed));
+    assert_eq!(updated.err(), Some(DbDataStoreError::StoreFailed));
+    assert_eq!(deleted.err(), Some(DbDataStoreError::StoreFailed));
     assert!(ctrl.db_get("items", "r1").is_none());
     assert_eq!(ctrl.db_get("items", "kept").unwrap().data, b"{\"n\":1}");
 }
