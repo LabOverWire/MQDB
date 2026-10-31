@@ -1,12 +1,6 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Cluster-side diagram sharing (#75). Reimplements the agent's `_shares` grant
-//! primitives (`crates/mqdb-agent/src/database/sharing.rs`) against the cluster
-//! `StoreManager`. A grant for resource `(entity, id)` is co-located on the
-//! resource's partition by minting its id with `generate_id_for_partition`, so
-//! grant scans and access checks run on the resource's primary.
-
 use super::{ClusterTransport, NodeController};
 use crate::cluster::db::{DbDataStoreError, data_partition, generate_id_for_partition};
 use crate::cluster::db_handler::helpers::json_write_failure;
@@ -15,7 +9,7 @@ use serde_json::{Value, json};
 use std::collections::{HashSet, VecDeque};
 
 #[cfg(feature = "http-api")]
-use super::db_ops::{EventOrigin, ForwardRequest};
+use super::db_ops::{EventOrigin, ForwardedJsonRequest};
 #[cfg(feature = "http-api")]
 use super::protocol::{JsonDbOp, JsonDbRequest};
 #[cfg(feature = "http-api")]
@@ -47,7 +41,6 @@ impl<T: ClusterTransport> NodeController<T> {
         data.get(owner_field).and_then(Value::as_str) == Some(sender)
     }
 
-    /// `None` when authorized; `Some(error_payload)` otherwise.
     fn require_owner_or_admin(
         &self,
         entity: &str,
@@ -81,9 +74,6 @@ impl<T: ClusterTransport> NodeController<T> {
             .collect()
     }
 
-    /// Highest access level granted to `sender` on `(entity, id)` (owner-or-grant
-    /// gate scans the co-located `_shares`). Matches on the resolved `grantee` or
-    /// the stable `grantee_key`, so it works for resolved and password-mode grants.
     #[must_use]
     pub(crate) fn cluster_share_level(
         &self,
@@ -108,10 +98,6 @@ impl<T: ClusterTransport> NodeController<T> {
             .max()
     }
 
-    /// Owner-or-grant access gate for a resource whose partition THIS node is the
-    /// primary of (grants are co-located and locally readable). `None` = allowed.
-    /// Callers must only invoke this on the resource primary; a non-primary node
-    /// forwards the request so the primary grades it (see #75 read-routing).
     pub(crate) fn check_local_share_access(
         &self,
         entity: &str,
@@ -176,10 +162,6 @@ impl<T: ClusterTransport> NodeController<T> {
         self.delete_grants(victims).await
     }
 
-    /// Remove every grant on a resource (called after the resource is deleted).
-    ///
-    /// # Errors
-    /// Returns the first error from deleting a grant.
     pub(crate) async fn clear_all_resource_grants(
         &mut self,
         entity: &str,
@@ -235,8 +217,6 @@ impl<T: ClusterTransport> NodeController<T> {
         Ok(())
     }
 
-    /// Self-reference fields on `entity` (FK constraints whose target is the same
-    /// entity) — the edges a cascade share walks.
     fn self_ref_fields(&self, entity: &str) -> Vec<String> {
         self.stores
             .constraint_get_fk_constraints(entity)
@@ -246,11 +226,6 @@ impl<T: ClusterTransport> NodeController<T> {
             .collect()
     }
 
-    /// Grant `grant` across every resource reachable from `root_id` via
-    /// self-references, at max-of-levels (never downgrading an existing grant).
-    /// Walks only the locally-held closure — cross-partition closure members are a
-    /// follow-up (they need cycle-safe cross-node fan-out); complete on a node that
-    /// is primary for the whole closure.
     async fn cascade_share(
         &mut self,
         entity: &str,
@@ -318,9 +293,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    /// Primary-side handler for `$DB/{entity}/{id}/share`. Grants the root resource
-    /// (set-to-level, may demote) and, when `cascade` is set, the locally-held
-    /// self-reference closure at max-of-levels.
     pub(crate) async fn handle_share_local(
         &mut self,
         entity: &str,
@@ -413,9 +385,6 @@ impl<T: ClusterTransport> NodeController<T> {
         serde_json::to_vec(&json!({ "status": "ok", "data": data })).unwrap_or_default()
     }
 
-    /// Primary-side handler for `$DB/{entity}/{id}/unshare` (single resource).
-    /// Revokes by every carried key so a grant is removed whether it was stored
-    /// under the input identifier or a resolved canonical id.
     pub(crate) async fn handle_unshare_local(
         &mut self,
         entity: &str,
@@ -458,10 +427,6 @@ impl<T: ClusterTransport> NodeController<T> {
         .unwrap_or_default()
     }
 
-    /// Primary-side handler for `$DB/{entity}/{id}/shares` (owner/admin lists a
-    /// resource's grants). In identity/OAuth mode the primary decrypts each grant's
-    /// `grantee_email` for display; without identity crypto it is returned as
-    /// stored.
     pub(crate) fn handle_shares_local(
         &self,
         entity: &str,
@@ -493,11 +458,6 @@ impl<T: ClusterTransport> NodeController<T> {
 
 #[cfg(feature = "http-api")]
 impl<T: ClusterTransport> NodeController<T> {
-    /// Look up the locally-held `_identity_links` record whose `email_hash` matches
-    /// and return its canonical id. Filters at the store rather than materializing
-    /// the whole entity (parity with the agent's filtered lookup). Identity records
-    /// are partitioned, so a miss here only means the link lives on another
-    /// partition (resolve it via a scatter).
     #[must_use]
     pub(crate) fn local_identity_canonical(&self, email_hash: &str) -> Option<String> {
         let payload = Self::email_hash_filter_payload(email_hash);
@@ -522,11 +482,6 @@ impl<T: ClusterTransport> NodeController<T> {
         serde_json::to_vec(&json!({ "filters": [filter] })).unwrap_or_default()
     }
 
-    /// Fan out a `_identity_links` LIST filtered by `email_hash` to resolve an
-    /// email grant's canonical grantee across partitions; the grant is written
-    /// when the scatter completes (`complete_share_resolution`). The caller only
-    /// scatters after `local_identity_canonical` confirmed a local miss, so this
-    /// node seeds no local contribution.
     pub(crate) async fn begin_identity_scatter(&mut self, cont: ShareResolveContinuation) {
         let remote_nodes: Vec<NodeId> = self
             .heartbeat
@@ -588,15 +543,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    /// Mark in-flight resolutions for `(entity, id, grantee_key)` as invalidated so
-    /// their completing write is skipped. Called when an unshare for that grantee
-    /// lands on this node while the share is still resolving — closes the
-    /// revoked-grant resurrection race (`specs/ShareResolveRace.tla`).
-    ///
-    /// This runs before the primary-side owner/admin gate, so it authorizes the
-    /// `sender` here: only the user who issued the share, an admin, or the
-    /// resource owner (checked locally when the resource is co-located) may cancel
-    /// an in-flight share. Empty/anonymous senders never match.
     pub(crate) fn invalidate_share_resolutions(
         &mut self,
         entity: &str,
@@ -623,10 +569,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    /// Complete a resolved (or unresolved) email share: pick the canonical id from
-    /// the gathered `_identity_links`, build the grant payload, and route it to the
-    /// resource primary. An unresolved grantee is written as a pending grant. A
-    /// resolution invalidated by an intervening unshare writes nothing.
     pub(crate) async fn complete_share_resolution(
         &mut self,
         items: Vec<Value>,
@@ -683,15 +625,15 @@ impl<T: ClusterTransport> NodeController<T> {
         } else {
             self.forward_json_db_request(
                 partition,
-                &ForwardRequest {
+                ForwardedJsonRequest {
                     op: JsonDbOp::Share,
                     entity: &cont.entity,
                     id: Some(&cont.id),
                     payload: &payload,
                     response_topic: &cont.response_topic,
                     correlation_data: cont.correlation_data.as_deref(),
+                    origin: EventOrigin::new(Some(cont.granted_by.as_str()), None),
                 },
-                EventOrigin::new(Some(cont.granted_by.as_str()), None),
             )
             .await;
         }

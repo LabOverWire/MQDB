@@ -1,13 +1,10 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// Multi-step share tests hold a NodeController across many awaits, so their
-// futures exceed the large-future threshold; irrelevant for one-shot test tasks.
-#![allow(clippy::large_futures)]
-
 use super::super::db::data_partition;
 use super::super::db_protocol::{DbReadRequest, DbResponse, DbStatus, DbWriteRequest};
 use super::super::node_controller::NodeController;
+use super::super::test_support::put_record;
 use super::super::transport::{ClusterMessage, ClusterTransport, InboundMessage, TransportConfig};
 use super::super::{Epoch, NUM_PARTITIONS, NodeId, PartitionId, PartitionMap};
 use super::DbRequestHandler;
@@ -325,8 +322,6 @@ async fn unsealed_partition_reserve_is_retryable_not_a_conflict() {
             },
         );
     }
-    // The map (the quorum-group source) must be in place before become_primary computes the seal
-    // majority; a multi-node group => become_primary QUEUES a seal but does not complete it.
     ctrl.update_partition_map(map);
     for i in 0..NUM_PARTITIONS {
         ctrl.become_primary(PartitionId::new(i).unwrap(), Epoch::new(1));
@@ -335,7 +330,6 @@ async fn unsealed_partition_reserve_is_retryable_not_a_conflict() {
         .await
         .unwrap();
 
-    // The value is genuinely FREE; the create can only fail because the partition is not yet sealed.
     let payload =
         serde_json::to_vec(&serde_json::json!({"id": "u1", "email": "free@x.com"})).unwrap();
     let response = handler
@@ -586,7 +580,6 @@ async fn delete_releases_unique_claim() {
         .await
         .unwrap();
 
-    // A durable record owning a committed unique claim, as it would be after a create+commit.
     let data_bytes = serde_json::to_vec(&serde_json::json!({"email": "a@x.com"})).unwrap();
     let rec = ctrl
         .db_create("users", "u1", &data_bytes, 1000)
@@ -667,6 +660,270 @@ async fn ttl_reap_leaves_unexpired_row() {
     let reaped = ctrl.reap_expired_ttl(1000).await;
     assert_eq!(reaped, 0, "a not-yet-expired row must not be reaped");
     assert!(ctrl.db_get("widgets", "w1").is_some());
+}
+
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+fn stored_json(ctrl: &NodeController<MockTransport>, entity: &str, id: &str) -> serde_json::Value {
+    let rec = ctrl.db_get(entity, id).expect("record stored");
+    serde_json::from_slice(&rec.data).unwrap()
+}
+
+#[tokio::test]
+async fn json_create_on_primary_turns_ttl_secs_into_expiry() {
+    let node1 = NodeId::validated(1).unwrap();
+    let handler = DbRequestHandler::new(node1);
+    let mut ctrl = setup_controller_all_partitions();
+
+    let before = unix_now_secs();
+    let payload = serde_json::to_vec(&serde_json::json!({"id": "t1", "ttl_secs": 5})).unwrap();
+    let response = handler
+        .handle_publish(
+            &mut ctrl,
+            "$DB/ttldocs/create",
+            &payload,
+            &MqttRequestContext {
+                response_topic: Some("$DB/_resp/client1"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    let after = unix_now_secs();
+
+    let json = parse_json_response(&response.payload);
+    assert_eq!(json["status"], "ok", "create failed: {json}");
+    assert!(json["data"].get("ttl_secs").is_none(), "response: {json}");
+
+    let stored = stored_json(&ctrl, "ttldocs", "t1");
+    assert!(stored.get("ttl_secs").is_none(), "stored: {stored}");
+    let expires_at = stored["_expires_at"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("no numeric _expires_at in {stored}"));
+    assert!(
+        (before + 5..=after + 5).contains(&expires_at),
+        "expires_at {expires_at} outside [{}, {}]",
+        before + 5,
+        after + 5
+    );
+
+    assert_eq!(ctrl.reap_expired_ttl(expires_at - 1).await, 0);
+    assert_eq!(ctrl.reap_expired_ttl(expires_at + 1).await, 1);
+    assert!(ctrl.db_get("ttldocs", "t1").is_none());
+}
+
+#[tokio::test]
+async fn json_create_with_huge_ttl_secs_never_expires() {
+    let node1 = NodeId::validated(1).unwrap();
+    let handler = DbRequestHandler::new(node1);
+    let mut ctrl = setup_controller_all_partitions();
+
+    let payload =
+        serde_json::to_vec(&serde_json::json!({"id": "t1", "ttl_secs": u64::MAX})).unwrap();
+    let response = handler
+        .handle_publish(
+            &mut ctrl,
+            "$DB/ttldocs/create",
+            &payload,
+            &MqttRequestContext {
+                response_topic: Some("$DB/_resp/client1"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    let json = parse_json_response(&response.payload);
+    assert_eq!(json["status"], "ok", "create failed: {json}");
+
+    let stored = stored_json(&ctrl, "ttldocs", "t1");
+    assert_eq!(
+        stored["_expires_at"].as_u64(),
+        Some(u64::MAX),
+        "stored: {stored}"
+    );
+    assert_eq!(ctrl.reap_expired_ttl(unix_now_secs() + 1).await, 0);
+    assert!(ctrl.db_get("ttldocs", "t1").is_some());
+}
+
+#[tokio::test]
+async fn vault_json_create_forwarded_to_primary_keeps_ttl_expiry() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let ownership = ownership_config("notes", "userId");
+    let key_store = Arc::new(mqdb_vault::VaultKeyStore::new());
+    let derived = mqdb_vault::VaultCrypto::derive_with_raw_key(
+        "passphrase",
+        &mqdb_vault::VaultCrypto::generate_salt(),
+    );
+    key_store.set("alice", derived.1);
+    let handler = DbRequestHandler::new(node1)
+        .with_ownership(Arc::clone(&ownership))
+        .with_vault_key_store(key_store);
+
+    let partition = data_partition("notes", "n1");
+    let assignment = crate::cluster::PartitionAssignment {
+        primary: Some(node2),
+        replicas: vec![],
+        epoch: Epoch::new(1),
+    };
+
+    let outbox = Arc::new(Mutex::new(Vec::new()));
+    let transport = MockTransport {
+        node_id: node1,
+        inbox: Arc::new(Mutex::new(VecDeque::new())),
+        outbox: Arc::clone(&outbox),
+        retained_publishes: Arc::new(Mutex::new(Vec::new())),
+        retained_refreshes: Arc::new(Mutex::new(Vec::new())),
+    };
+    let mut receiver = create_test_controller(node1, transport);
+    receiver.set_ownership(Arc::clone(&ownership));
+    let mut map = PartitionMap::default();
+    map.set(partition, assignment.clone());
+    receiver.update_partition_map(map.clone());
+
+    let payload = serde_json::to_vec(
+        &serde_json::json!({"id": "n1", "userId": "alice", "body": "x", "ttl_secs": 5}),
+    )
+    .unwrap();
+    let before = unix_now_secs();
+    let response = handler
+        .handle_publish(
+            &mut receiver,
+            "$DB/notes/create",
+            &payload,
+            &MqttRequestContext {
+                response_topic: Some("$DB/_resp/alice"),
+                correlation_data: None,
+                sender: Some("alice"),
+                client_id: Some("alice-client"),
+            },
+        )
+        .await;
+    assert!(response.is_none(), "a non-primary forwards the create");
+
+    let request = outbox
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|(to, m)| match m {
+            ClusterMessage::JsonDbRequest { request, .. } if *to == node2 => Some(request.clone()),
+            _ => None,
+        })
+        .expect("create forwarded to the primary");
+
+    let mut primary = create_test_controller(node2, MockTransport::new(node2));
+    primary.set_ownership(Arc::clone(&ownership));
+    primary.become_primary(partition, Epoch::new(1));
+    primary.update_partition_map(map);
+    primary
+        .handle_json_db_request(node1, partition, &request)
+        .await;
+
+    let after = unix_now_secs();
+
+    let stored = stored_json(&primary, "notes", "n1");
+    assert_ne!(
+        stored["body"], "x",
+        "vault must encrypt the forwarded body: {stored}"
+    );
+    assert!(stored.get("ttl_secs").is_none(), "stored: {stored}");
+    let expires_at = stored["_expires_at"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("no numeric _expires_at in {stored}"));
+    assert!(
+        (before + 5..=after + 5).contains(&expires_at),
+        "expires_at {expires_at} outside [{}, {}]",
+        before + 5,
+        after + 5
+    );
+    assert_eq!(primary.reap_expired_ttl(expires_at - 1).await, 0);
+    assert_eq!(primary.reap_expired_ttl(expires_at + 1).await, 1);
+    assert!(primary.db_get("notes", "n1").is_none());
+}
+
+#[tokio::test]
+async fn ttl_reap_pass_fills_its_budget_with_rows_it_owns() {
+    let node1 = NodeId::validated(1).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    let half = NUM_PARTITIONS / 2;
+    let mut map = PartitionMap::default();
+    for i in 0..half {
+        let partition = PartitionId::new(i).unwrap();
+        ctrl.become_primary(partition, Epoch::new(1));
+        map.set(
+            partition,
+            crate::cluster::PartitionAssignment {
+                primary: Some(node1),
+                replicas: vec![],
+                epoch: Epoch::new(1),
+            },
+        );
+    }
+    ctrl.update_partition_map(map);
+
+    let expired = serde_json::to_vec(&serde_json::json!({"_expires_at": 100})).unwrap();
+    let ids: Vec<String> = (0..6000).map(|i| format!("row-{i}")).collect();
+    let owned = ids
+        .iter()
+        .filter(|id| data_partition("ttldocs", id).get() < half)
+        .count();
+    assert!(
+        owned > 2048,
+        "need more owned rows than two passes: {owned}"
+    );
+    for id in &ids {
+        put_record(&ctrl.stores().db_data, "ttldocs", id, &expired, 1000);
+    }
+
+    assert_eq!(ctrl.reap_expired_ttl(1_000).await, 1024);
+    assert_eq!(ctrl.reap_expired_ttl(1_000).await, 1024);
+}
+
+#[tokio::test]
+async fn ttl_reap_budget_skips_partitions_mapped_but_not_held_as_primary() {
+    let node1 = NodeId::validated(1).unwrap();
+    let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
+    let half = NUM_PARTITIONS / 2;
+    let mut map = PartitionMap::default();
+    for i in 0..NUM_PARTITIONS {
+        let partition = PartitionId::new(i).unwrap();
+        if i < half {
+            map.set(
+                partition,
+                crate::cluster::PartitionAssignment {
+                    primary: Some(node1),
+                    replicas: vec![],
+                    epoch: Epoch::new(1),
+                },
+            );
+        } else {
+            ctrl.become_primary(partition, Epoch::new(1));
+        }
+    }
+    ctrl.update_partition_map(map);
+
+    let expired = serde_json::to_vec(&serde_json::json!({"_expires_at": 100})).unwrap();
+    let ids: Vec<String> = (0..6000).map(|i| format!("row-{i}")).collect();
+    let held = ids
+        .iter()
+        .filter(|id| data_partition("ttldocs", id).get() >= half)
+        .count();
+    assert!(held > 2048, "need more held rows than two passes: {held}");
+    for id in &ids {
+        put_record(&ctrl.stores().db_data, "ttldocs", id, &expired, 1000);
+    }
+
+    assert_eq!(ctrl.reap_expired_ttl(1_000).await, 1024);
+    assert_eq!(ctrl.reap_expired_ttl(1_000).await, 1024);
 }
 
 #[tokio::test]
@@ -1527,7 +1784,6 @@ async fn cascade_delete_releases_child_unique_claim() {
     .unwrap();
     let rec = ctrl.db_create("posts", "p1", &post, 1000).await.unwrap();
 
-    // The child post owns a committed unique claim on its slug, as it would after create+commit.
     let slug = serde_json::to_vec(&serde_json::json!("post-1")).unwrap();
     ctrl.stores()
         .db_unique
@@ -2027,7 +2283,6 @@ async fn fk_create_with_absent_fk_field_allowed() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn fk_create_with_multiple_constraints_validates_all() {
     use super::super::db::{ClusterConstraint, OnDeleteAction};
 
@@ -2431,7 +2686,6 @@ async fn cluster_share_and_read_forward_to_resource_primary() {
     let mut ctrl = create_test_controller(node1, transport);
     ctrl.set_ownership(Arc::clone(&ownership));
 
-    // node2 is primary for the resource's partition; node1 is not.
     let rp = data_partition("diagrams", "d1");
     let mut map = PartitionMap::default();
     map.set(
@@ -2444,8 +2698,6 @@ async fn cluster_share_and_read_forward_to_resource_primary() {
     );
     ctrl.update_partition_map(map);
 
-    // A graded read of a non-local resource is forwarded to its primary (never
-    // graded/served locally on a non-primary), and so is a share.
     let read = handler
         .handle_publish(&mut ctrl, "$DB/diagrams/d1", &[], &share_ctx("bob"))
         .await;
@@ -2502,9 +2754,6 @@ async fn forwarded_read_response(
     }
 }
 
-/// A Read that arrives at the resource primary via forwarding is graded there
-/// against co-located grants (`check_forwarded_ownership`) — the actual cross-node
-/// grantee-read path.
 #[tokio::test]
 async fn cluster_forwarded_read_graded_against_grant_on_primary() {
     let node1 = NodeId::validated(1).unwrap();
@@ -2862,7 +3111,6 @@ async fn cluster_identity_nonowner_cannot_invalidate_resolution() {
     seed_identity_link(&mut ctrl, &crypto, "user@example.com", "canon-1").await;
     let grantee_key = suspended_resolution(&mut ctrl, &crypto, 44, "user@example.com");
 
-    // a non-owner, non-admin attempt to cancel the owner's in-flight share is ignored
     ctrl.invalidate_share_resolutions("diagrams", "d1", &grantee_key, Some("mallory"));
     ctrl.handle_scatter_list_response(44, vec![resolved_link_item(&crypto, "user@example.com")])
         .await;

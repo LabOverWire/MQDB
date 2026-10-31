@@ -6,7 +6,7 @@ use super::super::db::{self, data_partition};
 use super::super::db_topic::DbTopicOperation;
 #[cfg(feature = "http-api")]
 use super::super::node_controller::ShareResolveContinuation;
-use super::super::node_controller::db_ops::{EventOrigin, FkDeletePlan, ForwardRequest};
+use super::super::node_controller::db_ops::{EventOrigin, FkDeletePlan, ForwardedJsonRequest};
 use super::super::node_controller::{
     FkCheckContinuation, FkDeleteContinuation, NodeController, PendingFkDeleteWork, PendingFkWork,
     PendingUniqueWork, UniqueCheckContinuation,
@@ -21,6 +21,15 @@ use mqdb_core::types::{
 };
 use serde_json::{Value, json};
 
+type RemoteReservations = Vec<(String, Vec<u8>, super::NodeId)>;
+type RemoteReserveResult = Result<
+    RemoteReservations,
+    (
+        super::super::node_controller::ReserveFailure,
+        RemoteReservations,
+    ),
+>;
+
 pub(super) enum JsonOpResult {
     Response(Vec<u8>),
     NoResponse,
@@ -29,9 +38,6 @@ pub(super) enum JsonOpResult {
     PendingFkDelete(Box<PendingFkDeleteWork>),
 }
 
-/// The reserved `_expected_version` compare-and-set precondition carried in a delete
-/// request body (deletes otherwise ignore their payload). Returns the client-facing error
-/// message when the field is present but malformed, so the CAS can never be silently skipped.
 fn expected_version_from_delete_payload(payload: &[u8]) -> Result<Option<u64>, String> {
     if payload.is_empty() {
         return Ok(None);
@@ -41,15 +47,9 @@ fn expected_version_from_delete_payload(payload: &[u8]) -> Result<Option<u64>, S
     mqdb_core::protocol::take_expected_version(&mut value).map_err(|e| e.to_string())
 }
 
-/// Outcome of resolving an identity-mode (email) grantee before a share/unshare
-/// is routed to the resource primary.
 #[cfg(feature = "http-api")]
 enum ShareResolution {
-    /// Continue routing with this crypto-rewritten payload (keys injected, and
-    /// for a share the canonical grantee resolved locally or left pending).
     Rewrite(Vec<u8>),
-    /// A cross-partition scatter is resolving the grantee; the grant is written
-    /// and the client answered when it completes.
     Suspended,
 }
 
@@ -132,9 +132,6 @@ impl DbRequestHandler {
         let correlation_data = mqtt_ctx.correlation_data;
         let sender = mqtt_ctx.sender;
 
-        // `_shares` is server-managed: reject direct generic CRUD so grants are
-        // only ever written through the share ops (preserves co-location and
-        // prevents forged grants). Mirrors the agent guard in transport_execute.
         match operation {
             DbTopicOperation::JsonCreate { entity }
             | DbTopicOperation::JsonRead { entity, .. }
@@ -179,21 +176,18 @@ impl DbRequestHandler {
                             return JsonOpResult::Response(err);
                         }
                     } else {
-                        // Not the resource primary: forward so the access decision
-                        // is graded on the primary against co-located grants,
-                        // never served from a stale replica (#75 read-routing).
                         let forwarded = controller
                             .forward_json_db_request(
                                 partition,
-                                &ForwardRequest {
+                                ForwardedJsonRequest {
                                     op: JsonDbOp::Read,
                                     entity,
                                     id: Some(id),
                                     payload,
                                     response_topic,
                                     correlation_data,
+                                    origin: EventOrigin::new(sender, mqtt_ctx.client_id),
                                 },
-                                EventOrigin::new(sender, mqtt_ctx.client_id),
                             )
                             .await;
                         return if forwarded {
@@ -214,8 +208,6 @@ impl DbRequestHandler {
                 let effective_payload = if let OwnershipDecision::Check { owner_field, .. } =
                     self.ownership.evaluate(entity, sender)
                 {
-                    // Grade Edit on the resource primary (grants are co-located);
-                    // when not primary, defer to the primary's forwarded check.
                     if controller.is_primary_for_partition(data_partition(entity, id))
                         && let Some(err) = controller.check_local_share_access(
                             entity,
@@ -239,15 +231,15 @@ impl DbRequestHandler {
                     let forwarded = controller
                         .forward_json_db_request(
                             partition,
-                            &ForwardRequest {
+                            ForwardedJsonRequest {
                                 op: JsonDbOp::Update,
                                 entity,
                                 id: Some(id),
                                 payload: &forward_payload,
                                 response_topic,
                                 correlation_data,
+                                origin: EventOrigin::new(sender, mqtt_ctx.client_id),
                             },
-                            EventOrigin::new(sender, mqtt_ctx.client_id),
                         )
                         .await;
                     return if forwarded {
@@ -288,15 +280,15 @@ impl DbRequestHandler {
                     let forwarded = controller
                         .forward_json_db_request(
                             partition,
-                            &ForwardRequest {
+                            ForwardedJsonRequest {
                                 op: JsonDbOp::Delete,
                                 entity,
                                 id: Some(id),
                                 payload,
                                 response_topic,
                                 correlation_data,
+                                origin: EventOrigin::new(sender, mqtt_ctx.client_id),
                             },
-                            EventOrigin::new(sender, mqtt_ctx.client_id),
                         )
                         .await;
                     return if forwarded {
@@ -422,15 +414,15 @@ impl DbRequestHandler {
         let forwarded = controller
             .forward_json_db_request(
                 partition,
-                &ForwardRequest {
+                ForwardedJsonRequest {
                     op,
                     entity,
                     id: Some(id),
                     payload,
                     response_topic,
                     correlation_data: mqtt_ctx.correlation_data,
+                    origin: EventOrigin::new(sender, mqtt_ctx.client_id),
                 },
-                EventOrigin::new(sender, mqtt_ctx.client_id),
             )
             .await;
         if forwarded {
@@ -443,11 +435,6 @@ impl DbRequestHandler {
         }
     }
 
-    /// Resolve an identity-mode (email) grantee before routing a share/unshare.
-    /// Returns `None` when there is no identity crypto or no grantee (verbatim
-    /// password-mode path). Otherwise rewrites the payload with the blind-indexed
-    /// `grantee_key` and encrypted `grantee_email`; a share resolves the canonical
-    /// grantee locally when possible, else suspends on a cross-partition scatter.
     #[cfg(feature = "http-api")]
     async fn resolve_share_identity<T: ClusterTransport>(
         &self,
@@ -574,6 +561,8 @@ impl DbRequestHandler {
             Err(_) => return JsonOpResult::Response(Self::json_error(400, "invalid JSON payload")),
         };
 
+        NodeController::<T>::apply_ttl_expiry(&mut data);
+
         if let Value::Object(ref mut obj) = data {
             obj.remove("_version");
             obj.insert("_version".to_string(), Value::Number(1.into()));
@@ -637,15 +626,15 @@ impl DbRequestHandler {
         let forwarded = controller
             .forward_json_db_request(
                 partition,
-                &ForwardRequest {
+                ForwardedJsonRequest {
                     op: JsonDbOp::Create,
                     entity,
                     id: None,
                     payload,
                     response_topic: mqtt_ctx.response_topic.unwrap_or(""),
                     correlation_data: mqtt_ctx.correlation_data,
+                    origin: EventOrigin::new(mqtt_ctx.sender, mqtt_ctx.client_id),
                 },
-                EventOrigin::new(mqtt_ctx.sender, mqtt_ctx.client_id),
             )
             .await;
         if forwarded {
@@ -861,15 +850,15 @@ impl DbRequestHandler {
             let forwarded = controller
                 .forward_json_db_request(
                     partition,
-                    &ForwardRequest {
+                    ForwardedJsonRequest {
                         op: JsonDbOp::Read,
                         entity,
                         id: Some(id),
                         payload,
                         response_topic,
                         correlation_data,
+                        origin: EventOrigin::new(sender, mqtt_ctx.client_id),
                     },
-                    EventOrigin::new(sender, mqtt_ctx.client_id),
                 )
                 .await;
             if forwarded {
@@ -1552,7 +1541,7 @@ impl DbRequestHandler {
         &self,
         controller: &mut NodeController<T>,
         local_reserved: Vec<(String, Vec<u8>)>,
-        remote_results: super::super::node_controller::RemoteReserveOutcome,
+        remote_results: RemoteReserveResult,
         continuation: UniqueCheckContinuation,
     ) -> Option<super::super::db_handler::DbPublishResponse> {
         match continuation {
