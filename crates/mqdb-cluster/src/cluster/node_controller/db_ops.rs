@@ -1850,7 +1850,6 @@ impl<T: ClusterTransport> NodeController<T> {
 
         let unique_fields = self.stores.constraint_get_unique_fields(entity);
         let mut local_reserved: Vec<(String, Vec<u8>)> = Vec::new();
-        let remote_reserved: Vec<(String, Vec<u8>, NodeId)> = Vec::new();
         let mut pending_remote_reserves = Vec::new();
         let mut pending_quorum: Vec<(String, tokio::sync::oneshot::Receiver<bool>)> = Vec::new();
 
@@ -1907,13 +1906,8 @@ impl<T: ClusterTransport> NodeController<T> {
             };
 
             if let Some(failure) = failure {
-                self.release_all_reservations(
-                    entity,
-                    &request_id,
-                    &local_reserved,
-                    &remote_reserved,
-                )
-                .await;
+                self.release_all_reservations(entity, &request_id, &local_reserved)
+                    .await;
                 for pending in pending_remote_reserves {
                     drop(pending.receiver);
                 }
@@ -1966,33 +1960,18 @@ impl<T: ClusterTransport> NodeController<T> {
             .await
         {
             Ok(db_entity) => {
-                self.commit_all_reservations(
-                    entity,
-                    &request_id,
-                    &local_reserved,
-                    &remote_reserved,
-                )
-                .await;
+                self.commit_all_reservations(entity, &request_id, &local_reserved)
+                    .await;
                 crate::cluster::db_handler::helpers::json_ok_with_id(db_entity.id_str(), &data)
             }
             Err(super::db::DbDataStoreError::AlreadyExists) => {
-                self.release_all_reservations(
-                    entity,
-                    &request_id,
-                    &local_reserved,
-                    &remote_reserved,
-                )
-                .await;
+                self.release_all_reservations(entity, &request_id, &local_reserved)
+                    .await;
                 Self::json_error(409, "entity already exists")
             }
             Err(error) => {
-                self.release_all_reservations(
-                    entity,
-                    &request_id,
-                    &local_reserved,
-                    &remote_reserved,
-                )
-                .await;
+                self.release_all_reservations(entity, &request_id, &local_reserved)
+                    .await;
                 json_write_failure(error)
             }
         };
@@ -2073,7 +2052,6 @@ impl<T: ClusterTransport> NodeController<T> {
         entity: &str,
         request_id: &str,
         local_reserved: &[(String, Vec<u8>)],
-        remote_reserved: &[(String, Vec<u8>, NodeId)],
     ) {
         for (f, v) in local_reserved {
             if let Some(w) = self
@@ -2083,10 +2061,6 @@ impl<T: ClusterTransport> NodeController<T> {
                 self.write_or_forward(w).await;
             }
         }
-        for (f, v, target) in remote_reserved {
-            self.send_unique_release_fire_and_forget(*target, entity, f, v, request_id, None)
-                .await;
-        }
     }
 
     async fn commit_all_reservations(
@@ -2094,7 +2068,6 @@ impl<T: ClusterTransport> NodeController<T> {
         entity: &str,
         request_id: &str,
         local_reserved: &[(String, Vec<u8>)],
-        remote_reserved: &[(String, Vec<u8>, NodeId)],
     ) {
         for (field, value) in local_reserved {
             if let Ok((_, w)) = self
@@ -2103,10 +2076,6 @@ impl<T: ClusterTransport> NodeController<T> {
             {
                 self.write_or_forward(w).await;
             }
-        }
-        for (field, value, target) in remote_reserved {
-            self.send_unique_commit_fire_and_forget(*target, entity, field, value, request_id)
-                .await;
         }
     }
 

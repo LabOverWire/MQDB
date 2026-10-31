@@ -475,18 +475,22 @@ impl<T: ClusterTransport> NodeController<T> {
         if let Some(err) = self.require_owner_or_admin(entity, id, sender) {
             return err;
         }
-        #[cfg_attr(not(feature = "http-api"), allow(unused_mut))]
-        let mut grants: Vec<Value> = self
+        let grants: Vec<Value> = self
             .shares_for_resource(entity, id)
             .into_iter()
             .map(|(_, value)| value)
             .collect();
         #[cfg(feature = "http-api")]
-        if let Some(crypto) = self.identity_crypto() {
-            for grant in &mut grants {
-                crypto.decrypt_json_fields(SHARES_ENTITY, grant, &["grantee_email"]);
-            }
-        }
+        let grants: Vec<Value> = match self.identity_crypto() {
+            Some(crypto) => grants
+                .into_iter()
+                .map(|mut grant| {
+                    crypto.decrypt_json_fields(SHARES_ENTITY, &mut grant, &["grantee_email"]);
+                    grant
+                })
+                .collect(),
+            None => grants,
+        };
         serde_json::to_vec(&json!({ "status": "ok", "data": grants })).unwrap_or_default()
     }
 }

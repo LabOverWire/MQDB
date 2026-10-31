@@ -748,7 +748,7 @@ async fn write_with_remote_unique(
     topic: &str,
     payload: &Value,
     value: Vec<u8>,
-) -> (Value, usize) {
+) -> (Value, usize, usize) {
     let handler = DbRequestHandler::new(node(1));
     let ctx = MqttRequestContext {
         response_topic: Some("resp/t"),
@@ -771,13 +771,24 @@ async fn write_with_remote_unique(
         )
         .await
         .unwrap();
-    let commits = ctrl
-        .transport
-        .sent_messages()
+    let sent = ctrl.transport.sent_messages();
+    let commits = sent
         .iter()
-        .filter(|(_, message)| matches!(message, ClusterMessage::UniqueCommitRequest(_)))
+        .filter(|(to, message)| {
+            *to == node(2) && matches!(message, ClusterMessage::UniqueCommitRequest(_))
+        })
         .count();
-    (serde_json::from_slice(&response.payload).unwrap(), commits)
+    let releases = sent
+        .iter()
+        .filter(|(to, message)| {
+            *to == node(2) && matches!(message, ClusterMessage::UniqueReleaseRequest(_))
+        })
+        .count();
+    (
+        serde_json::from_slice(&response.payload).unwrap(),
+        commits,
+        releases,
+    )
 }
 
 #[tokio::test]
@@ -790,7 +801,7 @@ async fn a_create_the_primary_cannot_store_commits_no_remote_unique_claim() {
         .unwrap();
     backend.fail_writes_to_keys_containing("users/u1");
 
-    let (reply, commits) = write_with_remote_unique(
+    let (reply, commits, releases) = write_with_remote_unique(
         &mut ctrl,
         "$DB/users/create",
         &json!({"id": "u1", "email": "a@x"}),
@@ -798,7 +809,7 @@ async fn a_create_the_primary_cannot_store_commits_no_remote_unique_claim() {
     )
     .await;
 
-    assert_eq!((&reply["code"], commits), (&json!(500), 0));
+    assert_eq!((&reply["code"], commits, releases), (&json!(500), 0, 1));
 }
 
 #[tokio::test]
@@ -818,7 +829,7 @@ async fn an_update_the_primary_cannot_store_commits_no_remote_unique_claim() {
         .unwrap();
     backend.fail_writes_to_keys_containing("users/u1");
 
-    let (reply, commits) = write_with_remote_unique(
+    let (reply, commits, releases) = write_with_remote_unique(
         &mut ctrl,
         "$DB/users/u1/update",
         &json!({"email": "a@x"}),
@@ -826,5 +837,25 @@ async fn an_update_the_primary_cannot_store_commits_no_remote_unique_claim() {
     )
     .await;
 
-    assert_eq!((&reply["code"], commits), (&json!(500), 0));
+    assert_eq!((&reply["code"], commits, releases), (&json!(500), 0, 1));
+}
+
+#[tokio::test]
+async fn a_stored_create_commits_its_remote_unique_claim_once() {
+    let backend = FaultyBackend::shared();
+    let value = serde_json::to_vec(&json!("a@x")).unwrap();
+    let mut ctrl = remote_unique_controller(&backend, &value);
+    ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
+        .await
+        .unwrap();
+
+    let (reply, commits, releases) = write_with_remote_unique(
+        &mut ctrl,
+        "$DB/users/create",
+        &json!({"id": "u1", "email": "a@x"}),
+        value,
+    )
+    .await;
+
+    assert_eq!((&reply["status"], commits, releases), (&json!("ok"), 1, 0));
 }
