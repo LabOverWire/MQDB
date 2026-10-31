@@ -366,6 +366,28 @@ fn dev_start_cluster_spawns_nothing_when_it_cannot_record_the_pid() {
 }
 
 #[test]
+fn dev_start_cluster_leaves_no_pid_file_when_it_cannot_open_the_log() {
+    let dir = TempDir::new().expect("temp dir");
+    let prefix = dir.path().join("e2e");
+    let node_dir = prefix.with_file_name("e2e-1");
+    std::fs::create_dir_all(node_dir.join("mqdb.log").join("blocker")).expect("block the log");
+
+    let output = start_one_node(&prefix.display().to_string(), "32060");
+
+    assert!(!output.status.success(), "{}", output_text(&output));
+    assert!(
+        output_text(&output).contains("mqdb.log"),
+        "start-cluster failed for another reason: {}",
+        output_text(&output)
+    );
+    assert!(
+        !node_dir.join("mqdb.pid").exists(),
+        "a node that never started left a pid file: {}",
+        output_text(&output)
+    );
+}
+
+#[test]
 fn dev_start_cluster_reports_a_stale_passwd_it_cannot_remove() {
     let dir = TempDir::new().expect("temp dir");
     let prefix = dir.path().join("e2e");

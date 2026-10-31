@@ -60,11 +60,35 @@ pub(crate) enum DevAction {
         presence: bool,
         #[arg(long, help = "Run constraint stress tests")]
         stress_constraints: bool,
-        #[arg(long, help = "Run all test suites")]
+        #[arg(
+            long,
+            help = "Run the default suites (not ownership, sharing, presence or stress-constraints)"
+        )]
         all: bool,
-        #[arg(long, default_value = "3", help = "Number of cluster nodes")]
+        #[arg(
+            long,
+            default_value = "3",
+            value_parser = clap::value_parser!(u8).range(1..=50),
+            help = "Number of cluster nodes"
+        )]
         nodes: u8,
-        #[arg(long, help = "Path to license key file (required for ownership tests)")]
+        #[arg(
+            long,
+            default_value = "1883",
+            value_parser = clap::value_parser!(u16).range(1024..),
+            help = "Port of node 1; node N uses base+N-1 (the ownership, sharing and presence suites start their own nodes there)"
+        )]
+        base_port: u16,
+        #[arg(
+            long,
+            default_value = "/tmp/mqdb-test",
+            help = "Prefix for the data dirs and passwd files of the nodes the suites start"
+        )]
+        db_prefix: String,
+        #[arg(
+            long,
+            help = "Path to license key file (required for the ownership, sharing and presence suites)"
+        )]
         license: Option<PathBuf>,
     },
     StartCluster {
@@ -131,6 +155,13 @@ pub(crate) enum DevAction {
         baseline: Option<PathBuf>,
         #[arg(long, default_value = "/tmp/mqdb-dev-bench")]
         db: String,
+        #[arg(
+            long,
+            default_value = "1883",
+            value_parser = clap::value_parser!(u16).range(1024..),
+            help = "Agent port to benchmark"
+        )]
+        port: u16,
     },
     #[command(about = "Profile with samply or flamegraph")]
     Profile {
@@ -148,6 +179,13 @@ pub(crate) enum DevAction {
         output: Option<PathBuf>,
         #[arg(long, default_value = "/tmp/mqdb-dev-profile")]
         db: String,
+        #[arg(
+            long,
+            default_value = "1883",
+            value_parser = clap::value_parser!(u16).range(1024..),
+            help = "Port for the profiled agent; must be free"
+        )]
+        port: u16,
     },
     #[command(about = "Manage benchmark baselines")]
     Baseline {

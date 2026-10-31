@@ -1,67 +1,104 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use std::path::PathBuf;
-use std::process::Command;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitStatus};
+use std::time::{Duration, Instant};
 
-use super::helpers::{chrono_timestamp, is_agent_running};
+use super::helpers::{
+    agent_args, broker_listening, chrono_timestamp, kill_processes_below, mqdb_agents_below,
+    only_mqdb_binaries, signal_pids, wait_until_gone,
+};
 use super::runners::build_bench_args;
 use crate::cli_types::DevBenchScenario;
 
+pub(crate) struct ProfileRun<'a> {
+    pub(crate) tool: &'a str,
+    pub(crate) duration: u64,
+    pub(crate) output: Option<PathBuf>,
+    pub(crate) db: &'a str,
+    pub(crate) port: u16,
+}
+
+enum ProfileTool {
+    Samply,
+    Flamegraph,
+    Sample,
+}
+
+impl ProfileTool {
+    fn parse(tool: &str) -> Result<Self, String> {
+        match tool {
+            "samply" => Ok(Self::Samply),
+            "flamegraph" => Ok(Self::Flamegraph),
+            "sample" => Ok(Self::Sample),
+            _ => Err(format!(
+                "Unknown profiling tool: {tool}. Use 'sample', 'samply', or 'flamegraph'"
+            )),
+        }
+    }
+}
+
+struct ProfileTarget<'a> {
+    db: &'a str,
+    port: u16,
+    output_path: PathBuf,
+    bench_args: Vec<String>,
+}
+
 pub(crate) fn cmd_dev_profile(
     scenario: &DevBenchScenario,
-    tool: &str,
-    duration: u64,
-    output: Option<PathBuf>,
-    db: &str,
+    run: &ProfileRun,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let exe = std::env::current_exe()?;
-
-    if is_agent_running() {
-        println!("Killing existing agent for profiling...");
-        let _ = Command::new("pkill").args(["-f", "mqdb agent"]).status();
-        std::thread::sleep(Duration::from_secs(1));
-    }
-
-    std::fs::create_dir_all(db)?;
+    let tool = ProfileTool::parse(run.tool)?;
+    let port = run.port;
+    refuse_busy_target(run.db, port)?;
+    std::fs::create_dir_all(run.db)?;
 
     let timestamp = chrono_timestamp();
-    let output_path = output.unwrap_or_else(|| {
+    let output_path = run.output.clone().unwrap_or_else(|| {
         let dir = PathBuf::from(".claude/profiles");
         let _ = std::fs::create_dir_all(&dir);
         match tool {
-            "flamegraph" => dir.join(format!("profile_{timestamp}.svg")),
-            _ => dir.join(format!("profile_{timestamp}")),
+            ProfileTool::Flamegraph => dir.join(format!("profile_{timestamp}.svg")),
+            ProfileTool::Samply | ProfileTool::Sample => dir.join(format!("profile_{timestamp}")),
         }
     });
 
-    println!("Profiling with {tool}...");
+    println!("Profiling with {}...", run.tool);
     println!("Output will be saved to: {}", output_path.display());
 
-    let bench_args = build_bench_args(scenario);
+    let mut bench_args = build_bench_args(scenario);
+    bench_args.extend(["--broker".to_string(), format!("127.0.0.1:{port}")]);
+    let target = ProfileTarget {
+        db: run.db,
+        port,
+        output_path,
+        bench_args,
+    };
 
     match tool {
-        "samply" => profile_with_samply(&exe, db, &output_path, &bench_args)?,
-        "flamegraph" => profile_with_flamegraph(&exe, db, &output_path, &bench_args)?,
-        "sample" => profile_with_sample(&exe, db, &output_path, &bench_args, duration)?,
-        _ => {
-            return Err(format!(
-                "Unknown profiling tool: {tool}. Use 'sample', 'samply', or 'flamegraph'"
-            )
-            .into());
-        }
+        ProfileTool::Samply => profile_with_samply(&target),
+        ProfileTool::Flamegraph => profile_with_flamegraph(&target),
+        ProfileTool::Sample => profile_with_sample(&target, run.duration),
     }
+}
 
+const PROFILER_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
+const AGENT_EXIT_GRACE: Duration = Duration::from_secs(10);
+const AGENT_KILL_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn refuse_busy_target(db: &str, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    if broker_listening(port) {
+        return Err(
+            format!("port {port} is already in use; profile on a free port with --port").into(),
+        );
+    }
+    crate::commands::dev::refuse_db_in_use(db)?;
     Ok(())
 }
 
-fn profile_with_samply(
-    _exe: &std::path::Path,
-    db: &str,
-    output_path: &std::path::Path,
-    bench_args: &[String],
-) -> Result<(), Box<dyn std::error::Error>> {
+fn build_profiling() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nBuilding with profiling profile (full DWARF symbols)...");
     let build_status = Command::new("cargo")
         .args(["build", "--profile=profiling"])
@@ -69,203 +106,332 @@ fn profile_with_samply(
     if !build_status.success() {
         return Err("Failed to build with profiling profile".into());
     }
-
-    let cwd = std::env::current_dir()?;
-    let profiling_exe = cwd.join("target/profiling/mqdb");
-    let symbol_dir = cwd.join("target/profiling");
-    println!("Starting agent under samply profiler...");
-
-    #[cfg(feature = "dev-insecure")]
-    let agent_args = vec![
-        "agent",
-        "start",
-        "--db",
-        db,
-        "--bind",
-        "127.0.0.1:1883",
-        "--anonymous",
-    ];
-    #[cfg(not(feature = "dev-insecure"))]
-    let agent_args = vec!["agent", "start", "--db", db, "--bind", "127.0.0.1:1883"];
-
-    let mut samply = Command::new("samply")
-        .args([
-            "record",
-            "--save-only",
-            "--unstable-presymbolicate",
-            "--symbol-dir",
-            symbol_dir.to_str().unwrap_or("."),
-            "-o",
-            output_path.to_str().unwrap_or("profile"),
-            "--",
-        ])
-        .arg(&profiling_exe)
-        .args(&agent_args)
-        .spawn()?;
-
-    std::thread::sleep(Duration::from_secs(3));
-
-    println!("\nRunning benchmark...");
-    let bench_status = Command::new(&profiling_exe).args(bench_args).status()?;
-    if !bench_status.success() {
-        println!("Benchmark failed with status: {bench_status}");
-    }
-
-    println!("\nStopping agent to save profile...");
-    let _ = Command::new("pkill")
-        .args(["-INT", "-f", "mqdb agent start"])
-        .status();
-
-    match samply.wait() {
-        Ok(status) => println!("Samply exited with: {status}"),
-        Err(e) => println!("Warning: Failed to wait for samply: {e}"),
-    }
-
-    println!("\nProfile saved: {}", output_path.display());
-    println!("Load with: samply load {}", output_path.display());
     Ok(())
 }
 
-fn profile_with_flamegraph(
-    exe: &std::path::Path,
-    db: &str,
-    output_path: &std::path::Path,
-    bench_args: &[String],
-) -> Result<(), Box<dyn std::error::Error>> {
-    println!("\nBuilding with profiling profile...");
-    let build_status = Command::new("cargo")
-        .args(["build", "--profile=profiling"])
-        .status()?;
-    if !build_status.success() {
-        return Err("Failed to build with profiling profile".into());
+fn build_profiling_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    build_profiling()?;
+    let profiling_exe = std::env::current_dir()?.join("target/profiling/mqdb");
+    if !profiling_exe.is_file() {
+        return Err(format!(
+            "profiling build has no {}; run dev profile from the workspace root",
+            profiling_exe.display()
+        )
+        .into());
     }
+    Ok(profiling_exe)
+}
+
+fn wait_with_timeout(child: &mut Child, timeout: Duration) -> std::io::Result<Option<ExitStatus>> {
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if start.elapsed() > timeout {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+struct OwnedChild {
+    child: Child,
+    name: &'static str,
+}
+
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        let stopped = match self.child.try_wait() {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => self.child.kill().and_then(|()| self.child.wait().map(drop)),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = stopped {
+            println!("Warning: could not stop the {}: {e}", self.name);
+        }
+    }
+}
+
+struct Profiler {
+    child: Child,
+    name: &'static str,
+    db: String,
+    stopped: bool,
+}
+
+impl Profiler {
+    fn db_agents(&self) -> Result<Vec<u32>, String> {
+        only_mqdb_binaries(&crate::commands::dev::pids_using_db(&self.db)?)
+    }
+
+    fn agents(&self) -> Result<Vec<u32>, String> {
+        let mut agents = mqdb_agents_below(self.child.id())?;
+        for pid in self.db_agents()? {
+            if !agents.contains(&pid) {
+                agents.push(pid);
+            }
+        }
+        Ok(agents)
+    }
+
+    fn force_stop(&mut self) -> Vec<String> {
+        let pid = self.child.id();
+        let mut problems = Vec::new();
+        if let Err(e) = kill_processes_below(pid) {
+            problems.push(format!(
+                "could not stop the processes under {}: {e}",
+                self.name
+            ));
+        }
+        if let Err(e) = self.child.kill().and_then(|()| self.child.wait().map(drop)) {
+            problems.push(format!("could not stop {} (pid {pid}): {e}", self.name));
+        }
+        if let Err(e) = self.kill_db_agents() {
+            problems.push(e);
+        }
+        problems
+    }
+
+    fn kill_db_agents(&self) -> Result<(), String> {
+        let left = self.db_agents()?;
+        if left.is_empty() {
+            return Ok(());
+        }
+        signal_pids("-KILL", &left)
+            .map_err(|e| format!("could not stop the agent on --db {}: {e}", self.db))?;
+        let survivors = wait_until_gone(&left, AGENT_KILL_TIMEOUT);
+        if survivors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "agent pids {survivors:?} on --db {} are still running after SIGKILL",
+                self.db
+            ))
+        }
+    }
+
+    fn settle_db_agents(&self) -> Result<(), String> {
+        let left = self.db_agents()?;
+        if wait_until_gone(&left, AGENT_EXIT_GRACE).is_empty() {
+            return Ok(());
+        }
+        self.kill_db_agents()?;
+        println!(
+            "Warning: killed the agent still running on --db {}",
+            self.db
+        );
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), String> {
+        if self.stopped {
+            return Ok(());
+        }
+        self.stopped = true;
+        println!("\nStopping agent to save profile...");
+        let agents = match self.agents() {
+            Ok(agents) if agents.is_empty() => Err(format!(
+                "no agent found under {} or on --db {}",
+                self.name, self.db
+            )),
+            Ok(agents) => signal_pids("-INT", &agents)
+                .map_err(|e| format!("could not interrupt the profiled agent: {e}")),
+            Err(e) => Err(e),
+        };
+        let exited = match agents {
+            Ok(()) => wait_with_timeout(&mut self.child, PROFILER_EXIT_TIMEOUT)
+                .map_err(|e| format!("could not wait for {}: {e}", self.name))
+                .and_then(|status| {
+                    status.ok_or_else(|| {
+                        format!(
+                            "{} did not exit within {PROFILER_EXIT_TIMEOUT:?}",
+                            self.name
+                        )
+                    })
+                }),
+            Err(e) => Err(e),
+        };
+        match exited {
+            Ok(status) => {
+                println!("{} exited with: {status}", self.name);
+                let settled = self.settle_db_agents();
+                match (status.success(), settled) {
+                    (true, settled) => settled,
+                    (false, Ok(())) => Err(format!(
+                        "{} failed ({status}), so its output may be missing",
+                        self.name
+                    )),
+                    (false, Err(e)) => Err(format!(
+                        "{} failed ({status}), so its output may be missing; {e}",
+                        self.name
+                    )),
+                }
+            }
+            Err(e) => {
+                let problems = self.force_stop();
+                Err(std::iter::once(format!(
+                    "{e}; killed {} before it finished, so its output may be missing",
+                    self.name
+                ))
+                .chain(problems)
+                .collect::<Vec<_>>()
+                .join("; "))
+            }
+        }
+    }
+
+    fn finish(mut self) -> Result<(), String> {
+        self.stop()
+    }
+}
+
+impl Drop for Profiler {
+    fn drop(&mut self) {
+        if let Err(e) = self.stop() {
+            println!("Warning: {e}");
+        }
+    }
+}
+
+fn combine(bench: Result<(), String>, stopped: Result<(), String>) -> Result<(), String> {
+    match (bench, stopped) {
+        (Ok(()), stopped) => stopped,
+        (Err(bench), Ok(())) => Err(format!("benchmark: {bench}")),
+        (Err(bench), Err(stopped)) => Err(format!("benchmark: {bench}; {stopped}")),
+    }
+}
+
+fn run_bench(profiling_exe: &Path, target: &ProfileTarget) -> Result<(), String> {
+    println!("\nRunning benchmark...");
+    let bench_status = Command::new(profiling_exe)
+        .args(&target.bench_args)
+        .status()
+        .map_err(|e| format!("could not run {}: {e}", profiling_exe.display()))?;
+    if bench_status.success() {
+        Ok(())
+    } else {
+        Err(format!("failed with {bench_status}"))
+    }
+}
+
+fn profile_with_samply(target: &ProfileTarget) -> Result<(), Box<dyn std::error::Error>> {
+    let profiling_exe = build_profiling_binary()?;
+    refuse_busy_target(target.db, target.port)?;
+    let symbol_dir = std::env::current_dir()?.join("target/profiling");
+    println!("Starting agent under samply profiler...");
+
+    let samply = Profiler {
+        child: Command::new("samply")
+            .args([
+                "record",
+                "--save-only",
+                "--unstable-presymbolicate",
+                "--symbol-dir",
+            ])
+            .arg(&symbol_dir)
+            .arg("-o")
+            .arg(&target.output_path)
+            .arg("--")
+            .arg(&profiling_exe)
+            .args(agent_args(target.db, target.port))
+            .spawn()?,
+        name: "Samply",
+        db: target.db.to_string(),
+        stopped: false,
+    };
+
+    std::thread::sleep(Duration::from_secs(3));
+    let bench = run_bench(&profiling_exe, target);
+    combine(bench, samply.finish())?;
+
+    println!("\nProfile saved: {}", target.output_path.display());
+    println!("Load with: samply load {}", target.output_path.display());
+    Ok(())
+}
+
+fn profile_with_flamegraph(target: &ProfileTarget) -> Result<(), Box<dyn std::error::Error>> {
+    build_profiling()?;
+    refuse_busy_target(target.db, target.port)?;
+    let bench_exe = std::env::current_exe()?;
 
     println!("Starting agent under flamegraph profiler...\n");
 
-    let output_str = output_path.to_str().unwrap_or("flamegraph.svg");
-    #[cfg(feature = "dev-insecure")]
-    let flamegraph_args = vec![
-        "flamegraph",
-        "--profile=profiling",
-        "-o",
-        output_str,
-        "--",
-        "agent",
-        "start",
-        "--db",
-        db,
-        "--bind",
-        "127.0.0.1:1883",
-        "--anonymous",
-    ];
-    #[cfg(not(feature = "dev-insecure"))]
-    let flamegraph_args = vec![
-        "flamegraph",
-        "--profile=profiling",
-        "-o",
-        output_str,
-        "--",
-        "agent",
-        "start",
-        "--db",
-        db,
-        "--bind",
-        "127.0.0.1:1883",
-    ];
-
-    let mut flamegraph = Command::new("cargo").args(&flamegraph_args).spawn()?;
+    let flamegraph = Profiler {
+        child: Command::new("cargo")
+            .args(["flamegraph", "--profile=profiling", "-o"])
+            .arg(&target.output_path)
+            .arg("--")
+            .args(agent_args(target.db, target.port))
+            .spawn()?,
+        name: "Flamegraph",
+        db: target.db.to_string(),
+        stopped: false,
+    };
 
     std::thread::sleep(Duration::from_secs(2));
+    let bench = run_bench(&bench_exe, target);
+    combine(bench, flamegraph.finish())?;
 
-    println!("Running benchmark...");
-    let _ = Command::new(exe).args(bench_args).status();
-
-    println!("\nStopping agent to save flamegraph...");
-    let _ = Command::new("pkill")
-        .args(["-INT", "-f", "mqdb agent start"])
-        .status();
-
-    match flamegraph.wait() {
-        Ok(status) => println!("Flamegraph exited with: {status}"),
-        Err(e) => println!("Warning: Failed to wait for flamegraph: {e}"),
-    }
-
-    println!("\nFlamegraph saved: {}", output_path.display());
+    println!("\nFlamegraph saved: {}", target.output_path.display());
     Ok(())
 }
 
 fn profile_with_sample(
-    _exe: &std::path::Path,
-    db: &str,
-    output_path: &std::path::Path,
-    bench_args: &[String],
+    target: &ProfileTarget,
     duration: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("\nBuilding with profiling profile (full DWARF symbols)...");
-    let build_status = Command::new("cargo")
-        .args(["build", "--profile=profiling"])
-        .status()?;
-    if !build_status.success() {
-        return Err("Failed to build with profiling profile".into());
-    }
-
-    let cwd = std::env::current_dir()?;
-    let profiling_exe = cwd.join("target/profiling/mqdb");
+    let profiling_exe = build_profiling_binary()?;
+    refuse_busy_target(target.db, target.port)?;
 
     println!("Starting agent...");
-    #[cfg(feature = "dev-insecure")]
-    let agent_args = vec![
-        "agent",
-        "start",
-        "--db",
-        db,
-        "--bind",
-        "127.0.0.1:1883",
-        "--anonymous",
-    ];
-    #[cfg(not(feature = "dev-insecure"))]
-    let agent_args = vec!["agent", "start", "--db", db, "--bind", "127.0.0.1:1883"];
-
-    let mut agent = Command::new(&profiling_exe)
-        .args(&agent_args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
+    let agent = OwnedChild {
+        child: Command::new(&profiling_exe)
+            .args(agent_args(target.db, target.port))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?,
+        name: "agent",
+    };
 
     std::thread::sleep(Duration::from_secs(2));
 
-    let agent_pid = agent.id();
+    let agent_pid = agent.child.id();
     println!("Agent started with PID: {agent_pid}");
 
     println!("\nRunning benchmark in background...");
-    let mut bench = Command::new(&profiling_exe)
-        .args(bench_args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
+    let mut bench = OwnedChild {
+        child: Command::new(&profiling_exe)
+            .args(&target.bench_args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?,
+        name: "benchmark",
+    };
 
     std::thread::sleep(Duration::from_millis(500));
 
     println!("Sampling for {duration} seconds...");
-    let sample_output = output_path.with_extension("txt");
+    let sample_output = target.output_path.with_extension("txt");
     let sample_status = Command::new("sample")
-        .args([
-            &agent_pid.to_string(),
-            &duration.to_string(),
-            "-f",
-            sample_output.to_str().unwrap_or("profile.txt"),
-        ])
-        .status()?;
-
-    if !sample_status.success() {
-        println!("Warning: sample command failed with status: {sample_status}");
-    }
+        .args([&agent_pid.to_string(), &duration.to_string(), "-f"])
+        .arg(&sample_output)
+        .status();
 
     println!("\nStopping benchmark and agent...");
-    let _ = bench.kill();
-    let _ = agent.kill();
-    let _ = bench.wait();
-    let _ = agent.wait();
+    let bench_exited = bench.child.try_wait();
+    drop(bench);
+    drop(agent);
+
+    let sample_status = sample_status?;
+    if !sample_status.success() {
+        return Err(
+            format!("sample failed ({sample_status}), so its output may be missing").into(),
+        );
+    }
+    if let Some(bench_status) = bench_exited?.filter(|status| !status.success()) {
+        return Err(format!("benchmark: failed with {bench_status}").into());
+    }
 
     println!("\nProfile saved: {}", sample_output.display());
 
@@ -277,7 +443,7 @@ fn profile_with_sample(
     Ok(())
 }
 
-fn analyze_sample_output(filepath: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+fn analyze_sample_output(filepath: &Path) -> Result<(), Box<dyn std::error::Error>> {
     profile_analysis::analyze(filepath)
 }
 
@@ -338,9 +504,8 @@ mod profile_analysis {
     ];
 
     fn pct(num: u64, denom: u64) -> f64 {
-        #[allow(clippy::cast_precision_loss)]
-        let result = (num as f64 / denom as f64) * 100.0;
-        result
+        let as_f64 = |n: u64| f64::from(u32::try_from(n).unwrap_or(u32::MAX));
+        as_f64(num) / as_f64(denom) * 100.0
     }
 
     fn compute_exclusive(call_graph: &[(usize, u64, String)]) -> HashMap<String, u64> {

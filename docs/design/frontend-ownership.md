@@ -194,7 +194,7 @@ mqdb list diagrams --broker 127.0.0.1:1883 --user admin --pass admin_password
 
 ```bash
 # Runs 9 automated tests covering create, list, update, delete, admin bypass
-mqdb dev test --ownership --nodes 3
+mqdb dev test --ownership --nodes 3 --license /path/to/license.key
 ```
 
 ---

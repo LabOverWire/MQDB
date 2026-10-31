@@ -1,48 +1,105 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use std::io::ErrorKind;
+use std::net::{Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-fn wait_for_cluster_ready(nodes: u8, timeout_secs: u64) -> bool {
+use super::cluster::{
+    BridgeDirection, StartClusterOptions, TRANSPORT_PORT_OFFSET, cmd_dev_start_cluster,
+};
+use super::helpers::{StartedNode, absolute_prefix, cmd_dev_clean, stop_started_nodes};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Suite {
+    Pubsub,
+    Db,
+    Constraints,
+    Wildcards,
+    Retained,
+    Lwt,
+    Events,
+    Ownership,
+    Sharing,
+    Presence,
+    StressConstraints,
+}
+
+impl Suite {
+    fn runs_by_default(self) -> bool {
+        matches!(
+            self,
+            Self::Pubsub
+                | Self::Db
+                | Self::Constraints
+                | Self::Wildcards
+                | Self::Retained
+                | Self::Lwt
+                | Self::Events
+        )
+    }
+
+    fn starts_own_cluster(self) -> bool {
+        matches!(self, Self::Ownership | Self::Sharing | Self::Presence)
+    }
+}
+
+pub(crate) struct DevTestOptions {
+    pub(crate) nodes: u8,
+    pub(crate) base_port: u16,
+    pub(crate) db_prefix: String,
+    pub(crate) license: Option<PathBuf>,
+}
+
+fn node_ports(base_port: u16, nodes: u8) -> Result<Vec<u16>, String> {
+    if nodes == 0 || nodes > TRANSPORT_PORT_OFFSET {
+        return Err(format!(
+            "--nodes must be between 1 and {TRANSPORT_PORT_OFFSET}, got {nodes}"
+        ));
+    }
+    let last_port = u32::from(base_port) + u32::from(TRANSPORT_PORT_OFFSET) + u32::from(nodes) - 1;
+    if last_port > u32::from(u16::MAX) {
+        return Err(format!(
+            "--base-port {base_port} with {nodes} nodes needs ports up to {last_port}, past {}",
+            u16::MAX
+        ));
+    }
+    Ok((0..u16::from(nodes)).map(|i| base_port + i).collect())
+}
+
+fn node_accepts_admin(port: u16) -> bool {
+    Command::new("timeout")
+        .args([
+            "1",
+            "mosquitto_pub",
+            "-h",
+            "127.0.0.1",
+            "-p",
+            &port.to_string(),
+            "-u",
+            "admin",
+            "-P",
+            "admin",
+            "-t",
+            "ping",
+            "-m",
+            "pong",
+        ])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn wait_for_cluster_ready(ports: &[u16], timeout_secs: u64) -> bool {
     let start = Instant::now();
     let timeout = Duration::from_secs(timeout_secs);
 
-    println!("Waiting for cluster to be ready ({nodes} nodes)...");
+    println!("Waiting for cluster to be ready ({} nodes)...", ports.len());
 
     while start.elapsed() < timeout {
-        let mut all_ready = true;
-
-        for i in 0..nodes {
-            let port = 1883 + u16::from(i);
-            let output = Command::new("timeout")
-                .args([
-                    "1",
-                    "mosquitto_pub",
-                    "-h",
-                    "127.0.0.1",
-                    "-p",
-                    &port.to_string(),
-                    "-u",
-                    "admin",
-                    "-P",
-                    "admin",
-                    "-t",
-                    "ping",
-                    "-m",
-                    "pong",
-                ])
-                .output();
-
-            if output.is_err() || !output.unwrap().status.success() {
-                all_ready = false;
-                break;
-            }
-        }
-
-        if all_ready {
-            let settled = wait_for_partitions_settled(nodes, timeout_secs);
+        if ports.iter().all(|&port| node_accepts_admin(port)) {
+            let settled = wait_for_partitions_settled(ports, timeout_secs);
             if settled {
                 println!("Cluster ready!");
             } else {
@@ -58,89 +115,54 @@ fn wait_for_cluster_ready(nodes: u8, timeout_secs: u64) -> bool {
     false
 }
 
-#[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
 pub(crate) fn cmd_dev_test(
-    pubsub: bool,
-    db: bool,
-    constraints: bool,
-    wildcards: bool,
-    retained: bool,
-    lwt: bool,
-    events: bool,
-    ownership: bool,
-    sharing: bool,
-    presence: bool,
-    stress_constraints: bool,
+    requested: &[(Suite, bool)],
     all: bool,
-    nodes: u8,
-    license: Option<&Path>,
-) {
-    let run_all = all
-        || (!pubsub
-            && !db
-            && !constraints
-            && !wildcards
-            && !retained
-            && !lwt
-            && !events
-            && !ownership
-            && !sharing
-            && !presence
-            && !stress_constraints);
+    options: &DevTestOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let ports = node_ports(options.base_port, options.nodes)?;
+    let run_defaults = all || requested.iter().all(|&(_, wanted)| !wanted);
+    let selected = requested
+        .iter()
+        .filter(|&&(suite, wanted)| wanted || (run_defaults && suite.runs_by_default()))
+        .map(|&(suite, _)| suite);
 
-    wait_for_cluster_ready(nodes, 10);
-    let ports: Vec<u16> = (0..nodes).map(|i| 1883 + u16::from(i)).collect();
-
-    if pubsub || run_all {
-        run_test_pubsub(nodes, &ports);
+    let tests_running_cluster = selected.clone().any(|suite| !suite.starts_own_cluster());
+    if tests_running_cluster && selected.clone().any(Suite::starts_own_cluster) {
+        return Err("--ownership, --sharing and --presence start their own cluster on the --base-port block, so they cannot run together with suites that test a running cluster there; run them in a separate dev test".into());
+    }
+    if tests_running_cluster {
+        wait_for_cluster_ready(&ports, 10);
     }
 
-    if db || run_all {
-        run_test_db(nodes, &ports);
-    }
-
-    if constraints || run_all {
-        run_test_constraints(nodes, &ports);
-    }
-
-    if wildcards || run_all {
-        run_test_wildcards(nodes, &ports);
-    }
-
-    if retained || run_all {
-        run_test_retained(nodes, &ports);
-    }
-
-    if lwt || run_all {
-        run_test_lwt(nodes, &ports);
-    }
-
-    if events || run_all {
-        run_test_events(nodes, &ports);
-    }
-
-    if ownership {
-        run_test_ownership(nodes, &ports, license);
-    }
-
-    if sharing {
-        run_test_sharing(nodes, &ports, license);
-    }
-
-    if presence {
-        run_test_presence(nodes, &ports, license);
-    }
-
-    if stress_constraints {
-        run_test_stress_constraints(nodes, &ports);
+    let nodes = options.nodes;
+    let failed: u32 = selected
+        .map(|suite| match suite {
+            Suite::Pubsub => run_test_pubsub(nodes, &ports),
+            Suite::Db => run_test_db(nodes, &ports),
+            Suite::Constraints => run_test_constraints(nodes, &ports),
+            Suite::Wildcards => run_test_wildcards(nodes, &ports),
+            Suite::Retained => run_test_retained(nodes, &ports),
+            Suite::Lwt => run_test_lwt(nodes, &ports),
+            Suite::Events => run_test_events(nodes, &ports),
+            Suite::Ownership => run_test_ownership(options, &ports),
+            Suite::Sharing => run_test_sharing(options, &ports),
+            Suite::Presence => run_test_presence(options, &ports),
+            Suite::StressConstraints => run_test_stress_constraints(nodes, &ports),
+        })
+        .sum();
+    if failed == 0 {
+        Ok(())
+    } else {
+        Err(format!("{failed} dev test check(s) failed").into())
     }
 }
 
-fn run_test_pubsub(nodes: u8, ports: &[u16]) {
+fn run_test_pubsub(nodes: u8, ports: &[u16]) -> u32 {
     println!("=== Cross-Node Pub/Sub Matrix Test ({nodes} nodes) ===\n");
 
-    let mut passed = 0;
-    let mut failed = 0;
+    let mut passed = 0u32;
+    let mut failed = 0u32;
 
     for (src_idx, &src_port) in ports.iter().enumerate() {
         for (dst_idx, &dst_port) in ports.iter().enumerate() {
@@ -167,15 +189,15 @@ fn run_test_pubsub(nodes: u8, ports: &[u16]) {
         }
     }
 
-    println!("\nResults: {passed} passed, {failed} failed\n");
+    report(passed, failed)
 }
 
-fn run_test_db(nodes: u8, ports: &[u16]) {
+fn run_test_db(nodes: u8, ports: &[u16]) -> u32 {
     println!("=== Cross-Node DB CRUD Test ({nodes} nodes) ===\n");
 
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mqdb"));
-    let mut passed = 0;
-    let mut failed = 0;
+    let mut passed = 0u32;
+    let mut failed = 0u32;
 
     for (idx, &port) in ports.iter().enumerate() {
         let node = idx + 1;
@@ -215,7 +237,7 @@ fn run_test_db(nodes: u8, ports: &[u16]) {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
 
-    println!("\nResults: {passed} passed, {failed} failed\n");
+    report(passed, failed)
 }
 
 fn mqdb_cmd(
@@ -229,12 +251,12 @@ fn mqdb_cmd(
     Command::new(exe).args(&full_args).output()
 }
 
-fn run_test_constraints(nodes: u8, ports: &[u16]) {
+fn run_test_constraints(nodes: u8, ports: &[u16]) -> u32 {
     println!("=== Unique Constraint Test ({nodes} nodes) ===\n");
 
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mqdb"));
-    let mut passed = 0;
-    let mut failed = 0;
+    let mut passed = 0u32;
+    let mut failed = 0u32;
 
     let ts = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_millis());
     let entity = format!("test_products_{ts}");
@@ -269,8 +291,7 @@ fn run_test_constraints(nodes: u8, ports: &[u16]) {
             eprintln!("    stderr: {}", String::from_utf8_lossy(&o.stderr));
         }
         failed += 1;
-        println!("\nResults: {passed} passed, {failed} failed\n");
-        return;
+        return report(passed, failed);
     }
 
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -328,14 +349,14 @@ fn run_test_constraints(nodes: u8, ports: &[u16]) {
         failed += 1;
     }
 
-    println!("\nResults: {passed} passed, {failed} failed\n");
+    report(passed, failed)
 }
 
-fn run_test_wildcards(nodes: u8, ports: &[u16]) {
+fn run_test_wildcards(nodes: u8, ports: &[u16]) -> u32 {
     println!("=== Cross-Node Wildcard Subscription Test ({nodes} nodes) ===\n");
 
-    let mut passed = 0;
-    let mut failed = 0;
+    let mut passed = 0u32;
+    let mut failed = 0u32;
 
     let sub_port = ports[0];
     let pub_port = ports[ports.len() - 1];
@@ -386,14 +407,14 @@ fn run_test_wildcards(nodes: u8, ports: &[u16]) {
         failed += 1;
     }
 
-    println!("\nResults: {passed} passed, {failed} failed\n");
+    report(passed, failed)
 }
 
-fn run_test_retained(nodes: u8, ports: &[u16]) {
+fn run_test_retained(nodes: u8, ports: &[u16]) -> u32 {
     println!("=== Cross-Node Retained Message Test ({nodes} nodes) ===\n");
 
-    let mut passed = 0;
-    let mut failed = 0;
+    let mut passed = 0u32;
+    let mut failed = 0u32;
 
     let ts = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_millis());
     let topic = format!("retained/test/{ts}");
@@ -477,14 +498,14 @@ fn run_test_retained(nodes: u8, ports: &[u16]) {
         ])
         .output();
 
-    println!("\nResults: {passed} passed, {failed} failed\n");
+    report(passed, failed)
 }
 
-fn run_test_lwt(nodes: u8, ports: &[u16]) {
+fn run_test_lwt(nodes: u8, ports: &[u16]) -> u32 {
     println!("=== Cross-Node Last Will & Testament Test ({nodes} nodes) ===\n");
 
-    let mut passed = 0;
-    let mut failed = 0;
+    let mut passed = 0u32;
+    let mut failed = 0u32;
 
     let ts = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_millis());
     let will_topic = format!("lwt/status/{ts}");
@@ -517,15 +538,15 @@ fn run_test_lwt(nodes: u8, ports: &[u16]) {
         failed += 1;
     }
 
-    println!("\nResults: {passed} passed, {failed} failed\n");
+    report(passed, failed)
 }
 
-fn run_test_events(nodes: u8, ports: &[u16]) {
+fn run_test_events(nodes: u8, ports: &[u16]) -> u32 {
     println!("=== Cross-Node Change Event Test ({nodes} nodes) ===\n");
 
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mqdb"));
-    let mut passed = 0;
-    let mut failed = 0;
+    let mut passed = 0u32;
+    let mut failed = 0u32;
 
     let ts = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_millis());
     let entity = format!("events_test_{ts}");
@@ -585,7 +606,7 @@ fn run_test_events(nodes: u8, ports: &[u16]) {
         );
     }
 
-    println!("\nResults: {passed} passed, {failed} failed\n");
+    report(passed, failed)
 }
 
 fn spawn_event_watcher(
@@ -662,57 +683,6 @@ fn run_pubsub_test(pub_port: u16, sub_port: u16, topic: &str, msg: &str) -> bool
     }
 }
 
-fn full_mesh_peers(node_id: u8, nodes: u8) -> Vec<String> {
-    (1..=nodes)
-        .filter(|&n| n != node_id)
-        .map(|n| format!("{}@127.0.0.1:{}", n, 1882 + u16::from(n)))
-        .collect()
-}
-
-fn wait_for_auth_cluster(nodes: u8, timeout_secs: u64) -> bool {
-    let start = Instant::now();
-    let timeout = Duration::from_secs(timeout_secs);
-
-    while start.elapsed() < timeout {
-        let mut all_ready = true;
-
-        for i in 0..nodes {
-            let port = 1883 + u16::from(i);
-            let output = Command::new("timeout")
-                .args([
-                    "1",
-                    "mosquitto_pub",
-                    "-h",
-                    "127.0.0.1",
-                    "-p",
-                    &port.to_string(),
-                    "-u",
-                    "admin",
-                    "-P",
-                    "admin",
-                    "-t",
-                    "ping",
-                    "-m",
-                    "pong",
-                ])
-                .output();
-
-            if output.is_err() || !output.unwrap().status.success() {
-                all_ready = false;
-                break;
-            }
-        }
-
-        if all_ready {
-            return wait_for_partitions_settled(nodes, timeout_secs);
-        }
-
-        std::thread::sleep(Duration::from_millis(500));
-    }
-
-    false
-}
-
 type PartitionAssignment = (u64, Option<u64>, Vec<u64>);
 
 fn partition_map_on(port: u16) -> Option<Vec<PartitionAssignment>> {
@@ -773,17 +743,17 @@ fn partition_map_complete(map: &[PartitionAssignment], nodes: u8) -> bool {
             .all(|node| map.iter().any(|(_, primary, _)| *primary == Some(node)))
 }
 
-fn wait_for_partitions_settled(nodes: u8, timeout_secs: u64) -> bool {
+fn wait_for_partitions_settled(ports: &[u16], timeout_secs: u64) -> bool {
     const STABLE_POLLS: u32 = 3;
+    let nodes = u8::try_from(ports.len()).unwrap_or(u8::MAX);
     let start = Instant::now();
     let timeout = Duration::from_secs(timeout_secs.max(30));
     let mut previous: Option<Vec<PartitionAssignment>> = None;
     let mut stable_polls = 0;
 
     while start.elapsed() < timeout {
-        let maps: Vec<Option<Vec<PartitionAssignment>>> = (0..nodes)
-            .map(|i| partition_map_on(1883 + u16::from(i)))
-            .collect();
+        let maps: Vec<Option<Vec<PartitionAssignment>>> =
+            ports.iter().map(|&port| partition_map_on(port)).collect();
         let agreed = match maps.first() {
             Some(Some(first)) if partition_map_complete(first, nodes) => maps
                 .iter()
@@ -819,380 +789,175 @@ fn wait_for_partitions_settled(nodes: u8, timeout_secs: u64) -> bool {
     false
 }
 
-#[allow(clippy::too_many_lines)]
-fn run_test_ownership(nodes: u8, _ports: &[u16], license: Option<&Path>) {
-    println!("=== Ownership Enforcement Test ({nodes} nodes) ===\n");
+fn port_in_use(port: u16) -> bool {
+    let local = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    TcpStream::connect_timeout(&local, Duration::from_millis(300)).is_ok()
+        || UdpSocket::bind(local).is_err()
+}
 
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mqdb"));
-    let mut passed = 0;
-    let mut failed = 0;
+fn busy_ports(ports: &[u16]) -> Vec<u16> {
+    ports
+        .iter()
+        .flat_map(|&port| [port, port + u16::from(TRANSPORT_PORT_OFFSET)])
+        .filter(|&port| port_in_use(port))
+        .collect()
+}
 
-    let passwd_path = "/tmp/mqdb-test-ownership-passwd";
-    let db_prefix = "/tmp/mqdb-test-own";
+struct SuiteSetup<'a> {
+    dir: &'a str,
+    users: &'a [&'a str],
+    ownership: Option<String>,
+    presence: bool,
+    label: &'a str,
+}
 
-    println!("  Setting up authenticated cluster with ownership...");
+struct SuiteCluster {
+    nodes: Vec<StartedNode>,
+    passwd: Option<PathBuf>,
+}
 
-    let _ = std::fs::remove_file(passwd_path);
-    for (user, pass) in [("alice", "alice"), ("bob", "bob"), ("admin", "admin")] {
-        let _ = Command::new(&exe)
-            .args(["passwd", user, "-b", pass, "-f", passwd_path])
-            .output();
-    }
-
-    let ts = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_millis());
-    let entity = format!("test_owned_{ts}");
-    let ownership_spec = format!("{entity}=userId");
-
-    let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
-    std::thread::sleep(Duration::from_secs(1));
-
-    for i in 1..=nodes {
-        let _ = std::fs::remove_dir_all(format!("{db_prefix}-{i}"));
-    }
-
-    let quic_cert = PathBuf::from("test_certs/server.pem");
-    let quic_key = PathBuf::from("test_certs/server.key");
-    let quic_ca = PathBuf::from("test_certs/ca.pem");
-
-    for node_id in 1..=nodes {
-        let port = 1882 + u16::from(node_id);
-        let db_path = format!("{db_prefix}-{node_id}");
-        let _ = std::fs::create_dir_all(&db_path);
-
-        let mut cmd = Command::new(&exe);
-        cmd.args([
-            "cluster",
-            "start",
-            "--node-id",
-            &node_id.to_string(),
-            "--bind",
-            &format!("127.0.0.1:{port}"),
-            "--db",
-            &db_path,
-            "--admin-users",
-            "admin",
-            "--passwd",
-            passwd_path,
-            "--ownership",
-            &ownership_spec,
-        ]);
-
-        if let Some(lic_path) = license
-            && let Some(lic_str) = lic_path.to_str()
-        {
-            cmd.args(["--license", lic_str]);
-        }
-
-        let peers = full_mesh_peers(node_id, nodes);
-        if !peers.is_empty() {
-            cmd.args(["--peers", &peers.join(",")]);
-        }
-
-        if quic_cert.exists() && quic_key.exists() {
-            cmd.args([
-                "--quic-cert",
-                quic_cert.to_str().unwrap_or(""),
-                "--quic-key",
-                quic_key.to_str().unwrap_or(""),
-            ]);
-            if quic_ca.exists() {
-                cmd.args(["--quic-ca", quic_ca.to_str().unwrap_or("")]);
+impl SuiteCluster {
+    fn stop(&mut self) -> Result<(), String> {
+        let mut nodes = std::mem::take(&mut self.nodes);
+        if let Err(e) = stop_started_nodes(&mut nodes) {
+            if let Some(passwd) = self.passwd.take() {
+                return Err(format!("{e}; kept {} for them", passwd.display()));
             }
-            #[cfg(feature = "dev-insecure")]
-            cmd.arg("--quic-insecure");
+            return Err(e);
         }
-
-        cmd.env(
-            "RUST_LOG",
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
-        );
-
-        if let Ok(log_file) = std::fs::File::create(format!("{db_path}/mqdb.log")) {
-            if let Ok(log_clone) = log_file.try_clone() {
-                cmd.stdout(log_clone);
+        match self.passwd.take().map(std::fs::remove_file) {
+            Some(Err(e)) if e.kind() != ErrorKind::NotFound => {
+                Err(format!("could not remove the suite passwd file: {e}"))
             }
-            cmd.stderr(log_file);
+            Some(Ok(()) | Err(_)) | None => Ok(()),
         }
-
-        println!("  Starting node {node_id} on port {port} (auth + ownership)...");
-        let _ = cmd.spawn();
-        std::thread::sleep(Duration::from_millis(500));
     }
+
+    fn finish(mut self) -> u32 {
+        match self.stop() {
+            Ok(()) => 0,
+            Err(e) => {
+                println!("  could not stop the suite cluster cleanly: {e}");
+                1
+            }
+        }
+    }
+}
+
+impl Drop for SuiteCluster {
+    fn drop(&mut self) {
+        if let Err(e) = self.stop() {
+            eprintln!("  could not stop the suite cluster cleanly: {e}");
+        }
+    }
+}
+
+fn create_suite_passwd(exe: &Path, passwd: &str, users: &[&str]) -> Result<(), String> {
+    for user in users {
+        let output = Command::new(exe)
+            .args(["passwd", user, "-b", user, "-f", passwd])
+            .output()
+            .map_err(|e| format!("run mqdb passwd: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "mqdb passwd {user}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn start_suite_cluster(
+    exe: &Path,
+    options: &DevTestOptions,
+    ports: &[u16],
+    setup: SuiteSetup,
+) -> Result<SuiteCluster, String> {
+    let busy = busy_ports(ports);
+    if !busy.is_empty() {
+        return Err(format!(
+            "ports {busy:?} are already in use; this suite starts its own cluster, so pick a free block with --base-port"
+        ));
+    }
+
+    let prefix = absolute_prefix(&format!(
+        "{}-{}-{}",
+        options.db_prefix, setup.dir, options.base_port
+    ))
+    .map_err(|e| e.to_string())?;
+    cmd_dev_clean(&prefix).map_err(|e| e.to_string())?;
+    let passwd = format!("{prefix}-passwd");
+    let mut cluster = SuiteCluster {
+        nodes: Vec::new(),
+        passwd: Some(PathBuf::from(&passwd)),
+    };
+    create_suite_passwd(exe, &passwd, setup.users)?;
+
+    println!("  Starting {} nodes ({})...", ports.len(), setup.label);
+    cluster.nodes = cmd_dev_start_cluster(&StartClusterOptions {
+        nodes: options.nodes,
+        clean: false,
+        quic_cert: PathBuf::from("test_certs/server.pem"),
+        quic_key: PathBuf::from("test_certs/server.key"),
+        quic_ca: PathBuf::from("test_certs/ca.pem"),
+        no_quic: false,
+        db_prefix: prefix,
+        base_port: options.base_port,
+        bind_host: "127.0.0.1".to_string(),
+        topology: Some("full".to_string()),
+        bridge: BridgeDirection::TopologyDefault,
+        passwd: Some(PathBuf::from(&passwd)),
+        ownership: setup.ownership,
+        presence: setup.presence,
+        license: options.license.clone(),
+    })
+    .map_err(|e| e.to_string())?;
 
     println!("  Waiting for authenticated cluster...");
-    if !wait_for_auth_cluster(nodes, 15) {
-        println!("  Cluster failed to become ready");
-        let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
-        println!("\nResults: {passed} passed, {failed} failed\n");
-        return;
-    }
-    println!("  Authenticated cluster ready!\n");
+    wait_for_suite_cluster(&mut cluster.nodes, ports, 30)?;
+    Ok(cluster)
+}
 
-    let broker = "127.0.0.1:1883";
+fn exited_node(nodes: &mut [StartedNode]) -> Option<String> {
+    nodes.iter_mut().find_map(|node| match node.exit_status() {
+        Ok(Some(status)) => Some(format!(
+            "node {} exited ({status}); see {}",
+            node.node_id,
+            node.dir.join("mqdb.log").display()
+        )),
+        Ok(None) => None,
+        Err(e) => Some(e),
+    })
+}
 
-    let create_output = Command::new(&exe)
-        .args([
-            "create",
-            &entity,
-            "-d",
-            r#"{"userId": "alice", "title": "Alice Doc"}"#,
-            "--broker",
-            broker,
-            "--user",
-            "alice",
-            "--pass",
-            "alice",
-            "--format",
-            "json",
-        ])
-        .output();
-
-    let id = create_output
-        .as_ref()
-        .ok()
-        .and_then(|o| {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            serde_json::from_str::<serde_json::Value>(&stdout).ok()
-        })
-        .and_then(|v| v["data"]["id"].as_str().map(String::from));
-
-    if id.is_some() {
-        println!("  Create as alice: ✓");
-        passed += 1;
-    } else {
-        println!("  Create as alice: ✗");
-        if let Ok(o) = &create_output {
-            eprintln!("    stdout: {}", String::from_utf8_lossy(&o.stdout));
-            eprintln!("    stderr: {}", String::from_utf8_lossy(&o.stderr));
+fn wait_for_suite_cluster(
+    nodes: &mut [StartedNode],
+    ports: &[u16],
+    timeout_secs: u64,
+) -> Result<(), String> {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(timeout_secs) {
+        if let Some(exited) = exited_node(nodes) {
+            return Err(exited);
         }
-        failed += 1;
-        let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
-        println!("\nResults: {passed} passed, {failed} failed\n");
-        return;
-    }
-
-    let id = id.unwrap();
-    std::thread::sleep(Duration::from_millis(500));
-
-    let list_alice = Command::new(&exe)
-        .args([
-            "list", &entity, "--broker", broker, "--user", "alice", "--pass", "alice", "--format",
-            "json",
-        ])
-        .output();
-
-    let alice_count = list_alice
-        .as_ref()
-        .ok()
-        .and_then(|o| {
-            serde_json::from_str::<serde_json::Value>(&String::from_utf8_lossy(&o.stdout)).ok()
-        })
-        .and_then(|v| v["data"].as_array().map(Vec::len))
-        .unwrap_or(0);
-
-    if alice_count == 1 {
-        println!("  List as alice (sees own doc): ✓");
-        passed += 1;
-    } else {
-        println!("  List as alice (sees own doc): ✗ (got {alice_count})");
-        failed += 1;
-    }
-
-    let list_bob = Command::new(&exe)
-        .args([
-            "list", &entity, "--broker", broker, "--user", "bob", "--pass", "bob", "--format",
-            "json",
-        ])
-        .output();
-
-    let bob_count = list_bob
-        .as_ref()
-        .ok()
-        .and_then(|o| {
-            serde_json::from_str::<serde_json::Value>(&String::from_utf8_lossy(&o.stdout)).ok()
-        })
-        .and_then(|v| v["data"].as_array().map(Vec::len))
-        .unwrap_or(0);
-
-    if bob_count == 0 {
-        println!("  List as bob (sees nothing): ✓");
-        passed += 1;
-    } else {
-        println!("  List as bob (sees nothing): ✗ (got {bob_count})");
-        failed += 1;
-    }
-
-    let update_bob = Command::new(&exe)
-        .args([
-            "update",
-            &entity,
-            &id,
-            "-d",
-            r#"{"title": "Stolen"}"#,
-            "--broker",
-            broker,
-            "--user",
-            "bob",
-            "--pass",
-            "bob",
-            "--format",
-            "json",
-        ])
-        .output();
-
-    let bob_update_blocked = update_bob.as_ref().ok().is_some_and(|o| {
-        let stdout = String::from_utf8_lossy(&o.stdout).to_lowercase();
-        !o.status.success() || stdout.contains("forbidden") || stdout.contains("error")
-    });
-
-    if bob_update_blocked {
-        println!("  Update as bob (forbidden): ✓");
-        passed += 1;
-    } else {
-        println!("  Update as bob (forbidden): ✗");
-        if let Ok(o) = &update_bob {
-            eprintln!("    stdout: {}", String::from_utf8_lossy(&o.stdout));
+        if ports.iter().all(|&port| node_accepts_admin(port)) {
+            return if wait_for_partitions_settled(ports, timeout_secs * 2) {
+                Ok(())
+            } else {
+                Err("partition map did not settle".to_string())
+            };
         }
-        failed += 1;
+        std::thread::sleep(Duration::from_millis(500));
     }
+    Err(format!(
+        "nodes did not accept connections within {timeout_secs}s; see their mqdb.log"
+    ))
+}
 
-    let delete_bob = Command::new(&exe)
-        .args([
-            "delete", &entity, &id, "--broker", broker, "--user", "bob", "--pass", "bob",
-            "--format", "json",
-        ])
-        .output();
-
-    let bob_delete_blocked = delete_bob.as_ref().ok().is_some_and(|o| {
-        let stdout = String::from_utf8_lossy(&o.stdout).to_lowercase();
-        !o.status.success() || stdout.contains("forbidden") || stdout.contains("error")
-    });
-
-    if bob_delete_blocked {
-        println!("  Delete as bob (forbidden): ✓");
-        passed += 1;
-    } else {
-        println!("  Delete as bob (forbidden): ✗");
-        failed += 1;
-    }
-
-    let list_admin = Command::new(&exe)
-        .args([
-            "list", &entity, "--broker", broker, "--user", "admin", "--pass", "admin", "--format",
-            "json",
-        ])
-        .output();
-
-    let admin_count = list_admin
-        .as_ref()
-        .ok()
-        .and_then(|o| {
-            serde_json::from_str::<serde_json::Value>(&String::from_utf8_lossy(&o.stdout)).ok()
-        })
-        .and_then(|v| v["data"].as_array().map(Vec::len))
-        .unwrap_or(0);
-
-    if admin_count == 1 {
-        println!("  List as admin (sees all): ✓");
-        passed += 1;
-    } else {
-        println!("  List as admin (sees all): ✗ (got {admin_count})");
-        failed += 1;
-    }
-
-    let update_admin = Command::new(&exe)
-        .args([
-            "update",
-            &entity,
-            &id,
-            "-d",
-            r#"{"title": "Admin Override"}"#,
-            "--broker",
-            broker,
-            "--user",
-            "admin",
-            "--pass",
-            "admin",
-            "--format",
-            "json",
-        ])
-        .output();
-
-    let admin_update_ok = update_admin
-        .as_ref()
-        .ok()
-        .is_some_and(|o| o.status.success());
-
-    if admin_update_ok {
-        println!("  Update as admin (bypass): ✓");
-        passed += 1;
-    } else {
-        println!("  Update as admin (bypass): ✗");
-        if let Ok(o) = &update_admin {
-            eprintln!("    stdout: {}", String::from_utf8_lossy(&o.stdout));
-        }
-        failed += 1;
-    }
-
-    let update_alice = Command::new(&exe)
-        .args([
-            "update",
-            &entity,
-            &id,
-            "-d",
-            r#"{"title": "Updated by Alice"}"#,
-            "--broker",
-            broker,
-            "--user",
-            "alice",
-            "--pass",
-            "alice",
-            "--format",
-            "json",
-        ])
-        .output();
-
-    let alice_update_ok = update_alice
-        .as_ref()
-        .ok()
-        .is_some_and(|o| o.status.success());
-
-    if alice_update_ok {
-        println!("  Update as alice (owner): ✓");
-        passed += 1;
-    } else {
-        println!("  Update as alice (owner): ✗");
-        if let Ok(o) = &update_alice {
-            eprintln!("    stdout: {}", String::from_utf8_lossy(&o.stdout));
-            eprintln!("    stderr: {}", String::from_utf8_lossy(&o.stderr));
-        }
-        failed += 1;
-    }
-
-    let delete_alice = Command::new(&exe)
-        .args([
-            "delete", &entity, &id, "--broker", broker, "--user", "alice", "--pass", "alice",
-            "--format", "json",
-        ])
-        .output();
-
-    let alice_delete_ok = delete_alice
-        .as_ref()
-        .ok()
-        .is_some_and(|o| o.status.success());
-
-    if alice_delete_ok {
-        println!("  Delete as alice (owner): ✓");
-        passed += 1;
-    } else {
-        println!("  Delete as alice (owner): ✗");
-        failed += 1;
-    }
-
-    let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
-    let _ = std::fs::remove_file(passwd_path);
-
+fn report(passed: u32, failed: u32) -> u32 {
     println!("\nResults: {passed} passed, {failed} failed\n");
+    failed
 }
 
 fn record(passed: &mut u32, failed: &mut u32, label: &str, ok: bool) {
@@ -1205,128 +970,191 @@ fn record(passed: &mut u32, failed: &mut u32, label: &str, ok: bool) {
     }
 }
 
-#[allow(clippy::too_many_lines)]
-fn run_test_sharing(nodes: u8, _ports: &[u16], license: Option<&Path>) {
-    println!("=== Cluster Diagram Sharing E2E ({nodes} nodes) ===\n");
+fn run_as(exe: &Path, broker: &str, user: &str, args: &[&str]) -> (Option<bool>, String) {
+    match Command::new(exe)
+        .args(args)
+        .args([
+            "--broker", broker, "--user", user, "--pass", user, "--format", "json",
+        ])
+        .output()
+    {
+        Ok(o) if o.status.success() => (Some(true), String::from_utf8_lossy(&o.stdout).to_string()),
+        Ok(o) => (
+            Some(false),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            ),
+        ),
+        Err(e) => {
+            eprintln!("    could not run {}: {e}", exe.display());
+            (None, String::new())
+        }
+    }
+}
+
+fn data_len(out: &str) -> usize {
+    serde_json::from_str::<serde_json::Value>(out)
+        .ok()
+        .and_then(|v| v["data"].as_array().map(Vec::len))
+        .unwrap_or(0)
+}
+
+fn denied(outcome: &(Option<bool>, String)) -> bool {
+    serde_json::Deserializer::from_str(&outcome.1)
+        .into_iter::<serde_json::Value>()
+        .next()
+        .and_then(Result::ok)
+        .is_some_and(|answer| answer["status"] == "error" && answer["code"].as_u64() == Some(403))
+}
+
+fn suite_entity(kind: &str) -> String {
+    let ts = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_millis());
+    format!("test_{kind}_{ts}")
+}
+
+fn run_test_ownership(options: &DevTestOptions, ports: &[u16]) -> u32 {
+    println!(
+        "=== Ownership Enforcement Test ({} nodes) ===\n",
+        options.nodes
+    );
 
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mqdb"));
     let mut passed = 0u32;
     let mut failed = 0u32;
-
-    let passwd_path = "/tmp/mqdb-test-sharing-passwd";
-    let db_prefix = "/tmp/mqdb-test-share";
-
-    println!("  Setting up authenticated cluster with ownership...");
-    let _ = std::fs::remove_file(passwd_path);
-    for (user, pass) in [("alice", "alice"), ("bob", "bob"), ("admin", "admin")] {
-        let _ = Command::new(&exe)
-            .args(["passwd", user, "-b", pass, "-f", passwd_path])
-            .output();
-    }
-
-    let ts = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_millis());
-    let entity = format!("test_shared_{ts}");
+    let entity = suite_entity("owned");
     let ownership_spec = format!("{entity}=userId");
 
-    let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
-    std::thread::sleep(Duration::from_secs(1));
-    for i in 1..=nodes {
-        let _ = std::fs::remove_dir_all(format!("{db_prefix}-{i}"));
-    }
-
-    let quic_cert = PathBuf::from("test_certs/server.pem");
-    let quic_key = PathBuf::from("test_certs/server.key");
-    let quic_ca = PathBuf::from("test_certs/ca.pem");
-
-    for node_id in 1..=nodes {
-        let port = 1882 + u16::from(node_id);
-        let db_path = format!("{db_prefix}-{node_id}");
-        let _ = std::fs::create_dir_all(&db_path);
-
-        let mut cmd = Command::new(&exe);
-        cmd.args([
-            "cluster",
-            "start",
-            "--node-id",
-            &node_id.to_string(),
-            "--bind",
-            &format!("127.0.0.1:{port}"),
-            "--db",
-            &db_path,
-            "--admin-users",
-            "admin",
-            "--passwd",
-            passwd_path,
-            "--ownership",
-            &ownership_spec,
-        ]);
-
-        if let Some(lic_path) = license
-            && let Some(lic_str) = lic_path.to_str()
-        {
-            cmd.args(["--license", lic_str]);
+    println!("  Setting up authenticated cluster with ownership...");
+    let setup = SuiteSetup {
+        dir: "own",
+        users: &["alice", "bob", "admin"],
+        ownership: Some(ownership_spec),
+        presence: false,
+        label: "auth + ownership",
+    };
+    let cluster = match start_suite_cluster(&exe, options, ports, setup) {
+        Ok(cluster) => cluster,
+        Err(e) => {
+            println!("  Cluster failed to become ready: {e}");
+            return report(passed, 1);
         }
-
-        let peers = full_mesh_peers(node_id, nodes);
-        if !peers.is_empty() {
-            cmd.args(["--peers", &peers.join(",")]);
-        }
-
-        if quic_cert.exists() && quic_key.exists() {
-            cmd.args([
-                "--quic-cert",
-                quic_cert.to_str().unwrap_or(""),
-                "--quic-key",
-                quic_key.to_str().unwrap_or(""),
-            ]);
-            if quic_ca.exists() {
-                cmd.args(["--quic-ca", quic_ca.to_str().unwrap_or("")]);
-            }
-            #[cfg(feature = "dev-insecure")]
-            cmd.arg("--quic-insecure");
-        }
-
-        cmd.env(
-            "RUST_LOG",
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
-        );
-
-        if let Ok(log_file) = std::fs::File::create(format!("{db_path}/mqdb.log")) {
-            if let Ok(log_clone) = log_file.try_clone() {
-                cmd.stdout(log_clone);
-            }
-            cmd.stderr(log_file);
-        }
-
-        println!("  Starting node {node_id} on port {port} (auth + ownership)...");
-        let _ = cmd.spawn();
-        std::thread::sleep(Duration::from_millis(500));
-    }
-
-    println!("  Waiting for authenticated cluster...");
-    if !wait_for_auth_cluster(nodes, 15) {
-        println!("  Cluster failed to become ready");
-        let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
-        println!("\nResults: {passed} passed, {failed} failed\n");
-        return;
-    }
+    };
     println!("  Authenticated cluster ready!\n");
 
-    let n1 = "127.0.0.1:1883";
-    let n2 = if nodes >= 2 { "127.0.0.1:1884" } else { n1 };
-    let n3 = if nodes >= 3 { "127.0.0.1:1885" } else { n1 };
+    let broker = format!("127.0.0.1:{}", ports[0]);
+    let run = |user: &str, args: &[&str]| run_as(&exe, &broker, user, args);
 
-    let run = |args: &[&str]| -> (bool, String) {
-        Command::new(&exe).args(args).output().map_or_else(
-            |_| (false, String::new()),
-            |o| {
-                (
-                    o.status.success(),
-                    String::from_utf8_lossy(&o.stdout).to_string(),
-                )
-            },
-        )
+    let (_, create_out) = run(
+        "alice",
+        &[
+            "create",
+            &entity,
+            "-d",
+            r#"{"userId": "alice", "title": "Alice Doc"}"#,
+        ],
+    );
+    let id = serde_json::from_str::<serde_json::Value>(&create_out)
+        .ok()
+        .and_then(|v| v["data"]["id"].as_str().map(String::from));
+    record(&mut passed, &mut failed, "Create as alice", id.is_some());
+    let Some(id) = id else {
+        eprintln!("    output: {create_out}");
+        let stop_failures = cluster.finish();
+        return report(passed, failed + stop_failures);
     };
+    std::thread::sleep(Duration::from_millis(500));
+
+    let alice_count = data_len(&run("alice", &["list", &entity]).1);
+    record(
+        &mut passed,
+        &mut failed,
+        &format!("List as alice (sees own doc, got {alice_count})"),
+        alice_count == 1,
+    );
+    let (bob_listed, bob_list_out) = run("bob", &["list", &entity]);
+    let bob_count = data_len(&bob_list_out);
+    record(
+        &mut passed,
+        &mut failed,
+        &format!("List as bob (sees nothing, got {bob_count})"),
+        bob_listed == Some(true) && bob_count == 0,
+    );
+    let bob_update = run(
+        "bob",
+        &["update", &entity, &id, "-d", r#"{"title": "Stolen"}"#],
+    );
+    record(
+        &mut passed,
+        &mut failed,
+        "Update as bob (forbidden)",
+        denied(&bob_update),
+    );
+    let bob_delete = run("bob", &["delete", &entity, &id]);
+    record(
+        &mut passed,
+        &mut failed,
+        "Delete as bob (forbidden)",
+        denied(&bob_delete),
+    );
+    let admin_count = data_len(&run("admin", &["list", &entity]).1);
+    record(
+        &mut passed,
+        &mut failed,
+        &format!("List as admin (sees all, got {admin_count})"),
+        admin_count == 1,
+    );
+    let (admin_update, _) = run(
+        "admin",
+        &[
+            "update",
+            &entity,
+            &id,
+            "-d",
+            r#"{"title": "Admin Override"}"#,
+        ],
+    );
+    record(
+        &mut passed,
+        &mut failed,
+        "Update as admin (bypass)",
+        admin_update == Some(true),
+    );
+    let (alice_update, alice_update_out) = run(
+        "alice",
+        &[
+            "update",
+            &entity,
+            &id,
+            "-d",
+            r#"{"title": "Updated by Alice"}"#,
+        ],
+    );
+    record(
+        &mut passed,
+        &mut failed,
+        "Update as alice (owner)",
+        alice_update == Some(true),
+    );
+    if alice_update != Some(true) {
+        eprintln!("    output: {alice_update_out}");
+    }
+    let (alice_delete, _) = run("alice", &["delete", &entity, &id]);
+    record(
+        &mut passed,
+        &mut failed,
+        "Delete as alice (owner)",
+        alice_delete == Some(true),
+    );
+
+    let stop_failures = cluster.finish();
+    report(passed, failed + stop_failures)
+}
+
+fn sharing_checks(exe: &Path, entity: &str, ports: &[u16], passed: &mut u32, failed: &mut u32) {
+    let broker = |idx: usize| format!("127.0.0.1:{}", ports[idx.min(ports.len() - 1)]);
+    let (n1, n2, n3) = (broker(0), broker(1), broker(2));
     let data_array_has = |out: &str, pred: &dyn Fn(&serde_json::Value) -> bool| -> bool {
         serde_json::from_str::<serde_json::Value>(out)
             .ok()
@@ -1334,437 +1162,303 @@ fn run_test_sharing(nodes: u8, _ports: &[u16], license: Option<&Path>) {
             .unwrap_or(false)
     };
 
-    let (created, create_out) = run(&[
-        "create",
-        &entity,
-        "-d",
-        r#"{"userId":"alice","title":"D1"}"#,
-        "--broker",
-        n1,
-        "--user",
+    let (created, create_out) = run_as(
+        exe,
+        &n1,
         "alice",
-        "--pass",
-        "alice",
-        "--format",
-        "json",
-    ]);
+        &["create", entity, "-d", r#"{"userId":"alice","title":"D1"}"#],
+    );
     let id = serde_json::from_str::<serde_json::Value>(&create_out)
         .ok()
         .and_then(|v| v["data"]["id"].as_str().map(String::from));
     record(
-        &mut passed,
-        &mut failed,
+        passed,
+        failed,
         "create as alice",
-        created && id.is_some(),
+        created == Some(true) && id.is_some(),
     );
     let Some(id) = id else {
-        let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
-        let _ = std::fs::remove_file(passwd_path);
-        println!("\nResults: {passed} passed, {failed} failed\n");
+        eprintln!("    output: {create_out}");
         return;
     };
+    let id = id.as_str();
     std::thread::sleep(Duration::from_millis(300));
 
-    let (bob_before, _) = run(&[
-        "read", &entity, &id, "--broker", n2, "--user", "bob", "--pass", "bob", "--format", "json",
-    ]);
+    let bob_before = run_as(exe, &n2, "bob", &["read", entity, id]);
     record(
-        &mut passed,
-        &mut failed,
+        passed,
+        failed,
         "bob read before share denied (cross-node)",
-        !bob_before,
+        denied(&bob_before),
     );
 
-    let (share_view, share_out) = run(&[
-        "share",
-        &entity,
-        &id,
-        "bob",
-        "--permission",
-        "view",
-        "--broker",
-        n1,
-        "--user",
+    let (share_view, share_out) = run_as(
+        exe,
+        &n1,
         "alice",
-        "--pass",
-        "alice",
-        "--format",
-        "json",
-    ]);
+        &["share", entity, id, "bob", "--permission", "view"],
+    );
     record(
-        &mut passed,
-        &mut failed,
+        passed,
+        failed,
         "alice shares view with bob",
-        share_view && share_out.contains("shared"),
+        share_view == Some(true) && share_out.contains("shared"),
     );
 
-    let (bob_view_read, bob_read_out) = run(&[
-        "read", &entity, &id, "--broker", n2, "--user", "bob", "--pass", "bob", "--format", "json",
-    ]);
+    let (bob_view_read, bob_read_out) = run_as(exe, &n2, "bob", &["read", entity, id]);
     record(
-        &mut passed,
-        &mut failed,
+        passed,
+        failed,
         "bob read after view grant (cross-node)",
-        bob_view_read && bob_read_out.contains("D1"),
+        bob_view_read == Some(true) && bob_read_out.contains("D1"),
     );
 
-    let (bob_view_update, _) = run(&[
-        "update",
-        &entity,
-        &id,
-        "-d",
-        r#"{"title":"X"}"#,
-        "--broker",
-        n2,
-        "--user",
+    let bob_view_update = run_as(
+        exe,
+        &n2,
         "bob",
-        "--pass",
-        "bob",
-        "--format",
-        "json",
-    ]);
+        &["update", entity, id, "-d", r#"{"title":"X"}"#],
+    );
     record(
-        &mut passed,
-        &mut failed,
+        passed,
+        failed,
         "bob update with view-only denied (cross-node)",
-        !bob_view_update,
+        denied(&bob_view_update),
     );
 
-    let (share_edit, _) = run(&[
-        "share",
-        &entity,
-        &id,
-        "bob",
-        "--permission",
-        "edit",
-        "--broker",
-        n1,
-        "--user",
+    let (share_edit, _) = run_as(
+        exe,
+        &n1,
         "alice",
-        "--pass",
-        "alice",
-        "--format",
-        "json",
-    ]);
+        &["share", entity, id, "bob", "--permission", "edit"],
+    );
     record(
-        &mut passed,
-        &mut failed,
+        passed,
+        failed,
         "alice upgrades bob to edit",
-        share_edit,
+        share_edit == Some(true),
     );
 
-    let (bob_edit_update, _) = run(&[
-        "update",
-        &entity,
-        &id,
-        "-d",
-        r#"{"title":"EditedByBob"}"#,
-        "--broker",
-        n3,
-        "--user",
+    let (bob_edit_update, _) = run_as(
+        exe,
+        &n3,
         "bob",
-        "--pass",
-        "bob",
-        "--format",
-        "json",
-    ]);
+        &["update", entity, id, "-d", r#"{"title":"EditedByBob"}"#],
+    );
     record(
-        &mut passed,
-        &mut failed,
+        passed,
+        failed,
         "bob update with edit grant (cross-node)",
-        bob_edit_update,
+        bob_edit_update == Some(true),
     );
 
-    let (_, shares_out) = run(&[
-        "shares", &entity, &id, "--broker", n1, "--user", "alice", "--pass", "alice", "--format",
-        "json",
-    ]);
+    let (_, shares_out) = run_as(exe, &n1, "alice", &["shares", entity, id]);
     record(
-        &mut passed,
-        &mut failed,
+        passed,
+        failed,
         "alice shares lists bob's grant",
         data_array_has(&shares_out, &|g| g["grantee"] == "bob"),
     );
 
-    let (_, shared_out) = run(&[
-        "shared", &entity, "--broker", n3, "--user", "bob", "--pass", "bob", "--format", "json",
-    ]);
+    let (_, shared_out) = run_as(exe, &n3, "bob", &["shared", entity]);
     record(
-        &mut passed,
-        &mut failed,
+        passed,
+        failed,
         "bob shared lists hydrated resource (cross-node scatter)",
         data_array_has(&shared_out, &|r| {
             r["title"] == "EditedByBob" && r.get("resource_id").is_none()
         }),
     );
 
-    let (unshared, _) = run(&[
-        "unshare", &entity, &id, "bob", "--broker", n2, "--user", "alice", "--pass", "alice",
-        "--format", "json",
-    ]);
+    let (unshared, _) = run_as(exe, &n2, "alice", &["unshare", entity, id, "bob"]);
     record(
-        &mut passed,
-        &mut failed,
+        passed,
+        failed,
         "alice unshares bob (cross-node)",
-        unshared,
+        unshared == Some(true),
     );
     std::thread::sleep(Duration::from_millis(300));
 
-    let (bob_after, _) = run(&[
-        "read", &entity, &id, "--broker", n3, "--user", "bob", "--pass", "bob", "--format", "json",
-    ]);
+    let bob_after = run_as(exe, &n3, "bob", &["read", entity, id]);
     record(
-        &mut passed,
-        &mut failed,
+        passed,
+        failed,
         "bob read after unshare denied (cross-node)",
-        !bob_after,
+        denied(&bob_after),
     );
-
-    let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
-    let _ = std::fs::remove_file(passwd_path);
-
-    println!("\nResults: {passed} passed, {failed} failed\n");
 }
 
-#[allow(clippy::too_many_lines)]
-fn run_test_stress_constraints(nodes: u8, ports: &[u16]) {
-    if nodes < 2 {
-        println!("=== Stress Test: Cross-Node Unique Constraints (skipped, need >= 2 nodes) ===\n");
-        return;
-    }
-
-    println!("=== Stress Test: Cross-Node Unique Constraints ({nodes} nodes) ===\n");
+fn run_test_sharing(options: &DevTestOptions, ports: &[u16]) -> u32 {
+    println!(
+        "=== Cluster Diagram Sharing E2E ({} nodes) ===\n",
+        options.nodes
+    );
 
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mqdb"));
-    let mut passed = 0;
-    let mut failed = 0;
+    let mut passed = 0u32;
+    let mut failed = 0u32;
+    let entity = suite_entity("shared");
+    let ownership_spec = format!("{entity}=userId");
 
-    let ts = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_millis());
-    let entity = format!("stress_products_{ts}");
+    println!("  Setting up authenticated cluster with ownership...");
+    let setup = SuiteSetup {
+        dir: "share",
+        users: &["alice", "bob", "admin"],
+        ownership: Some(ownership_spec),
+        presence: false,
+        label: "auth + ownership",
+    };
+    let cluster = match start_suite_cluster(&exe, options, ports, setup) {
+        Ok(cluster) => cluster,
+        Err(e) => {
+            println!("  Cluster failed to become ready: {e}");
+            return report(passed, 1);
+        }
+    };
+    println!("  Authenticated cluster ready!\n");
+
+    sharing_checks(&exe, &entity, ports, &mut passed, &mut failed);
+
+    let stop_failures = cluster.finish();
+    report(passed, failed + stop_failures)
+}
+
+fn add_stress_constraint(exe: &Path, entity: &str, port: u16) -> bool {
     let constraint_name = format!("unique_{entity}_sku");
-
     let add_output = mqdb_cmd(
-        &exe,
+        exe,
         &[
             "constraint",
             "add",
-            &entity,
+            entity,
             "--unique",
             "sku",
             "--name",
             &constraint_name,
         ],
-        ports[0],
+        port,
     );
-
-    let constraint_added = add_output.as_ref().is_ok_and(|o| {
+    let added = add_output.as_ref().is_ok_and(|o| {
         let stdout = String::from_utf8_lossy(&o.stdout);
         stdout.contains("constraint added") || stdout.contains("\"status\":\"ok\"")
     });
-
-    if !constraint_added {
-        println!("  Add unique constraint: ✗ (aborting stress test)");
-        if let Ok(o) = &add_output {
-            eprintln!("    stdout: {}", String::from_utf8_lossy(&o.stdout));
-            eprintln!("    stderr: {}", String::from_utf8_lossy(&o.stderr));
-        }
-        println!("\nResults: 0 passed, 1 failed\n");
-        return;
+    if !added && let Ok(o) = &add_output {
+        eprintln!("    stdout: {}", String::from_utf8_lossy(&o.stdout));
+        eprintln!("    stderr: {}", String::from_utf8_lossy(&o.stderr));
     }
+    added
+}
 
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
+fn stress_unique_creates(exe: &Path, entity: &str, ports: &[u16]) -> (u32, u32) {
     let thread_count: u32 = 20;
     let creates_per_thread: u32 = 10;
     let total = thread_count * creates_per_thread;
-
-    println!("Phase 1: {total} concurrent creates with unique SKUs across {nodes} nodes...");
-
-    let mut handles = Vec::with_capacity(thread_count as usize);
-
-    for thread_id in 0..thread_count {
-        let exe = exe.clone();
-        let entity = entity.clone();
-        let port = ports[thread_id as usize % ports.len()];
-
-        handles.push(std::thread::spawn(move || {
-            let mut successes: u32 = 0;
-            let mut failures: u32 = 0;
-
-            for seq in 0..creates_per_thread {
-                let sku = format!("STRESS-{thread_id:03}-{seq:03}");
-                let data = format!(r#"{{"name": "Item {sku}", "sku": "{sku}"}}"#);
-                let result = mqdb_cmd(&exe, &["create", &entity, "-d", &data], port);
-
-                if result.is_ok_and(|o| o.status.success()) {
-                    successes += 1;
-                } else {
-                    failures += 1;
-                }
-            }
-
-            (successes, failures)
-        }));
-    }
-
-    let mut total_successes: u32 = 0;
-    let mut total_failures: u32 = 0;
-
-    for handle in handles {
-        if let Ok((s, f)) = handle.join() {
-            total_successes += s;
-            total_failures += f;
-        }
-    }
-
-    if total_failures == 0 {
-        println!("  Results: {total_successes} succeeded, {total_failures} false conflicts ✓");
-        passed += 1;
-    } else {
-        println!("  Results: {total_successes} succeeded, {total_failures} false conflicts ✗");
-        failed += 1;
-    }
-
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    let conflict_threads: u32 = 10;
-    let conflict_sku = format!("CONFLICT-{ts}");
-
     println!(
-        "\nPhase 2: {conflict_threads} concurrent creates with same SKU across {nodes} nodes..."
+        "Phase 1: {total} concurrent creates with unique SKUs across {} nodes...",
+        ports.len()
     );
 
-    let mut conflict_handles = Vec::with_capacity(conflict_threads as usize);
+    let handles: Vec<_> = (0..thread_count)
+        .map(|thread_id| {
+            let exe = exe.to_path_buf();
+            let entity = entity.to_string();
+            let port = ports[thread_id as usize % ports.len()];
+            std::thread::spawn(move || {
+                (0..creates_per_thread)
+                    .map(|seq| {
+                        let sku = format!("STRESS-{thread_id:03}-{seq:03}");
+                        let data = format!(r#"{{"name": "Item {sku}", "sku": "{sku}"}}"#);
+                        mqdb_cmd(&exe, &["create", &entity, "-d", &data], port)
+                            .is_ok_and(|o| o.status.success())
+                    })
+                    .fold((0u32, 0u32), |(ok, err), created| {
+                        if created {
+                            (ok + 1, err)
+                        } else {
+                            (ok, err + 1)
+                        }
+                    })
+            })
+        })
+        .collect();
 
-    for i in 0..conflict_threads {
-        let exe = exe.clone();
-        let entity = entity.clone();
-        let sku = conflict_sku.clone();
-        let port = ports[i as usize % ports.len()];
-
-        conflict_handles.push(std::thread::spawn(move || {
-            let data = format!(r#"{{"name": "Conflict Item {i}", "sku": "{sku}"}}"#);
-            let result = mqdb_cmd(&exe, &["create", &entity, "-d", &data], port);
-            result.is_ok_and(|o| o.status.success())
-        }));
-    }
-
-    let mut conflict_successes: u32 = 0;
-    let mut conflict_rejections: u32 = 0;
-
-    for handle in conflict_handles {
-        if let Ok(succeeded) = handle.join() {
-            if succeeded {
-                conflict_successes += 1;
-            } else {
-                conflict_rejections += 1;
-            }
-        }
-    }
-
-    if conflict_successes <= 1 {
-        println!(
-            "  Results: {conflict_successes} succeeded, {conflict_rejections} correctly rejected ✓"
-        );
-        passed += 1;
-    } else {
-        println!(
-            "  Results: {conflict_successes} succeeded (expected ≤1), {conflict_rejections} rejected ✗"
-        );
-        failed += 1;
-    }
-
-    println!("\nResults: {passed} passed, {failed} failed\n");
+    handles
+        .into_iter()
+        .filter_map(|handle| handle.join().ok())
+        .fold((0, 0), |(ok, err), (s, f)| (ok + s, err + f))
 }
 
-fn start_presence_cluster(
-    nodes: u8,
-    exe: &Path,
-    passwd_path: &str,
-    license: Option<&Path>,
-) -> bool {
-    let db_prefix = "/tmp/mqdb-test-presence";
+fn stress_conflicting_creates(exe: &Path, entity: &str, ports: &[u16], sku: &str) -> (u32, u32) {
+    let conflict_threads: u32 = 10;
+    println!(
+        "\nPhase 2: {conflict_threads} concurrent creates with same SKU across {} nodes...",
+        ports.len()
+    );
 
-    let _ = std::fs::remove_file(passwd_path);
-    for (user, pass) in [("alice", "alice"), ("admin", "admin")] {
-        let _ = Command::new(exe)
-            .args(["passwd", user, "-b", pass, "-f", passwd_path])
-            .output();
-    }
+    let handles: Vec<_> = (0..conflict_threads)
+        .map(|i| {
+            let exe = exe.to_path_buf();
+            let entity = entity.to_string();
+            let sku = sku.to_string();
+            let port = ports[i as usize % ports.len()];
+            std::thread::spawn(move || {
+                let data = format!(r#"{{"name": "Conflict Item {i}", "sku": "{sku}"}}"#);
+                mqdb_cmd(&exe, &["create", &entity, "-d", &data], port)
+                    .is_ok_and(|o| o.status.success())
+            })
+        })
+        .collect();
 
-    let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
-    std::thread::sleep(Duration::from_secs(1));
-    for i in 1..=nodes {
-        let _ = std::fs::remove_dir_all(format!("{db_prefix}-{i}"));
-    }
-
-    let quic_cert = PathBuf::from("test_certs/server.pem");
-    let quic_key = PathBuf::from("test_certs/server.key");
-    let quic_ca = PathBuf::from("test_certs/ca.pem");
-
-    for node_id in 1..=nodes {
-        let port = 1882 + u16::from(node_id);
-        let db_path = format!("{db_prefix}-{node_id}");
-        let _ = std::fs::create_dir_all(&db_path);
-
-        let mut cmd = Command::new(exe);
-        cmd.args([
-            "cluster",
-            "start",
-            "--node-id",
-            &node_id.to_string(),
-            "--bind",
-            &format!("127.0.0.1:{port}"),
-            "--db",
-            &db_path,
-            "--admin-users",
-            "admin",
-            "--passwd",
-            passwd_path,
-            "--presence",
-        ]);
-
-        if let Some(lic_str) = license.and_then(|p| p.to_str()) {
-            cmd.args(["--license", lic_str]);
-        }
-
-        let peers = full_mesh_peers(node_id, nodes);
-        if !peers.is_empty() {
-            cmd.args(["--peers", &peers.join(",")]);
-        }
-
-        if quic_cert.exists() && quic_key.exists() {
-            cmd.args([
-                "--quic-cert",
-                quic_cert.to_str().unwrap_or(""),
-                "--quic-key",
-                quic_key.to_str().unwrap_or(""),
-            ]);
-            if quic_ca.exists() {
-                cmd.args(["--quic-ca", quic_ca.to_str().unwrap_or("")]);
+    handles
+        .into_iter()
+        .filter_map(|handle| handle.join().ok())
+        .fold((0, 0), |(ok, rejected), succeeded| {
+            if succeeded {
+                (ok + 1, rejected)
+            } else {
+                (ok, rejected + 1)
             }
-            #[cfg(feature = "dev-insecure")]
-            cmd.arg("--quic-insecure");
-        }
+        })
+}
 
-        cmd.env(
-            "RUST_LOG",
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
-        );
-        if let Ok(log_file) = std::fs::File::create(format!("{db_path}/mqdb.log")) {
-            if let Ok(log_clone) = log_file.try_clone() {
-                cmd.stdout(log_clone);
-            }
-            cmd.stderr(log_file);
-        }
-
-        println!("  Starting node {node_id} on port {port} (auth + presence)...");
-        let _ = cmd.spawn();
-        std::thread::sleep(Duration::from_millis(500));
+fn run_test_stress_constraints(nodes: u8, ports: &[u16]) -> u32 {
+    if nodes < 2 {
+        println!("=== Stress Test: Cross-Node Unique Constraints (skipped, need >= 2 nodes) ===\n");
+        return 0;
     }
 
-    println!("  Waiting for authenticated cluster...");
-    wait_for_auth_cluster(nodes, 15)
+    println!("=== Stress Test: Cross-Node Unique Constraints ({nodes} nodes) ===\n");
+
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mqdb"));
+    let mut passed = 0u32;
+    let mut failed = 0u32;
+
+    let ts = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_millis());
+    let entity = format!("stress_products_{ts}");
+
+    if !add_stress_constraint(&exe, &entity, ports[0]) {
+        println!("  Add unique constraint: ✗ (aborting stress test)");
+        return report(0, 1);
+    }
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    let (successes, failures) = stress_unique_creates(&exe, &entity, ports);
+    let mark = if failures == 0 { "✓" } else { "✗" };
+    println!("  Results: {successes} succeeded, {failures} false conflicts {mark}");
+    record(&mut passed, &mut failed, "Unique creates", failures == 0);
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    let conflict_sku = format!("CONFLICT-{ts}");
+    let (successes, rejections) = stress_conflicting_creates(&exe, &entity, ports, &conflict_sku);
+    let mark = if successes <= 1 { "✓" } else { "✗" };
+    println!(
+        "  Results: {successes} succeeded (expected ≤1), {rejections} correctly rejected {mark}"
+    );
+    record(&mut passed, &mut failed, "Same-SKU creates", successes <= 1);
+
+    report(passed, failed)
 }
 
 fn presence_line_has(out: &str, client_id: &str, event: &str) -> bool {
@@ -1772,50 +1466,34 @@ fn presence_line_has(out: &str, client_id: &str, event: &str) -> bool {
         .any(|line| line.contains(client_id) && line.contains(event))
 }
 
-fn capture_presence(sub_port: u16, holder_id: &str, holder_port: u16) -> String {
-    let _ = std::fs::remove_file("/tmp/mqdb-presence-out.txt");
-    let script = format!(
-        "mosquitto_sub -i 'janitor-{sub_port}' -h 127.0.0.1 -p {sub_port} -u alice -P alice -t '$DB/_presence/#' -v > /tmp/mqdb-presence-out.txt & \
-         sleep 2; \
-         mosquitto_pub -i '{holder_id}' -h 127.0.0.1 -p {holder_port} -u alice -P alice -t 'presence/noop' -m 'x'; \
-         sleep 2; wait"
-    );
-    let _ = Command::new("timeout")
-        .args(["8", "sh", "-c", &script])
-        .output();
-    std::fs::read_to_string("/tmp/mqdb-presence-out.txt").unwrap_or_default()
+fn shell_output(timeout_secs: &str, script: &str) -> String {
+    Command::new("timeout")
+        .args([timeout_secs, "sh", "-c", script])
+        .output()
+        .map_or_else(
+            |_| String::new(),
+            |o| String::from_utf8_lossy(&o.stdout).to_string(),
+        )
 }
 
-fn run_test_presence(nodes: u8, _ports: &[u16], license: Option<&Path>) {
-    println!("=== Cluster Presence Feed E2E ({nodes} nodes) ===\n");
+fn capture_presence(sub_port: u16, holder_id: &str, holder_port: u16) -> String {
+    shell_output(
+        "12",
+        &format!(
+            "mosquitto_sub -i 'janitor-{sub_port}' -h 127.0.0.1 -p {sub_port} -u alice -P alice -t '$DB/_presence/#' -v -W 8 & \
+             sleep 2; \
+             mosquitto_pub -i '{holder_id}' -h 127.0.0.1 -p {holder_port} -u alice -P alice -t 'presence/noop' -m 'x'; \
+             wait"
+        ),
+    )
+}
 
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mqdb"));
-    let passwd_path = "/tmp/mqdb-test-presence-passwd";
-    let mut passed = 0u32;
-    let mut failed = 0u32;
-
-    if !start_presence_cluster(nodes, &exe, passwd_path, license) {
-        println!("  Cluster failed to become ready");
-        let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
-        println!("\nResults: 0 passed, 1 failed\n");
-        return;
-    }
-    println!("  Authenticated cluster ready!\n");
-
+fn presence_checks(ports: &[u16], check: &mut dyn FnMut(&str, bool)) {
     let ts = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_millis());
-
-    let mut check = |name: &str, ok: bool| {
-        if ok {
-            println!("  {name}: ✓");
-            passed += 1;
-        } else {
-            println!("  {name}: ✗");
-            failed += 1;
-        }
-    };
+    let first = ports[0];
 
     let same_id = format!("seat-holder-same-{ts}");
-    let out = capture_presence(1883, &same_id, 1883);
+    let out = capture_presence(first, &same_id, first);
     check(
         "same-node connect presence",
         presence_line_has(&out, &same_id, "\"event\":\"connect\""),
@@ -1825,9 +1503,9 @@ fn run_test_presence(nodes: u8, _ports: &[u16], license: Option<&Path>) {
         presence_line_has(&out, &same_id, "\"event\":\"disconnect\""),
     );
 
-    if nodes >= 2 {
+    if let Some(&second) = ports.get(1) {
         let cross_id = format!("seat-holder-cross-{ts}");
-        let out = capture_presence(1883, &cross_id, 1884);
+        let out = capture_presence(first, &cross_id, second);
         check(
             "cross-node connect presence (janitor n1, holder n2)",
             presence_line_has(&out, &cross_id, "\"event\":\"connect\""),
@@ -1838,60 +1516,187 @@ fn run_test_presence(nodes: u8, _ports: &[u16], license: Option<&Path>) {
         );
     }
 
-    if nodes >= 3 {
+    if let (Some(&second), Some(&third)) = (ports.get(1), ports.get(2)) {
         let far_id = format!("seat-holder-far-{ts}");
-        let out = capture_presence(1885, &far_id, 1884);
+        let out = capture_presence(third, &far_id, second);
         check(
             "cross-node presence (janitor n3, holder n2)",
             out.contains(&far_id),
         );
     }
 
+    let holder = ports.get(1).copied().unwrap_or(first);
     let retained_id = format!("seat-holder-retained-{ts}");
-    let _ = Command::new("timeout")
-        .args([
-            "5",
-            "sh",
-            "-c",
-            &format!(
-                "mosquitto_pub -i '{retained_id}' -h 127.0.0.1 -p 1884 -u alice -P alice -t 'presence/noop' -m 'x'"
-            ),
-        ])
-        .output();
+    shell_output(
+        "5",
+        &format!(
+            "mosquitto_pub -i '{retained_id}' -h 127.0.0.1 -p {holder} -u alice -P alice -t 'presence/noop' -m 'x'"
+        ),
+    );
     std::thread::sleep(Duration::from_secs(2));
-    let late = Command::new("timeout")
-        .args([
-            "5",
-            "sh",
-            "-c",
-            "mosquitto_sub -i 'janitor-late' -h 127.0.0.1 -p 1883 -u alice -P alice -t '$DB/_presence/#' -v -W 3",
-        ])
-        .output()
-        .map_or_else(|_| String::new(), |o| String::from_utf8_lossy(&o.stdout).to_string());
+    let late = shell_output(
+        "5",
+        &format!(
+            "mosquitto_sub -i 'janitor-late' -h 127.0.0.1 -p {first} -u alice -P alice -t '$DB/_presence/#' -v -W 3"
+        ),
+    );
     check(
         "retained presence reaches a late janitor on another node",
         late.contains(&retained_id),
     );
 
-    let _ = Command::new("timeout")
-        .args([
-            "5",
-            "sh",
-            "-c",
-            "mosquitto_pub -i 'attacker' -h 127.0.0.1 -p 1883 -u alice -P alice -t '$DB/_presence/victim' -m '{\"forged\":true}'",
-        ])
-        .output();
-    let victim = Command::new("timeout")
-        .args([
-            "5",
-            "sh",
-            "-c",
-            "mosquitto_sub -i 'janitor-forge' -h 127.0.0.1 -p 1883 -u alice -P alice -t '$DB/_presence/victim' -v -W 3",
-        ])
-        .output()
-        .map_or_else(|_| String::new(), |o| String::from_utf8_lossy(&o.stdout).to_string());
-    check("a client cannot forge presence", !victim.contains("forged"));
+    let canary_id = format!("seat-holder-canary-{ts}");
+    let watched = shell_output(
+        "12",
+        &format!(
+            "mosquitto_sub -i 'janitor-forge' -h 127.0.0.1 -p {first} -u alice -P alice -t '$DB/_presence/#' -v -W 8 & \
+             sleep 2; \
+             mosquitto_pub -i 'attacker' -h 127.0.0.1 -p {first} -u alice -P alice -t '$DB/_presence/victim' -m '{{\"forged\":true}}'; \
+             mosquitto_pub -i '{canary_id}' -h 127.0.0.1 -p {first} -u alice -P alice -t 'presence/noop' -m 'x'; \
+             wait"
+        ),
+    );
+    check(
+        "a client cannot forge presence",
+        watched.contains(&canary_id) && !watched.contains("forged"),
+    );
+}
 
-    let _ = Command::new("pkill").args(["-f", "mqdb cluster"]).status();
-    println!("\nResults: {passed} passed, {failed} failed\n");
+fn run_test_presence(options: &DevTestOptions, ports: &[u16]) -> u32 {
+    println!(
+        "=== Cluster Presence Feed E2E ({} nodes) ===\n",
+        options.nodes
+    );
+
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mqdb"));
+    let mut passed = 0u32;
+    let mut failed = 0u32;
+
+    let setup = SuiteSetup {
+        dir: "presence",
+        users: &["alice", "admin"],
+        ownership: None,
+        presence: true,
+        label: "auth + presence",
+    };
+    let cluster = match start_suite_cluster(&exe, options, ports, setup) {
+        Ok(cluster) => cluster,
+        Err(e) => {
+            println!("  Cluster failed to become ready: {e}");
+            return report(0, 1);
+        }
+    };
+    println!("  Authenticated cluster ready!\n");
+
+    presence_checks(ports, &mut |name, ok| {
+        record(&mut passed, &mut failed, name, ok);
+    });
+
+    let stop_failures = cluster.finish();
+    report(passed, failed + stop_failures)
+}
+
+#[cfg(test)]
+mod port_tests {
+    use super::*;
+
+    #[test]
+    fn node_ports_follow_the_base_port() {
+        assert_eq!(node_ports(33601, 3), Ok(vec![33601, 33602, 33603]));
+        assert_eq!(node_ports(1883, 1), Ok(vec![1883]));
+    }
+
+    #[test]
+    fn node_ports_refuse_blocks_that_overflow_or_overlap_transport_ports() {
+        assert!(node_ports(1883, 0).is_err());
+        assert!(node_ports(1883, 50).is_ok());
+        assert!(node_ports(1883, 51).is_err());
+        assert!(node_ports(65485, 1).is_ok());
+        assert!(node_ports(65485, 2).is_err());
+    }
+
+    #[test]
+    fn a_failed_command_keeps_its_stderr() {
+        let (ok, output) = run_as(
+            Path::new("/bin/sh"),
+            "127.0.0.1:1",
+            "bob",
+            &["-c", "echo on-stdout; echo on-stderr >&2; exit 3"],
+        );
+        assert_eq!(ok, Some(false));
+        assert!(output.contains("on-stdout"), "{output}");
+        assert!(output.contains("on-stderr"), "{output}");
+    }
+
+    fn shell_failure(stderr: &str) -> (Option<bool>, String) {
+        run_as(
+            Path::new("/bin/sh"),
+            "127.0.0.1:1",
+            "bob",
+            &["-c", &format!("echo '{stderr}' >&2; exit 1")],
+        )
+    }
+
+    #[test]
+    fn only_a_server_refusal_is_counted_as_denied() {
+        for stderr in [
+            "Error: ConnectionError(\"TCP connect failed\")",
+            "Error: ConnectionRefused(BadUsernameOrPassword)",
+            "Error: \"connect to 127.0.0.1:1 timed out after 2s\"",
+            "Error: request timed out after 5s",
+        ] {
+            let failed = shell_failure(stderr);
+            assert_eq!(failed.0, Some(false));
+            assert!(!denied(&failed), "{}", failed.1);
+        }
+        let refused = run_as(
+            Path::new("/bin/sh"),
+            "127.0.0.1:1",
+            "bob",
+            &[
+                "-c",
+                "printf '{\\n  \"code\": 403,\\n  \"message\": \"permission denied\",\\n  \"status\": \"error\"\\n}\\n'; echo 'Error: permission denied' >&2; exit 1",
+            ],
+        );
+        assert!(denied(&refused), "{}", refused.1);
+        assert!(!denied(&(
+            Some(false),
+            r#"{"status":"error","code":404,"message":"entity not found"}"#.to_string()
+        )));
+        assert!(!denied(&(
+            Some(false),
+            r#"{"status":"error","code":500,"message":"internal"}"#.to_string()
+        )));
+    }
+
+    #[test]
+    fn a_command_that_never_ran_is_not_counted_as_denied() {
+        let never_ran = run_as(
+            Path::new("/nonexistent/mqdb"),
+            "127.0.0.1:1",
+            "bob",
+            &["delete", "x", "y"],
+        );
+        assert_eq!(never_ran.0, None);
+        assert!(!denied(&never_ran));
+        assert!(!denied(&(Some(false), String::new())));
+        assert!(!denied(&(Some(true), r#"{"status":"ok"}"#.to_string())));
+    }
+
+    #[test]
+    fn a_listening_port_is_reported_busy() {
+        let listener =
+            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind listener");
+        let port = listener.local_addr().expect("local addr").port();
+        assert!(port_in_use(port));
+        drop(listener);
+    }
+
+    #[test]
+    fn a_bound_udp_port_is_reported_busy() {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind udp");
+        let port = socket.local_addr().expect("local addr").port();
+        assert!(port_in_use(port));
+        drop(socket);
+    }
 }

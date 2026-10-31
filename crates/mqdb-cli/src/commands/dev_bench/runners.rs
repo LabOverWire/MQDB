@@ -135,9 +135,9 @@ pub(super) async fn run_pubsub_benchmark(
     let elapsed = start_time.elapsed();
     let sent = metrics.messages_sent.load(Ordering::Relaxed);
     let throughput = sent as f64 / elapsed.as_secs_f64();
-    let p50 = metrics.calculate_percentile(50.0) / 1000;
-    let p95 = metrics.calculate_percentile(95.0) / 1000;
-    let p99 = metrics.calculate_percentile(99.0) / 1000;
+    let p50 = metrics.calculate_percentile(50) / 1000;
+    let p95 = metrics.calculate_percentile(95) / 1000;
+    let p99 = metrics.calculate_percentile(99) / 1000;
 
     Ok(DevBenchResult {
         scenario: "pubsub".to_string(),
@@ -222,9 +222,9 @@ pub(super) async fn run_db_benchmark(
     let elapsed = start_time.elapsed();
     let completed = metrics.messages_sent.load(Ordering::Relaxed);
     let throughput = completed as f64 / elapsed.as_secs_f64();
-    let p50 = metrics.calculate_percentile(50.0) / 1000;
-    let p95 = metrics.calculate_percentile(95.0) / 1000;
-    let p99 = metrics.calculate_percentile(99.0) / 1000;
+    let p50 = metrics.calculate_percentile(50) / 1000;
+    let p95 = metrics.calculate_percentile(95) / 1000;
+    let p99 = metrics.calculate_percentile(99) / 1000;
 
     Ok(DevBenchResult {
         scenario: "db".to_string(),
