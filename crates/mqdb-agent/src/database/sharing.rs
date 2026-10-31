@@ -20,17 +20,22 @@ fn eq_filter(field: &str, value: &str) -> Filter {
     )
 }
 
-/// The grantee of a share in the forms the share machinery needs. `key` is the
-/// stable lookup/dedup identifier stored as `grantee_key` (a blind index of the
-/// email in identity mode, or the username in password mode). `resolved` is the
-/// match-identity written to `grantee` (canonical id / username), or `None` while
-/// the grant is pending; it also serves as the secondary key for revoke. `display`
-/// is the encrypted email retained for owner display (identity mode only).
 #[derive(Clone, Copy)]
 pub struct GranteeIdentity<'a> {
     pub key: &'a str,
     pub resolved: Option<&'a str>,
     pub display: Option<&'a str>,
+}
+
+#[derive(Clone, Copy)]
+pub struct ShareActor<'a> {
+    pub sender: Option<&'a str>,
+    pub ownership: &'a OwnershipConfig,
+}
+
+struct ShareableClosure {
+    members: Vec<String>,
+    skipped: usize,
 }
 
 impl Database {
@@ -109,11 +114,6 @@ impl Database {
         self.delete_grants(filters, actor, ownership).await
     }
 
-    /// Remove every grant on a resource. Called when the resource itself is deleted
-    /// so stale grants cannot be inherited by a later record reusing the same id.
-    ///
-    /// # Errors
-    /// Returns an error if scanning or deleting the share records fails.
     pub(crate) async fn clear_all_resource_grants(
         &self,
         entity: &str,
@@ -181,53 +181,76 @@ impl Database {
         fields.into_iter().collect()
     }
 
-    async fn referenced_closure(&self, entity: &str, root_id: &str) -> Result<Vec<String>> {
+    fn may_share(
+        &self,
+        entity: &str,
+        id: &str,
+        owner_field: &str,
+        actor: ShareActor<'_>,
+    ) -> Result<bool> {
+        let key = keys::encode_data_key(entity, id);
+        if self.storage.get(&key)?.is_none() {
+            return Ok(false);
+        }
+        match actor.sender {
+            Some(uid) if !actor.ownership.is_admin(uid) => {
+                self.is_owner(entity, id, owner_field, uid)
+            }
+            _ => Ok(true),
+        }
+    }
+
+    async fn shareable_closure(
+        &self,
+        entity: &str,
+        root_id: &str,
+        actor: ShareActor<'_>,
+    ) -> Result<ShareableClosure> {
+        let Some(owner_field) = actor.ownership.owner_field(entity) else {
+            return Ok(ShareableClosure {
+                members: vec![],
+                skipped: 0,
+            });
+        };
         let ref_fields = self.self_reference_fields(entity).await;
-        let mut visited: HashSet<String> = HashSet::new();
-        let mut queue: VecDeque<String> = VecDeque::new();
-        queue.push_back(root_id.to_string());
+        let mut visited: HashSet<String> = HashSet::from([root_id.to_string()]);
+        let mut queue: VecDeque<String> = VecDeque::from([root_id.to_string()]);
+        let mut members = Vec::new();
+        let mut skipped = 0;
         while let Some(id) = queue.pop_front() {
-            if visited.len() >= MAX_CASCADE_DIAGRAMS {
-                break;
-            }
-            if !visited.insert(id.clone()) {
-                continue;
-            }
             let key = keys::encode_data_key(entity, &id);
             let Some(bytes) = self.storage.get(&key)? else {
                 continue;
             };
-            let record = Entity::deserialize(entity.to_string(), id.clone(), &bytes)?;
+            let record = Entity::deserialize(entity.to_string(), id, &bytes)?;
             for field in &ref_fields {
-                if let Some(ref_id) = record.data.get(field).and_then(Value::as_str)
-                    && !visited.contains(ref_id)
-                {
+                let Some(ref_id) = record.data.get(field).and_then(Value::as_str) else {
+                    continue;
+                };
+                if visited.len() >= MAX_CASCADE_DIAGRAMS || !visited.insert(ref_id.to_string()) {
+                    continue;
+                }
+                if self.may_share(entity, ref_id, owner_field, actor)? {
+                    members.push(ref_id.to_string());
                     queue.push_back(ref_id.to_string());
+                } else {
+                    skipped += 1;
                 }
             }
         }
-        Ok(visited.into_iter().collect())
+        Ok(ShareableClosure { members, skipped })
     }
 
-    /// Grant `grantee` access to a resource at `permission` (`view`/`edit`).
-    /// The root resource is set-to-level (a re-share may demote it); when `cascade`
-    /// is set, every diagram reachable via self-references is granted at max-of-levels
-    /// (never downgrading an existing grant).
-    ///
-    /// # Errors
-    /// Returns `Forbidden` if the sender is not the owner/admin, `Validation` for a
-    /// bad permission or non-shareable entity, or `NotFound` if the resource is missing.
-    #[allow(clippy::too_many_arguments)]
     pub async fn share_grant(
         &self,
         entity: &str,
         id: &str,
         grantee: GranteeIdentity<'_>,
         permission: &str,
-        sender: Option<&str>,
-        ownership: &OwnershipConfig,
+        actor: ShareActor<'_>,
         cascade: bool,
     ) -> Result<Value> {
+        let ShareActor { sender, ownership } = actor;
         self.require_owner_or_admin(ownership, entity, id, sender)?;
         if grantee.key.trim().is_empty() {
             return Err(Error::Validation("grantee is required".to_string()));
@@ -244,47 +267,41 @@ impl Database {
         let granted_by = sender.unwrap_or_default();
         self.write_grant(entity, id, grantee, level, granted_by, ownership)
             .await?;
-        let mut shared = 1usize;
-        if cascade {
-            for ref_id in self.referenced_closure(entity, id).await? {
-                if ref_id == id {
-                    continue;
-                }
-                let existing = self
-                    .existing_grant_level(entity, &ref_id, grantee.key)
+        let closure = if cascade {
+            self.shareable_closure(entity, id, actor).await?
+        } else {
+            ShareableClosure {
+                members: vec![],
+                skipped: 0,
+            }
+        };
+        for ref_id in &closure.members {
+            let existing = self
+                .existing_grant_level(entity, ref_id, grantee.key)
+                .await?;
+            if existing.is_none_or(|current| current < level) {
+                self.write_grant(entity, ref_id, grantee, level, granted_by, ownership)
                     .await?;
-                if existing.is_none_or(|current| current < level) {
-                    self.write_grant(entity, &ref_id, grantee, level, granted_by, ownership)
-                        .await?;
-                }
-                shared += 1;
             }
         }
         Ok(json!({
             "status": if grantee.resolved.is_none() { "pending" } else { "shared" },
             "grantee": grantee.resolved,
             "permission": level.as_str(),
-            "resources_shared": shared,
+            "resources_shared": 1 + closure.members.len(),
+            "resources_skipped": closure.skipped,
         }))
     }
 
-    /// Revoke a grantee's grant on a resource, and (when `cascade` is set) across
-    /// every diagram reachable via self-references. Revokes by every known key so a
-    /// grant survives regardless of whether it was stored under the input identifier
-    /// (email/username) or a resolved canonical id.
-    ///
-    /// # Errors
-    /// Returns `Forbidden` if the sender is not the owner/admin, or `Validation` for a
-    /// non-shareable entity.
     pub async fn share_revoke(
         &self,
         entity: &str,
         id: &str,
         grantee: GranteeIdentity<'_>,
-        sender: Option<&str>,
-        ownership: &OwnershipConfig,
+        actor: ShareActor<'_>,
         cascade: bool,
     ) -> Result<Value> {
+        let ShareActor { sender, ownership } = actor;
         self.require_owner_or_admin(ownership, entity, id, sender)?;
         let mut keys: Vec<&str> = vec![grantee.key];
         if let Some(resolved) = grantee.resolved
@@ -292,27 +309,19 @@ impl Database {
         {
             keys.push(resolved);
         }
-        for revoke_key in &keys {
-            self.clear_grant(entity, id, revoke_key, sender, ownership)
-                .await?;
-        }
+        let mut revoked_ids = vec![id.to_string()];
         if cascade {
-            for ref_id in self.referenced_closure(entity, id).await? {
-                if ref_id == id {
-                    continue;
-                }
-                for revoke_key in &keys {
-                    self.clear_grant(entity, &ref_id, revoke_key, sender, ownership)
-                        .await?;
-                }
+            revoked_ids.extend(self.shareable_closure(entity, id, actor).await?.members);
+        }
+        for revoked_id in &revoked_ids {
+            for revoke_key in &keys {
+                self.clear_grant(entity, revoked_id, revoke_key, sender, ownership)
+                    .await?;
             }
         }
         Ok(json!({ "status": "unshared", "grantee": grantee.key }))
     }
 
-    /// Highest access level already granted on a resource for a given input
-    /// identifier (`grantee_key`), independent of whether the grant is resolved or
-    /// still pending. Used by cascade to avoid downgrading an existing grant.
     async fn existing_grant_level(
         &self,
         entity: &str,
@@ -338,13 +347,6 @@ impl Database {
             .max())
     }
 
-    /// Fill pending grants for a now-verified identity. Sweeps `_shares` by
-    /// `grantee_key` and sets `grantee = canonical_id` on every row whose `grantee`
-    /// is still null. Idempotent — a second sweep fills nothing. Returns the count
-    /// of grants filled.
-    ///
-    /// # Errors
-    /// Returns an error if scanning or updating the share records fails.
     pub(crate) async fn resolve_pending_grants(
         &self,
         grantee_key: &str,
@@ -388,11 +390,6 @@ impl Database {
         Ok(filled)
     }
 
-    /// List the grants on a resource (owner/admin only).
-    ///
-    /// # Errors
-    /// Returns `Forbidden` if the sender is not the owner/admin, or `Validation` for a
-    /// non-shareable entity.
     pub async fn list_resource_shares(
         &self,
         entity: &str,
@@ -412,10 +409,6 @@ impl Database {
         .await
     }
 
-    /// List the resources of `entity` shared with the caller.
-    ///
-    /// # Errors
-    /// Returns an error if scanning the share records or reading a resource fails.
     pub async fn list_shared_with(&self, entity: &str, sender: Option<&str>) -> Result<Vec<Value>> {
         let Some(uid) = sender else {
             return Ok(vec![]);
@@ -447,11 +440,6 @@ impl Database {
         Ok(resources)
     }
 
-    /// All grantee identities with a grant on a resource. Every grant is at least
-    /// `view`, so all qualify as event recipients.
-    ///
-    /// # Errors
-    /// Returns an error if scanning the share records fails.
     pub(crate) async fn resource_grantees(&self, entity: &str, id: &str) -> Result<Vec<String>> {
         let records = self
             .list_core(
@@ -490,13 +478,6 @@ impl Database {
             .map(String::from))
     }
 
-    /// Recipients of a change event for confidentiality-scoped delivery: the owner
-    /// plus every grantee of the governing resource. Ownership entities govern
-    /// themselves; derived (child) entities govern through their parent. Returns
-    /// `None` for entities with no ownership/derivation (Global — broadcast as before).
-    ///
-    /// # Errors
-    /// Returns an error if reading the parent record or scanning grants fails.
     pub async fn event_recipients(
         &self,
         ownership: &OwnershipConfig,

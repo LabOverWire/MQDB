@@ -375,8 +375,7 @@ impl Database {
                         &id,
                         grantee_id,
                         &permission,
-                        sender,
-                        ownership,
+                        crate::database::ShareActor { sender, ownership },
                         cascade,
                     )
                     .await
@@ -398,7 +397,13 @@ impl Database {
                     display: None,
                 };
                 match self
-                    .share_revoke(&entity, &id, grantee_id, sender, ownership, cascade)
+                    .share_revoke(
+                        &entity,
+                        &id,
+                        grantee_id,
+                        crate::database::ShareActor { sender, ownership },
+                        cascade,
+                    )
                     .await
                 {
                     Ok(v) => Response::ok(v),

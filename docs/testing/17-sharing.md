@@ -49,6 +49,7 @@ mqdb share docs d1 carol                                           # bob: 403, o
     "grantee": "bob",
     "permission": "view",
     "resources_shared": 1,
+    "resources_skipped": 0,
     "status": "shared"
   },
   "status": "ok"
@@ -75,6 +76,17 @@ mqdb read docs d2                          # bob: ok
 mqdb unshare docs d3 bob                   # alice: see below
 mqdb read docs d2                          # bob: 403
 mqdb share docs d3 carol --no-cascade      # alice: resources_shared 1
+
+mqdb create docs -d '{"id":"b1","userId":"bob","title":"B1"}'                 # bob
+mqdb create docs -d '{"id":"d4","userId":"alice","title":"D4","ref":"b1"}'    # alice
+mqdb share docs d4 carol --permission edit # alice: resources_shared 1, resources_skipped 1 (b1 is bob's)
+mqdb read docs b1                          # carol: 403
+mqdb update docs b1 -d '{"title":"X"}'     # carol: 403
+mqdb share docs b1 carol                   # bob
+mqdb unshare docs d4 carol                 # alice
+mqdb read docs b1                          # carol: ok, alice's cascade does not revoke bob's grant
+mqdb share docs d4 dave                    # admin: resources_shared 2, resources_skipped 0
+mqdb read docs b1                          # dave: ok
 
 mqdb unshare docs d1 bob                   # alice
 mqdb read docs d1                          # bob: 403
@@ -115,7 +127,7 @@ mqdb create docs -d "{\"id\":\"$D3\",\"userId\":\"alice\",\"title\":\"D3\",\"ref
 mqdb share docs "$D3" bob --broker 127.0.0.1:1884                                                        # alice
 ```
 - `resources_shared: 2` means `$D2` has the same primary as `$D3`. Continue with this pair.
-- `resources_shared: 1` means `$D2` is held by another primary and was not granted, so `mqdb read docs "$D2"` as bob returns 403 (#122). Set new ids (`D2=d2b D3=d3b`, ...) and repeat the three commands until a share reports 2. Every command below uses the variables, so it runs against the pair that reported 2.
+- `resources_shared: 1` with `resources_skipped: 1` means `$D2` is held by another primary and was not granted, so `mqdb read docs "$D2"` as bob returns 403 (#122). Set new ids (`D2=d2b D3=d3b`, ...) and repeat the three commands until a share reports 2. Every command below uses the variables, so it runs against the pair that reported 2.
 
 With that pair:
 ```bash
@@ -132,13 +144,14 @@ mqdb read docs "$D2" --broker 127.0.0.1:1884          # dave: 403
 mqdb share docs "$D3" dave --broker 127.0.0.1:1883    # alice: resources_shared 2 (the CLI sends cascade: true)
 mqdb read docs "$D2" --broker 127.0.0.1:1884          # dave: ok
 ```
-**Expected:** the raw share prints `{"data":{"grantee":"dave","permission":"view","resources_shared":1,"status":"shared"},"status":"ok"}`. In agent mode the same raw share reports `"resources_shared":2`.
+**Expected:** the raw share prints `{"data":{"grantee":"dave","permission":"view","resources_shared":1,"resources_skipped":0,"status":"shared"},"status":"ok"}`. In agent mode the same raw share reports `"resources_shared":2`.
 
 ## Verification Checklist
 
 - [ ] View grant allows read, denies update; edit grant allows update; delete stays owner-only
 - [ ] Only the owner or an admin can share or list `shares`; `shared` returns the granted records
 - [ ] Cascade grants the referenced record; `--no-cascade` grants only the named record
+- [ ] Cascade skips a referenced record the sharer does not own (`resources_skipped`), unless the sharer is an admin; a cascading unshare leaves its grants alone
 - [ ] Unshare revokes access (agent: across the cascade too)
 - [ ] A direct delete clears the record's grants
 - [ ] Cluster: the same results across nodes, with the differences shown in section 52 (the full list of cluster gaps is in the [repository README](../../README.md#sharing-operations))
