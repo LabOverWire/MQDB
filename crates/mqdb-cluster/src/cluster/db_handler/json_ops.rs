@@ -6,7 +6,7 @@ use super::super::db::{self, data_partition};
 use super::super::db_topic::DbTopicOperation;
 #[cfg(feature = "http-api")]
 use super::super::node_controller::ShareResolveContinuation;
-use super::super::node_controller::db_ops::EventOrigin;
+use super::super::node_controller::db_ops::{EventOrigin, ForwardedJsonRequest};
 use super::super::node_controller::{
     FkCheckContinuation, FkDeleteContinuation, NodeController, PendingFkDeleteWork, PendingFkWork,
     PendingUniqueWork, UniqueCheckContinuation,
@@ -20,6 +20,15 @@ use mqdb_core::types::{
     AccessLevel, MAX_FILTERS, MAX_LIST_RESULTS, MAX_SORT_FIELDS, OwnershipDecision, SHARES_ENTITY,
 };
 use serde_json::{Value, json};
+
+type RemoteReservations = Vec<(String, Vec<u8>, super::NodeId)>;
+type RemoteReserveResult = Result<
+    RemoteReservations,
+    (
+        super::super::node_controller::ReserveFailure,
+        RemoteReservations,
+    ),
+>;
 
 pub(super) enum JsonOpResult {
     Response(Vec<u8>),
@@ -187,13 +196,15 @@ impl DbRequestHandler {
                         let forwarded = controller
                             .forward_json_db_request(
                                 partition,
-                                JsonDbOp::Read,
-                                entity,
-                                Some(id),
-                                payload,
-                                response_topic,
-                                correlation_data,
-                                EventOrigin::new(sender, mqtt_ctx.client_id),
+                                ForwardedJsonRequest {
+                                    op: JsonDbOp::Read,
+                                    entity,
+                                    id: Some(id),
+                                    payload,
+                                    response_topic,
+                                    correlation_data,
+                                    origin: EventOrigin::new(sender, mqtt_ctx.client_id),
+                                },
                             )
                             .await;
                         return if forwarded {
@@ -239,13 +250,15 @@ impl DbRequestHandler {
                     let forwarded = controller
                         .forward_json_db_request(
                             partition,
-                            JsonDbOp::Update,
-                            entity,
-                            Some(id),
-                            &forward_payload,
-                            response_topic,
-                            correlation_data,
-                            EventOrigin::new(sender, mqtt_ctx.client_id),
+                            ForwardedJsonRequest {
+                                op: JsonDbOp::Update,
+                                entity,
+                                id: Some(id),
+                                payload: &forward_payload,
+                                response_topic,
+                                correlation_data,
+                                origin: EventOrigin::new(sender, mqtt_ctx.client_id),
+                            },
                         )
                         .await;
                     return if forwarded {
@@ -286,13 +299,15 @@ impl DbRequestHandler {
                     let forwarded = controller
                         .forward_json_db_request(
                             partition,
-                            JsonDbOp::Delete,
-                            entity,
-                            Some(id),
-                            payload,
-                            response_topic,
-                            correlation_data,
-                            EventOrigin::new(sender, mqtt_ctx.client_id),
+                            ForwardedJsonRequest {
+                                op: JsonDbOp::Delete,
+                                entity,
+                                id: Some(id),
+                                payload,
+                                response_topic,
+                                correlation_data,
+                                origin: EventOrigin::new(sender, mqtt_ctx.client_id),
+                            },
                         )
                         .await;
                     return if forwarded {
@@ -384,16 +399,7 @@ impl DbRequestHandler {
         let resolved_payload: Option<Vec<u8>> = match op {
             JsonDbOp::Share | JsonDbOp::Unshare => {
                 match self
-                    .resolve_share_identity(
-                        controller,
-                        op,
-                        entity,
-                        id,
-                        payload,
-                        response_topic,
-                        mqtt_ctx.correlation_data,
-                        sender,
-                    )
+                    .resolve_share_identity(controller, op, entity, id, payload, mqtt_ctx)
                     .await
                 {
                     Some(ShareResolution::Suspended) => return JsonOpResult::NoResponse,
@@ -427,13 +433,15 @@ impl DbRequestHandler {
         let forwarded = controller
             .forward_json_db_request(
                 partition,
-                op,
-                entity,
-                Some(id),
-                payload,
-                response_topic,
-                mqtt_ctx.correlation_data,
-                EventOrigin::new(sender, mqtt_ctx.client_id),
+                ForwardedJsonRequest {
+                    op,
+                    entity,
+                    id: Some(id),
+                    payload,
+                    response_topic,
+                    correlation_data: mqtt_ctx.correlation_data,
+                    origin: EventOrigin::new(sender, mqtt_ctx.client_id),
+                },
             )
             .await;
         if forwarded {
@@ -460,10 +468,11 @@ impl DbRequestHandler {
         entity: &str,
         id: &str,
         payload: &[u8],
-        response_topic: &str,
-        correlation_data: Option<&[u8]>,
-        sender: Option<&str>,
+        mqtt_ctx: &super::MqttRequestContext<'_>,
     ) -> Option<ShareResolution> {
+        let response_topic = mqtt_ctx.response_topic.unwrap_or("");
+        let correlation_data = mqtt_ctx.correlation_data;
+        let sender = mqtt_ctx.sender;
         let crypto = controller.identity_crypto()?.clone();
         let value: Value = serde_json::from_slice(payload).ok()?;
         let raw = value
@@ -643,13 +652,15 @@ impl DbRequestHandler {
         let forwarded = controller
             .forward_json_db_request(
                 partition,
-                JsonDbOp::Create,
-                entity,
-                None,
-                payload,
-                mqtt_ctx.response_topic.unwrap_or(""),
-                mqtt_ctx.correlation_data,
-                EventOrigin::new(mqtt_ctx.sender, mqtt_ctx.client_id),
+                ForwardedJsonRequest {
+                    op: JsonDbOp::Create,
+                    entity,
+                    id: None,
+                    payload,
+                    response_topic: mqtt_ctx.response_topic.unwrap_or(""),
+                    correlation_data: mqtt_ctx.correlation_data,
+                    origin: EventOrigin::new(mqtt_ctx.sender, mqtt_ctx.client_id),
+                },
             )
             .await;
         if forwarded {
@@ -865,13 +876,15 @@ impl DbRequestHandler {
             let forwarded = controller
                 .forward_json_db_request(
                     partition,
-                    JsonDbOp::Read,
-                    entity,
-                    Some(id),
-                    payload,
-                    response_topic,
-                    correlation_data,
-                    EventOrigin::new(sender, mqtt_ctx.client_id),
+                    ForwardedJsonRequest {
+                        op: JsonDbOp::Read,
+                        entity,
+                        id: Some(id),
+                        payload,
+                        response_topic,
+                        correlation_data,
+                        origin: EventOrigin::new(sender, mqtt_ctx.client_id),
+                    },
                 )
                 .await;
             if forwarded {
@@ -1556,13 +1569,7 @@ impl DbRequestHandler {
         &self,
         controller: &mut NodeController<T>,
         local_reserved: Vec<(String, Vec<u8>)>,
-        remote_results: Result<
-            Vec<(String, Vec<u8>, super::NodeId)>,
-            (
-                super::super::node_controller::ReserveFailure,
-                Vec<(String, Vec<u8>, super::NodeId)>,
-            ),
-        >,
+        remote_results: RemoteReserveResult,
         continuation: UniqueCheckContinuation,
     ) -> Option<super::super::db_handler::DbPublishResponse> {
         match continuation {

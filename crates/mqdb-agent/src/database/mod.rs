@@ -9,7 +9,7 @@ mod schema_ops;
 mod sharing;
 mod subscriptions;
 
-pub use crud::CallerContext;
+pub use crud::{CallerContext, DerivedAccess};
 pub use sharing::GranteeIdentity;
 
 use crate::consumer_group::ConsumerGroup;

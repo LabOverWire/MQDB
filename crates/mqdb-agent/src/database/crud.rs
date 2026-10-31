@@ -27,6 +27,15 @@ fn map_unique_guard_conflict(err: Error) -> Error {
     err
 }
 
+pub struct DerivedAccess<'a> {
+    pub child_entity: &'a str,
+    pub child_id: &'a str,
+    pub parent_entity: &'a str,
+    pub fk_field: &'a str,
+    pub sender: &'a str,
+    pub required: AccessLevel,
+}
+
 pub struct CallerContext<'a> {
     pub sender: Option<&'a str>,
     pub client_id: Option<&'a str>,
@@ -754,17 +763,18 @@ impl Database {
     #[allow(clippy::too_many_arguments)]
     pub async fn check_derived_access(
         &self,
-        child_entity: &str,
-        child_id: &str,
-        parent_entity: &str,
-        fk_field: &str,
-        sender: &str,
-        required: AccessLevel,
+        access: &DerivedAccess<'_>,
         ownership: &OwnershipConfig,
     ) -> Result<()> {
-        let parent_id = self.parent_ref(child_entity, child_id, fk_field)?;
-        self.check_parent_access(parent_entity, &parent_id, sender, required, ownership)
-            .await
+        let parent_id = self.parent_ref(access.child_entity, access.child_id, access.fk_field)?;
+        self.check_parent_access(
+            access.parent_entity,
+            &parent_id,
+            access.sender,
+            access.required,
+            ownership,
+        )
+        .await
     }
 
     /// Authorize a child create by deriving access from the parent referenced in the

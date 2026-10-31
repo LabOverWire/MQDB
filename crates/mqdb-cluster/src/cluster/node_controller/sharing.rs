@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use std::collections::{HashSet, VecDeque};
 
 #[cfg(feature = "http-api")]
-use super::db_ops::EventOrigin;
+use super::db_ops::{EventOrigin, ForwardedJsonRequest};
 #[cfg(feature = "http-api")]
 use super::protocol::{JsonDbOp, JsonDbRequest};
 #[cfg(feature = "http-api")]
@@ -634,13 +634,15 @@ impl<T: ClusterTransport> NodeController<T> {
         } else {
             self.forward_json_db_request(
                 partition,
-                JsonDbOp::Share,
-                &cont.entity,
-                Some(&cont.id),
-                &payload,
-                &cont.response_topic,
-                cont.correlation_data.as_deref(),
-                EventOrigin::new(Some(cont.granted_by.as_str()), None),
+                ForwardedJsonRequest {
+                    op: JsonDbOp::Share,
+                    entity: &cont.entity,
+                    id: Some(&cont.id),
+                    payload: &payload,
+                    response_topic: &cont.response_topic,
+                    correlation_data: cont.correlation_data.as_deref(),
+                    origin: EventOrigin::new(Some(cont.granted_by.as_str()), None),
+                },
             )
             .await;
         }

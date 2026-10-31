@@ -2770,13 +2770,15 @@ async fn forwarded_write_without_a_response_topic_keeps_no_vault_decrypt() {
     assert!(
         ctrl.forward_json_db_request(
             partition,
-            JsonDbOp::Update,
-            "notes",
-            Some("n1"),
-            update,
-            "",
-            None,
-            EventOrigin::new(Some("alice"), None),
+            super::db_ops::ForwardedJsonRequest {
+                op: JsonDbOp::Update,
+                entity: "notes",
+                id: Some("n1"),
+                payload: update,
+                response_topic: "",
+                correlation_data: None,
+                origin: EventOrigin::new(Some("alice"), None)
+            }
         )
         .await
     );
@@ -2785,13 +2787,15 @@ async fn forwarded_write_without_a_response_topic_keeps_no_vault_decrypt() {
     assert!(
         ctrl.forward_json_db_request(
             partition,
-            JsonDbOp::Update,
-            "notes",
-            Some("n1"),
-            update,
-            "resp/t",
-            None,
-            EventOrigin::new(Some("alice"), None),
+            super::db_ops::ForwardedJsonRequest {
+                op: JsonDbOp::Update,
+                entity: "notes",
+                id: Some("n1"),
+                payload: update,
+                response_topic: "resp/t",
+                correlation_data: None,
+                origin: EventOrigin::new(Some("alice"), None)
+            }
         )
         .await
     );

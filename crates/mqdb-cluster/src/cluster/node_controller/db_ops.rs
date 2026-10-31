@@ -95,6 +95,16 @@ fn change_event_user_properties(event: &ChangeEvent) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+pub(crate) struct ForwardedJsonRequest<'a> {
+    pub(crate) op: JsonDbOp,
+    pub(crate) entity: &'a str,
+    pub(crate) id: Option<&'a str>,
+    pub(crate) payload: &'a [u8],
+    pub(crate) response_topic: &'a str,
+    pub(crate) correlation_data: Option<&'a [u8]>,
+    pub(crate) origin: EventOrigin<'a>,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct EventOrigin<'a> {
     pub(crate) sender: Option<&'a str>,
@@ -2349,14 +2359,17 @@ impl<T: ClusterTransport> NodeController<T> {
     pub(crate) async fn forward_json_db_request(
         &mut self,
         partition: PartitionId,
-        op: JsonDbOp,
-        entity: &str,
-        id: Option<&str>,
-        payload: &[u8],
-        response_topic: &str,
-        correlation_data: Option<&[u8]>,
-        origin: EventOrigin<'_>,
+        forwarded: ForwardedJsonRequest<'_>,
     ) -> bool {
+        let ForwardedJsonRequest {
+            op,
+            entity,
+            id,
+            payload,
+            response_topic,
+            correlation_data,
+            origin,
+        } = forwarded;
         let start = std::time::Instant::now();
         let node_id = self.node_id.get();
 
