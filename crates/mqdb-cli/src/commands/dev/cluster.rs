@@ -97,6 +97,7 @@ pub(crate) struct StartClusterOptions {
     pub(crate) bridge: BridgeDirection,
     pub(crate) passwd: Option<PathBuf>,
     pub(crate) ownership: Option<String>,
+    pub(crate) presence: bool,
     pub(crate) license: Option<PathBuf>,
 }
 
@@ -143,6 +144,9 @@ fn node_command(
     ]);
     if let Some(ownership_spec) = &options.ownership {
         cmd.args(["--ownership", ownership_spec]);
+    }
+    if options.presence {
+        cmd.arg("--presence");
     }
     if let Some(license) = &options.license {
         cmd.args(["--license", utf8_path(license, "license")?]);

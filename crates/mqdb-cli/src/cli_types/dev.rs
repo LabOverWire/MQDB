@@ -65,7 +65,7 @@ pub(crate) enum DevAction {
         #[arg(
             long,
             default_value = "3",
-            value_parser = clap::value_parser!(u8).range(1..=100),
+            value_parser = clap::value_parser!(u8).range(1..=50),
             help = "Number of cluster nodes"
         )]
         nodes: u8,

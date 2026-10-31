@@ -137,13 +137,13 @@ fn a_suite_cluster_signals_nothing_outside_its_own_nodes() {
         stdout.contains(&format!("Starting node 1 on port {base_port}")),
         "{stdout}"
     );
-    assert!(stdout.contains("exited"), "{stdout}");
+    assert!(stdout.contains("did not accept connections"), "{stdout}");
     assert_eq!(
         shim.calls(),
         "",
         "the suite looked up or signalled processes"
     );
-    assert!(!Path::new(&format!("{prefix_arg}-ownership-passwd")).exists());
+    assert!(!Path::new(&format!("{prefix_arg}-own-passwd")).exists());
     assert!(!Path::new(&format!("{prefix_arg}-own-1/mqdb.pid")).exists());
 }
 

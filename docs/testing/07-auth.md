@@ -453,12 +453,12 @@ mqdb dev test --ownership --nodes 3
 ```
 
 This command:
-1. Creates a temporary password file with users `alice`, `bob`, and `admin`
-2. Kills any running cluster
-3. Starts a fresh 3-node cluster with `--passwd`, `--admin-users admin`, and `--ownership test_owned=userId`
+1. Refuses to start if the `--base-port` block (default 1883) or its cluster transport ports are in use
+2. Creates a password file with users `alice`, `bob`, and `admin` at `<db-prefix>-own-passwd`
+3. Starts a fresh 3-node cluster under `<db-prefix>-own` with `--passwd`, `--admin-users admin`, and `--ownership test_owned_<ts>=userId`
 4. Waits for the authenticated cluster to become ready
-5. Runs 7 test cases (see below)
-6. Kills the cluster and cleans up
+5. Runs the test cases (see below)
+6. Stops only the nodes it started and removes the password file
 
 ### Test Cases
 

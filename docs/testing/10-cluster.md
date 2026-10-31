@@ -474,17 +474,27 @@ mqdb dev test --stress-constraints  # Constraint stress tests
 
 # Specify node count
 mqdb dev test --all --nodes 5
+
+# Test a cluster started on another port block
+mqdb dev test --all --base-port 33601
 ```
 
-> **Note:** `--ownership` is excluded from `--all` because it manages its own authenticated cluster.
-> It kills any running cluster, starts a fresh one with password auth and `--ownership` config,
-> runs ownership tests, then kills the cluster. It requires `--license` to provide a valid
-> Enterprise license for the cluster nodes it spawns.
+`--base-port` (default 1883) is the port of node 1; node N is on `base+N-1`.
+
+> **Note:** `--ownership`, `--sharing` and `--presence` are excluded from `--all` because each
+> starts its own authenticated cluster on the `--base-port` block, under
+> `--db-prefix` (default `/tmp/mqdb-test`) plus `-own`, `-share` or `-presence`. They refuse
+> to start if any of those ports (or their `+50` cluster transport ports) is already in use,
+> so run them on a free block, not on top of a running `dev start-cluster`. At the end they
+> stop only the nodes they started, by recorded pid; after an interrupted run, stop the
+> leftovers with `mqdb dev kill --db-prefix /tmp/mqdb-test-own` (or `-share`, `-presence`).
+> They require `--license` to provide a valid Enterprise license for the nodes they spawn.
 
 ### Dev Bench (Benchmarking with Auto-Start)
 
-`dev bench` auto-starts an agent, runs benchmarks, and saves results. Parent options
-(`--output`, `--baseline`, `--db`) go before the subcommand:
+`dev bench` benchmarks the broker on `--port` (default 1883) and starts an agent there first
+if nothing is listening on that port. Parent options (`--output`, `--baseline`, `--db`,
+`--port`) go before the subcommand:
 
 ```bash
 # Pub/sub benchmark
@@ -503,7 +513,9 @@ mqdb dev bench --output results.json --baseline baseline.json db
 
 ### Dev Profile (Performance Profiling)
 
-Profile the broker using `samply` or `flamegraph`. Parent options (`--tool`, `--duration`, `--output`) go before the subcommand:
+Profile the broker using `samply`, `flamegraph` or `sample`. Parent options (`--tool`, `--duration`, `--output`, `--port`) go before the subcommand.
+The profiled agent binds `--port` (default 1883), which must be free: `dev profile` refuses to
+start rather than stop another agent, and at the end it interrupts only the agent it started.
 
 ```bash
 # Profile pub/sub with samply (default tool, 30s)

@@ -506,6 +506,7 @@ async fn dispatch_dev(action: DevAction) -> Result<(), Box<dyn std::error::Error
             },
             passwd,
             ownership,
+            presence: false,
             license,
         })?,
         DevAction::Bench {

@@ -365,7 +365,10 @@ fn forget_node(node: &RecordedNode, pid: u32, state: &str) -> Result<(), String>
     std::fs::remove_file(&node.pid_file).map_err(|e| format!("{}: {e}", node.pid_file.display()))
 }
 
-fn kill_cluster(db_prefix: &str, node: Option<u16>) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn kill_cluster(
+    db_prefix: &str,
+    node: Option<u16>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let prefix = absolute_prefix(db_prefix)?;
     let recorded = recorded_nodes(&prefix)?;
     let targets: Vec<RecordedNode> = match node {
@@ -510,7 +513,7 @@ pub(crate) fn cmd_dev_kill(
 }
 
 const DEV_TEST_SUITE_DIRS: [&str; 3] = ["own", "share", "presence"];
-const DEV_TEST_SUITE_PASSWDS: [&str; 3] = ["ownership", "sharing", "presence"];
+const DEV_TEST_SUITE_PASSWDS: [&str; 5] = ["own", "share", "ownership", "sharing", "presence"];
 
 fn is_dev_test_prefix(db_prefix: &str) -> bool {
     let prefix = Path::new(db_prefix);

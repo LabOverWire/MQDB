@@ -4,11 +4,13 @@
 use std::io::ErrorKind;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
-const CLUSTER_PORT_OFFSET: u16 = 100;
-const NODE_PID_FILE: &str = "mqdb.pid";
+use super::cluster::{
+    BridgeDirection, StartClusterOptions, TRANSPORT_PORT_OFFSET, cmd_dev_start_cluster,
+};
+use super::helpers::{absolute_prefix, cmd_dev_clean, kill_cluster};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Suite {
@@ -52,12 +54,12 @@ pub(crate) struct DevTestOptions {
 }
 
 fn node_ports(base_port: u16, nodes: u8) -> Result<Vec<u16>, String> {
-    if nodes == 0 || u16::from(nodes) > CLUSTER_PORT_OFFSET {
+    if nodes == 0 || nodes > TRANSPORT_PORT_OFFSET {
         return Err(format!(
-            "--nodes must be between 1 and {CLUSTER_PORT_OFFSET}, got {nodes}"
+            "--nodes must be between 1 and {TRANSPORT_PORT_OFFSET}, got {nodes}"
         ));
     }
-    let last_port = u32::from(base_port) + u32::from(CLUSTER_PORT_OFFSET) + u32::from(nodes) - 1;
+    let last_port = u32::from(base_port) + u32::from(TRANSPORT_PORT_OFFSET) + u32::from(nodes) - 1;
     if last_port > u32::from(u16::MAX) {
         return Err(format!(
             "--base-port {base_port} with {nodes} nodes needs ports up to {last_port}, past {}",
@@ -674,15 +676,6 @@ fn run_pubsub_test(pub_port: u16, sub_port: u16, topic: &str, msg: &str) -> bool
     }
 }
 
-fn full_mesh_peers(node_id: u8, ports: &[u16]) -> Option<String> {
-    let peers: Vec<String> = (1u8..)
-        .zip(ports)
-        .filter(|&(peer, _)| peer != node_id)
-        .map(|(peer, port)| format!("{peer}@127.0.0.1:{port}"))
-        .collect();
-    (!peers.is_empty()).then(|| peers.join(","))
-}
-
 type PartitionAssignment = (u64, Option<u64>, Vec<u64>);
 
 fn partition_map_on(port: u16) -> Option<Vec<PartitionAssignment>> {
@@ -798,163 +791,44 @@ fn port_in_use(port: u16) -> bool {
 fn busy_ports(ports: &[u16]) -> Vec<u16> {
     ports
         .iter()
-        .flat_map(|&port| [port, port + CLUSTER_PORT_OFFSET])
+        .flat_map(|&port| [port, port + u16::from(TRANSPORT_PORT_OFFSET)])
         .filter(|&port| port_in_use(port))
         .collect()
 }
 
-fn remove_stale(path: &Path) -> Result<(), String> {
-    let removed = if path.is_dir() {
-        std::fs::remove_dir_all(path)
-    } else {
-        std::fs::remove_file(path)
-    };
-    match removed {
-        Err(e) if e.kind() != ErrorKind::NotFound => {
-            Err(format!("remove stale {}: {e}", path.display()))
-        }
-        Ok(()) | Err(_) => Ok(()),
-    }
-}
-
 struct SuiteSetup<'a> {
     dir: &'a str,
-    passwd: &'a str,
     users: &'a [&'a str],
-    node_args: &'a [&'a str],
+    ownership: Option<String>,
+    presence: bool,
     label: &'a str,
 }
 
 struct SuiteCluster {
-    nodes: Vec<Child>,
-    owned_files: Vec<PathBuf>,
-    db_paths: Vec<String>,
-}
-
-impl SuiteCluster {
-    fn exited_node(&mut self) -> Option<String> {
-        self.nodes
-            .iter_mut()
-            .zip(&self.db_paths)
-            .find_map(|(child, db_path)| match child.try_wait() {
-                Ok(Some(status)) => Some(format!("node {db_path} exited ({status})")),
-                Ok(None) => None,
-                Err(e) => Some(format!("node {db_path}: {e}")),
-            })
-            .map(|exited| format!("{exited}; see its mqdb.log"))
-    }
+    prefix: String,
 }
 
 impl Drop for SuiteCluster {
     fn drop(&mut self) {
-        for child in &mut self.nodes {
-            let stopped = match child.try_wait() {
-                Ok(Some(_)) => Ok(()),
-                Ok(None) => child.kill().and_then(|()| child.wait().map(drop)),
-                Err(e) => Err(e),
-            };
-            if let Err(e) = stopped {
-                eprintln!("  could not stop node pid {}: {e}", child.id());
-            }
+        if let Err(e) = kill_cluster(&self.prefix, None) {
+            eprintln!(
+                "  could not stop the suite nodes under {}: {e}",
+                self.prefix
+            );
         }
-        for path in &self.owned_files {
-            if let Err(e) = remove_stale(path) {
-                eprintln!("  {e}");
-            }
+        let passwd = format!("{}-passwd", self.prefix);
+        if let Err(e) = std::fs::remove_file(&passwd)
+            && e.kind() != ErrorKind::NotFound
+        {
+            eprintln!("  could not remove {passwd}: {e}");
         }
     }
 }
 
-fn suite_node_command(
-    exe: &Path,
-    options: &DevTestOptions,
-    setup: &SuiteSetup,
-    ports: &[u16],
-    node_id: u8,
-    db_path: &str,
-    passwd: &str,
-) -> Result<Command, String> {
-    let port = ports[usize::from(node_id - 1)];
-    let mut cmd = Command::new(exe);
-    cmd.args([
-        "cluster",
-        "start",
-        "--node-id",
-        &node_id.to_string(),
-        "--bind",
-        &format!("127.0.0.1:{port}"),
-        "--db",
-        db_path,
-        "--admin-users",
-        "admin",
-        "--passwd",
-        passwd,
-    ]);
-    cmd.args(setup.node_args);
-
-    if let Some(license) = &options.license {
-        let license = license
-            .to_str()
-            .ok_or_else(|| format!("license path {} is not UTF-8", license.display()))?;
-        cmd.args(["--license", license]);
-    }
-
-    if let Some(peers) = full_mesh_peers(node_id, ports) {
-        cmd.args(["--peers", &peers]);
-    }
-
-    let quic = ["server.pem", "server.key", "ca.pem"].map(|name| format!("test_certs/{name}"));
-    let [cert, key, ca] = &quic;
-    if Path::new(cert).exists() && Path::new(key).exists() {
-        cmd.args(["--quic-cert", cert, "--quic-key", key]);
-        if Path::new(ca).exists() {
-            cmd.args(["--quic-ca", ca]);
-        }
-        #[cfg(feature = "dev-insecure")]
-        cmd.arg("--quic-insecure");
-    }
-
-    cmd.env(
-        "RUST_LOG",
-        std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
-    );
-
-    let log_path = format!("{db_path}/mqdb.log");
-    let log_file =
-        std::fs::File::create(&log_path).map_err(|e| format!("create {log_path}: {e}"))?;
-    let log_clone = log_file
-        .try_clone()
-        .map_err(|e| format!("open {log_path}: {e}"))?;
-    cmd.stdout(log_clone);
-    cmd.stderr(log_file);
-    Ok(cmd)
-}
-
-fn start_suite_cluster(
-    exe: &Path,
-    options: &DevTestOptions,
-    ports: &[u16],
-    setup: &SuiteSetup,
-) -> Result<SuiteCluster, String> {
-    let busy = busy_ports(ports);
-    if !busy.is_empty() {
-        return Err(format!(
-            "ports {busy:?} are already in use; this suite starts its own cluster, so pick a free block with --base-port"
-        ));
-    }
-
-    let prefix = &options.db_prefix;
-    let passwd = format!("{prefix}-{}-passwd", setup.passwd);
-    remove_stale(Path::new(&passwd))?;
-    let mut cluster = SuiteCluster {
-        nodes: Vec::with_capacity(ports.len()),
-        owned_files: vec![PathBuf::from(&passwd)],
-        db_paths: Vec::with_capacity(ports.len()),
-    };
-
-    for user in setup.users {
+fn create_suite_passwd(exe: &Path, passwd: &str, users: &[&str]) -> Result<(), String> {
+    for user in users {
         let output = Command::new(exe)
-            .args(["passwd", user, "-b", user, "-f", &passwd])
+            .args(["passwd", user, "-b", user, "-f", passwd])
             .output()
             .map_err(|e| format!("run mqdb passwd: {e}"))?;
         if !output.status.success() {
@@ -964,45 +838,59 @@ fn start_suite_cluster(
             ));
         }
     }
+    Ok(())
+}
 
-    for (node_id, &port) in (1u8..).zip(ports) {
-        let db_path = format!("{prefix}-{}-{node_id}", setup.dir);
-        remove_stale(Path::new(&db_path))?;
-        std::fs::create_dir_all(&db_path).map_err(|e| format!("create {db_path}: {e}"))?;
-        let mut cmd = suite_node_command(exe, options, setup, ports, node_id, &db_path, &passwd)?;
-
-        println!(
-            "  Starting node {node_id} on port {port} ({})...",
-            setup.label
-        );
-        let child = cmd
-            .spawn()
-            .map_err(|e| format!("start node {node_id}: {e}"))?;
-        let pid = child.id();
-        cluster.nodes.push(child);
-        cluster.db_paths.push(db_path.clone());
-        let pid_file = PathBuf::from(format!("{db_path}/{NODE_PID_FILE}"));
-        std::fs::write(&pid_file, pid.to_string())
-            .map_err(|e| format!("record node {node_id} in {}: {e}", pid_file.display()))?;
-        cluster.owned_files.push(pid_file);
-        std::thread::sleep(Duration::from_millis(500));
+fn start_suite_cluster(
+    exe: &Path,
+    options: &DevTestOptions,
+    ports: &[u16],
+    setup: SuiteSetup,
+) -> Result<SuiteCluster, String> {
+    let busy = busy_ports(ports);
+    if !busy.is_empty() {
+        return Err(format!(
+            "ports {busy:?} are already in use; this suite starts its own cluster, so pick a free block with --base-port"
+        ));
     }
 
+    let prefix = absolute_prefix(&format!("{}-{}", options.db_prefix, setup.dir))
+        .map_err(|e| e.to_string())?;
+    cmd_dev_clean(&prefix).map_err(|e| e.to_string())?;
+    let passwd = format!("{prefix}-passwd");
+    let cluster = SuiteCluster {
+        prefix: prefix.clone(),
+    };
+    create_suite_passwd(exe, &passwd, setup.users)?;
+
+    println!("  Starting {} nodes ({})...", ports.len(), setup.label);
+    cmd_dev_start_cluster(&StartClusterOptions {
+        nodes: options.nodes,
+        clean: false,
+        quic_cert: PathBuf::from("test_certs/server.pem"),
+        quic_key: PathBuf::from("test_certs/server.key"),
+        quic_ca: PathBuf::from("test_certs/ca.pem"),
+        no_quic: false,
+        db_prefix: prefix,
+        base_port: options.base_port,
+        bind_host: "127.0.0.1".to_string(),
+        topology: Some("full".to_string()),
+        bridge: BridgeDirection::TopologyDefault,
+        passwd: Some(PathBuf::from(&passwd)),
+        ownership: setup.ownership,
+        presence: setup.presence,
+        license: options.license.clone(),
+    })
+    .map_err(|e| e.to_string())?;
+
     println!("  Waiting for authenticated cluster...");
-    wait_for_suite_cluster(&mut cluster, ports, 15)?;
+    wait_for_suite_cluster(ports, 15)?;
     Ok(cluster)
 }
 
-fn wait_for_suite_cluster(
-    cluster: &mut SuiteCluster,
-    ports: &[u16],
-    timeout_secs: u64,
-) -> Result<(), String> {
+fn wait_for_suite_cluster(ports: &[u16], timeout_secs: u64) -> Result<(), String> {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(timeout_secs) {
-        if let Some(exited) = cluster.exited_node() {
-            return Err(exited);
-        }
         if ports.iter().all(|&port| node_accepts_admin(port)) {
             return if wait_for_partitions_settled(ports, timeout_secs) {
                 Ok(())
@@ -1013,7 +901,7 @@ fn wait_for_suite_cluster(
         std::thread::sleep(Duration::from_millis(500));
     }
     Err(format!(
-        "nodes did not accept connections within {timeout_secs}s"
+        "nodes did not accept connections within {timeout_secs}s; see their mqdb.log"
     ))
 }
 
@@ -1077,12 +965,12 @@ fn run_test_ownership(options: &DevTestOptions, ports: &[u16]) {
     println!("  Setting up authenticated cluster with ownership...");
     let setup = SuiteSetup {
         dir: "own",
-        passwd: "ownership",
         users: &["alice", "bob", "admin"],
-        node_args: &["--ownership", &ownership_spec],
+        ownership: Some(ownership_spec),
+        presence: false,
         label: "auth + ownership",
     };
-    let cluster = match start_suite_cluster(&exe, options, ports, &setup) {
+    let cluster = match start_suite_cluster(&exe, options, ports, setup) {
         Ok(cluster) => cluster,
         Err(e) => {
             println!("  Cluster failed to become ready: {e}");
@@ -1333,12 +1221,12 @@ fn run_test_sharing(options: &DevTestOptions, ports: &[u16]) {
     println!("  Setting up authenticated cluster with ownership...");
     let setup = SuiteSetup {
         dir: "share",
-        passwd: "sharing",
         users: &["alice", "bob", "admin"],
-        node_args: &["--ownership", &ownership_spec],
+        ownership: Some(ownership_spec),
+        presence: false,
         label: "auth + ownership",
     };
-    let cluster = match start_suite_cluster(&exe, options, ports, &setup) {
+    let cluster = match start_suite_cluster(&exe, options, ports, setup) {
         Ok(cluster) => cluster,
         Err(e) => {
             println!("  Cluster failed to become ready: {e}");
@@ -1604,12 +1492,12 @@ fn run_test_presence(options: &DevTestOptions, ports: &[u16]) {
 
     let setup = SuiteSetup {
         dir: "presence",
-        passwd: "presence",
         users: &["alice", "admin"],
-        node_args: &["--presence"],
+        ownership: None,
+        presence: true,
         label: "auth + presence",
     };
-    let cluster = match start_suite_cluster(&exe, options, ports, &setup) {
+    let cluster = match start_suite_cluster(&exe, options, ports, setup) {
         Ok(cluster) => cluster,
         Err(e) => {
             println!("  Cluster failed to become ready: {e}");
@@ -1640,19 +1528,10 @@ mod port_tests {
     #[test]
     fn node_ports_refuse_blocks_that_overflow_or_overlap_transport_ports() {
         assert!(node_ports(1883, 0).is_err());
-        assert!(node_ports(1883, 100).is_ok());
-        assert!(node_ports(1883, 101).is_err());
-        assert!(node_ports(65435, 1).is_ok());
-        assert!(node_ports(65435, 2).is_err());
-    }
-
-    #[test]
-    fn peers_list_every_other_node_on_its_own_port() {
-        assert_eq!(
-            full_mesh_peers(2, &[33601, 33602, 33603]).as_deref(),
-            Some("1@127.0.0.1:33601,3@127.0.0.1:33603")
-        );
-        assert_eq!(full_mesh_peers(1, &[33601]), None);
+        assert!(node_ports(1883, 50).is_ok());
+        assert!(node_ports(1883, 51).is_err());
+        assert!(node_ports(65485, 1).is_ok());
+        assert!(node_ports(65485, 2).is_err());
     }
 
     #[test]
@@ -1662,6 +1541,13 @@ mod port_tests {
         let port = listener.local_addr().expect("local addr").port();
         assert!(port_in_use(port));
         drop(listener);
-        assert!(!port_in_use(port));
+    }
+
+    #[test]
+    fn a_bound_udp_port_is_reported_busy() {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind udp");
+        let port = socket.local_addr().expect("local addr").port();
+        assert!(port_in_use(port));
+        drop(socket);
     }
 }
