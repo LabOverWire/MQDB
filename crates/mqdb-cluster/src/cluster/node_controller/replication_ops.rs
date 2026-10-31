@@ -7,9 +7,9 @@ use super::super::protocol::{
 };
 use super::super::quorum::{QuorumResult, QuorumTracker};
 use super::super::replication::{ReplicaRole, ReplicaState};
-use super::super::store_manager::StoreManager;
+use super::super::store_manager::{HeldPrimaries, StoreManager};
 use super::super::transport::{ClusterMessage, ClusterTransport};
-use super::super::{Epoch, NodeId, PartitionId, PartitionMap};
+use super::super::{Epoch, NodeId, PartitionAssignment, PartitionId, PartitionMap};
 use super::{
     HELD_WRITE_CAPACITY, HELD_WRITE_TIMEOUT, HeldWrite, NodeController, NodeStatus,
     ReplicationError, WRITE_COUNTER, WRITE_RECEIVED, WRITE_REQUEST_SENT,
@@ -398,9 +398,13 @@ impl<T: ClusterTransport> NodeController<T> {
 
     pub async fn apply_raft_partition_map(&mut self, raft_map: PartitionMap) -> bool {
         if self.partition_map == raft_map {
+            self.retry_stalled_snapshots().await;
             self.release_held_writes().await;
             return false;
         }
+        let held = *self
+            .held_primaries
+            .get_or_insert_with(|| self.stores.held_primaries());
         let current_map = self.partition_map.clone();
         let mut became_primary = false;
         let mut changes = 0u32;
@@ -411,8 +415,16 @@ impl<T: ClusterTransport> NodeController<T> {
                 continue;
             }
             if new_assignment.primary == Some(self.node_id) {
-                self.become_primary(partition, new_assignment.epoch);
-                became_primary |= old_assignment.primary != Some(self.node_id);
+                match self.source_needed_before_primary(partition, new_assignment, &held) {
+                    Some(source) => {
+                        self.await_snapshot(partition, new_assignment.epoch, source)
+                            .await;
+                    }
+                    None => {
+                        self.become_primary(partition, new_assignment.epoch);
+                        became_primary |= old_assignment.primary != Some(self.node_id);
+                    }
+                }
             } else if new_assignment.replicas.contains(&self.node_id) {
                 if matches!(
                     self.role(partition),
@@ -434,8 +446,30 @@ impl<T: ClusterTransport> NodeController<T> {
             }
         }
         self.update_partition_map(raft_map);
+        self.retry_stalled_snapshots().await;
         self.release_held_writes().await;
         became_primary
+    }
+
+    fn source_needed_before_primary(
+        &self,
+        partition: PartitionId,
+        assignment: &PartitionAssignment,
+        held: &HeldPrimaries,
+    ) -> Option<NodeId> {
+        let holds_data = matches!(
+            self.role(partition),
+            ReplicaRole::Primary | ReplicaRole::Replica
+        ) || (!self.replicas.contains_key(&partition.get())
+            && held.trusts(partition, assignment.epoch));
+        if holds_data {
+            return None;
+        }
+        assignment
+            .replicas
+            .iter()
+            .copied()
+            .find(|node| *node != self.node_id)
     }
 
     pub async fn write_or_forward(&mut self, write: ReplicationWrite) {

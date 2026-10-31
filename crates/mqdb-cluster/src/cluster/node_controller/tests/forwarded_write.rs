@@ -80,6 +80,7 @@ async fn a_write_for_a_newer_assignment_is_applied_once_the_receiver_catches_up(
     let mut ctrl = controller(2);
     ctrl.apply_raft_partition_map(map_with(partition, node(1), &[node(2)], 1))
         .await;
+    ctrl.become_replica(partition, Epoch::new(1), 0);
 
     ctrl.transport.inject_message(
         node(3),
@@ -117,6 +118,7 @@ async fn a_write_for_an_older_assignment_is_not_sent_on() {
 async fn a_write_for_a_newer_assignment_waits_even_on_the_current_primary() {
     let partition = session_partition("c1");
     let mut ctrl = controller(2);
+    ctrl.become_primary(partition, Epoch::new(1));
     ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
         .await;
 
@@ -170,6 +172,7 @@ async fn a_forwarded_write_is_stored_once_by_the_primary() {
     let partition = session_partition("c1");
     let backend = FaultyBackend::shared();
     let mut ctrl = controller_with_storage(2, &backend);
+    ctrl.become_primary(partition, Epoch::new(1));
     ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
         .await;
     let before = backend.inserts();
@@ -240,6 +243,7 @@ async fn a_write_the_primary_cannot_store_is_not_replicated() {
     let partition = session_partition("c1");
     let backend = FaultyBackend::shared();
     let mut ctrl = controller_with_storage(2, &backend);
+    ctrl.become_primary(partition, Epoch::new(1));
     ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
         .await;
     backend.fail_writes(true);
@@ -267,6 +271,7 @@ async fn a_persisted_write_the_primary_cannot_apply_in_memory_is_still_replicate
     let partition = session_partition("c1");
     let backend = FaultyBackend::shared();
     let mut ctrl = controller_with_storage(2, &backend);
+    ctrl.become_primary(partition, Epoch::new(1));
     ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
         .await;
     let mut unreadable = session_write("c1", 1);
