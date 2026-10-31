@@ -1164,7 +1164,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .scan_expired_ttl(now_secs)
             .into_iter()
             .filter(|(entity, id)| {
-                self.is_primary_for_partition(crate::cluster::db::data_partition(entity, id))
+                self.holds_primary_role(crate::cluster::db::data_partition(entity, id))
             })
             .take(TTL_REAP_MAX_PER_PASS)
             .collect();
