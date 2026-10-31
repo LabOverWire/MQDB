@@ -4453,3 +4453,41 @@ async fn json_create_refuses_an_entity_name_longer_than_the_limit() {
     let json = json_create(&mut ctrl, &at_limit, &serde_json::json!({"id": "r1"})).await;
     assert_eq!(json["status"], "ok");
 }
+
+#[tokio::test]
+async fn per_id_requests_on_a_primary_still_waiting_for_its_data_are_refused_as_not_ready() {
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let handler = DbRequestHandler::new(node2);
+    let mut ctrl = create_test_controller(node2, MockTransport::new(node2));
+    let partition = data_partition("docs", "d");
+    let mut map = PartitionMap::default();
+    map.set(
+        partition,
+        crate::cluster::PartitionAssignment::new(node2, vec![node3], Epoch::new(1)),
+    );
+    ctrl.apply_raft_partition_map(map).await;
+    let ctx = MqttRequestContext {
+        response_topic: Some("resp/t"),
+        correlation_data: None,
+        sender: None,
+        client_id: None,
+    };
+    let update = serde_json::to_vec(&serde_json::json!({"n": 1})).unwrap();
+
+    for (topic, payload) in [
+        ("$DB/docs/d/update", update.as_slice()),
+        ("$DB/docs/d/delete", b"{}".as_slice()),
+        ("$DB/docs/d", b"{}".as_slice()),
+    ] {
+        let response = handler
+            .handle_publish(&mut ctrl, topic, payload, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            parse_json_response(&response.payload)["code"],
+            503,
+            "{topic}"
+        );
+    }
+}

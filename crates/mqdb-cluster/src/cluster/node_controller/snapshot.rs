@@ -20,6 +20,7 @@ pub(super) const DEFERRED_SNAPSHOT_CAPACITY: usize = 1024;
 pub(crate) struct SnapshotRequestState {
     pub(crate) source: NodeId,
     pub(crate) last_activity: Instant,
+    pub(crate) taking_primary: bool,
 }
 
 #[derive(Debug)]
@@ -318,14 +319,16 @@ impl<T: ClusterTransport> NodeController<T> {
         partition: PartitionId,
         epoch: Epoch,
         source: NodeId,
-        keep_live_source: bool,
+        taking_primary: bool,
     ) {
-        let source = match self.requested_snapshots.get(&partition) {
-            Some(request) if keep_live_source && self.source_is_alive(request.source) => {
-                request.source
-            }
-            _ => source,
-        };
+        let kept_source = self
+            .requested_snapshots
+            .get(&partition)
+            .filter(|request| {
+                (taking_primary || request.taking_primary) && self.source_is_alive(request.source)
+            })
+            .map(|request| request.source);
+        let source = kept_source.unwrap_or(source);
         self.replicas
             .entry(partition.get())
             .or_insert_with(|| {
@@ -347,7 +350,8 @@ impl<T: ClusterTransport> NodeController<T> {
             source = source.get(),
             "waiting for a snapshot before taking the partition"
         );
-        self.request_snapshot(partition, source).await;
+        self.send_snapshot_request(partition, source, taking_primary || kept_source.is_some())
+            .await;
     }
 
     pub(super) async fn refuse_unready_read(&self, from: NodeId, request: &JsonDbRequest) {
@@ -370,11 +374,11 @@ impl<T: ClusterTransport> NodeController<T> {
 
     pub(super) async fn retry_stalled_snapshots(&mut self) {
         for partition in PartitionId::all() {
-            let Some(stalled_source) = self
+            let Some((stalled_source, stalled_taking_primary)) = self
                 .requested_snapshots
                 .get(&partition)
                 .filter(|request| request.last_activity.elapsed() >= SNAPSHOT_RETRY_AFTER)
-                .map(|request| request.source)
+                .map(|request| (request.source, request.taking_primary))
             else {
                 continue;
             };
@@ -384,7 +388,9 @@ impl<T: ClusterTransport> NodeController<T> {
                 continue;
             }
             let waiting_to_take = self.partition_map.primary(partition) == Some(self.node_id);
-            let source = if waiting_to_take && self.source_is_alive(stalled_source) {
+            let keep_stalled_source =
+                (waiting_to_take || stalled_taking_primary) && self.source_is_alive(stalled_source);
+            let source = if keep_stalled_source {
                 Some(stalled_source)
             } else {
                 self.snapshot_source(partition)
@@ -395,12 +401,25 @@ impl<T: ClusterTransport> NodeController<T> {
                     source = source.get(),
                     "snapshot stalled, requesting again"
                 );
-                self.request_snapshot(partition, source).await;
+                let taking_primary = waiting_to_take || keep_stalled_source;
+                self.send_snapshot_request(partition, source, taking_primary)
+                    .await;
             }
         }
     }
 
     pub async fn request_snapshot(&mut self, partition: PartitionId, from: NodeId) {
+        let taking_primary = self.partition_map.primary(partition) == Some(self.node_id);
+        self.send_snapshot_request(partition, from, taking_primary)
+            .await;
+    }
+
+    async fn send_snapshot_request(
+        &mut self,
+        partition: PartitionId,
+        from: NodeId,
+        taking_primary: bool,
+    ) {
         if self.requested_snapshots.contains_key(&partition)
             || self.pending_snapshots.contains_key(&partition)
         {
@@ -414,6 +433,7 @@ impl<T: ClusterTransport> NodeController<T> {
             SnapshotRequestState {
                 source: from,
                 last_activity: Instant::now(),
+                taking_primary,
             },
         );
 

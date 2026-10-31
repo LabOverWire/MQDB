@@ -845,3 +845,72 @@ async fn two_empty_nodes_waiting_on_each_other_both_take_their_roles() {
     assert_eq!(primary.role(partition), ReplicaRole::Primary);
     assert_eq!(replica.role(partition), ReplicaRole::Replica);
 }
+
+async fn swap_a_waiting_primary_after_a_replica_move() -> (
+    NodeController<MockTransport>,
+    NodeController<MockTransport>,
+    NodeController<MockTransport>,
+    PartitionId,
+) {
+    let partition = session_partition("c1");
+    let mut holder = controller(2);
+    holder.become_replica(partition, Epoch::new(1), 0);
+    holder.stores().create_session_replicated("c1").unwrap();
+    let mut wiped = controller(1);
+    let mut joiner = controller(3);
+    wiped
+        .apply_raft_partition_map(map_with(partition, node(1), &[node(2)], 1))
+        .await;
+    let moved = map_with(partition, node(1), &[node(3)], 2);
+    wiped.apply_raft_partition_map(moved.clone()).await;
+    joiner.apply_raft_partition_map(moved).await;
+    wiped.transport.inject_message(
+        node(3),
+        ClusterMessage::SnapshotRequest(SnapshotRequest::create(partition, node(3))),
+    );
+    wiped.process_messages().await;
+    let swapped = map_with(partition, node(3), &[node(1)], 3);
+    wiped.apply_raft_partition_map(swapped.clone()).await;
+    joiner.apply_raft_partition_map(swapped).await;
+    (holder, wiped, joiner, partition)
+}
+
+#[tokio::test]
+async fn a_waiting_primary_swapped_to_replica_keeps_its_live_source() {
+    let (mut holder, mut wiped, mut joiner, partition) =
+        swap_a_waiting_primary_after_a_replica_move().await;
+
+    assert_eq!(snapshot_requests_to(&wiped, node(3)), 0);
+    serve_snapshot(&mut joiner, &mut wiped, partition).await;
+    assert_eq!(wiped.role(partition), ReplicaRole::AwaitingSnapshot);
+
+    serve_snapshot(&mut holder, &mut wiped, partition).await;
+    assert_eq!(wiped.role(partition), ReplicaRole::Replica);
+    for (to, message) in wiped.transport.sent_messages() {
+        if to == node(3) && matches!(message, ClusterMessage::SnapshotChunk(_)) {
+            joiner.transport.inject_message(node(1), message);
+        }
+    }
+    joiner.process_messages().await;
+
+    assert_eq!(joiner.role(partition), ReplicaRole::Primary);
+    assert!(joiner.stores().sessions.get("c1").is_some());
+}
+
+#[tokio::test]
+async fn a_stalled_request_of_a_waiting_primary_swapped_to_replica_keeps_its_source() {
+    let (_, mut wiped, _, partition) = swap_a_waiting_primary_after_a_replica_move().await;
+    let stalled_since = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(11))
+        .unwrap();
+    if let Some(request) = wiped.requested_snapshots.get_mut(&partition) {
+        request.last_activity = stalled_since;
+    }
+
+    wiped
+        .apply_raft_partition_map(map_with(partition, node(3), &[node(1)], 3))
+        .await;
+
+    assert_eq!(snapshot_requests_to(&wiped, node(2)), 2);
+    assert_eq!(snapshot_requests_to(&wiped, node(3)), 0);
+}

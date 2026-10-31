@@ -974,6 +974,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 snapshot::SnapshotRequestState {
                     source,
                     last_activity: std::time::Instant::now(),
+                    taking_primary: self.partition_map.primary(partition) == Some(self.node_id),
                 },
             );
             let req = SnapshotRequest::create(partition, self.node_id);

@@ -206,6 +206,11 @@ impl<T: ClusterTransport> NodeController<T> {
         self.role(partition) == ReplicaRole::Primary
     }
 
+    pub(crate) fn waits_for_primary_data(&self, partition: PartitionId) -> bool {
+        self.partition_map.primary(partition) == Some(self.node_id)
+            && self.role(partition) == ReplicaRole::AwaitingSnapshot
+    }
+
     pub async fn db_create(
         &mut self,
         entity_type: &str,
