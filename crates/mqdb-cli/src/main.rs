@@ -439,23 +439,34 @@ async fn dispatch_dev(action: DevAction) -> Result<(), Box<dyn std::error::Error
             stress_constraints,
             all,
             nodes,
+            base_port,
+            db_prefix,
             license,
-        } => commands::dev::cmd_dev_test(
-            pubsub,
-            db,
-            constraints,
-            wildcards,
-            retained,
-            lwt,
-            events,
-            ownership,
-            sharing,
-            presence,
-            stress_constraints,
-            all,
-            nodes,
-            license.as_deref(),
-        ),
+        } => {
+            use commands::dev::Suite;
+            commands::dev::cmd_dev_test(
+                &[
+                    (Suite::Pubsub, pubsub),
+                    (Suite::Db, db),
+                    (Suite::Constraints, constraints),
+                    (Suite::Wildcards, wildcards),
+                    (Suite::Retained, retained),
+                    (Suite::Lwt, lwt),
+                    (Suite::Events, events),
+                    (Suite::Ownership, ownership),
+                    (Suite::Sharing, sharing),
+                    (Suite::Presence, presence),
+                    (Suite::StressConstraints, stress_constraints),
+                ],
+                all,
+                &commands::dev::DevTestOptions {
+                    nodes,
+                    base_port,
+                    db_prefix,
+                    license,
+                },
+            )?;
+        }
         DevAction::StartCluster {
             nodes,
             clean,
@@ -492,9 +503,10 @@ async fn dispatch_dev(action: DevAction) -> Result<(), Box<dyn std::error::Error
             output,
             baseline,
             db,
+            port,
         } => {
             Box::pin(commands::dev_bench::cmd_dev_bench(
-                scenario, output, baseline, &db,
+                scenario, output, baseline, &db, port,
             ))
             .await?;
         }
@@ -504,7 +516,17 @@ async fn dispatch_dev(action: DevAction) -> Result<(), Box<dyn std::error::Error
             duration,
             output,
             db,
-        } => commands::dev_bench::cmd_dev_profile(&scenario, &tool, duration, output, &db)?,
+            port,
+        } => commands::dev_bench::cmd_dev_profile(
+            &scenario,
+            &commands::dev_bench::ProfileRun {
+                tool: &tool,
+                duration,
+                output,
+                db: &db,
+                port,
+            },
+        )?,
         DevAction::Baseline { action } => commands::dev_bench::cmd_dev_baseline(action)?,
     }
     Ok(())

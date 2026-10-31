@@ -12,8 +12,8 @@ use std::time::Duration;
 use crate::cli_types::{ConnectionArgs, DevBenchScenario};
 
 pub(crate) use baseline::cmd_dev_baseline;
-use helpers::{is_agent_running, start_agent_for_bench, wait_for_broker_ready};
-pub(crate) use profiling::cmd_dev_profile;
+use helpers::{broker_listening, start_agent_for_bench, wait_for_broker_ready};
+pub(crate) use profiling::{ProfileRun, cmd_dev_profile};
 use runners::{compare_with_baseline, print_bench_result, run_db_benchmark, run_pubsub_benchmark};
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -32,19 +32,20 @@ pub(crate) async fn cmd_dev_bench(
     output: Option<PathBuf>,
     baseline: Option<PathBuf>,
     db: &str,
+    port: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let exe = std::env::current_exe()?;
     let conn = ConnectionArgs {
-        broker: "127.0.0.1:1883".to_string(),
+        broker: format!("127.0.0.1:{port}"),
         user: None,
         pass: None,
         timeout: 30,
         insecure: false,
     };
 
-    if !is_agent_running() {
-        println!("Starting agent for benchmark...");
-        start_agent_for_bench(&exe, db)?;
+    if !broker_listening(port) {
+        println!("Starting agent for benchmark on port {port}...");
+        start_agent_for_bench(&exe, db, port)?;
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
