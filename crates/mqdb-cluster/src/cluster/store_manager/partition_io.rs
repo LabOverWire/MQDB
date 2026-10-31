@@ -138,69 +138,8 @@ impl StoreManager {
             let store_data = &data[offset..offset + data_len];
             offset += data_len;
 
-            let imported = match entity_name {
-                entity::SESSIONS => self
-                    .sessions
-                    .import_sessions(store_data)
-                    .map_err(|_| StoreApplyError::SessionError)?,
-                entity::QOS2 => self
-                    .qos2
-                    .import_states(store_data)
-                    .map_err(|_| StoreApplyError::Qos2Error)?,
-                entity::SUBSCRIPTIONS => self
-                    .subscriptions
-                    .import_subscriptions(store_data)
-                    .map_err(|_| StoreApplyError::SubscriptionError)?,
-                entity::RETAINED => self
-                    .retained
-                    .import_retained(store_data)
-                    .map_err(|_| StoreApplyError::RetainedError)?,
-                entity::TOPIC_INDEX => self
-                    .topics
-                    .import_entries(store_data)
-                    .map_err(|_| StoreApplyError::TopicIndexError)?,
-                entity::WILDCARDS => self
-                    .wildcards
-                    .import_wildcards(store_data)
-                    .map_err(|_| StoreApplyError::WildcardError)?,
-                entity::INFLIGHT => self
-                    .inflight
-                    .import_inflight(store_data)
-                    .map_err(|_| StoreApplyError::InflightError)?,
-                entity::OFFSETS => self
-                    .offsets
-                    .import_offsets(store_data)
-                    .map_err(|_| StoreApplyError::OffsetError)?,
-                entity::IDEMPOTENCY => self
-                    .idempotency
-                    .import_records(store_data)
-                    .map_err(|_| StoreApplyError::IdempotencyError)?,
-                entity::DB_DATA => self
-                    .db_data
-                    .import_entities(store_data)
-                    .map_err(|_| StoreApplyError::DbDataError)?,
-                entity::DB_SCHEMA => self
-                    .db_schema
-                    .import_schemas(store_data)
-                    .map_err(|_| StoreApplyError::DbSchemaError)?,
-                entity::DB_INDEX => self
-                    .db_index
-                    .import_entries(store_data)
-                    .map_err(|_| StoreApplyError::DbIndexError)?,
-                entity::DB_UNIQUE => self
-                    .db_unique
-                    .import_reservations(store_data)
-                    .map_err(|_| StoreApplyError::DbUniqueError)?,
-                entity::DB_FK => self
-                    .db_fk
-                    .import_requests(store_data)
-                    .map_err(|_| StoreApplyError::DbFkError)?,
-                entity::DB_CONSTRAINT => self
-                    .db_constraints
-                    .import_constraints(store_data)
-                    .map_err(|_| StoreApplyError::DbConstraintError)?,
-                entity::CHANGE_EVENTS => self.import_change_events(store_data)?,
-                _ => continue,
+            let Some(imported) = self.import_section(entity_name, store_data)? else {
+                continue;
             };
 
             counts.total += imported;
@@ -212,6 +151,78 @@ impl StoreManager {
         self.rebuild_fk_indexes_after_import();
 
         Ok(counts)
+    }
+
+    fn import_section(
+        &self,
+        entity_name: &str,
+        store_data: &[u8],
+    ) -> Result<Option<usize>, StoreApplyError> {
+        let imported = match entity_name {
+            entity::SESSIONS => self
+                .sessions
+                .import_sessions(store_data)
+                .map_err(|_| StoreApplyError::SessionError),
+            entity::QOS2 => self
+                .qos2
+                .import_states(store_data)
+                .map_err(|_| StoreApplyError::Qos2Error),
+            entity::SUBSCRIPTIONS => self
+                .subscriptions
+                .import_subscriptions(store_data)
+                .map_err(|_| StoreApplyError::SubscriptionError),
+            entity::RETAINED => self
+                .retained
+                .import_retained(store_data)
+                .map_err(|_| StoreApplyError::RetainedError),
+            entity::TOPIC_INDEX => self
+                .topics
+                .import_entries(store_data)
+                .map_err(|_| StoreApplyError::TopicIndexError),
+            entity::WILDCARDS => self
+                .wildcards
+                .import_wildcards(store_data)
+                .map_err(|_| StoreApplyError::WildcardError),
+            entity::INFLIGHT => self
+                .inflight
+                .import_inflight(store_data)
+                .map_err(|_| StoreApplyError::InflightError),
+            entity::OFFSETS => self
+                .offsets
+                .import_offsets(store_data)
+                .map_err(|_| StoreApplyError::OffsetError),
+            entity::IDEMPOTENCY => self
+                .idempotency
+                .import_records(store_data)
+                .map_err(|_| StoreApplyError::IdempotencyError),
+            entity::DB_DATA => self
+                .db_data
+                .import_entities(store_data)
+                .map_err(|_| StoreApplyError::DbDataError),
+            entity::DB_SCHEMA => self
+                .db_schema
+                .import_schemas(store_data)
+                .map_err(|_| StoreApplyError::DbSchemaError),
+            entity::DB_INDEX => self
+                .db_index
+                .import_entries(store_data)
+                .map_err(|_| StoreApplyError::DbIndexError),
+            entity::DB_UNIQUE => self
+                .db_unique
+                .import_reservations(store_data)
+                .map_err(|_| StoreApplyError::DbUniqueError),
+            entity::DB_FK => self
+                .db_fk
+                .import_requests(store_data)
+                .map_err(|_| StoreApplyError::DbFkError),
+            entity::DB_CONSTRAINT => self
+                .db_constraints
+                .import_constraints(store_data)
+                .map_err(|_| StoreApplyError::DbConstraintError),
+            entity::CHANGE_EVENTS => self.import_change_events(store_data),
+            _ => return Ok(None),
+        };
+        imported.map(Some)
     }
 
     fn export_change_events(&self, partition: PartitionId) -> Vec<u8> {

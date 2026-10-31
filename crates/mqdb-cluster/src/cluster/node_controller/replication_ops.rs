@@ -427,15 +427,14 @@ impl<T: ClusterTransport> NodeController<T> {
                 continue;
             }
             if new_assignment.primary == Some(self.node_id) {
-                match self.source_needed_before_primary(partition, new_assignment, &held) {
-                    Some(source) => {
-                        self.await_snapshot(partition, new_assignment.epoch, source, true)
-                            .await;
-                    }
-                    None => {
-                        self.become_primary(partition, new_assignment.epoch);
-                        became_primary |= old_assignment.primary != Some(self.node_id);
-                    }
+                if let Some(source) =
+                    self.source_needed_before_primary(partition, new_assignment, &held)
+                {
+                    self.await_snapshot(partition, new_assignment.epoch, source, true)
+                        .await;
+                } else {
+                    self.become_primary(partition, new_assignment.epoch);
+                    became_primary |= old_assignment.primary != Some(self.node_id);
                 }
             } else if new_assignment.replicas.contains(&self.node_id) {
                 if matches!(

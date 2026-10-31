@@ -963,6 +963,7 @@ async fn a_waiting_node_that_leaves_the_assignment_does_not_serve_its_deferred_r
         .apply_raft_partition_map(map_with(partition, node(3), &[node(2)], 3))
         .await;
 
+    assert_eq!(chunks_to(&wiped, node(3)), 0);
     assert_ne!(joiner.role(partition), ReplicaRole::Primary);
 }
 
@@ -1167,4 +1168,83 @@ async fn a_waiting_replica_swapped_to_primary_keeps_its_source_when_the_replica_
     assert_eq!(ctrl.role(partition), ReplicaRole::AwaitingSnapshot);
     assert_eq!(snapshot_requests_to(&ctrl, node(1)), 1);
     assert_eq!(snapshot_requests_to(&ctrl, node(3)), 0);
+}
+
+#[tokio::test]
+async fn a_stalled_partial_transfer_is_requested_again() {
+    let partition = session_partition("c1");
+    let map = map_with(partition, node(2), &[node(3)], 1);
+    let mut ctrl = controller(2);
+    ctrl.apply_raft_partition_map(map.clone()).await;
+    ctrl.transport.inject_message(
+        node(3),
+        ClusterMessage::SnapshotChunk(crate::cluster::snapshot::SnapshotChunk::new(
+            partition,
+            0,
+            2,
+            0,
+            Vec::new(),
+        )),
+    );
+    ctrl.process_messages().await;
+    assert!(ctrl.pending_snapshots.contains_key(&partition));
+    stall_request(&mut ctrl, partition);
+
+    ctrl.apply_raft_partition_map(map).await;
+
+    assert_eq!(snapshot_requests_to(&ctrl, node(3)), 2);
+}
+
+#[tokio::test]
+async fn a_failed_import_is_requested_again() {
+    let partition = session_partition("c1");
+    let map = map_with(partition, node(2), &[node(3)], 1);
+    let mut ctrl = controller(2);
+    ctrl.apply_raft_partition_map(map.clone()).await;
+    ctrl.transport.inject_message(
+        node(3),
+        ClusterMessage::SnapshotChunk(crate::cluster::snapshot::SnapshotChunk::new(
+            partition,
+            0,
+            1,
+            0,
+            vec![1, 2, 0xff, 0xfe, 0, 0, 0, 0],
+        )),
+    );
+    ctrl.process_messages().await;
+    assert_eq!(ctrl.role(partition), ReplicaRole::AwaitingSnapshot);
+    stall_request(&mut ctrl, partition);
+
+    ctrl.apply_raft_partition_map(map).await;
+
+    assert_eq!(snapshot_requests_to(&ctrl, node(3)), 2);
+}
+
+#[tokio::test]
+async fn a_primary_built_from_a_constraint_only_snapshot_trusts_its_disk_after_a_restart() {
+    let partition = session_partition("c1");
+    let mut replica = controller(3);
+    replica.become_replica(partition, Epoch::new(1), 0);
+    replica
+        .stores()
+        .db_constraints
+        .add(
+            crate::cluster::db::ClusterConstraint::unique("bigdocs", "uniq_bigdocs", "email")
+                .unwrap(),
+        )
+        .unwrap();
+    let backend = crate::cluster::test_support::FaultyBackend::shared();
+    let map = map_with(partition, node(2), &[node(3)], 1);
+
+    let mut fresh = controller_on(2, &backend);
+    fresh.apply_raft_partition_map(map.clone()).await;
+    serve_snapshot(&mut replica, &mut fresh, partition).await;
+    assert_eq!(fresh.role(partition), ReplicaRole::Primary);
+    drop(fresh);
+
+    let mut restarted = controller_on(2, &backend);
+    restarted.stores().recover().unwrap();
+    restarted.apply_raft_partition_map(map).await;
+
+    assert_eq!(restarted.role(partition), ReplicaRole::Primary);
 }

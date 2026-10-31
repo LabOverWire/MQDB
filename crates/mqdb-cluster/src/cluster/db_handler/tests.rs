@@ -4491,3 +4491,71 @@ async fn per_id_requests_on_a_primary_still_waiting_for_its_data_are_refused_as_
         );
     }
 }
+
+#[tokio::test]
+async fn owned_per_id_requests_on_a_primary_still_waiting_for_its_data_are_refused_as_not_ready() {
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let ownership = ownership_config("docs", "owner");
+    let handler = DbRequestHandler::new(node2).with_ownership(Arc::clone(&ownership));
+    let mut ctrl = create_test_controller(node2, MockTransport::new(node2));
+    ctrl.set_ownership(Arc::clone(&ownership));
+    let partition = data_partition("docs", "d");
+    let mut map = PartitionMap::default();
+    map.set(
+        partition,
+        crate::cluster::PartitionAssignment::new(node2, vec![node3], Epoch::new(1)),
+    );
+    ctrl.apply_raft_partition_map(map).await;
+    let ctx = MqttRequestContext {
+        response_topic: Some("resp/t"),
+        correlation_data: None,
+        sender: Some("alice"),
+        client_id: None,
+    };
+    let update = serde_json::to_vec(&serde_json::json!({"n": 1})).unwrap();
+    let mut codes = Vec::new();
+    for (topic, payload) in [
+        ("$DB/docs/d/update", update.as_slice()),
+        ("$DB/docs/d/delete", b"{}".as_slice()),
+        ("$DB/docs/d", b"{}".as_slice()),
+    ] {
+        let response = handler
+            .handle_publish(&mut ctrl, topic, payload, &ctx)
+            .await
+            .unwrap();
+        let body = parse_json_response(&response.payload);
+        codes.push(format!("{topic} -> {} {}", body["code"], body["message"]));
+    }
+    assert!(codes.iter().all(|c| c.contains("-> 503")), "{codes:?}");
+}
+
+#[tokio::test]
+async fn per_id_writes_on_a_replica_still_waiting_for_its_data_go_to_the_primary() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let handler = DbRequestHandler::new(node2);
+    let mut ctrl = create_test_controller(node2, MockTransport::new(node2));
+    let partition = data_partition("docs", "d");
+    let mut map = PartitionMap::default();
+    map.set(
+        partition,
+        crate::cluster::PartitionAssignment::new(node1, vec![node2], Epoch::new(1)),
+    );
+    ctrl.apply_raft_partition_map(map).await;
+    assert_eq!(
+        ctrl.role(partition),
+        crate::cluster::replication::ReplicaRole::AwaitingSnapshot
+    );
+    let ctx = MqttRequestContext {
+        response_topic: Some("resp/t"),
+        correlation_data: None,
+        sender: None,
+        client_id: None,
+    };
+    let update = serde_json::to_vec(&serde_json::json!({"n": 1})).unwrap();
+    let response = handler
+        .handle_publish(&mut ctrl, "$DB/docs/d/update", &update, &ctx)
+        .await;
+    assert!(matches!(response, super::DbPublishResult::NoResponse));
+}
