@@ -38,9 +38,6 @@ pub(super) enum JsonOpResult {
     PendingFkDelete(Box<PendingFkDeleteWork>),
 }
 
-/// The reserved `_expected_version` compare-and-set precondition carried in a delete
-/// request body (deletes otherwise ignore their payload). Returns the client-facing error
-/// message when the field is present but malformed, so the CAS can never be silently skipped.
 fn expected_version_from_delete_payload(payload: &[u8]) -> Result<Option<u64>, String> {
     if payload.is_empty() {
         return Ok(None);
@@ -50,15 +47,9 @@ fn expected_version_from_delete_payload(payload: &[u8]) -> Result<Option<u64>, S
     mqdb_core::protocol::take_expected_version(&mut value).map_err(|e| e.to_string())
 }
 
-/// Outcome of resolving an identity-mode (email) grantee before a share/unshare
-/// is routed to the resource primary.
 #[cfg(feature = "http-api")]
 enum ShareResolution {
-    /// Continue routing with this crypto-rewritten payload (keys injected, and
-    /// for a share the canonical grantee resolved locally or left pending).
     Rewrite(Vec<u8>),
-    /// A cross-partition scatter is resolving the grantee; the grant is written
-    /// and the client answered when it completes.
     Suspended,
 }
 
@@ -78,7 +69,6 @@ struct UniqueDiffs<'a> {
     old_diff: &'a Value,
 }
 
-#[allow(clippy::unused_self)]
 impl DbRequestHandler {
     fn validate_against_schema<T: ClusterTransport>(
         controller: &NodeController<T>,
@@ -131,7 +121,6 @@ impl DbRequestHandler {
         Some(Self::json_error(400, &msg))
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_json_operation<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -143,9 +132,6 @@ impl DbRequestHandler {
         let correlation_data = mqtt_ctx.correlation_data;
         let sender = mqtt_ctx.sender;
 
-        // `_shares` is server-managed: reject direct generic CRUD so grants are
-        // only ever written through the share ops (preserves co-location and
-        // prevents forged grants). Mirrors the agent guard in transport_execute.
         match operation {
             DbTopicOperation::JsonCreate { entity }
             | DbTopicOperation::JsonRead { entity, .. }
@@ -190,9 +176,6 @@ impl DbRequestHandler {
                             return JsonOpResult::Response(err);
                         }
                     } else {
-                        // Not the resource primary: forward so the access decision
-                        // is graded on the primary against co-located grants,
-                        // never served from a stale replica (#75 read-routing).
                         let forwarded = controller
                             .forward_json_db_request(
                                 partition,
@@ -225,8 +208,6 @@ impl DbRequestHandler {
                 let effective_payload = if let OwnershipDecision::Check { owner_field, .. } =
                     self.ownership.evaluate(entity, sender)
                 {
-                    // Grade Edit on the resource primary (grants are co-located);
-                    // when not primary, defer to the primary's forwarded check.
                     if controller.is_primary_for_partition(data_partition(entity, id))
                         && let Some(err) = controller.check_local_share_access(
                             entity,
@@ -454,13 +435,7 @@ impl DbRequestHandler {
         }
     }
 
-    /// Resolve an identity-mode (email) grantee before routing a share/unshare.
-    /// Returns `None` when there is no identity crypto or no grantee (verbatim
-    /// password-mode path). Otherwise rewrites the payload with the blind-indexed
-    /// `grantee_key` and encrypted `grantee_email`; a share resolves the canonical
-    /// grantee locally when possible, else suspends on a cross-partition scatter.
     #[cfg(feature = "http-api")]
-    #[allow(clippy::too_many_arguments)]
     async fn resolve_share_identity<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -847,7 +822,6 @@ impl DbRequestHandler {
         )
     }
 
-    #[allow(clippy::cast_possible_truncation)]
     async fn handle_json_read<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -974,7 +948,6 @@ impl DbRequestHandler {
         self.execute_local_update(controller, &ctx, updates).await
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn execute_local_update<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -1372,7 +1345,6 @@ impl DbRequestHandler {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn handle_json_list<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -1424,7 +1396,6 @@ impl DbRequestHandler {
             ));
         }
 
-        #[allow(clippy::cast_possible_truncation)]
         let pagination: Option<mqdb_core::Pagination> = parsed_data.as_ref().and_then(|d| {
             d.get("pagination")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -1564,7 +1535,6 @@ impl DbRequestHandler {
         Some(serde_json::to_vec(&result).unwrap_or_default())
     }
 
-    #[allow(clippy::too_many_lines, clippy::type_complexity)]
     pub async fn complete_pending_unique_check<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -1863,7 +1833,6 @@ impl DbRequestHandler {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     pub async fn complete_pending_fk_check<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
