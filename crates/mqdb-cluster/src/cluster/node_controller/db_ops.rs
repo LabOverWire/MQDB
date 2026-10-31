@@ -995,9 +995,13 @@ impl<T: ClusterTransport> NodeController<T> {
             Ok(v) => v,
             Err(msg) => return (Self::json_error(400, &msg), None),
         };
-        if let Some(expected) = expected_version
-            && let Some(existing) = self.db_get(entity, id)
-        {
+        let Some(existing) = self.db_get(entity, id) else {
+            return (
+                Self::json_error(404, &format!("entity not found: {entity} id={id}")),
+                None,
+            );
+        };
+        if let Some(expected) = expected_version {
             let current = serde_json::from_slice::<Value>(&existing.data)
                 .ok()
                 .and_then(|d| d.get("_version").and_then(Value::as_u64))

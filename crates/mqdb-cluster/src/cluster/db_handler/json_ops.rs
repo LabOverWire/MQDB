@@ -199,13 +199,13 @@ impl DbRequestHandler {
                     return JsonOpResult::Response(Self::json_error(400, &message));
                 }
                 let partition = data_partition(entity, id);
+                if let Some(err) = Self::refuse_until_primary_role(controller, partition) {
+                    return JsonOpResult::Response(err);
+                }
                 let stripped_payload;
                 let effective_payload = if let OwnershipDecision::Check { owner_field, .. } =
                     self.ownership.evaluate(entity, sender)
                 {
-                    if let Some(err) = Self::refuse_until_primary_role(controller, partition) {
-                        return JsonOpResult::Response(err);
-                    }
                     if controller.is_primary_for_partition(partition)
                         && let Some(err) = controller.check_local_share_access(
                             entity,
@@ -264,14 +264,15 @@ impl DbRequestHandler {
                     Err(msg) => return JsonOpResult::Response(Self::json_error(400, &msg)),
                 };
                 let partition = data_partition(entity, id);
+                if let Some(err) = Self::refuse_until_primary_role(controller, partition) {
+                    return JsonOpResult::Response(err);
+                }
                 if let OwnershipDecision::Check {
                     owner_field,
                     sender: uid,
                 } = self.ownership.evaluate(entity, sender)
-                    && let Some(err) = Self::refuse_until_primary_role(controller, partition)
-                        .or_else(|| {
-                            self.check_cluster_ownership(controller, entity, id, owner_field, uid)
-                        })
+                    && let Some(err) =
+                        self.check_cluster_ownership(controller, entity, id, owner_field, uid)
                 {
                     return JsonOpResult::Response(err);
                 }
@@ -1237,9 +1238,13 @@ impl DbRequestHandler {
         let response_topic = mqtt_ctx.response_topic.unwrap_or("");
         let correlation_data = mqtt_ctx.correlation_data;
 
-        if let Some(expected) = expected_version
-            && let Some(existing) = controller.db_get(entity, id)
-        {
+        let Some(existing) = controller.db_get(entity, id) else {
+            return JsonOpResult::Response(Self::json_error(
+                404,
+                &format!("entity not found: {entity} id={id}"),
+            ));
+        };
+        if let Some(expected) = expected_version {
             let current = serde_json::from_slice::<Value>(&existing.data)
                 .ok()
                 .and_then(|d| d.get("_version").and_then(Value::as_u64))

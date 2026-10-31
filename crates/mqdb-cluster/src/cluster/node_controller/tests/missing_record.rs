@@ -451,21 +451,26 @@ async fn writes_reaching_a_not_yet_primary_stay_retryable_on_every_path() {
     let update = serde_json::to_vec(&json!({"title": "x"})).unwrap();
 
     let mut codes = Vec::new();
-    for (op, payload) in [
-        (JsonDbOp::Update, update.as_slice()),
-        (JsonDbOp::Delete, &[]),
-    ] {
-        codes.push((
-            op,
-            codes_for_payload(&mut ctrl, op, "child-1", "bob", payload).await,
-        ));
+    for sender in ["bob", "root"] {
+        for (op, payload) in [
+            (JsonDbOp::Update, update.as_slice()),
+            (JsonDbOp::Delete, &[]),
+        ] {
+            codes.push((
+                sender,
+                op,
+                codes_for_payload(&mut ctrl, op, "child-1", sender, payload).await,
+            ));
+        }
     }
 
     assert_eq!(
         codes,
         [
-            (JsonDbOp::Update, [json!(503), json!(503)]),
-            (JsonDbOp::Delete, [json!(503), json!(503)]),
+            ("bob", JsonDbOp::Update, [json!(503), json!(503)]),
+            ("bob", JsonDbOp::Delete, [json!(503), json!(503)]),
+            ("root", JsonDbOp::Update, [json!(503), json!(503)]),
+            ("root", JsonDbOp::Delete, [json!(503), json!(503)]),
         ]
     );
 }
@@ -573,12 +578,34 @@ async fn deleting_a_missing_record_touches_no_referencing_rows_on_every_path() {
     let note = serde_json::to_vec(&json!({"userId": "carol", "parent_id": "ghost"})).unwrap();
     ctrl.db_create("notes", "n1", &note, 1000).await.unwrap();
 
-    let codes = codes_for_payload(&mut ctrl, JsonDbOp::Delete, "ghost", "bob", &[]).await;
+    let mut answers = Vec::new();
+    for sender in ["bob", "root"] {
+        let local = local_response(&mut ctrl, JsonDbOp::Delete, "ghost", sender, &[]).await;
+        let after_local: Value =
+            serde_json::from_slice(&ctrl.db_get("notes", "n1").unwrap().data).unwrap();
+        ctrl.db_update("notes", "n1", &note, 2000).await.unwrap();
+        let forwarded = forwarded_response(&mut ctrl, JsonDbOp::Delete, "ghost", sender, &[]).await;
+        let after_forwarded: Value =
+            serde_json::from_slice(&ctrl.db_get("notes", "n1").unwrap().data).unwrap();
+        ctrl.db_update("notes", "n1", &note, 3000).await.unwrap();
+        answers.push((
+            sender,
+            [local["code"].clone(), after_local["parent_id"].clone()],
+            [
+                forwarded["code"].clone(),
+                after_forwarded["parent_id"].clone(),
+            ],
+        ));
+    }
 
-    let note_after: Value =
-        serde_json::from_slice(&ctrl.db_get("notes", "n1").unwrap().data).unwrap();
-    assert_eq!(codes, [json!(404), json!(404)]);
-    assert_eq!(note_after["parent_id"], "ghost");
+    let untouched = [json!(404), json!("ghost")];
+    assert_eq!(
+        answers,
+        [
+            ("bob", untouched.clone(), untouched.clone()),
+            ("root", untouched.clone(), untouched),
+        ]
+    );
 }
 
 #[tokio::test]
