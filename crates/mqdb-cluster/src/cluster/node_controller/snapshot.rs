@@ -8,7 +8,7 @@ use super::super::snapshot::{
     SnapshotBuilder, SnapshotChunk, SnapshotComplete, SnapshotRequest, SnapshotSender,
 };
 use super::super::transport::{ClusterMessage, ClusterTransport};
-use super::super::{Epoch, NodeId, PartitionId};
+use super::super::{Epoch, NUM_PARTITIONS, NodeId, PartitionId};
 use super::NodeController;
 use std::time::{Duration, Instant};
 
@@ -18,6 +18,35 @@ pub(super) const SNAPSHOT_RETRY_AFTER: Duration = Duration::from_secs(10);
 pub(crate) struct SnapshotRequestState {
     pub(crate) source: NodeId,
     pub(crate) last_activity: Instant,
+}
+
+#[derive(Debug)]
+pub(crate) struct SnapshotRequests([Option<SnapshotRequestState>; NUM_PARTITIONS as usize]);
+
+impl SnapshotRequests {
+    pub(crate) fn new() -> Self {
+        Self([None; NUM_PARTITIONS as usize])
+    }
+
+    pub(crate) fn get(&self, partition: &PartitionId) -> Option<&SnapshotRequestState> {
+        self.0[usize::from(partition.get())].as_ref()
+    }
+
+    pub(crate) fn get_mut(&mut self, partition: &PartitionId) -> Option<&mut SnapshotRequestState> {
+        self.0[usize::from(partition.get())].as_mut()
+    }
+
+    pub(crate) fn contains_key(&self, partition: &PartitionId) -> bool {
+        self.get(partition).is_some()
+    }
+
+    pub(crate) fn insert(&mut self, partition: PartitionId, request: SnapshotRequestState) {
+        self.0[usize::from(partition.get())] = Some(request);
+    }
+
+    pub(crate) fn remove(&mut self, partition: &PartitionId) {
+        self.0[usize::from(partition.get())] = None;
+    }
 }
 
 impl<T: ClusterTransport> NodeController<T> {
@@ -95,7 +124,6 @@ impl<T: ClusterTransport> NodeController<T> {
                 .send(from, ClusterMessage::SnapshotComplete(complete))
                 .await;
             self.pending_snapshots.remove(&partition);
-            self.requested_snapshots.remove(&partition);
             return;
         }
 
@@ -107,7 +135,6 @@ impl<T: ClusterTransport> NodeController<T> {
                 .and_then(SnapshotBuilder::assemble)
             else {
                 tracing::error!(?partition, "failed to assemble snapshot");
-                self.requested_snapshots.remove(&partition);
                 let complete = SnapshotComplete::failed(partition);
                 let _ = self
                     .transport
@@ -119,6 +146,7 @@ impl<T: ClusterTransport> NodeController<T> {
             let saved_events = self.set_aside_change_events(partition);
             match self.stores.import_partition(&data) {
                 Ok(count) => {
+                    self.imported_partitions[usize::from(partition.get())] = true;
                     tracing::info!(
                         ?partition,
                         imported = count,
@@ -148,7 +176,6 @@ impl<T: ClusterTransport> NodeController<T> {
                 Err(e) => {
                     tracing::error!(?partition, ?e, "failed to import snapshot");
                     self.restore_change_events(partition, &saved_events);
-                    self.requested_snapshots.remove(&partition);
                     let complete = SnapshotComplete::failed(partition);
                     let _ = self
                         .transport
@@ -203,22 +230,12 @@ impl<T: ClusterTransport> NodeController<T> {
                 sequence,
                 "primary now active after snapshot import"
             );
-        } else if self
-            .partition_map
-            .replicas(partition)
-            .contains(&self.node_id)
-        {
+        } else {
             self.become_replica(partition, epoch, sequence);
             tracing::info!(
                 ?partition,
                 sequence,
                 "replica now active after snapshot import"
-            );
-        } else {
-            self.step_down(partition);
-            tracing::info!(
-                ?partition,
-                "snapshot imported for a partition no longer assigned"
             );
         }
     }

@@ -463,7 +463,9 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) dead_nodes_for_session_update: VecDeque<NodeId>,
     pub(super) migration_manager: MigrationManager,
     pub(super) pending_snapshots: HashMap<PartitionId, SnapshotBuilder>,
-    pub(super) requested_snapshots: HashMap<PartitionId, snapshot::SnapshotRequestState>,
+    pub(super) requested_snapshots: snapshot::SnapshotRequests,
+    pub(super) imported_partitions: [bool; super::NUM_PARTITIONS as usize],
+    pub(super) held_since_boot: [bool; super::NUM_PARTITIONS as usize],
     pub(super) held_primaries: Option<super::store_manager::HeldPrimaries>,
     pub(super) outgoing_snapshots: HashMap<(NodeId, PartitionId), SnapshotSender>,
     pub(super) draining: bool,
@@ -542,7 +544,9 @@ impl<T: ClusterTransport> NodeController<T> {
             dead_nodes_for_session_update: VecDeque::new(),
             migration_manager: MigrationManager::new(node_id),
             pending_snapshots: HashMap::new(),
-            requested_snapshots: HashMap::new(),
+            requested_snapshots: snapshot::SnapshotRequests::new(),
+            imported_partitions: [false; super::NUM_PARTITIONS as usize],
+            held_since_boot: [false; super::NUM_PARTITIONS as usize],
             held_primaries: None,
             outgoing_snapshots: HashMap::new(),
             draining: false,
@@ -700,7 +704,10 @@ impl<T: ClusterTransport> NodeController<T> {
             .entry(partition.get())
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
         state.become_primary(epoch);
-        if let Err(e) = self.stores.record_held_primary(partition, epoch) {
+        self.held_since_boot[usize::from(partition.get())] = true;
+        if !self.imported_partitions[usize::from(partition.get())]
+            && let Err(e) = self.stores.record_held_primary(partition, epoch)
+        {
             tracing::warn!(?partition, ?e, "failed to persist the held primary marker");
         }
         self.seal_or_queue_unique(partition, epoch);
@@ -713,6 +720,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .entry(partition.get())
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
         state.become_replica(epoch, sequence);
+        self.held_since_boot[usize::from(partition.get())] = true;
         self.stop_sending_change_events(partition);
     }
 

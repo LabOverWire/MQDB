@@ -22,15 +22,18 @@
 (*    if its map names it, and replica otherwise                           *)
 (*  - any node answers a snapshot request with what its store holds        *)
 (*                                                                          *)
-(* Design = "fix": a node takes the primary role only if it already held   *)
-(* the partition (Primary or Replica role), or if this is its first        *)
-(* assignment since boot and its disk records that it held the primary     *)
-(* role at this very assignment (marker, written when it takes the role    *)
-(* and lost with the disk). Otherwise it waits for a snapshot from the replica and becomes *)
-(* primary on import. A waiting node asks again when its assignment        *)
-(* changes or its request is lost (Retry stands for the retry timeout).    *)
-(* An import for a partition the node is no longer assigned leaves it      *)
-(* without a role.                                                         *)
+(* Design = "fix": a node takes the primary role only if it already holds  *)
+(* the partition (Primary or Replica role), or if it has not held the      *)
+(* partition since boot and its disk records that it held the primary role *)
+(* at this very assignment (marker). Otherwise it waits for a snapshot from *)
+(* the replica and becomes primary on import. A waiting node asks again    *)
+(* when its assignment changes or its request is lost (Retry stands for    *)
+(* the retry timeout and for a failed transfer).                           *)
+(*                                                                          *)
+(* A node keeps records in memory (mem) and on disk. A write reaches both; *)
+(* a snapshot import reaches memory only (import_partition does not        *)
+(* persist); a crash reloads memory from disk. So the marker is written     *)
+(* only for a partition the node did not fill by an import in this run.    *)
 (*                                                                          *)
 (* ABSTRACTIONS: a snapshot transfer is one step (export and import), so  *)
 (* writes cannot fall between them; a write reaches the replica named by  *)
@@ -59,12 +62,16 @@
 (*                   primary of a rebalance keeps serving on its old map   *)
 (*                   after the new primary took over. Not caused or fixed  *)
 (*                   by this change.                                        *)
+(*  _markimport:     Design "markimport" also writes the marker after an   *)
+(*                   import; ServeCorrect fails: a wiped node fills from a *)
+(*                   snapshot, restarts without a wipe, and trusts a disk  *)
+(*                   that never held the imported records.                 *)
 (*  _recovered:      Design "recovered" trusts any data on disk instead of *)
 (*                   the marker; ServeCorrect fails: a replica that missed *)
 (*                   writes while down is promoted after its restart.      *)
 (*                                                                          *)
 (* ServeCorrect: a live node in the primary role holds every acked write.  *)
-(* NoAckedLoss: every acked write is on some node's disk.                  *)
+(* NoAckedLoss: every acked write is on some disk or some live memory.    *)
 (* EventuallyServing: once failures stop, the assigned primary serves.     *)
 (* EventuallyReplicated: once failures stop, the assigned replica has the  *)
 (* Replica role.                                                            *)
@@ -78,20 +85,21 @@ Keys == {1}
 None == 0
 Roles == {"none", "primary", "replica", "awaiting"}
 
-VARIABLES up, disk, role, applied, requested, src, live, assigned, marker,
-          hist, dead, truth, writes, crashes, wipes, swaps
+VARIABLES up, mem, disk, role, applied, requested, src, live, held, imported,
+          marker, hist, dead, truth, writes, crashes, wipes, swaps
 
-vars == <<up, disk, role, applied, requested, src, live, assigned, marker,
-          hist, dead, truth, writes, crashes, wipes, swaps>>
+vars == <<up, mem, disk, role, applied, requested, src, live, held, imported,
+          marker, hist, dead, truth, writes, crashes, wipes, swaps>>
 
 Empty == [k \in Keys |-> 0]
 Latest == hist[Len(hist)]
 LocalMap(n) == hist[applied[n]]
-HasAll(n) == \A k \in Keys : disk[n][k] = truth[k]
+HasAll(n) == \A k \in Keys : mem[n][k] = truth[k]
 Failed(n) == ~up[n] \/ (n \in {Latest.p, Latest.r} /\ ~HasAll(n))
 
 TypeOK ==
     /\ up \in [Nodes -> BOOLEAN]
+    /\ mem \in [Nodes -> [Keys -> 0..MaxWrites + 1]]
     /\ disk \in [Nodes -> [Keys -> 0..MaxWrites + 1]]
     /\ role \in [Nodes -> Roles]
     /\ applied \in [Nodes -> 0..(1 + MaxCrashes * 2 + MaxSwaps + 4)]
@@ -103,12 +111,14 @@ TypeOK ==
 Init ==
     /\ up = [n \in Nodes |-> TRUE]
     /\ disk = [n \in Nodes |-> IF n \in {1, 2} THEN [k \in Keys |-> 1] ELSE Empty]
+    /\ mem = disk
     /\ role = [n \in Nodes |-> CASE n = 1 -> "primary" [] n = 2 -> "replica" [] OTHER -> "none"]
     /\ applied = [n \in Nodes |-> 1]
     /\ requested = [n \in Nodes |-> FALSE]
     /\ src = [n \in Nodes |-> None]
     /\ live = [n \in Nodes |-> FALSE]
-    /\ assigned = [n \in Nodes |-> n \in {1, 2}]
+    /\ held = [n \in Nodes |-> n \in {1, 2}]
+    /\ imported = [n \in Nodes |-> FALSE]
     /\ marker = [n \in Nodes |-> IF n = 1 THEN 1 ELSE 0]
     /\ hist = <<[p |-> 1, r |-> 2]>>
     /\ dead = {}
@@ -139,7 +149,7 @@ TakeRole(n, r) ==
 
 HeldData(n) == role[n] \in {"primary", "replica"}
 TrustDisk(n) ==
-    /\ ~assigned[n]
+    /\ ~held[n]
     /\ IF Design = "recovered"
        THEN \E k \in Keys : disk[n][k] # 0
        ELSE marker[n] = Len(hist)
@@ -159,10 +169,11 @@ ApplyMap(n) ==
        /\ CASE m.p = n -> ApplyAsPrimary(n, m)
             [] m.r = n -> ApplyAsReplica(n, m)
             [] OTHER -> TakeRole(n, "none")
-       /\ assigned' = [assigned EXCEPT ![n] = assigned[n] \/ m.p = n \/ m.r = n]
     /\ applied' = [applied EXCEPT ![n] = Len(hist)]
-    /\ marker' = [marker EXCEPT ![n] = IF role'[n] = "primary" THEN Len(hist) ELSE marker[n]]
-    /\ UNCHANGED <<up, disk, hist, dead, truth, writes, crashes, wipes, swaps>>
+    /\ held' = [held EXCEPT ![n] = held[n] \/ role'[n] \in {"primary", "replica"}]
+    /\ marker' = [marker EXCEPT ![n] =
+                      IF role'[n] = "primary" /\ ~imported[n] THEN Len(hist) ELSE marker[n]]
+    /\ UNCHANGED <<up, mem, disk, imported, hist, dead, truth, writes, crashes, wipes, swaps>>
 
 ImportedRole(n) ==
     LET m == LocalMap(n) IN
@@ -175,14 +186,18 @@ ServeSnapshot(n) ==
     /\ role[n] = "awaiting"
     /\ live[n]
     /\ up[src[n]]
-    /\ disk' = [disk EXCEPT ![n] = [k \in Keys |->
-                   IF disk[src[n]][k] # 0 THEN disk[src[n]][k] ELSE disk[n][k]]]
+    /\ mem' = [mem EXCEPT ![n] = [k \in Keys |->
+                   IF mem[src[n]][k] # 0 THEN mem[src[n]][k] ELSE mem[n][k]]]
     /\ role' = [role EXCEPT ![n] = ImportedRole(n)]
     /\ requested' = [requested EXCEPT ![n] = FALSE]
     /\ live' = [live EXCEPT ![n] = FALSE]
     /\ src' = [src EXCEPT ![n] = None]
-    /\ marker' = [marker EXCEPT ![n] = IF ImportedRole(n) = "primary" THEN applied[n] ELSE marker[n]]
-    /\ UNCHANGED <<up, applied, assigned, hist, dead, truth, writes, crashes, wipes, swaps>>
+    /\ held' = [held EXCEPT ![n] = held[n] \/ ImportedRole(n) \in {"primary", "replica"}]
+    /\ imported' = [imported EXCEPT ![n] = Design \in {"fix", "recovered"}]
+    /\ marker' = [marker EXCEPT ![n] =
+                      IF ImportedRole(n) = "primary" /\ Design \in {"current", "markimport"}
+                      THEN applied[n] ELSE marker[n]]
+    /\ UNCHANGED <<up, disk, applied, hist, dead, truth, writes, crashes, wipes, swaps>>
 
 Retry(n) ==
     /\ Design # "current"
@@ -196,7 +211,7 @@ Retry(n) ==
           /\ from # n
           /\ up[from]
           /\ Ask(n, from)
-    /\ UNCHANGED <<up, disk, role, applied, assigned, marker, hist, dead, truth, writes, crashes, wipes, swaps>>
+    /\ UNCHANGED <<up, mem, disk, role, applied, held, imported, marker, hist, dead, truth, writes, crashes, wipes, swaps>>
 
 Write(k) ==
     /\ writes < MaxWrites + 1
@@ -205,13 +220,12 @@ Write(k) ==
         /\ role[p] = "primary"
         /\ LET v == writes + 1
                r == Latest.r
-           IN /\ disk' = [n \in Nodes |->
-                    IF n = p \/ (n = r /\ n # p /\ up[n] /\ role[n] = "replica")
-                    THEN [disk[n] EXCEPT ![k] = v]
-                    ELSE disk[n]]
+               gets(n) == n = p \/ (n = r /\ n # p /\ up[n] /\ role[n] = "replica")
+           IN /\ mem' = [n \in Nodes |-> IF gets(n) THEN [mem[n] EXCEPT ![k] = v] ELSE mem[n]]
+              /\ disk' = [n \in Nodes |-> IF gets(n) THEN [disk[n] EXCEPT ![k] = v] ELSE disk[n]]
               /\ truth' = [truth EXCEPT ![k] = v]
               /\ writes' = v
-    /\ UNCHANGED <<up, role, applied, requested, src, live, assigned, marker, hist, dead, crashes, wipes, swaps>>
+    /\ UNCHANGED <<up, role, applied, requested, src, live, held, imported, marker, hist, dead, crashes, wipes, swaps>>
 
 Crash(n, wipe) ==
     /\ up[n]
@@ -221,13 +235,15 @@ Crash(n, wipe) ==
     /\ n = Latest.p => (Latest.r # None /\ role[Latest.r] = "replica")
     /\ up' = [up EXCEPT ![n] = FALSE]
     /\ disk' = IF wipe THEN [disk EXCEPT ![n] = Empty] ELSE disk
+    /\ mem' = [mem EXCEPT ![n] = IF wipe THEN Empty ELSE disk[n]]
+    /\ imported' = [imported EXCEPT ![n] = FALSE]
     /\ marker' = IF wipe THEN [marker EXCEPT ![n] = 0] ELSE marker
     /\ role' = [role EXCEPT ![n] = "none"]
     /\ applied' = [applied EXCEPT ![n] = 0]
     /\ requested' = [requested EXCEPT ![n] = FALSE]
     /\ src' = [src EXCEPT ![n] = None]
     /\ live' = [m \in Nodes |-> IF m = n \/ src[m] = n THEN FALSE ELSE live[m]]
-    /\ assigned' = [assigned EXCEPT ![n] = FALSE]
+    /\ held' = [held EXCEPT ![n] = FALSE]
     /\ crashes' = crashes + 1
     /\ wipes' = IF wipe THEN wipes + 1 ELSE wipes
     /\ UNCHANGED <<hist, dead, truth, writes, swaps>>
@@ -236,7 +252,7 @@ Restart(n) ==
     /\ ~up[n]
     /\ up' = [up EXCEPT ![n] = TRUE]
     /\ dead' = dead \ {n}
-    /\ UNCHANGED <<disk, marker, role, applied, requested, src, live, assigned, hist, truth, writes, crashes, wipes, swaps>>
+    /\ UNCHANGED <<mem, disk, marker, role, applied, requested, src, live, held, imported, hist, truth, writes, crashes, wipes, swaps>>
 
 Detect(n) ==
     /\ ~up[n]
@@ -250,7 +266,7 @@ Detect(n) ==
                  ELSE \E q \in alive : hist' = Append(hist, [p |-> q, r |-> None])
             [] m.r = n -> hist' = Append(hist, [p |-> m.p, r |-> None])
             [] OTHER -> UNCHANGED hist
-    /\ UNCHANGED <<up, disk, role, applied, requested, src, live, assigned, marker, truth, writes, crashes, wipes, swaps>>
+    /\ UNCHANGED <<up, mem, disk, role, applied, requested, src, live, held, imported, marker, truth, writes, crashes, wipes, swaps>>
 
 AddReplica(n) ==
     /\ up[n]
@@ -258,7 +274,7 @@ AddReplica(n) ==
     /\ Latest.r = None
     /\ Latest.p # n
     /\ hist' = Append(hist, [p |-> Latest.p, r |-> n])
-    /\ UNCHANGED <<up, disk, role, applied, requested, src, live, assigned, marker, dead, truth, writes, crashes, wipes, swaps>>
+    /\ UNCHANGED <<up, mem, disk, role, applied, requested, src, live, held, imported, marker, dead, truth, writes, crashes, wipes, swaps>>
 
 Swap ==
     /\ swaps < MaxSwaps
@@ -274,7 +290,7 @@ Swap ==
                /\ role' = [role EXCEPT ![m.p] = "replica"]
                /\ applied' = [applied EXCEPT ![m.p] = Len(hist) + 1]
     /\ swaps' = swaps + 1
-    /\ UNCHANGED <<up, disk, requested, src, live, assigned, marker, dead, truth, writes, crashes, wipes>>
+    /\ UNCHANGED <<up, mem, disk, requested, src, live, held, imported, marker, dead, truth, writes, crashes, wipes>>
 
 Next ==
     \/ \E n \in Nodes : ApplyMap(n) \/ ServeSnapshot(n) \/ Retry(n) \/ Restart(n) \/ Detect(n) \/ AddReplica(n)
@@ -294,7 +310,9 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 
 ServeCorrect == \A n \in Nodes : (up[n] /\ role[n] = "primary") => HasAll(n)
 
-NoAckedLoss == \A k \in Keys : truth[k] # 0 => \E n \in Nodes : disk[n][k] = truth[k]
+NoAckedLoss ==
+    \A k \in Keys : truth[k] # 0 =>
+        \E n \in Nodes : disk[n][k] = truth[k] \/ (up[n] /\ mem[n][k] = truth[k])
 
 Serving ==
     /\ up[Latest.p]

@@ -122,7 +122,7 @@ impl<T: ClusterTransport> NodeController<T> {
     async fn route_write_request(&mut self, from: NodeId, write: ReplicationWrite) {
         let partition = write.partition;
         let assignment_epoch = self.partition_map.get(partition).epoch;
-        if write.epoch > assignment_epoch {
+        if write.epoch > assignment_epoch || self.waiting_to_take(partition) {
             self.hold_write_request(from, write).await;
             return;
         }
@@ -181,14 +181,15 @@ impl<T: ClusterTransport> NodeController<T> {
         let held = std::mem::take(&mut self.held_writes);
         for entry in held {
             let assignment_epoch = self.partition_map.get(entry.write.partition).epoch;
-            if entry.write.epoch <= assignment_epoch {
+            if entry.write.epoch <= assignment_epoch && !self.waiting_to_take(entry.write.partition)
+            {
                 self.route_write_request(entry.from, entry.write).await;
             } else if entry.since.elapsed() >= HELD_WRITE_TIMEOUT {
                 tracing::warn!(
                     partition = ?entry.write.partition,
                     from = entry.from.get(),
                     epoch = ?entry.write.epoch,
-                    "held write request dropped: assignment never applied"
+                    "held write request dropped: the assignment was not applied or the snapshot never arrived"
                 );
                 if let Some(record) = entry.write.event {
                     self.publish_unowned_change_event(entry.write.partition, record)
@@ -445,10 +446,16 @@ impl<T: ClusterTransport> NodeController<T> {
                 tokio::task::yield_now().await;
             }
         }
+        self.held_primaries = Some(held.without_legacy());
         self.update_partition_map(raft_map);
         self.retry_stalled_snapshots().await;
         self.release_held_writes().await;
         became_primary
+    }
+
+    fn waiting_to_take(&self, partition: PartitionId) -> bool {
+        self.partition_map.primary(partition) == Some(self.node_id)
+            && self.role(partition) == ReplicaRole::AwaitingSnapshot
     }
 
     fn source_needed_before_primary(
@@ -460,7 +467,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let holds_data = matches!(
             self.role(partition),
             ReplicaRole::Primary | ReplicaRole::Replica
-        ) || (!self.replicas.contains_key(&partition.get())
+        ) || (!self.held_since_boot[usize::from(partition.get())]
             && held.trusts(partition, assignment.epoch));
         if holds_data {
             return None;
