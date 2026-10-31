@@ -1006,9 +1006,7 @@ fn denied(outcome: &(Option<bool>, String)) -> bool {
         .into_iter::<serde_json::Value>()
         .next()
         .and_then(Result::ok)
-        .is_some_and(|answer| {
-            answer["status"] == "error" && matches!(answer["code"].as_u64(), Some(403 | 404))
-        })
+        .is_some_and(|answer| answer["status"] == "error" && answer["code"].as_u64() == Some(403))
 }
 
 fn suite_entity(kind: &str) -> String {
@@ -1661,9 +1659,9 @@ mod port_tests {
             ],
         );
         assert!(denied(&refused), "{}", refused.1);
-        assert!(denied(&(
+        assert!(!denied(&(
             Some(false),
-            r#"{"status":"error","code":404,"message":"not found"}"#.to_string()
+            r#"{"status":"error","code":404,"message":"entity not found"}"#.to_string()
         )));
         assert!(!denied(&(
             Some(false),

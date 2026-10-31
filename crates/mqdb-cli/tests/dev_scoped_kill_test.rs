@@ -523,17 +523,27 @@ fn agent_start_line(shim: &Shimmed, db: &Path) -> (String, PortBlock) {
     (line, block)
 }
 
-struct RecordedAgent(std::path::PathBuf);
+struct RecordedAgent {
+    pid_file: std::path::PathBuf,
+    db: std::path::PathBuf,
+}
 
 impl RecordedAgent {
+    fn in_shim(shim: &Shimmed) -> Self {
+        Self {
+            pid_file: shim.path().join("agent.pid"),
+            db: shim.path().join("db"),
+        }
+    }
+
     fn pid(&self) -> Option<String> {
-        recorded_pid(&self.0)
+        recorded_pid(&self.pid_file)
     }
 }
 
 impl Drop for RecordedAgent {
     fn drop(&mut self) {
-        let Ok(pid) = std::fs::read_to_string(&self.0) else {
+        let Ok(pid) = std::fs::read_to_string(&self.pid_file) else {
             return;
         };
         let pid = pid.trim();
@@ -541,8 +551,11 @@ impl Drop for RecordedAgent {
             .args(["-p", pid, "-o", "command="])
             .output()
             .is_ok_and(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .starts_with(&format!("{} agent start", env!("CARGO_BIN_EXE_mqdb")))
+                String::from_utf8_lossy(&o.stdout).starts_with(&format!(
+                    "{} agent start --db {} ",
+                    env!("CARGO_BIN_EXE_mqdb"),
+                    self.db.display()
+                ))
             });
         if still_ours {
             let _ = Command::new("kill").args(["-KILL", pid]).status();
@@ -590,12 +603,15 @@ fn profile_with_shims(
 #[test]
 fn profile_stops_its_agent_after_the_profiler_exits_first() {
     let shim = Shimmed::new();
-    let recorded = RecordedAgent(shim.path().join("agent.pid"));
+    let recorded = RecordedAgent::in_shim(&shim);
     let db = shim.path().join("db");
     let (agent, agent_block) = agent_start_line(&shim, &db);
     let (output, _) = profile_with_shims(
         &shim,
-        &format!("{agent} &\necho $! > '{}'\nexit 0", recorded.0.display()),
+        &format!(
+            "{agent} &\necho $! > '{}'\nexit 0",
+            recorded.pid_file.display()
+        ),
         &bench_waiting_for_agent(&agent_block, 0),
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -686,14 +702,14 @@ fn profile_interrupts_only_the_agent_not_the_profiler() {
     let shim = Shimmed::new();
     let db = shim.path().join("db");
     let interrupted = shim.path().join("profiler-interrupted");
-    let recorded = RecordedAgent(shim.path().join("agent.pid"));
+    let recorded = RecordedAgent::in_shim(&shim);
     let (agent, agent_block) = agent_start_line(&shim, &db);
     let (output, _) = profile_with_shims(
         &shim,
         &format!(
-            "set -m\ntrap 'echo int >> \"{}\"' INT\n{agent} &\necho $! > '{}'\nwait $!\nwait\nexit 0",
+            "set -m\ntrap 'echo int >> \"{}\"' INT\n{agent} &\necho $! > '{}'\nwait $!\nsleep 2\nwait\nexit 0",
             interrupted.display(),
-            recorded.0.display()
+            recorded.pid_file.display()
         ),
         &bench_waiting_for_agent(&agent_block, 0),
     );
@@ -723,7 +739,7 @@ fn interruptible_agent_samply(
     let (agent, agent_block) = agent_start_line(shim, &db);
     let body = format!(
         "set -m\n{agent} &\necho $! > '{}'\nwait $!\nexit {exit_code}",
-        recorded.0.display()
+        recorded.pid_file.display()
     );
     install_shim(
         &shim.path().join("samply-body"),
@@ -735,7 +751,7 @@ fn interruptible_agent_samply(
 #[test]
 fn profile_fails_when_the_profiler_exits_non_zero() {
     let shim = Shimmed::new();
-    let recorded = RecordedAgent(shim.path().join("agent.pid"));
+    let recorded = RecordedAgent::in_shim(&shim);
     let agent_block = interruptible_agent_samply(&shim, &recorded, 3);
     let body = format!("exec '{}'", shim.path().join("samply-body").display());
     let (output, _) = profile_with_shims(&shim, &body, &bench_waiting_for_agent(&agent_block, 0));
@@ -755,7 +771,7 @@ fn profile_fails_when_the_profiler_exits_non_zero() {
 #[test]
 fn profile_fails_when_the_benchmark_fails() {
     let shim = Shimmed::new();
-    let recorded = RecordedAgent(shim.path().join("agent.pid"));
+    let recorded = RecordedAgent::in_shim(&shim);
     let agent_block = interruptible_agent_samply(&shim, &recorded, 0);
     let body = format!("exec '{}'", shim.path().join("samply-body").display());
     let (output, _) = profile_with_shims(&shim, &body, &bench_waiting_for_agent(&agent_block, 1));
@@ -832,4 +848,38 @@ fn profile_with_sample_fails_when_the_benchmark_fails() {
     assert!(!output.status.success(), "{stdout}{stderr}");
     assert!(!stdout.contains("Profile saved"), "{stdout}");
     assert!(stderr.contains("benchmark: failed"), "{stderr}");
+}
+
+#[test]
+fn profile_kills_an_agent_that_outlives_the_profiler_and_ignores_sigint() {
+    let shim = Shimmed::new();
+    let recorded = RecordedAgent::in_shim(&shim);
+    let (agent, agent_block) = agent_start_line(&shim, &recorded.db);
+    let freeze = format!(
+        "{}\nkill -STOP \"$(cat '{}')\"\nexit 0",
+        bench_waiting_for_agent(&agent_block, 0).trim_end_matches("exit 0"),
+        recorded.pid_file.display()
+    );
+    let (output, _) = profile_with_shims(
+        &shim,
+        &format!(
+            "{agent} &\necho $! > '{}'\nexit 0",
+            recorded.pid_file.display()
+        ),
+        &freeze,
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let pid = recorded.pid().expect("the shim started an agent");
+    assert!(
+        !alive(&pid),
+        "dev profile left its frozen agent (pid {pid}) running: {stdout}{stderr}"
+    );
+    assert!(output.status.success(), "{stdout}{stderr}");
+    assert!(
+        stdout.contains("Warning: killed the agent still running"),
+        "{stdout}"
+    );
+    assert_eq!(shim.calls(), "");
+    drop(agent_block);
 }
