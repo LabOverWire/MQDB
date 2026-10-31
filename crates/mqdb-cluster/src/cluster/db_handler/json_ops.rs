@@ -38,15 +38,6 @@ pub(super) enum JsonOpResult {
     PendingFkDelete(Box<PendingFkDeleteWork>),
 }
 
-fn expected_version_from_delete_payload(payload: &[u8]) -> Result<Option<u64>, String> {
-    if payload.is_empty() {
-        return Ok(None);
-    }
-    let mut value: Value =
-        serde_json::from_slice(payload).map_err(|e| format!("invalid JSON payload: {e}"))?;
-    mqdb_core::protocol::take_expected_version(&mut value).map_err(|e| e.to_string())
-}
-
 #[cfg(feature = "http-api")]
 enum ShareResolution {
     Rewrite(Vec<u8>),
@@ -204,11 +195,18 @@ impl DbRequestHandler {
                     .await
             }
             DbTopicOperation::JsonUpdate { entity, id } => {
+                if let Some(message) = helpers::update_payload_error(payload) {
+                    return JsonOpResult::Response(Self::json_error(400, &message));
+                }
+                let partition = data_partition(entity, id);
+                if let Some(err) = Self::refuse_until_primary_role(controller, partition) {
+                    return JsonOpResult::Response(err);
+                }
                 let stripped_payload;
                 let effective_payload = if let OwnershipDecision::Check { owner_field, .. } =
                     self.ownership.evaluate(entity, sender)
                 {
-                    if controller.is_primary_for_partition(data_partition(entity, id))
+                    if controller.is_primary_for_partition(partition)
                         && let Some(err) = controller.check_local_share_access(
                             entity,
                             id,
@@ -224,7 +222,6 @@ impl DbRequestHandler {
                 } else {
                     payload
                 };
-                let partition = data_partition(entity, id);
                 if !controller.is_primary_for_partition(partition) {
                     let forward_payload =
                         self.vault_encrypt_update_delta(entity, id, effective_payload, sender);
@@ -262,6 +259,14 @@ impl DbRequestHandler {
                 }
             }
             DbTopicOperation::JsonDelete { entity, id } => {
+                let expected_version = match helpers::delete_expected_version(payload) {
+                    Ok(v) => v,
+                    Err(msg) => return JsonOpResult::Response(Self::json_error(400, &msg)),
+                };
+                let partition = data_partition(entity, id);
+                if let Some(err) = Self::refuse_until_primary_role(controller, partition) {
+                    return JsonOpResult::Response(err);
+                }
                 if let OwnershipDecision::Check {
                     owner_field,
                     sender: uid,
@@ -271,11 +276,6 @@ impl DbRequestHandler {
                 {
                     return JsonOpResult::Response(err);
                 }
-                let expected_version = match expected_version_from_delete_payload(payload) {
-                    Ok(v) => v,
-                    Err(msg) => return JsonOpResult::Response(Self::json_error(400, &msg)),
-                };
-                let partition = data_partition(entity, id);
                 if !controller.is_primary_for_partition(partition) {
                     let forwarded = controller
                         .forward_json_db_request(
@@ -526,6 +526,15 @@ impl DbRequestHandler {
         None
     }
 
+    fn refuse_until_primary_role<T: ClusterTransport>(
+        controller: &NodeController<T>,
+        partition: PartitionId,
+    ) -> Option<Vec<u8>> {
+        (controller.is_primary_for_partition(partition)
+            && !controller.holds_primary_role(partition))
+        .then(|| helpers::json_write_failure(db::DbDataStoreError::NotPrimary))
+    }
+
     fn check_cluster_ownership<T: ClusterTransport>(
         &self,
         controller: &mut NodeController<T>,
@@ -534,7 +543,11 @@ impl DbRequestHandler {
         owner_field: &str,
         sender: &str,
     ) -> Option<Vec<u8>> {
-        let existing = controller.db_get(entity, id)?;
+        let Some(existing) = controller.db_get(entity, id) else {
+            return controller
+                .holds_primary_role(data_partition(entity, id))
+                .then(|| Self::json_error(404, &format!("entity not found: {entity} id={id}")));
+        };
         let Ok(data) = serde_json::from_slice::<Value>(&existing.data) else {
             return Some(Self::json_error(403, "permission denied"));
         };
@@ -885,14 +898,13 @@ impl DbRequestHandler {
 
         let projection = parse_projection(payload);
 
-        if let Some(ref fields) = projection
-            && let Some(err) = Self::validate_projection_fields(controller, entity, fields)
-        {
-            return JsonOpResult::Response(err);
-        }
-
         let result = match controller.db_get(entity, id) {
             Some(db_entity) => {
+                if let Some(ref fields) = projection
+                    && let Some(err) = Self::validate_projection_fields(controller, entity, fields)
+                {
+                    return JsonOpResult::Response(err);
+                }
                 let mut data: Value =
                     serde_json::from_slice(&db_entity.data).unwrap_or(Value::Null);
                 if let Some(crypto) = self.resolve_vault_crypto(entity, sender) {
@@ -931,9 +943,9 @@ impl DbRequestHandler {
         payload: &[u8],
         mqtt_ctx: &super::MqttRequestContext<'_>,
     ) -> JsonOpResult {
-        let updates: Value = match serde_json::from_slice(payload) {
+        let updates = match helpers::update_fields(payload) {
             Ok(v) => v,
-            Err(_) => return JsonOpResult::Response(Self::json_error(400, "invalid JSON payload")),
+            Err(message) => return JsonOpResult::Response(Self::json_error(400, &message)),
         };
 
         let ctx = JsonOpContext {
@@ -1226,9 +1238,13 @@ impl DbRequestHandler {
         let response_topic = mqtt_ctx.response_topic.unwrap_or("");
         let correlation_data = mqtt_ctx.correlation_data;
 
-        if let Some(expected) = expected_version
-            && let Some(existing) = controller.db_get(entity, id)
-        {
+        let Some(existing) = controller.db_get(entity, id) else {
+            return JsonOpResult::Response(Self::json_error(
+                404,
+                &format!("entity not found: {entity} id={id}"),
+            ));
+        };
+        if let Some(expected) = expected_version {
             let current = serde_json::from_slice::<Value>(&existing.data)
                 .ok()
                 .and_then(|d| d.get("_version").and_then(Value::as_u64))
