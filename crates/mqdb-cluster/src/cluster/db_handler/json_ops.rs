@@ -578,6 +578,8 @@ impl DbRequestHandler {
             Err(_) => return JsonOpResult::Response(Self::json_error(400, "invalid JSON payload")),
         };
 
+        NodeController::<T>::apply_ttl_expiry(&mut data);
+
         if let Value::Object(ref mut obj) = data {
             obj.remove("_version");
             obj.insert("_version".to_string(), Value::Number(1.into()));

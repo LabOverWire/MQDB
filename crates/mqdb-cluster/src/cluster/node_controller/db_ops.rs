@@ -1910,7 +1910,7 @@ impl<T: ClusterTransport> NodeController<T> {
         (result, None)
     }
 
-    fn apply_ttl_expiry(data: &mut serde_json::Value) {
+    pub(crate) fn apply_ttl_expiry(data: &mut serde_json::Value) {
         if let serde_json::Value::Object(obj) = data
             && let Some(ttl_secs) = obj.get("ttl_secs").and_then(serde_json::Value::as_u64)
         {
