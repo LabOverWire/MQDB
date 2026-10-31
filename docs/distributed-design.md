@@ -209,7 +209,7 @@ Stores expose paired methods for generating replicated writes:
 
 The caller uses the entity immediately and routes the write for cluster-wide replication.
 
-**Key Files**: `store_manager.rs:68-128`, `entity.rs`
+**Key Files**: `store_manager/db_ops.rs`, `store_manager/apply.rs`, `entity.rs`
 
 ---
 
@@ -1337,33 +1337,49 @@ Special entities that must exist on ALL nodes (not just partition owners):
 ### 5.3 write_or_forward() Logic
 
 ```rust
-pub fn write_or_forward(&mut self, write: ReplicationWrite) {
+pub async fn write_or_forward_with_event(
+    &mut self,
+    mut write: ReplicationWrite,
+    event: Option<ChangeEventRecord>,
+    extra_outbox: &[(Vec<u8>, Vec<u8>)],
+) -> Result<(), ReplicationError> {
     let partition = write.partition;
 
-    // Broadcast entities - apply locally first
-    let is_broadcast = write.entity == "_topic_index"
-        || write.entity == "_wildcards"
-        || write.entity == "_client_loc";
-    if is_broadcast {
-        self.stores.apply_write(&write);
+    // Unique reservations go to the unique-constraint quorum group
+    if write.entity == entity::DB_UNIQUE {
+        self.replicate_unique_to_group(write).await;
+        return Ok(());
     }
 
-    // Route to partition owner
-    if self.is_primary_for_partition(partition) {
-        // We're primary - replicate to replicas
+    // Broadcast entities - apply locally, then send to every alive node
+    if is_broadcast_entity(&write.entity) {
+        self.broadcast_write(&write).await;
+        return Ok(());
+    }
+
+    if self.is_primary_for_partition(partition) && self.role(partition) != ReplicaRole::Primary {
+        // Named primary but not in the primary role: refuse, publish nothing
+        Err(ReplicationError::NotPrimary)
+    } else if self.is_primary_for_partition(partition) {
+        // We're primary - persist, apply to memory, then replicate.
+        // A persistence failure returns StoreFailed and nothing is applied or sent.
         let replicas = self.partition_map.replicas(partition).to_vec();
-        self.replicate_write_async(write, &replicas);
+        self.replicate_write_async_with_extra(write, &replicas, event, extra_outbox)
+            .await?;
+        Ok(())
     } else if let Some((primary, epoch)) = self.believed_primary(partition) {
         // Forward to primary (heartbeat map as fallback), stamped with the
         // epoch of the assignment that named it; see A2.2 for the receiver
         write.epoch = epoch;
-        self.transport.send(primary, ClusterMessage::WriteRequest(write));
+        self.forward_write_with_change_event(primary, write, event).await;
+        Ok(())
     } else {
-        // No primary known - log warning
-        tracing::warn!(?partition, "no primary found for partition");
+        Err(ReplicationError::NotPrimary)
     }
 }
 ```
+
+`write_or_forward(write)` calls this with no event and logs a failure at debug level. DB record writes use the `Result`: a primary that cannot store the write answers the client with an error.
 
 ---
 
