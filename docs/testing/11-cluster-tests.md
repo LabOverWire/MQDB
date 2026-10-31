@@ -243,20 +243,23 @@ mqdb dev start-cluster --nodes 3 --clean
 mqdb create partition_test --data '{"before": "partition"}' \
   --broker 127.0.0.1:1883 --user admin --pass admin
 
-# 3. Simulate partition by killing Node 3
-mqdb dev kill --node 3
+# 3. Simulate partition by stopping Node 3
+mqdb dev kill --db-prefix /tmp/mqdb-test --node 3
 
 # 4. Create more data (should succeed with 2 nodes)
 mqdb create partition_test --data '{"during": "partition"}' \
   --broker 127.0.0.1:1883 --user admin --pass admin
 
 # 5. Restart Node 3 — list every other node, otherwise the nodes that started
-#    before it will not re-dial it and the 2-3 link stays down
+#    before it will not re-dial it and the 2-3 link stays down. dev start-cluster
+#    puts the cluster transport at bind port + 50, so pass the same offset.
+#    Record the PID so 'mqdb dev kill --db-prefix /tmp/mqdb-test' still stops it
 mqdb cluster start --node-id 3 --bind 127.0.0.1:1885 --db /tmp/mqdb-test-3 \
-  --peers 1@127.0.0.1:1883,2@127.0.0.1:1884 \
+  --peers 1@127.0.0.1:1883,2@127.0.0.1:1884 --cluster-port-offset 50 --bridge-out \
   --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem \
   --passwd /tmp/mqdb-test-passwd --admin-users admin \
-  --license /path/to/license.key &
+  --license /path/to/license.key >> /tmp/mqdb-test-3/mqdb.log 2>&1 &
+echo $! > /tmp/mqdb-test-3/mqdb.pid
 
 # 6. Wait for rejoin
 sleep 5

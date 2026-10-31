@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod common;
+mod running_agent;
 
 use common::next_test_port;
 use mqdb_agent::broker_defaults::BROKER_SYS_RETAINED_TOPICS;
@@ -9,7 +10,7 @@ use mqdb_agent::{Database, MqdbAgent};
 use mqtt5::client::MqttClient;
 use mqtt5::protocol::v5::reason_codes::ReasonCode;
 use mqtt5::{MqttError, PublishOptions, QoS};
-use std::net::SocketAddr;
+use running_agent::RunningAgent;
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -20,46 +21,16 @@ struct Limits {
     sparkplug_aware: bool,
 }
 
-struct TestAgent {
-    dir: TempDir,
-    handle: tokio::task::JoinHandle<()>,
-    shutdown: tokio::sync::broadcast::Sender<()>,
-}
-
-impl TestAgent {
-    async fn stop(self) {
-        self.shutdown
-            .send(())
-            .expect("the agent listens for shutdown until it stops");
-        tokio::time::timeout(Duration::from_secs(10), self.handle)
-            .await
-            .expect("the agent should stop after shutdown")
-            .expect("the agent task should not panic");
-        drop(self.dir);
-    }
-}
-
-async fn start_agent(port: u16, limits: Limits) -> TestAgent {
+async fn start_agent(port: u16, limits: Limits) -> RunningAgent {
     let tmp = TempDir::new().unwrap();
     let db = Database::open(tmp.path()).await.unwrap();
-    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let agent = MqdbAgent::new(db)
-        .with_bind_address(addr)
         .with_anonymous(true)
         .with_presence(limits.presence)
         .with_sparkplug_aware(limits.sparkplug_aware)
         .with_max_retained_messages(limits.messages)
         .with_max_retained_message_size(limits.message_size);
-    let (handle, mut ready_rx, shutdown) = agent.start().await.unwrap();
-    tokio::time::timeout(Duration::from_secs(10), ready_rx.wait_for(|ready| *ready))
-        .await
-        .expect("agent did not become ready")
-        .expect("the agent stopped before it became ready");
-    TestAgent {
-        dir: tmp,
-        handle,
-        shutdown,
-    }
+    RunningAgent::start(agent, port, tmp).await
 }
 
 async fn connect(port: u16, client_id: &str) -> MqttClient {
