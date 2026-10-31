@@ -24,8 +24,6 @@ fn create_test_controller(
     )
 }
 
-/// Establish the unique quorum group by placing `primary` + `replicas` in the (replicated)
-/// partition map on partition 5 — the source `unique_fanout_group` now derives membership from.
 fn set_unique_group(
     ctrl: &mut NodeController<MockTransport>,
     primary: NodeId,
@@ -41,9 +39,6 @@ fn set_unique_group(
         },
     );
     ctrl.update_partition_map(map);
-    // Found the voter set to the initial group on first setup (mirrors the leader founding voters =
-    // membership); later membership changes do not re-found, so tests that manipulate the voter set
-    // separately keep control of it. Without a voter set, reserves/seals fail closed.
     if ctrl.unique_voter_group().is_empty() {
         let group: std::collections::BTreeSet<NodeId> = std::iter::once(primary)
             .chain(replicas.iter().copied())
@@ -333,7 +328,6 @@ async fn unique_reserve_resolves_on_majority_ack() {
     let write = unique_reserve_write(&ctrl, "users", "email", b"a@x.com");
     let rx = ctrl.replicate_unique_reserve(write).await;
 
-    // group is {1,2,3}, majority 2, self already counts as one; one more ack completes it.
     ctrl.record_unique_quorum_ack(node2, 1).await;
 
     assert_eq!(
@@ -357,7 +351,6 @@ async fn unique_reserve_fails_closed_on_timeout() {
     let write = unique_reserve_write(&ctrl, "users", "email", b"a@x.com");
     let rx = ctrl.replicate_unique_reserve(write).await;
 
-    // no acks arrive; the deadline sweep must fail the reserve closed.
     ctrl.sweep_unique_quorum(NodeController::<MockTransport>::current_time_ms() + 10_000)
         .await;
 
@@ -379,8 +372,6 @@ async fn remote_reserve_quorum_timeout_releases_local_reservation() {
     set_unique_group(&mut ctrl, node1, &[node2, node3]);
     ctrl.become_primary(PartitionId::new(5).unwrap(), Epoch::new(1));
 
-    // A remote-coordinated reserve landed on the value-primary: it holds the reservation locally
-    // and defers its response until the reservation is majority-durable.
     let write = unique_reserve_write(&ctrl, "users", "email", b"a@x.com");
     assert!(
         ctrl.stores()
@@ -401,8 +392,6 @@ async fn remote_reserve_quorum_timeout_releases_local_reservation() {
     )
     .await;
 
-    // No group member acks; the deadline sweep fails the reserve closed. It must ALSO release the
-    // local reservation, or a transient quorum timeout wedges the value until its 30s TTL.
     ctrl.sweep_unique_quorum(NodeController::<MockTransport>::current_time_ms() + 10_000)
         .await;
 
@@ -464,7 +453,6 @@ async fn reconcile_apply_skips_record_deleted_after_collection() {
         "one reassert work item for the durable record"
     );
 
-    // The lock is released between collect and apply; the record is deleted in that window.
     ctrl.stores().db_data.delete("users", "u1").unwrap();
     ctrl.apply_unique_reconcile_chunk(&work).await;
 
@@ -484,10 +472,8 @@ async fn reassert_replicated_rejects_stale_epoch_below_the_fence() {
     let p = PartitionId::new(5).unwrap();
     let value = serde_json::to_vec(&serde_json::json!("a@x.com")).unwrap();
 
-    // The value site has seen data-partition epoch 3 (e.g. a release from the current primary).
     ctrl.stores().db_unique.fence_bump(p, 3);
 
-    // A reassert stamped with epoch 2 (< 3) is from a superseded primary: dropped, no claim, no write.
     let (result, write) = ctrl
         .stores()
         .reassert_replicated("users", "email", &value, "u1", p, 2, 1000);
@@ -505,7 +491,6 @@ async fn reassert_replicated_rejects_stale_epoch_below_the_fence() {
         "a stale reassert must not establish a committed claim"
     );
 
-    // A current-epoch reassert (3 >= 3) passes the fence and establishes the claim.
     let (result, write) = ctrl
         .stores()
         .reassert_replicated("users", "email", &value, "u1", p, 3, 1000);
@@ -549,8 +534,6 @@ async fn project_reconcile_work_skips_key_deleted_after_gather() {
     let keys = ctrl.collect_unique_reconcile_keys();
     assert_eq!(keys.len(), 1, "one owned durable record gathered");
 
-    // The read lock is released between key-gather and the per-chunk parse; the record is deleted in
-    // that window, so projecting the stale key must yield no work rather than parse a gone record.
     ctrl.stores().db_data.delete("users", "u1").unwrap();
     let work = ctrl.project_unique_reconcile_work(&keys);
     assert!(
@@ -566,12 +549,9 @@ async fn unique_fanout_group_derives_from_map_not_heartbeat_growth() {
     let node3 = NodeId::validated(3).unwrap();
     let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
 
-    // Membership comes from the replicated partition map: {node1, node2}.
     set_unique_group(&mut ctrl, node1, &[node2]);
     assert_eq!(ctrl.unique_fanout_group(), vec![node1, node2]);
 
-    // A previously-unknown node appearing in the heartbeat-discovered set must NOT expand the quorum
-    // basis — that local, divergent growth was the disjoint-majority oversell source.
     ctrl.register_peer(node3);
     assert_eq!(
         ctrl.unique_fanout_group(),
@@ -579,7 +559,6 @@ async fn unique_fanout_group_derives_from_map_not_heartbeat_growth() {
         "the quorum group derives from the replicated map, not the heartbeat-discovered node set"
     );
 
-    // node3 joins the group only once consensus (the map) places it there.
     set_unique_group(&mut ctrl, node1, &[node2, node3]);
     assert_eq!(ctrl.unique_fanout_group(), vec![node1, node2, node3]);
 }
@@ -590,11 +569,6 @@ async fn empty_voter_set_fails_closed_before_founding_in_multi_node_cluster() {
     let node2 = NodeId::validated(2).unwrap();
     let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
 
-    // A MULTI-node partition map exists but no voter set has been founded/adopted yet — set the map
-    // directly so the founding in `set_unique_group` does not run. With an empty voter set in a
-    // multi-node cluster the group is empty and the majority is unreachable, so reserves and seals
-    // fail closed — it does NOT fall back to the full membership (which would let a restarted
-    // promoting primary seal over a group larger than the established set and miss its holders).
     let mut map = crate::cluster::PartitionMap::default();
     map.set(
         PartitionId::new(5).unwrap(),
@@ -610,8 +584,6 @@ async fn empty_voter_set_fails_closed_before_founding_in_multi_node_cluster() {
     assert_eq!(ctrl.unique_majority(), usize::MAX);
     assert!(!ctrl.is_unique_voter(node1));
 
-    // A single-node cluster (this node is the only member) still self-serves — it is trivially its
-    // own voter set, so there is no larger membership to miss a reservation on.
     let mut solo_ctrl = create_test_controller(node1, MockTransport::new(node1));
     let mut solo_map = crate::cluster::PartitionMap::default();
     solo_map.set(
@@ -635,8 +607,6 @@ async fn unique_voter_group_lags_membership_when_seeded() {
     let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
     set_unique_group(&mut ctrl, node1, &[node2, node3]);
 
-    // A lagged voter set excludes the newly-joined node3: the seal/majority denominator stays {1,2}
-    // so node3 cannot dilute a majority away from an existing reservation's holders.
     ctrl.seed_unique_voters([node1, node2].into_iter().collect());
     assert_eq!(ctrl.unique_voter_group(), vec![node1, node2]);
     assert_eq!(ctrl.unique_majority(), 2);
@@ -652,16 +622,13 @@ async fn manage_unique_voters_founds_then_paces_growth() {
     let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
     set_unique_group(&mut ctrl, node1, &[node2]);
 
-    // Founding takes the whole current membership at once.
     ctrl.manage_unique_voters(true, 1, 1_000);
     assert_eq!(ctrl.unique_voter_group(), vec![node1, node2]);
 
-    // node3 joins the membership; within the change interval the voter set does NOT grow.
     set_unique_group(&mut ctrl, node1, &[node2, node3]);
     ctrl.manage_unique_voters(true, 1, 2_000);
     assert_eq!(ctrl.unique_voter_group(), vec![node1, node2]);
 
-    // After the interval it promotes exactly one learner.
     ctrl.manage_unique_voters(
         true,
         1,
@@ -680,7 +647,6 @@ async fn manage_unique_voters_removes_departed_voter() {
     ctrl.manage_unique_voters(true, 1, 1_000);
     assert_eq!(ctrl.unique_voter_group(), vec![node1, node2, node3]);
 
-    // node3 leaves the membership; after the interval it is dropped from the voter set.
     set_unique_group(&mut ctrl, node1, &[node2]);
     ctrl.manage_unique_voters(
         true,
@@ -692,12 +658,6 @@ async fn manage_unique_voters_removes_departed_voter() {
 
 #[tokio::test]
 async fn correlated_removal_does_not_collapse_voter_majority() {
-    // Finding-2 regression guard. A correlated multi-node loss must NOT instantly shrink the voter
-    // majority/seal denominator: removal is paced one node per interval (single-step safety, V6). If
-    // the denominator collapsed by 2 at once, a seal could reach a majority that misses a
-    // reservation's holder-majority and oversell (V6 unpaced). Departed voters stay counted until
-    // paced removal, so a seal must reach a majority of the FULL set — which still intersects any
-    // holder-majority — or fail closed.
     let n = |i: u16| NodeId::validated(i).unwrap();
     let mut ctrl = create_test_controller(n(1), MockTransport::new(n(1)));
     set_unique_group(&mut ctrl, n(1), &[n(2), n(3), n(4), n(5)]);
@@ -708,8 +668,6 @@ async fn correlated_removal_does_not_collapse_voter_majority() {
         vec![n(1), n(2), n(3), n(4), n(5)]
     );
 
-    // Nodes 4 and 5 leave the partition map together (correlated failure), before the leader's paced
-    // removal has run. The voter denominator must stay at 5 (majority 3), not collapse to {1,2,3}.
     set_unique_group(&mut ctrl, n(1), &[n(2), n(3)]);
     assert_eq!(
         ctrl.unique_majority(),
@@ -722,7 +680,6 @@ async fn correlated_removal_does_not_collapse_voter_majority() {
         "departed voters remain in the denominator until paced removal (fail-closed, not oversell)"
     );
 
-    // The leader then paces them out one node per interval, converging to the surviving membership.
     ctrl.manage_unique_voters(true, 1, super::unique::UNIQUE_VOTER_CHANGE_INTERVAL_MS + 1);
     assert_eq!(
         ctrl.unique_voter_group().len(),
@@ -744,7 +701,6 @@ async fn followers_do_not_manage_voters() {
     let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
     set_unique_group(&mut ctrl, node1, &[node2]);
 
-    // A non-leader never establishes a voter set of its own; it adopts the leader's via heartbeat.
     ctrl.manage_unique_voters(false, 1, 1_000);
     ctrl.seed_unique_voters([node1].into_iter().collect());
     ctrl.manage_unique_voters(false, 1, 2_000);
@@ -789,7 +745,6 @@ async fn fk_then_unique_defers_reserve_to_async_completion() {
 
     let node1 = NodeId::validated(1).unwrap();
     let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
-    // Single-node group: become_primary seals every partition synchronously.
     let mut map = crate::cluster::PartitionMap::default();
     for i in 0..NUM_PARTITIONS {
         let p = PartitionId::new(i).unwrap();
@@ -826,8 +781,6 @@ async fn fk_then_unique_defers_reserve_to_async_completion() {
         .complete_pending_fk_work(true, None, continuation)
         .await;
 
-    // The reserve must be handed to the async completion (which awaits the quorum OUTSIDE the lock),
-    // never performed inline here — doing so would deadlock on the ack path.
     assert!(
         matches!(outcome, FkThenUniqueOutcome::NeedUnique(_)),
         "an FK+unique create must defer its reserve to spawn_unique_completion"
@@ -851,7 +804,6 @@ async fn unsealed_partition_fails_reserve_closed() {
         .unwrap();
     let value = b"a@x.com";
     let unique_part = crate::cluster::db::unique_partition(entity, "email", value);
-    // Primary at epoch 1, but a multi-node group has not completed the seal handshake.
     ctrl.become_primary(unique_part, Epoch::new(1));
     assert!(
         !ctrl.unique_partition_sealed(unique_part),
@@ -927,9 +879,6 @@ async fn unique_seal_reaches_majority_on_response() {
 
 #[tokio::test]
 async fn empty_voter_seal_re_queues_then_completes_after_founding() {
-    // Proof that the empty-voter fail-closed seal RECOVERS (does not wedge): with no founded voter
-    // set a multi-node primary must not seal; once the leader founds the set the re-queued seal must
-    // complete. Guards against a poisoned `usize::MAX`-needed tracker leaking from the empty attempt.
     let node1 = NodeId::validated(1).unwrap();
     let node2 = NodeId::validated(2).unwrap();
     let node3 = NodeId::validated(3).unwrap();
@@ -938,7 +887,6 @@ async fn empty_voter_seal_re_queues_then_completes_after_founding() {
     ctrl.register_peer(node3);
     let p = PartitionId::new(5).unwrap();
 
-    // Multi-node membership set directly so no voter set is founded (unlike `set_unique_group`).
     let mut map = crate::cluster::PartitionMap::default();
     map.set(
         p,
@@ -962,7 +910,6 @@ async fn empty_voter_seal_re_queues_then_completes_after_founding() {
         "and it must not report itself sealed while failing closed"
     );
 
-    // The leader founds the voter set; the re-queued seal must now proceed and reach a majority.
     ctrl.seed_unique_voters([node1, node2, node3].into_iter().collect());
     ctrl.drain_pending_seals().await;
     assert_eq!(
@@ -993,7 +940,6 @@ async fn seal_response_teaches_primary_a_missed_reservation() {
 
     let value = b"a@x.com";
     let unique_part = crate::cluster::db::unique_partition("users", "email", value);
-    // A committed claim for the value exists on the group, but this promoting primary missed it.
     let committed = UniqueReservation::create(
         "users",
         "email",
@@ -2770,13 +2716,15 @@ async fn forwarded_write_without_a_response_topic_keeps_no_vault_decrypt() {
     assert!(
         ctrl.forward_json_db_request(
             partition,
-            JsonDbOp::Update,
-            "notes",
-            Some("n1"),
-            update,
-            "",
-            None,
-            EventOrigin::new(Some("alice"), None),
+            super::db_ops::ForwardedJsonRequest {
+                op: JsonDbOp::Update,
+                entity: "notes",
+                id: Some("n1"),
+                payload: update,
+                response_topic: "",
+                correlation_data: None,
+                origin: EventOrigin::new(Some("alice"), None)
+            }
         )
         .await
     );
@@ -2785,13 +2733,15 @@ async fn forwarded_write_without_a_response_topic_keeps_no_vault_decrypt() {
     assert!(
         ctrl.forward_json_db_request(
             partition,
-            JsonDbOp::Update,
-            "notes",
-            Some("n1"),
-            update,
-            "resp/t",
-            None,
-            EventOrigin::new(Some("alice"), None),
+            super::db_ops::ForwardedJsonRequest {
+                op: JsonDbOp::Update,
+                entity: "notes",
+                id: Some("n1"),
+                payload: update,
+                response_topic: "resp/t",
+                correlation_data: None,
+                origin: EventOrigin::new(Some("alice"), None)
+            }
         )
         .await
     );
