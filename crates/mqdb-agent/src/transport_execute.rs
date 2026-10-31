@@ -6,7 +6,7 @@ use mqdb_core::transport::{Request, Response, VaultConstraintData};
 use mqdb_core::types::{AccessLevel, OwnershipConfig, OwnershipDecision, ScopeConfig};
 use serde_json::Value;
 
-fn value_from_unit(_: ()) -> Value {
+fn value_from_unit((): ()) -> Value {
     Value::Null
 }
 
@@ -31,7 +31,6 @@ impl Database {
         .await
     }
 
-    #[allow(clippy::too_many_lines)]
     #[tracing::instrument(skip_all, fields(op = request.operation_label()))]
     pub async fn execute_with_sender(
         &self,
