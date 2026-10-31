@@ -438,7 +438,7 @@ async fn writes_reaching_a_not_yet_primary_stay_retryable_on_every_path() {
 }
 
 #[tokio::test]
-async fn cascade_delete_answered_by_a_not_yet_primary_is_not_acknowledged() {
+async fn cascade_delete_reaching_a_not_yet_primary_with_a_stale_copy_is_not_acknowledged() {
     let partition = data_partition("docs", "child-1");
     let mut origin = create_test_controller(node(2), MockTransport::new(node(2)));
     let mut map = PartitionMap::default();
@@ -469,6 +469,11 @@ async fn cascade_delete_answered_by_a_not_yet_primary_is_not_acknowledged() {
         .unwrap();
 
     let mut receiver = not_yet_primary(partition);
+    let copy_owned_by_bob = serde_json::to_vec(&json!({"userId": "bob", "title": "b"})).unwrap();
+    receiver
+        .stores
+        .db_create_replicated("docs", "child-1", &copy_owned_by_bob, 1000)
+        .unwrap();
     receiver
         .handle_json_db_request(node(2), partition, &request)
         .await;
