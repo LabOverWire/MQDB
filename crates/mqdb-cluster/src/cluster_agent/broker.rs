@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::{AdminRequest, ClusterTransportKind, ClusteredAgent, RunningBroker};
-use crate::cluster::{ClusterEventHandler, DedicatedExecutor, NodeId, QuicDirectTransport};
+use crate::cluster::{
+    BrokerView, ClusterEventHandler, DedicatedExecutor, NodeId, QuicDirectTransport,
+};
 use mqdb_agent::auth_config::{
     AuthSetupResult, enhanced_auth_with_fallback, rate_limited, take_auth_rate_limit,
 };
@@ -127,7 +129,8 @@ impl ClusteredAgent {
                 .with_ownership(ownership)
                 .with_vault_key_store(Arc::clone(&self.vault_key_store))
                 .with_presence(self.presence)
-                .with_retained_echoes(Arc::clone(&self.retained_echoes)),
+                .with_retained_echoes(Arc::clone(&self.retained_echoes))
+                .with_broker_view(Arc::clone(&self.broker_view)),
         );
         Ok(self.configure_broker_with_auth(
             event_handler,
@@ -220,6 +223,13 @@ impl ClusteredAgent {
             take_auth_rate_limit(self.apply_cluster_listener(broker_config)?);
 
         let mut broker = MqttBroker::with_config(broker_config).await?;
+        if self
+            .broker_view
+            .set(BrokerView::new(broker.router(), broker.storage()))
+            .is_err()
+        {
+            warn!("broker view already set, keeping the first broker's router");
+        }
 
         let auth_providers = if self.password_file.is_some() || self.acl_file.is_some() {
             let pwd = if let Some(path) = &self.password_file {

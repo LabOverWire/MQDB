@@ -64,16 +64,17 @@ impl StoreManager {
         Ok((db_entity, write))
     }
 
-    #[must_use]
+    /// # Errors
+    /// Returns `DbDataStoreError::SerializationError` if a length does not fit the record format.
     pub fn db_upsert_replicated(
         &self,
         entity_type: &str,
         id: &str,
         data: &[u8],
         timestamp_ms: u64,
-    ) -> (DbEntity, ReplicationWrite) {
+    ) -> Result<(DbEntity, ReplicationWrite), DbDataStoreError> {
         let old = self.db_data.get(entity_type, id);
-        let db_entity = self.db_data.upsert(entity_type, id, data, timestamp_ms);
+        let db_entity = self.db_data.upsert(entity_type, id, data, timestamp_ms)?;
         self.update_fk_reverse_index(
             Operation::Update,
             entity_type,
@@ -92,7 +93,7 @@ impl StoreManager {
             db_entity.key(),
             serialized,
         );
-        (db_entity, write)
+        Ok((db_entity, write))
     }
 
     /// # Errors

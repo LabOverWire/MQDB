@@ -336,7 +336,18 @@ mqdb dev kill --node 2
 
 # Kill agent only
 mqdb dev kill --agent
+
+# Kill only the nodes started with this --db-prefix (reads <prefix>-N/mqdb.pid)
+mqdb dev kill --db-prefix /tmp/my-test
 ```
+
+`--all`, `--node` and the bare form match process command lines with `pkill -f`, so they
+also stop nodes and agents started by anything else on the machine. `--db-prefix` stops
+only the PIDs that `dev start-cluster` recorded, after checking that each one still runs an
+`mqdb cluster start` or `mqdb agent start` whose `--db` resolves to `<prefix>-N`.
+The `dev test` suites that start their own cluster (`--ownership`, `--sharing`, `--presence`)
+also run `pkill -f "mqdb cluster"` and use ports 1883+, whatever `--db-prefix` or `--base-port`
+another cluster was started with.
 
 ### Clean Test Data
 
@@ -347,6 +358,18 @@ mqdb dev clean
 # Clean custom directory
 mqdb dev clean --db-prefix /tmp/my-test
 ```
+
+`dev clean` removes the `<prefix>-N` node directories and `<prefix>-passwd`. With the default
+prefix `/tmp/mqdb-test` it also removes what `dev test` leaves, which always lives there:
+`/tmp/mqdb-test-{own,share,presence}-N` directories and `/tmp/mqdb-test-{ownership,sharing,presence}-passwd`
+files. It waits up to 10s while an `mqdb cluster start` or `mqdb agent start` process still uses
+one of those directories as its `--db` or one of those files as its `--passwd`, then refuses. `dev start-cluster` without `--clean` refuses right away
+if a node still runs on one of its `<prefix>-N` directories, or, when no `--passwd` is given, still
+uses the `<prefix>-passwd` file it would regenerate. A process is matched by its
+`--db <dir>` or `--db=<dir>` argument; a relative `--db` is resolved against that process's
+working directory with `lsof`, and so is a relative `--passwd`; if either cannot be resolved,
+`dev clean` and `dev start-cluster` refuse. A node given its
+database only through `MQDB_DB` is not detected.
 
 ### View Logs
 
@@ -360,8 +383,8 @@ mqdb dev logs --follow
 # View specific node logs
 mqdb dev logs --node 2
 
-# Filter by pattern
-mqdb dev logs --pattern "error|warn"
+# Filter by a literal substring
+mqdb dev logs --pattern "ERROR"
 
 # Show last N lines
 mqdb dev logs --last 100
@@ -381,7 +404,7 @@ mqdb dev start-cluster --nodes 5
 # Clean existing data first
 mqdb dev start-cluster --clean
 
-# Choose topology: partial (default), upper, or full
+# Choose topology: full (default with QUIC), partial (default with --no-quic), or upper
 mqdb dev start-cluster --topology partial
 mqdb dev start-cluster --topology upper
 mqdb dev start-cluster --topology full
@@ -395,9 +418,9 @@ mqdb dev start-cluster --no-quic
 > on all nodes. Use `--user admin --pass admin` when running CLI commands against the cluster.
 
 **Topology options:**
-- `partial` (default): each node connects to lower-numbered nodes
+- `partial` (default with `--no-quic`): each node connects to lower-numbered nodes
 - `upper`: each node connects to higher-numbered nodes
-- `full`: every node connects to every other node
+- `full` (default with QUIC): every node connects to every other node
 
 ### Start-Cluster Options
 
@@ -410,13 +433,27 @@ mqdb dev start-cluster --no-quic
 | `--quic-ca` | CA certificate path | `test_certs/ca.pem` |
 | `--no-quic` | Disable QUIC transport | `false` |
 | `--db-prefix` | Database path prefix | `/tmp/mqdb-test` |
+| `--base-port` | MQTT port of node 1; node N uses base+N-1 and its cluster transport base+50+N-1 (up to 50 nodes) | `1883` |
 | `--bind-host` | Host to bind | `127.0.0.1` |
-| `--topology` | Mesh topology: `partial`, `upper`, `full` | `partial` |
+| `--topology` | Mesh topology: `partial`, `upper`, `full` | `full`, or `partial` with `--no-quic` |
 | `--bridge-out` | Use Out-only bridge direction | `false` |
 | `--no-bridge-out` | Use Both bridge direction even for full topology | `false` |
 | `--passwd` | Path to password file (auto-generated if omitted) | (auto) |
 | `--ownership` | Ownership config: `entity=field` pairs | (none) |
 | `--license` | Path to license key file (required for clustering) | (none) |
+
+To add node K to a running dev cluster, start it by hand with the same offset, list every
+existing node as a peer, and record its PID so `dev kill --db-prefix` stops it:
+
+```bash
+mkdir -p /tmp/mqdb-test-4
+mqdb cluster start --node-id 4 --bind 127.0.0.1:1886 --db /tmp/mqdb-test-4 \
+  --peers 1@127.0.0.1:1883,2@127.0.0.1:1884,3@127.0.0.1:1885 --cluster-port-offset 50 --bridge-out \
+  --quic-cert test_certs/server.pem --quic-key test_certs/server.key --quic-ca test_certs/ca.pem \
+  --passwd /tmp/mqdb-test-passwd --admin-users admin \
+  --license /path/to/license.key >> /tmp/mqdb-test-4/mqdb.log 2>&1 &
+echo $! > /tmp/mqdb-test-4/mqdb.pid
+```
 
 ### Run Built-in Tests
 

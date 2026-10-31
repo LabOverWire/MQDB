@@ -316,10 +316,14 @@ impl<T: ClusterTransport> NodeController<T> {
                 }
             } else if let Some(target_node) = primary {
                 let request_id = self.allocate_fk_request_id();
+                let Some(req) = FkCheckRequest::create(request_id, target_entity, &fk_value) else {
+                    return Err(format!(
+                        "FK constraint violation: referenced {target_entity} id is too long to exist"
+                    ));
+                };
                 let (tx, rx) = oneshot::channel();
                 self.pending_constraints.insert_fk_check(request_id, tx);
 
-                let req = FkCheckRequest::create(request_id, target_entity, &fk_value);
                 let _ = self
                     .transport
                     .send(target_node, ClusterMessage::FkCheckRequest(req))

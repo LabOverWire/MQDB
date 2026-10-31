@@ -120,7 +120,7 @@ impl CertificateStore {
             {
                 debug!(topic = %stale.topic_name, "clearing device certificate after node rebirth");
                 router
-                    .route_message(&retained(stale.topic_name, Vec::new()), None)
+                    .route_sys_message(&retained(stale.topic_name, Vec::new()))
                     .await;
             }
         }
@@ -132,12 +132,12 @@ impl CertificateStore {
                 "birth larger than the retained message size limit, certificate cleared"
             );
             router
-                .route_message(&retained(certificate, Vec::new()), None)
+                .route_sys_message(&retained(certificate, Vec::new()))
                 .await;
             return;
         }
         router
-            .route_message(&retained(certificate, payload.to_vec()), None)
+            .route_sys_message(&retained(certificate, payload.to_vec()))
             .await;
     }
 }

@@ -330,6 +330,73 @@ fn forwarded_publish_from_a_node_without_the_trailer_decodes_with_no_properties(
 }
 
 #[test]
+fn forwarded_publish_carries_its_assigned_share_groups() {
+    let origin = NodeId::validated(2).unwrap();
+    let fwd = ForwardedPublish::new(
+        origin,
+        "sh/x".to_string(),
+        1,
+        false,
+        b"m".to_vec(),
+        vec![ForwardTarget::new("plain-a".to_string(), 1)],
+    )
+    .with_user_properties(vec![("trace".to_string(), "1".to_string())])
+    .with_share_groups(vec!["g".to_string(), "h".to_string()]);
+
+    let decoded = ForwardedPublish::from_bytes(&fwd.to_bytes()).unwrap();
+
+    assert_eq!(
+        decoded.share_groups,
+        Some(vec!["g".to_string(), "h".to_string()])
+    );
+    assert_eq!(
+        decoded.user_properties,
+        vec![("trace".to_string(), "1".to_string())]
+    );
+    assert_eq!(decoded.targets.len(), 1);
+}
+
+#[test]
+fn forwarded_publish_with_no_assigned_groups_is_told_to_serve_none() {
+    let origin = NodeId::validated(2).unwrap();
+    let fwd = ForwardedPublish::new(origin, "sh/x".to_string(), 1, false, b"m".to_vec(), vec![])
+        .with_share_groups(Vec::new());
+
+    let decoded = ForwardedPublish::from_bytes(&fwd.to_bytes()).unwrap();
+
+    assert_eq!(decoded.share_groups, Some(Vec::new()));
+}
+
+#[test]
+fn forwarded_publish_from_a_node_without_share_groups_serves_every_group() {
+    let origin = NodeId::validated(2).unwrap();
+    let fwd = ForwardedPublish::new(origin, "sh/x".to_string(), 1, false, b"m".to_vec(), vec![])
+        .with_user_properties(vec![("trace".to_string(), "1".to_string())]);
+
+    let decoded = ForwardedPublish::from_bytes(&fwd.to_bytes()).unwrap();
+
+    assert_eq!(decoded.share_groups, None);
+    assert_eq!(
+        decoded.user_properties,
+        vec![("trace".to_string(), "1".to_string())]
+    );
+}
+
+#[test]
+fn forwarded_publish_with_an_unreadable_share_trailer_still_decodes() {
+    let origin = NodeId::validated(2).unwrap();
+    let fwd = ForwardedPublish::new(origin, "sh/x".to_string(), 1, false, b"m".to_vec(), vec![])
+        .with_user_properties(vec![("trace".to_string(), "1".to_string())]);
+    let mut bytes = fwd.to_bytes();
+    bytes.extend_from_slice(&[0, 3, 0, 9, b'g']);
+
+    let decoded = ForwardedPublish::from_bytes(&bytes).unwrap();
+
+    assert_eq!(decoded.share_groups, None);
+    assert_eq!(decoded.payload, b"m");
+}
+
+#[test]
 fn forwarded_publish_with_more_targets_than_fit_keeps_its_properties() {
     let origin = NodeId::validated(2).unwrap();
     let targets = (0..300)

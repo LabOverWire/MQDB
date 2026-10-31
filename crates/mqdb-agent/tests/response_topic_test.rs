@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod common;
+mod running_agent;
 
 use common::next_test_port;
 use mqdb_agent::{Database, MqdbAgent};
@@ -9,8 +10,8 @@ use mqdb_core::types::OwnershipConfig;
 use mqtt5::broker::PasswordAuthProvider;
 use mqtt5::client::MqttClient;
 use mqtt5::types::{ConnectOptions, PublishOptions, PublishProperties};
+use running_agent::RunningAgent;
 use serde_json::{Value, json};
-use std::net::SocketAddr;
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -74,59 +75,25 @@ async fn request(client: &MqttClient, topic: &str, payload: &Value) -> Value {
     serde_json::from_slice(&payload).unwrap()
 }
 
-struct TestAgent {
-    port: u16,
-    handle: tokio::task::JoinHandle<()>,
-    shutdown: tokio::sync::broadcast::Sender<()>,
-    tmp: TempDir,
-}
-
-impl TestAgent {
-    async fn start(users: &[&User]) -> Self {
-        let tmp = TempDir::new().unwrap();
-        let password_file = tmp.path().join("passwd");
-        let lines: String = users
-            .iter()
-            .map(|user| {
-                let hash = PasswordAuthProvider::hash_password(&user.password).unwrap();
-                format!("{}:{hash}\n", user.name)
-            })
-            .collect();
-        std::fs::write(&password_file, lines).unwrap();
-
-        let db = Database::open_without_background_tasks(tmp.path().join("agent"))
-            .await
-            .unwrap();
-        let port = next_test_port();
-        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-        let agent = MqdbAgent::new(db)
-            .with_bind_address(addr)
-            .with_password_file(password_file)
-            .with_ownership_config(OwnershipConfig::parse("diagrams=userId").unwrap());
-        let (handle, mut ready_rx, shutdown) = agent.start().await.unwrap();
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while !*ready_rx.borrow() {
-                ready_rx.changed().await.unwrap();
-            }
+async fn start_agent(users: &[&User]) -> RunningAgent {
+    let tmp = TempDir::new().unwrap();
+    let password_file = tmp.path().join("passwd");
+    let lines: String = users
+        .iter()
+        .map(|user| {
+            let hash = PasswordAuthProvider::hash_password(&user.password).unwrap();
+            format!("{}:{hash}\n", user.name)
         })
-        .await
-        .expect("agent did not become ready");
-        Self {
-            port,
-            handle,
-            shutdown,
-            tmp,
-        }
-    }
+        .collect();
+    std::fs::write(&password_file, lines).unwrap();
 
-    async fn stop(self) {
-        self.shutdown.send(()).unwrap();
-        tokio::time::timeout(Duration::from_secs(10), self.handle)
-            .await
-            .expect("agent did not stop")
-            .unwrap();
-        self.tmp.close().unwrap();
-    }
+    let db = Database::open_without_background_tasks(tmp.path().join("agent"))
+        .await
+        .unwrap();
+    let agent = MqdbAgent::new(db)
+        .with_password_file(password_file)
+        .with_ownership_config(OwnershipConfig::parse("diagrams=userId").unwrap());
+    RunningAgent::start(agent, next_test_port(), tmp).await
 }
 
 async fn watch(client: &MqttClient, topic: &str) -> flume::Receiver<Vec<u8>> {
@@ -151,7 +118,7 @@ async fn wait_for_delivery(deliveries: &flume::Receiver<Vec<u8>>) {
 async fn responses_published_to_request_topics_are_not_executed() {
     let alice = User::new("alice");
     let bob = User::new("bob");
-    let agent = TestAgent::start(&[&alice, &bob]).await;
+    let agent = start_agent(&[&alice, &bob]).await;
 
     let bob_client = bob.connect(agent.port).await;
     let created = request(
@@ -211,7 +178,7 @@ async fn responses_published_to_request_topics_are_not_executed() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn requests_with_an_unauthorized_response_topic_are_refused() {
     let alice = User::new("alice");
-    let agent = TestAgent::start(&[&alice]).await;
+    let agent = start_agent(&[&alice]).await;
     let alice_client = alice.connect(agent.port).await;
 
     publish_with_response_topic(

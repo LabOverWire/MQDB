@@ -9,6 +9,7 @@ use super::super::{
     TopicSubscriptionBroadcast, WildcardBroadcast,
 };
 use super::{ClusterEventHandler, LwtForwardingData, qos_to_u8};
+use crate::cluster::{LocalShare, RemoteForward, remote_forwards};
 use mqtt5::broker::events::ClientPublishEvent;
 use std::collections::HashMap;
 use tracing::{debug, trace, warn};
@@ -68,17 +69,18 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
         qos: u8,
         retain: bool,
         payload: &[u8],
-        remote_nodes: HashMap<NodeId, Vec<ForwardTarget>>,
+        forwards: HashMap<NodeId, RemoteForward>,
     ) {
-        for (target_node, targets) in remote_nodes {
+        for (target_node, forward) in forwards {
             let fwd = ForwardedPublish::new(
                 origin,
                 topic.to_string(),
                 qos,
                 retain,
                 payload.to_vec(),
-                targets,
-            );
+                forward.targets,
+            )
+            .with_share_groups(forward.share_groups);
             let fwd_msg = ClusterMessage::ForwardedPublish(fwd);
             if let Err(e) = transport.send(target_node, fwd_msg).await {
                 warn!(target = target_node.get(), error = %e, "failed to forward publish");
@@ -312,6 +314,7 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
         node_id: NodeId,
         event: &ClientPublishEvent,
     ) {
+        let held = self.held_local_shares(event.topic.as_ref()).await;
         let (ctrl, try_read_success) = match self.controller.try_read() {
             Ok(guard) => (guard, true),
             Err(_) => (self.controller.read().await, false),
@@ -335,8 +338,9 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
                 .into_iter()
                 .map(|target| ForwardTarget::new(target.client_id, target.qos)),
         );
+        let share_nodes = self.share_assignment(&ctrl, topic, &held);
 
-        if remote_nodes.is_empty() {
+        if remote_nodes.is_empty() && share_nodes.is_empty() {
             drop(ctrl);
         } else {
             let transport = ctrl.transport().clone();
@@ -349,15 +353,17 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
                 qos_to_u8(event.qos),
                 event.retain,
                 &event.payload,
-                remote_nodes,
+                remote_forwards(remote_nodes, share_nodes),
             )
             .await;
         }
     }
 
     pub(super) fn prepare_lwt_forwarding(
+        &self,
         ctrl: &NodeController<T>,
         client_id: &str,
+        held: &[LocalShare],
     ) -> Option<LwtForwardingData<T>> {
         let lwt_publisher = LwtPublisher::new(&ctrl.stores().sessions);
         let prepared = lwt_publisher.prepare_lwt(client_id);
@@ -385,6 +391,8 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
                 .map(|t| ForwardTarget::new(t.client_id, t.qos)),
         );
 
+        let share_nodes = self.share_assignment(ctrl, &lwt.topic, held);
+
         let is_clean_session = ctrl
             .stores()
             .sessions
@@ -399,6 +407,7 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             payload: lwt.payload,
             token: lwt.token,
             remote_nodes,
+            share_nodes,
             is_clean_session,
         })
     }

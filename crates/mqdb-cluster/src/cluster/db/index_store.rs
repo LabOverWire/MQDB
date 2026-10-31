@@ -47,7 +47,6 @@ fn decode_hex(s: &str) -> Option<Vec<u8>> {
 }
 
 impl IndexEntry {
-    #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub fn create(
         entity: &str,
@@ -55,23 +54,19 @@ impl IndexEntry {
         value: &[u8],
         data_partition: PartitionId,
         record_id: &str,
-    ) -> Self {
-        let entity_bytes = entity.as_bytes().to_vec();
-        let field_bytes = field.as_bytes().to_vec();
-        let record_id_bytes = record_id.as_bytes().to_vec();
-
-        Self {
+    ) -> Option<Self> {
+        Some(Self {
             version: 1,
-            entity_len: entity_bytes.len() as u16,
-            entity: entity_bytes,
-            field_len: field_bytes.len() as u16,
-            field: field_bytes,
-            value_len: value.len() as u32,
+            entity_len: u16::try_from(entity.len()).ok()?,
+            entity: entity.as_bytes().to_vec(),
+            field_len: u16::try_from(field.len()).ok()?,
+            field: field.as_bytes().to_vec(),
+            value_len: u32::try_from(value.len()).ok()?,
             value: value.to_vec(),
             data_partition: data_partition.get(),
-            record_id_len: record_id_bytes.len() as u16,
-            record_id: record_id_bytes,
-        }
+            record_id_len: u16::try_from(record_id.len()).ok()?,
+            record_id: record_id.as_bytes().to_vec(),
+        })
     }
 
     #[must_use]
@@ -281,26 +276,26 @@ impl IndexStore {
 
     /// # Panics
     /// Panics if the internal lock is poisoned.
-    #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub fn export_for_partition(&self, partition: PartitionId) -> Vec<u8> {
         let entries = self.entries.read().unwrap();
-        let matching: Vec<&IndexEntry> = entries
+        let encoded: Vec<Vec<u8>> = entries
             .values()
             .flat_map(BTreeMap::values)
             .filter(|e| e.index_partition() == partition)
+            .filter_map(|entry| {
+                let data = Self::serialize(entry);
+                let data_len = u32::try_from(data.len()).ok();
+                if data_len.is_none() {
+                    tracing::warn!(
+                        data_len = data.len(),
+                        "index entry too large for snapshot, skipped"
+                    );
+                }
+                data_len.map(|len| [len.to_be_bytes().as_slice(), &data].concat())
+            })
             .collect();
-
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&(matching.len() as u32).to_be_bytes());
-
-        for entry in matching {
-            let data = Self::serialize(entry);
-            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
-            buf.extend_from_slice(&data);
-        }
-
-        buf
+        super::data_store::join_snapshot_entries(&encoded)
     }
 
     /// # Panics
@@ -405,7 +400,8 @@ mod tests {
             b"alice@example.com",
             partition(42),
             "user123",
-        );
+        )
+        .unwrap();
         let bytes = IndexStore::serialize(&entry);
         let parsed = IndexStore::deserialize(&bytes).unwrap();
 
@@ -425,7 +421,8 @@ mod tests {
             b"alice@example.com",
             partition(42),
             "user123",
-        );
+        )
+        .unwrap();
 
         store.add_entry(entry.clone()).unwrap();
 
@@ -443,7 +440,8 @@ mod tests {
             b"alice@example.com",
             partition(42),
             "user123",
-        );
+        )
+        .unwrap();
 
         store.add_entry(entry.clone()).unwrap();
         let result = store.add_entry(entry);
@@ -460,7 +458,8 @@ mod tests {
             b"alice@example.com",
             partition(42),
             "user123",
-        );
+        )
+        .unwrap();
 
         store.add_entry(entry).unwrap();
 
@@ -484,23 +483,29 @@ mod tests {
         let store = IndexStore::new(node(1));
 
         store
-            .add_entry(IndexEntry::create(
-                "products",
-                "category",
-                b"electronics",
-                partition(10),
-                "prod1",
-            ))
+            .add_entry(
+                IndexEntry::create(
+                    "products",
+                    "category",
+                    b"electronics",
+                    partition(10),
+                    "prod1",
+                )
+                .unwrap(),
+            )
             .unwrap();
 
         store
-            .add_entry(IndexEntry::create(
-                "products",
-                "category",
-                b"electronics",
-                partition(20),
-                "prod2",
-            ))
+            .add_entry(
+                IndexEntry::create(
+                    "products",
+                    "category",
+                    b"electronics",
+                    partition(20),
+                    "prod2",
+                )
+                .unwrap(),
+            )
             .unwrap();
 
         let results = store.lookup("products", "category", b"electronics");
@@ -516,7 +521,8 @@ mod tests {
             b"bob@example.com",
             partition(5),
             "user456",
-        );
+        )
+        .unwrap();
         let data = IndexStore::serialize(&entry);
 
         store
@@ -535,7 +541,8 @@ mod tests {
             b"test@example.com",
             partition(42),
             "user789",
-        );
+        )
+        .unwrap();
         let key = index_key(&entry);
 
         assert!(key.starts_with("gidx/users/email/"));
@@ -555,7 +562,8 @@ mod tests {
                 format!("user{i}@example.com").as_bytes(),
                 partition(i),
                 &format!("u{i}"),
-            );
+            )
+            .unwrap();
             src.add_entry(entry.clone()).unwrap();
             entries.push(entry);
         }
@@ -601,7 +609,8 @@ mod tests {
                 format!("u{i}").as_bytes(),
                 partition(i),
                 &format!("rec{i}"),
-            );
+            )
+            .unwrap();
             store.add_entry(entry.clone()).unwrap();
             entries.push(entry);
         }
@@ -626,13 +635,16 @@ mod tests {
         let dst = IndexStore::new(node(2));
 
         for i in 0_u16..4 {
-            src.add_entry(IndexEntry::create(
-                "users",
-                "email",
-                format!("u{i}@x.com").as_bytes(),
-                partition(i),
-                &format!("u{i}"),
-            ))
+            src.add_entry(
+                IndexEntry::create(
+                    "users",
+                    "email",
+                    format!("u{i}@x.com").as_bytes(),
+                    partition(i),
+                    &format!("u{i}"),
+                )
+                .unwrap(),
+            )
             .unwrap();
         }
 

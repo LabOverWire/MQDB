@@ -24,21 +24,18 @@ pub struct DbEntity {
 }
 
 impl DbEntity {
-    #[allow(clippy::cast_possible_truncation)]
     #[must_use]
-    pub fn create(entity: &str, id: &str, data: &[u8], timestamp_ms: u64) -> Self {
-        let entity_bytes = entity.as_bytes().to_vec();
-        let id_bytes = id.as_bytes().to_vec();
-        Self {
+    pub fn create(entity: &str, id: &str, data: &[u8], timestamp_ms: u64) -> Option<Self> {
+        Some(Self {
             version: 1,
-            entity_len: entity_bytes.len() as u16,
-            entity: entity_bytes,
-            id_len: id_bytes.len() as u16,
-            id: id_bytes,
+            entity_len: u16::try_from(entity.len()).ok()?,
+            entity: entity.as_bytes().to_vec(),
+            id_len: u16::try_from(id.len()).ok()?,
+            id: id.as_bytes().to_vec(),
             timestamp_ms,
-            data_len: data.len() as u32,
+            data_len: u32::try_from(data.len()).ok()?,
             data: data.to_vec(),
-        }
+        })
     }
 
     #[must_use]
@@ -60,6 +57,43 @@ impl DbEntity {
     pub fn partition(&self) -> PartitionId {
         data_partition(self.entity_str(), self.id_str())
     }
+}
+
+pub(super) fn encode_snapshot_entry(key: &str, data: &[u8]) -> Option<Vec<u8>> {
+    let key_len = u16::try_from(key.len()).ok()?;
+    let data_len = u32::try_from(data.len()).ok()?;
+    let mut entry = Vec::with_capacity(6 + key.len() + data.len());
+    entry.extend_from_slice(&key_len.to_be_bytes());
+    entry.extend_from_slice(key.as_bytes());
+    entry.extend_from_slice(&data_len.to_be_bytes());
+    entry.extend_from_slice(data);
+    Some(entry)
+}
+
+pub(super) fn join_snapshot_entries(entries: &[Vec<u8>]) -> Vec<u8> {
+    let count = u32::try_from(entries.len()).unwrap_or(u32::MAX);
+    let mut buf = count.to_be_bytes().to_vec();
+    for entry in entries
+        .iter()
+        .take(usize::try_from(count).unwrap_or(usize::MAX))
+    {
+        buf.extend_from_slice(entry);
+    }
+    buf
+}
+
+#[must_use]
+pub fn oversized_create_message(entity: &str, data: &serde_json::Value) -> Option<String> {
+    let entity_limit = mqdb_core::protocol::MAX_ENTITY_NAME_LEN;
+    if entity.len() > entity_limit {
+        return Some(format!(
+            "entity name is {} bytes, the limit is {entity_limit}",
+            entity.len()
+        ));
+    }
+    let id = data.get("id")?.as_str()?;
+    let id_limit = mqdb_core::protocol::MAX_RECORD_ID_LEN;
+    (id.len() > id_limit).then(|| format!("id is {} bytes, the limit is {id_limit}", id.len()))
 }
 
 #[must_use]
@@ -159,7 +193,8 @@ impl DbDataStore {
         if entities.contains_key(&key) {
             return Err(DbDataStoreError::AlreadyExists);
         }
-        let db_entity = DbEntity::create(entity, id, data, timestamp_ms);
+        let db_entity = DbEntity::create(entity, id, data, timestamp_ms)
+            .ok_or(DbDataStoreError::SerializationError)?;
         entities.insert(key, db_entity.clone());
 
         let total_time = start.elapsed();
@@ -199,7 +234,8 @@ impl DbDataStore {
         if !entities.contains_key(&key) {
             return Err(DbDataStoreError::NotFound);
         }
-        let db_entity = DbEntity::create(entity, id, data, timestamp_ms);
+        let db_entity = DbEntity::create(entity, id, data, timestamp_ms)
+            .ok_or(DbDataStoreError::SerializationError)?;
         entities.insert(key, db_entity.clone());
         Ok(db_entity)
     }
@@ -217,12 +253,21 @@ impl DbDataStore {
 
     /// # Panics
     /// Panics if the internal lock is poisoned.
-    pub fn upsert(&self, entity: &str, id: &str, data: &[u8], timestamp_ms: u64) -> DbEntity {
-        let key = format!("{entity}/{id}");
-        let mut entities = self.write_entities();
-        let db_entity = DbEntity::create(entity, id, data, timestamp_ms);
-        entities.insert(key, db_entity.clone());
-        db_entity
+    ///
+    /// # Errors
+    /// Returns `SerializationError` if a length does not fit the record format.
+    pub fn upsert(
+        &self,
+        entity: &str,
+        id: &str,
+        data: &[u8],
+        timestamp_ms: u64,
+    ) -> Result<DbEntity, DbDataStoreError> {
+        let db_entity = DbEntity::create(entity, id, data, timestamp_ms)
+            .ok_or(DbDataStoreError::SerializationError)?;
+        self.write_entities()
+            .insert(format!("{entity}/{id}"), db_entity.clone());
+        Ok(db_entity)
     }
 
     #[must_use]
@@ -294,7 +339,6 @@ impl DbDataStore {
     /// # Panics
     /// Panics if the internal lock is poisoned.
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn query(
         &self,
         entity_type: Option<&str>,
@@ -332,7 +376,7 @@ impl DbDataStore {
 
         results.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
 
-        let limit_usize = limit as usize;
+        let limit_usize = usize::try_from(limit).unwrap_or(usize::MAX);
         let has_more = results.len() > limit_usize;
         let results: Vec<_> = results.into_iter().take(limit_usize).collect();
 
@@ -400,29 +444,24 @@ impl DbDataStore {
 
     /// # Panics
     /// Panics if the internal lock is poisoned.
-    #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub fn export_for_partition(&self, partition: PartitionId) -> Vec<u8> {
         let entities = self.read_entities();
-        let partition_entities: Vec<_> = entities
+        let encoded: Vec<Vec<u8>> = entities
             .iter()
             .filter(|(_, v)| v.partition() == partition)
+            .filter_map(|(key, entity)| {
+                let entry = encode_snapshot_entry(key, &Self::serialize(entity));
+                if entry.is_none() {
+                    tracing::warn!(
+                        key_len = key.len(),
+                        "record too large for snapshot, skipped"
+                    );
+                }
+                entry
+            })
             .collect();
-
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&(partition_entities.len() as u32).to_be_bytes());
-
-        for (key, entity) in partition_entities {
-            let key_bytes = key.as_bytes();
-            buf.extend_from_slice(&(key_bytes.len() as u16).to_be_bytes());
-            buf.extend_from_slice(key_bytes);
-
-            let data = Self::serialize(entity);
-            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
-            buf.extend_from_slice(&data);
-        }
-
-        buf
+        join_snapshot_entries(&encoded)
     }
 
     /// # Panics
@@ -622,7 +661,7 @@ mod tests {
 
     #[test]
     fn db_entity_bebytes_roundtrip() {
-        let entity = DbEntity::create("users", "123", b"{\"name\":\"Alice\"}", 1000);
+        let entity = DbEntity::create("users", "123", b"{\"name\":\"Alice\"}", 1000).unwrap();
         let bytes = DbDataStore::serialize(&entity);
         let parsed = DbDataStore::deserialize(&bytes).unwrap();
 
@@ -882,5 +921,19 @@ mod tests {
             idx.lookup("users", "u1", "posts", "editor_id"),
             vec!["p2".to_string()],
         );
+    }
+
+    #[test]
+    fn snapshot_entry_refuses_a_key_whose_length_does_not_fit() {
+        let at_limit = "k".repeat(usize::from(u16::MAX));
+        let entry = encode_snapshot_entry(&at_limit, b"v").unwrap();
+        assert_eq!(&entry[..2], &u16::MAX.to_be_bytes());
+        assert_eq!(entry.len(), 2 + at_limit.len() + 4 + 1);
+
+        assert!(encode_snapshot_entry(&"k".repeat(usize::from(u16::MAX) + 1), b"v").is_none());
+
+        let joined = join_snapshot_entries(&[entry.clone(), entry.clone()]);
+        assert_eq!(&joined[..4], &2_u32.to_be_bytes());
+        assert_eq!(joined.len(), 4 + 2 * entry.len());
     }
 }

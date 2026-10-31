@@ -14,6 +14,12 @@ pub(crate) enum DevAction {
         node: Option<u16>,
         #[arg(long, help = "Kill agent process")]
         agent: bool,
+        #[arg(
+            long,
+            conflicts_with_all = ["all", "agent"],
+            help = "Kill only the nodes 'dev start-cluster' started with this --db-prefix"
+        )]
+        db_prefix: Option<String>,
     },
     Clean {
         #[arg(long, default_value = "/tmp/mqdb-test")]
@@ -76,6 +82,13 @@ pub(crate) enum DevAction {
         no_quic: bool,
         #[arg(long, default_value = "/tmp/mqdb-test")]
         db_prefix: String,
+        #[arg(
+            long,
+            default_value = "1883",
+            value_parser = clap::value_parser!(u16).range(1024..),
+            help = "Port of node 1; node N uses base+N-1 and its cluster transport base+50+N-1"
+        )]
+        base_port: u16,
         #[arg(
             long,
             default_value = "127.0.0.1",

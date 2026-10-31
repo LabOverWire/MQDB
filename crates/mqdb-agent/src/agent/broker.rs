@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::MqdbAgent;
+use super::websocket::WebSocketListener;
 use crate::auth_config::{AuthRateLimit, enhanced_auth_with_fallback, rate_limited};
 use crate::broker_defaults::{
     BROKER_MAX_CLIENTS, BROKER_MAX_PACKET_SIZE, BROKER_SYS_RETAINED_TOPICS, SESSION_EXPIRY_SECS,
@@ -14,7 +15,6 @@ use crate::topic_protection::TopicProtectionAuthProvider;
 use mqtt5::broker::auth::ComprehensiveAuthProvider;
 use mqtt5::broker::config::{
     AuthMethod, ChangeOnlyDeliveryConfig, QuicConfig, StorageBackend, StorageConfig,
-    WebSocketConfig,
 };
 use mqtt5::broker::events::{
     BrokerEventHandler, ClientConnectEvent, ClientDisconnectEvent, ClientPublishEvent,
@@ -225,11 +225,25 @@ impl MqdbAgent {
             *config = std::mem::take(config).with_quic(quic_config);
             info!(quic_bind = %self.bind_address, "QUIC listener configured");
         }
+    }
 
-        if let Some(ws_addr) = self.ws_bind_address {
-            let ws_config = WebSocketConfig::new().with_bind_addresses(vec![ws_addr]);
-            *config = std::mem::take(config).with_websocket(ws_config);
-            info!(ws_bind = %ws_addr, "WebSocket listener configured");
+    pub(super) fn spawn_websocket_task(
+        &self,
+        listener: Option<WebSocketListener>,
+        broker: &MqttBroker,
+        agent_ready_rx: Option<tokio::sync::watch::Receiver<bool>>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        let (listener, agent_ready_rx) = listener.zip(agent_ready_rx)?;
+        Some(listener.spawn(broker, self.shutdown_tx.clone(), agent_ready_rx))
+    }
+
+    pub(super) async fn bind_websocket(
+        &self,
+        config: &BrokerConfig,
+    ) -> std::io::Result<Option<WebSocketListener>> {
+        match self.ws_bind_address {
+            Some(addr) => WebSocketListener::bind(addr, config).await.map(Some),
+            None => Ok(None),
         }
     }
 

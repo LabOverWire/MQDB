@@ -11,17 +11,18 @@ WebSocket support is available in the `mqtt5` broker via `WebSocketConfig`.
 ## Confirmed API
 
 ```rust
-use mqtt5::{BrokerConfig, WebSocketConfig};
+use mqtt5::broker::config::WebSocketConfig;
+use mqtt5::broker::{BrokerConfig, MqttBroker};
 
 let config = BrokerConfig::new()
-    .with_bind_address("0.0.0.0:1883".parse().unwrap())  // TCP
+    .with_bind_address(([0, 0, 0, 0], 1883))
     .with_websocket(
         WebSocketConfig::new()
-            .with_bind_address("0.0.0.0:8080".parse().unwrap())
+            .with_bind_address(([0, 0, 0, 0], 8080))
             .with_path("/mqtt")
     );
 
-let broker = Broker::new(config);
+let mut broker = MqttBroker::with_config(config).await?;
 broker.run().await?;
 ```
 
@@ -35,6 +36,26 @@ broker.run().await?;
 
 The `mqtt` subprotocol and binary frame handling are managed internally by the codec.
 
+Cluster mode uses this API. Agent mode (`mqdb agent start --ws-bind`) does not: MQDB binds the WebSocket port itself
+(`crates/mqdb-agent/src/agent/websocket.rs`) so it can answer a plain HTTP `GET /health` with `200` before any
+upgrade. Every other request is handed to `mqtt5::broker::websocket_server::accept_websocket_connection` with the
+default `/mqtt` path and `mqtt` subprotocol, and the upgraded stream runs in an `mqtt5` `ClientHandler` built from the
+broker's router, auth provider, storage, stats and resource monitor.
+
+- The port is bound at startup but connections are served only once the agent is ready (broker, internal handler with
+  its response publisher, and event publisher). Until then TCP connections wait in the kernel backlog, so `/health`
+  never answers `200` for a node that cannot serve requests yet. MQTT over WebSocket depends on that readiness, unlike
+  MQTT over TCP. `/health` reports startup readiness only and does not track those internal tasks afterwards.
+  `GET /health` is answered as a health probe with or without upgrade headers.
+- `/health` is answered before the broker's connection limits are checked; those limits apply to WebSocket upgrades.
+- Reading the request and completing the handshake must finish within 10 seconds. At most 128 connections can be
+  between accept and the broker's CONNACK: the slot is released when a WebSocket frame carrying the CONNACK is written
+  (enhanced-auth AUTH packets do not release it), or when the connection closes. Further connections, `/health`
+  probes included, wait in the kernel backlog.
+- On agent shutdown, connections without a CONNACK are closed at once, connected MQTT 5 sessions get the broker's
+  shutdown DISCONNECT (MQTT 3.1.1 sessions are closed without one), and connections still open after 5 seconds are
+  closed by dropping their handler.
+
 ---
 
 ## Testing
@@ -43,6 +64,9 @@ The `mqtt` subprotocol and binary frame handling are managed internally by the c
 # Test with websocat
 websocat ws://127.0.0.1:8080/mqtt
 
+# Agent mode health check on the same port
+curl -i http://127.0.0.1:8080/health
+
 # Test with browser console
 const ws = new WebSocket('ws://127.0.0.1:8080/mqtt', 'mqtt');
 ws.binaryType = 'arraybuffer';
@@ -50,4 +74,4 @@ ws.onopen = () => console.log('Connected');
 ws.onmessage = (e) => console.log('Received:', e.data);
 ```
 
-Browser clients use the `mqtt5-wasm` crate; the server uses `mqtt5` with `WebSocketConfig`.
+Browser clients use the `mqtt5-wasm` crate; the server uses `mqtt5`, through `WebSocketConfig` in cluster mode and through `accept_websocket_connection` plus `ClientHandler` in agent mode.

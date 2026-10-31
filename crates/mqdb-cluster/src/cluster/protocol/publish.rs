@@ -27,13 +27,13 @@ pub struct ForwardedPublish {
     pub timestamp_us: u64,
     pub user_properties: Vec<(String, String)>,
     pub order_key: Option<String>,
+    pub share_groups: Option<Vec<String>>,
 }
 
 impl ForwardedPublish {
     pub const VERSION: u8 = 2;
 
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn new(
         origin_node: NodeId,
         topic: String,
@@ -57,6 +57,7 @@ impl ForwardedPublish {
             timestamp_us,
             user_properties: Vec::new(),
             order_key: None,
+            share_groups: None,
         }
     }
 
@@ -73,7 +74,12 @@ impl ForwardedPublish {
     }
 
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
+    pub fn with_share_groups(mut self, share_groups: Vec<String>) -> Self {
+        self.share_groups = Some(share_groups);
+        self
+    }
+
+    #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let topic_bytes = self.topic.as_bytes();
 
@@ -123,6 +129,18 @@ impl ForwardedPublish {
         for (key, value) in encodable_properties {
             put_str16(&mut buf, key);
             put_str16(&mut buf, value);
+        }
+
+        if let Some(groups) = &self.share_groups {
+            let encodable_groups = groups
+                .iter()
+                .filter(|group| group.len() <= usize::from(u16::MAX))
+                .take(usize::from(u16::MAX));
+            let group_count = u16::try_from(encodable_groups.clone().count()).unwrap_or(u16::MAX);
+            buf.extend_from_slice(&group_count.to_be_bytes());
+            for group in encodable_groups {
+                put_str16(&mut buf, group);
+            }
         }
 
         buf
@@ -203,8 +221,8 @@ impl ForwardedPublish {
             });
         }
 
-        let (order_key, user_properties) = if offset == bytes.len() {
-            (None, Vec::new())
+        let (order_key, user_properties, offset) = if offset == bytes.len() {
+            (None, Vec::new(), offset)
         } else {
             let (order_key, mut offset) = read_str16(bytes, offset)?;
             if bytes.len() < offset + 2 {
@@ -223,8 +241,11 @@ impl ForwardedPublish {
             (
                 (!order_key.is_empty()).then_some(order_key),
                 user_properties,
+                offset,
             )
         };
+
+        let share_groups = read_share_groups(bytes, offset);
 
         Some(Self {
             origin_node: NodeId::validated(origin_node)?,
@@ -236,8 +257,22 @@ impl ForwardedPublish {
             timestamp_us,
             user_properties,
             order_key,
+            share_groups,
         })
     }
+}
+
+fn read_share_groups(bytes: &[u8], offset: usize) -> Option<Vec<String>> {
+    let count_bytes = bytes.get(offset..offset + 2)?;
+    let group_count = usize::from(u16::from_be_bytes([count_bytes[0], count_bytes[1]]));
+    let mut offset = offset + 2;
+    let mut groups = Vec::with_capacity(group_count.min(bytes.len()));
+    for _ in 0..group_count {
+        let (group, next) = read_str16(bytes, offset)?;
+        offset = next;
+        groups.push(group);
+    }
+    Some(groups)
 }
 
 fn put_str16(buf: &mut Vec<u8>, value: &str) {

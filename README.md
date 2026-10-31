@@ -404,7 +404,7 @@ ready_rx.changed().await?; // wait until broker + handler are ready
 
 #### Sharing Operations
 
-An owner can share any ownership-enabled entity (the motivating case is diagrams) with a named user at `view` or `edit`. Grants are stored in a server-managed `_shares` entity that is **not** reachable via generic CRUD — mutate them only through these topics. Agent mode only (cluster parity tracked separately); the embedded WASM build rejects these operations.
+An owner can share any ownership-enabled entity (the motivating case is diagrams) with a named user at `view` or `edit`. Grants are stored in a server-managed `_shares` entity that is **not** reachable via generic CRUD — mutate them only through these topics. Agent and cluster mode both support them (see the cluster notes below); the embedded WASM build rejects these operations. Design: [docs/design/diagram-sharing.md](docs/design/diagram-sharing.md); manual tests: [docs/testing/17-sharing.md](docs/testing/17-sharing.md).
 
 | Topic | Action |
 |-------|--------|
@@ -413,7 +413,15 @@ An owner can share any ownership-enabled entity (the motivating case is diagrams
 | `$DB/{entity}/{id}/shares` | List a resource's grants (owner/admin only) |
 | `$DB/{entity}/shared` | List resources shared with the caller |
 
-`share`/`unshare` cascade by default over self-references (a diagram and the diagrams it links to); a direct share sets the level while a cascade only raises an existing grant. Read requires `view`, update requires `edit`; delete stays owner-only and clears the resource's grants. In OAuth deployments `grantee` is an email resolved to the registered user's canonical id; sharing with an as-yet-unregistered email stores a **pending** grant (inert until that user first signs in, at which point it is filled automatically and access is granted without re-sharing). With password/SCRAM auth `grantee` is the username.
+`share`/`unshare` cascade by default over self-references (a diagram and the diagrams it links to); a direct share sets the level while a cascade only raises an existing grant. Read requires `view`, update requires `edit`; delete stays owner-only, and a direct delete clears the resource's grants. In agent mode a record removed by an FK `cascade` ([#253](https://github.com/LabOverWire/MQDB/issues/253)) or by TTL expiry keeps its grants, so a record later created with the same id is readable by the old grantees. In OAuth deployments `grantee` is an email resolved to the registered user's canonical id; sharing with an as-yet-unregistered email stores a **pending** grant (inert until that user first signs in, at which point it is filled automatically and access is granted without re-sharing). With password/SCRAM auth `grantee` is the username.
+
+**In a cluster.** A grant is stored on its resource's partition, so `share`, `unshare`, `shares` and the share checks on read and update run on the node that holds that partition's primary; a node that is not the primary forwards the request there. While a partition is changing primary, reads, updates, deletes, `share`, `unshare` and `shares` on it can fail with a 503 that the client must retry, and `shares` and the read and update checks can be answered by a node whose copy of the grants is not current. `shared` sends a `_shares` list to every node and returns the matching resources. An OAuth email grantee is resolved to the canonical id across partitions. A direct delete and a TTL expiry clear the record's grants; a record removed by an FK `cascade` keeps them when its primary is the node running the cascade ([#253](https://github.com/LabOverWire/MQDB/issues/253)). Not yet in cluster mode:
+
+- A pending grant is stored but stays inert, because it is not filled when its user signs in ([#122](https://github.com/LabOverWire/MQDB/issues/122)).
+- A cascade grants only referenced records held by the shared record's primary. It skips a reference held by another primary (logging a warning) and does not follow references beyond it, even to records back on the original primary; the other references are still followed ([#122](https://github.com/LabOverWire/MQDB/issues/122)).
+- `unshare` revokes only the named record and never cascades ([#247](https://github.com/LabOverWire/MQDB/issues/247)).
+- A `share` payload that omits `cascade` does not cascade ([#248](https://github.com/LabOverWire/MQDB/issues/248)); the `mqdb share` CLI always sends the field.
+- Child-entity derivation (`--ownership-derive`, [#210](https://github.com/LabOverWire/MQDB/issues/210)) and scoped events (`--scoped-events`, [#211](https://github.com/LabOverWire/MQDB/issues/211)), both described below, are agent mode only.
 
 **Child-entity derivation.** Child records (e.g. a diagram's nodes/edges) can inherit access from their parent via `--ownership-derive` (env `MQDB_OWNERSHIP_DERIVE`), a comma-separated map of `child=fk_field>parent_entity` (e.g. `nodes=diagramId>diagrams,edges=diagramId>diagrams`). A derived child's read requires `view` on the parent and create/update/delete require `edit`; the parent reference is immutable on update, so an editor cannot move a child into a diagram they cannot edit. Without a mapping a child entity is unrestricted (default), so derivation is opt-in per deployment.
 
@@ -811,6 +819,7 @@ Use `--no-persist-stores` for testing or ephemeral deployments where data doesn'
 | Unique constraints | Full | Distributed reserve-commit-release protocol across nodes |
 | Foreign key constraints | Full | Distributed existence checks, owner-aware cascade/set-null with ack-wait, in-memory reverse index |
 | NOT NULL constraints | — | Agent mode only; not yet available in cluster mode |
+| Sharing | Partial | share/unshare/shares/shared work across nodes; the gaps are listed under [Sharing Operations](#sharing-operations) |
 | Consumer Groups | Partial | Shared subscriptions work; group tracking is local |
 
 ## CLI Tool
@@ -867,7 +876,7 @@ Every CLI flag can be set via environment variable. This is the primary configur
 | `MQDB_MAX_RETAINED_MESSAGES` | Reject client retained publishes to new topics once this many retained messages are stored, counting the broker's `$SYS` topics, presence and Sparkplug certificates (agent mode only; `0` = no limit) | `0` |
 | `MQDB_MAX_RETAINED_MESSAGE_SIZE` | Reject retained publishes with a larger payload, in bytes (agent and cluster; `0` = no limit) | `0` |
 | `MQDB_EVENT_SCOPE` | Scope events by entity field | — |
-| `MQDB_WS_BIND` | WebSocket bind address | — |
+| `MQDB_WS_BIND` | WebSocket bind address: MQTT over WebSocket on `/mqtt`; in agent mode a plain HTTP `GET /health` on the same port returns `200` for load balancer health checks | — |
 
 **Authentication:**
 

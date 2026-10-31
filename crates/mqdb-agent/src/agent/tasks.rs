@@ -120,9 +120,6 @@ impl MqdbAgent {
             }
 
             info!("Internal handler subscribed to $DB/#");
-            if let Some(tx) = handler_ready_tx {
-                let _ = tx.send(());
-            }
 
             let response_client = MqttClient::new(super::handlers::RESPONSE_PUBLISHER_CLIENT_ID);
             if let Err(e) = connect_mqtt_client(
@@ -136,6 +133,9 @@ impl MqdbAgent {
             {
                 error!("Failed to connect response publisher: {e}");
                 return;
+            }
+            if let Some(tx) = handler_ready_tx {
+                let _ = tx.send(());
             }
 
             loop {
@@ -309,7 +309,7 @@ impl MqdbAgent {
                         };
                         let publish = PublishPacket::new(presence.topic(), payload, QoS::AtMostOnce)
                             .with_retain(true);
-                        router.route_message(&publish, None).await;
+                        router.route_sys_message(&publish).await;
                     }
                     _ = presence_shutdown_rx.recv() => {
                         debug!("Presence publisher shutting down");

@@ -1,12 +1,12 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::database::{CallerContext, Database};
+use crate::database::{CallerContext, Database, DerivedAccess};
 use mqdb_core::transport::{Request, Response, VaultConstraintData};
 use mqdb_core::types::{AccessLevel, OwnershipConfig, OwnershipDecision, ScopeConfig};
 use serde_json::Value;
 
-fn value_from_unit(_: ()) -> Value {
+fn value_from_unit((): ()) -> Value {
     Value::Null
 }
 
@@ -31,7 +31,6 @@ impl Database {
         .await
     }
 
-    #[allow(clippy::too_many_lines)]
     #[tracing::instrument(skip_all, fields(op = request.operation_label()))]
     pub async fn execute_with_sender(
         &self,
@@ -59,6 +58,16 @@ impl Database {
         }
         match request {
             Request::Create { entity, data } => {
+                let id_limit = mqdb_core::protocol::MAX_RECORD_ID_LEN;
+                if let Some(id) = data.get("id").and_then(serde_json::Value::as_str)
+                    && id.len() > id_limit
+                {
+                    return mqdb_core::error::Error::Validation(format!(
+                        "id is {} bytes, the limit is {id_limit}",
+                        id.len()
+                    ))
+                    .into();
+                }
                 if let OwnershipDecision::Derive {
                     parent_entity,
                     fk_field,
@@ -114,12 +123,14 @@ impl Database {
                     } => {
                         if let Err(e) = self
                             .check_derived_access(
-                                &entity,
-                                &id,
-                                parent_entity,
-                                fk_field,
-                                uid,
-                                AccessLevel::View,
+                                &DerivedAccess {
+                                    child_entity: &entity,
+                                    child_id: &id,
+                                    parent_entity,
+                                    fk_field,
+                                    sender: uid,
+                                    required: AccessLevel::View,
+                                },
                                 ownership,
                             )
                             .await
@@ -162,12 +173,14 @@ impl Database {
                     } => {
                         if let Err(e) = self
                             .check_derived_access(
-                                &entity,
-                                &id,
-                                parent_entity,
-                                fk_field,
-                                uid,
-                                AccessLevel::Edit,
+                                &DerivedAccess {
+                                    child_entity: &entity,
+                                    child_id: &id,
+                                    parent_entity,
+                                    fk_field,
+                                    sender: uid,
+                                    required: AccessLevel::Edit,
+                                },
                                 ownership,
                             )
                             .await
@@ -227,12 +240,14 @@ impl Database {
                     } => {
                         if let Err(e) = self
                             .check_derived_access(
-                                &entity,
-                                &id,
-                                parent_entity,
-                                fk_field,
-                                uid,
-                                AccessLevel::Edit,
+                                &DerivedAccess {
+                                    child_entity: &entity,
+                                    child_id: &id,
+                                    parent_entity,
+                                    fk_field,
+                                    sender: uid,
+                                    required: AccessLevel::Edit,
+                                },
                                 ownership,
                             )
                             .await
