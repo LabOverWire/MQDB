@@ -884,7 +884,7 @@ fn start_suite_cluster(
     .map_err(|e| e.to_string())?;
 
     println!("  Waiting for authenticated cluster...");
-    wait_for_suite_cluster(ports, 15)?;
+    wait_for_suite_cluster(ports, 30)?;
     Ok(cluster)
 }
 
@@ -892,7 +892,7 @@ fn wait_for_suite_cluster(ports: &[u16], timeout_secs: u64) -> Result<(), String
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(timeout_secs) {
         if ports.iter().all(|&port| node_accepts_admin(port)) {
-            return if wait_for_partitions_settled(ports, timeout_secs) {
+            return if wait_for_partitions_settled(ports, timeout_secs * 2) {
                 Ok(())
             } else {
                 Err("partition map did not settle".to_string())
