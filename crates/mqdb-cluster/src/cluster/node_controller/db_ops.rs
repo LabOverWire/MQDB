@@ -192,7 +192,7 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     pub fn db_create_prepare(
-        &mut self,
+        &self,
         entity_type: &str,
         id: &str,
         data: &[u8],
@@ -232,7 +232,7 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     pub fn db_update_prepare(
-        &mut self,
+        &self,
         entity_type: &str,
         id: &str,
         data: &[u8],
@@ -256,7 +256,7 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     pub fn db_delete_prepare(
-        &mut self,
+        &self,
         entity_type: &str,
         id: &str,
     ) -> Result<(super::db::DbEntity, ReplicationWrite), super::db::DbDataStoreError> {
@@ -1003,20 +1003,6 @@ impl<T: ClusterTransport> NodeController<T> {
                     &merged_data,
                 )
             }
-            Err(super::db::DbDataStoreError::NotFound) => {
-                if has_unique_changes {
-                    self.release_unique_constraints(
-                        entity,
-                        id,
-                        &new_diff,
-                        partition,
-                        &request_id,
-                        now_ms,
-                    )
-                    .await;
-                }
-                Self::json_error(404, &format!("entity not found: {entity} id={id}"))
-            }
             Err(error) => {
                 if has_unique_changes {
                     self.release_unique_constraints(
@@ -1029,7 +1015,12 @@ impl<T: ClusterTransport> NodeController<T> {
                     )
                     .await;
                 }
-                json_write_failure(error)
+                match error {
+                    super::db::DbDataStoreError::NotFound => {
+                        Self::json_error(404, &format!("entity not found: {entity} id={id}"))
+                    }
+                    error => json_write_failure(error),
+                }
             }
         };
 
@@ -1347,7 +1338,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    pub(crate) async fn run_fk_delete_plan(
+    async fn run_fk_delete_plan(
         &mut self,
         plan: &FkDeletePlan,
         origin: EventOrigin<'_>,
@@ -1917,15 +1908,15 @@ impl<T: ClusterTransport> NodeController<T> {
                     .await;
                 crate::cluster::db_handler::helpers::json_ok_with_id(db_entity.id_str(), &data)
             }
-            Err(super::db::DbDataStoreError::AlreadyExists) => {
-                self.release_all_reservations(entity, &request_id, &local_reserved)
-                    .await;
-                Self::json_error(409, "entity already exists")
-            }
             Err(error) => {
                 self.release_all_reservations(entity, &request_id, &local_reserved)
                     .await;
-                json_write_failure(error)
+                match error {
+                    super::db::DbDataStoreError::AlreadyExists => {
+                        Self::json_error(409, "entity already exists")
+                    }
+                    error => json_write_failure(error),
+                }
             }
         };
 

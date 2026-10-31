@@ -2406,19 +2406,15 @@ fn share_ctx(sender: &'static str) -> MqttRequestContext<'static> {
     }
 }
 
-async fn share_setup() -> (
-    DbRequestHandler,
-    NodeController<MockTransport>,
-    Arc<OwnershipConfig>,
-) {
+async fn share_setup() -> (DbRequestHandler, NodeController<MockTransport>) {
     let node1 = NodeId::validated(1).unwrap();
     let ownership = ownership_config("diagrams", "userId");
     let handler = DbRequestHandler::new(node1).with_ownership(Arc::clone(&ownership));
     let mut ctrl = setup_controller_all_partitions();
-    ctrl.set_ownership(Arc::clone(&ownership));
+    ctrl.set_ownership(ownership);
     let data = serde_json::to_vec(&serde_json::json!({"userId": "alice", "title": "D"})).unwrap();
     ctrl.db_create("diagrams", "d1", &data, 1000).await.unwrap();
-    (handler, ctrl, ownership)
+    (handler, ctrl)
 }
 
 fn grant_payload(grantee: &str, permission: &str) -> Vec<u8> {
@@ -2441,7 +2437,7 @@ async fn resp_json(
 
 #[tokio::test]
 async fn cluster_share_grants_view_then_edit_then_revoke() {
-    let (handler, mut ctrl, _) = share_setup().await;
+    let (handler, mut ctrl) = share_setup().await;
 
     assert_eq!(
         resp_json(&handler, &mut ctrl, "$DB/diagrams/d1", &[], "bob").await["code"],
@@ -2498,7 +2494,7 @@ async fn cluster_share_grants_view_then_edit_then_revoke() {
 
 #[tokio::test]
 async fn cluster_shares_listing_owner_only() {
-    let (handler, mut ctrl, _) = share_setup().await;
+    let (handler, mut ctrl) = share_setup().await;
     resp_json(
         &handler,
         &mut ctrl,
@@ -2520,7 +2516,7 @@ async fn cluster_shares_listing_owner_only() {
 
 #[tokio::test]
 async fn cluster_non_owner_cannot_share() {
-    let (handler, mut ctrl, _) = share_setup().await;
+    let (handler, mut ctrl) = share_setup().await;
     assert_eq!(
         resp_json(
             &handler,
@@ -2536,7 +2532,7 @@ async fn cluster_non_owner_cannot_share() {
 
 #[tokio::test]
 async fn cluster_delete_clears_grants() {
-    let (handler, mut ctrl, _) = share_setup().await;
+    let (handler, mut ctrl) = share_setup().await;
     resp_json(
         &handler,
         &mut ctrl,
@@ -2552,7 +2548,7 @@ async fn cluster_delete_clears_grants() {
 
 #[tokio::test]
 async fn cluster_direct_shares_crud_forbidden() {
-    let (handler, mut ctrl, _) = share_setup().await;
+    let (handler, mut ctrl) = share_setup().await;
     for topic in [
         "$DB/_shares/create",
         "$DB/_shares/some-id",
@@ -2568,7 +2564,7 @@ async fn cluster_direct_shares_crud_forbidden() {
 
 #[tokio::test]
 async fn cluster_shared_hydrates_resources_for_grantee() {
-    let (handler, mut ctrl, _) = share_setup().await;
+    let (handler, mut ctrl) = share_setup().await;
     let d2 = serde_json::to_vec(&serde_json::json!({"userId": "alice", "title": "D2"})).unwrap();
     ctrl.db_create("diagrams", "d2", &d2, 1000).await.unwrap();
 
@@ -2618,7 +2614,7 @@ async fn cluster_shared_hydrates_resources_for_grantee() {
 
 #[tokio::test]
 async fn cluster_shared_scatter_primary_hydrates_co_located_resource() {
-    let (handler, mut ctrl, _) = share_setup().await;
+    let (handler, mut ctrl) = share_setup().await;
     resp_json(
         &handler,
         &mut ctrl,
@@ -4065,7 +4061,7 @@ fn grants_for(ctrl: &NodeController<MockTransport>, grantee: &str) -> usize {
 
 #[tokio::test]
 async fn a_forwarded_unshare_on_a_node_that_lost_the_partition_is_refused() {
-    let (handler, mut ctrl, _) = share_setup().await;
+    let (handler, mut ctrl) = share_setup().await;
     resp_json(
         &handler,
         &mut ctrl,
@@ -4095,7 +4091,7 @@ async fn a_forwarded_unshare_on_a_node_that_lost_the_partition_is_refused() {
 
 #[tokio::test]
 async fn a_forwarded_share_on_a_node_that_lost_the_partition_is_refused() {
-    let (_, mut ctrl, _) = share_setup().await;
+    let (_, mut ctrl) = share_setup().await;
     let partition = data_partition("diagrams", "d1");
     lose_primary_role(&mut ctrl, partition, NodeId::validated(3).unwrap());
 

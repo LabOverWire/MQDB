@@ -27,9 +27,7 @@ impl<T: ClusterTransport> NodeController<T> {
             Ok(data) => data,
             Err(error) => {
                 tracing::error!(?partition, requester = from.get(), %error, "partition snapshot not exported");
-                let complete = SnapshotComplete::failed(partition);
-                self.send_snapshot_message(from, ClusterMessage::SnapshotComplete(complete))
-                    .await;
+                self.send_snapshot_failed(from, partition).await;
                 return;
             }
         };
@@ -73,9 +71,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
         if !builder.add_chunk(chunk) {
             tracing::warn!(?partition, "failed to add snapshot chunk");
-            let complete = SnapshotComplete::failed(partition);
-            self.send_snapshot_message(from, ClusterMessage::SnapshotComplete(complete))
-                .await;
+            self.send_snapshot_failed(from, partition).await;
             self.pending_snapshots.remove(&partition);
             self.requested_snapshots.remove(&partition);
             return;
@@ -90,9 +86,7 @@ impl<T: ClusterTransport> NodeController<T> {
             else {
                 tracing::error!(?partition, "failed to assemble snapshot");
                 self.requested_snapshots.remove(&partition);
-                let complete = SnapshotComplete::failed(partition);
-                self.send_snapshot_message(from, ClusterMessage::SnapshotComplete(complete))
-                    .await;
+                self.send_snapshot_failed(from, partition).await;
                 return;
             };
 
@@ -150,9 +144,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     tracing::error!(?partition, ?e, "failed to import snapshot");
                     self.restore_change_events(partition, &saved_events);
                     self.requested_snapshots.remove(&partition);
-                    let complete = SnapshotComplete::failed(partition);
-                    self.send_snapshot_message(from, ClusterMessage::SnapshotComplete(complete))
-                        .await;
+                    self.send_snapshot_failed(from, partition).await;
                 }
             }
         }
@@ -185,8 +177,6 @@ impl<T: ClusterTransport> NodeController<T> {
             }
         } else {
             tracing::warn!(?partition, ?status, "snapshot transfer failed");
-            self.requested_snapshots.remove(&partition);
-            self.pending_snapshots.remove(&partition);
         }
     }
 
@@ -210,5 +200,11 @@ impl<T: ClusterTransport> NodeController<T> {
         if let Err(error) = self.transport.send(to, message).await {
             tracing::warn!(to = to.get(), %error, "snapshot message not sent");
         }
+    }
+
+    async fn send_snapshot_failed(&self, to: NodeId, partition: PartitionId) {
+        let complete = SnapshotComplete::failed(partition);
+        self.send_snapshot_message(to, ClusterMessage::SnapshotComplete(complete))
+            .await;
     }
 }

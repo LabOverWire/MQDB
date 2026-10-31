@@ -107,7 +107,7 @@ replication — neither adds per-create Raft traffic.
 - **Quorum-durable reserve/commit:** the primary replicates the reservation to a **majority** of
   the unique-partition replica set and returns success only after majority ack (reuse the existing
   `replicate_write` + `QuorumTracker`, `replication_ops.rs:213-262`, instead of the async
-  fire-and-forget `replicate_primary_write`). A minority-partitioned old primary cannot
+  fire-and-forget `replicate_write_async_with_extra`). A minority-partitioned old primary cannot
   reach a majority ⇒ its reserve **fails** (fenced), and the promoted primary is in the acking
   majority so it already holds the reservation (closes A′).
 - **Epoch fence:** every reserve/commit carries the primary's epoch; replicas durably reject writes
@@ -164,7 +164,7 @@ timeout) classes and adds oversell *detection*. Leaves dual-primary (B) narrowed
 6. **Carry the real partition epoch** on every unique reserve/commit/release write (replace the
    hardcoded `Epoch::ZERO`, `unique_ops.rs:32,61,93`); replicas durably reject stale-epoch writes.
 7. **Quorum-durable reserve/commit:** switch the unique write path from
-   `replicate_primary_write` to the quorum-tracked `replicate_write`
+   `replicate_write_async_with_extra` to the quorum-tracked `replicate_write`
    (`replication_ops.rs:213-262`); return success only on majority ack. Retire the in-memory-only
    remote handlers.
 8. **Epoch sealing at promotion:** `become_primary` (`mod.rs:503-509`) must install the new epoch

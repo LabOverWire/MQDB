@@ -42,7 +42,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
         let ack = if let Some(state) = self.replicas.get_mut(&partition.get()) {
             let ack = state.handle_write(write);
-            let t_state = crate::cluster::node_controller::elapsed_micros(start);
+            let t_state = super::elapsed_micros(start);
             tracing::debug!(
                 ?partition,
                 sequence = write.sequence,
@@ -63,10 +63,10 @@ impl<T: ClusterTransport> NodeController<T> {
                     );
                     self.sync_retained_to_broker(write).await;
                 }
-                let t_apply = crate::cluster::node_controller::elapsed_micros(start);
+                let t_apply = super::elapsed_micros(start);
                 self.write_log
                     .append(partition, write.sequence, write.clone());
-                let t_log = crate::cluster::node_controller::elapsed_micros(start);
+                let t_log = super::elapsed_micros(start);
                 tracing::trace!(
                     node = self.node_id.get(),
                     from = from.get(),
@@ -535,11 +535,11 @@ impl<T: ClusterTransport> NodeController<T> {
         } else if self.is_primary_for_partition(partition) {
             let replicas: Vec<NodeId> = self.partition_map.replicas(partition).to_vec();
             WRITE_REQUEST_SENT.fetch_add(replicas.len() as u64, AtomicOrdering::Relaxed);
-            let t_lookup = crate::cluster::node_controller::elapsed_micros(start);
+            let t_lookup = super::elapsed_micros(start);
             self.replicate_primary_write(write, &replicas, event, extra_outbox)
                 .await
                 .map_err(|refused| refused.error)?;
-            let t_replicate = crate::cluster::node_controller::elapsed_micros(start);
+            let t_replicate = super::elapsed_micros(start);
             tracing::trace!(
                 node = self.node_id.get(),
                 ?partition,

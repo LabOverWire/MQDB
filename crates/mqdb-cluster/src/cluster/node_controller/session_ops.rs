@@ -116,20 +116,6 @@ impl<T: ClusterTransport> NodeController<T> {
         Ok((session, rx))
     }
 
-    /// # Errors
-    /// Returns `NotPrimary` if this node is not in the primary role for the partition, or
-    /// `StoreFailed` if the write cannot be persisted.
-    pub async fn replicate_write_async(
-        &mut self,
-        write: ReplicationWrite,
-        replicas: &[NodeId],
-        event: Option<ChangeEventRecord>,
-    ) -> Result<u64, ReplicationError> {
-        self.replicate_primary_write(write, replicas, event, &[])
-            .await
-            .map_err(|refused| refused.error)
-    }
-
     fn apply_primary_write(
         &self,
         write_msg: &ReplicationWrite,
@@ -202,7 +188,7 @@ impl<T: ClusterTransport> NodeController<T> {
             write.data,
         )
         .with_event(event);
-        let t_state = crate::cluster::node_controller::elapsed_micros(start);
+        let t_state = super::elapsed_micros(start);
 
         let change_event = Self::change_event_entry(&write_msg);
         if let Err(error) =
@@ -213,14 +199,14 @@ impl<T: ClusterTransport> NodeController<T> {
                 event: write_msg.event,
             });
         }
-        let t_apply = crate::cluster::node_controller::elapsed_micros(start);
+        let t_apply = super::elapsed_micros(start);
 
         if let Some(state) = self.replicas.get_mut(&partition.get()) {
             state.advance_sequence();
         }
         self.write_log
             .append(partition, sequence, write_msg.clone());
-        let t_writelog = crate::cluster::node_controller::elapsed_micros(start);
+        let t_writelog = super::elapsed_micros(start);
 
         for &replica in replicas {
             let _ = self
@@ -228,7 +214,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 .send(replica, ClusterMessage::Write(write_msg.clone()))
                 .await;
         }
-        let t_send = crate::cluster::node_controller::elapsed_micros(start);
+        let t_send = super::elapsed_micros(start);
 
         tracing::trace!(
             node = self.node_id.get(),

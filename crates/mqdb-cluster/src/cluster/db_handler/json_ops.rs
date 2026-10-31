@@ -719,7 +719,6 @@ impl DbRequestHandler {
         let data = self.vault_encrypt_if_needed(vault_crypto, entity, id, data);
 
         if !phase1.pending_remote.is_empty() || !phase1.pending_quorum.is_empty() {
-            let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
             return JsonOpResult::PendingUniqueCheck(Box::new(PendingUniqueWork {
                 phase1,
                 continuation: UniqueCheckContinuation::CreateFromDbHandler {
@@ -727,7 +726,6 @@ impl DbRequestHandler {
                     id: id.to_string(),
                     data,
                     constraint_data,
-                    data_bytes,
                     partition,
                     request_id,
                     now_ms,
@@ -1077,14 +1075,12 @@ impl DbRequestHandler {
             };
 
             if !phase1.pending_remote.is_empty() || !phase1.pending_quorum.is_empty() {
-                let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
                 return JsonOpResult::PendingUniqueCheck(Box::new(PendingUniqueWork {
                     phase1,
                     continuation: UniqueCheckContinuation::UpdateFromDbHandler {
                         entity: entity.to_string(),
                         id: id.to_string(),
                         merged_data,
-                        data_bytes,
                         partition,
                         request_id,
                         now_ms,
@@ -1537,7 +1533,6 @@ impl DbRequestHandler {
                 client_id,
                 response_topic,
                 correlation_data,
-                ..
             } => {
                 let vault_sender = sender.clone();
                 let response_payload = match remote_results {
@@ -1578,17 +1573,6 @@ impl DbRequestHandler {
                                     .await;
                                 helpers::json_ok_with_id(db_entity.id_str(), &data)
                             }
-                            Err(db::DbDataStoreError::AlreadyExists) => {
-                                controller
-                                    .release_unique_check_reservations(
-                                        &entity,
-                                        &request_id,
-                                        &local_reserved,
-                                        &confirmed_remotes,
-                                    )
-                                    .await;
-                                Self::json_error(409, "entity already exists")
-                            }
                             Err(error) => {
                                 controller
                                     .release_unique_check_reservations(
@@ -1598,7 +1582,12 @@ impl DbRequestHandler {
                                         &confirmed_remotes,
                                     )
                                     .await;
-                                helpers::json_write_failure(error)
+                                match error {
+                                    db::DbDataStoreError::AlreadyExists => {
+                                        Self::json_error(409, "entity already exists")
+                                    }
+                                    error => helpers::json_write_failure(error),
+                                }
                             }
                         }
                     }
@@ -1628,7 +1617,6 @@ impl DbRequestHandler {
                 client_id,
                 response_topic,
                 correlation_data,
-                ..
             } => {
                 let vault_sender = sender.clone();
                 let response_payload = match remote_results {
@@ -1674,20 +1662,6 @@ impl DbRequestHandler {
                                     .await;
                                 helpers::json_ok_with_id(db_entity.id_str(), &merged_data)
                             }
-                            Err(db::DbDataStoreError::NotFound) => {
-                                controller
-                                    .release_unique_check_reservations(
-                                        &entity,
-                                        &request_id,
-                                        &local_reserved,
-                                        &confirmed_remotes,
-                                    )
-                                    .await;
-                                Self::json_error(
-                                    404,
-                                    &format!("entity not found: {entity} id={id}"),
-                                )
-                            }
                             Err(error) => {
                                 controller
                                     .release_unique_check_reservations(
@@ -1697,7 +1671,13 @@ impl DbRequestHandler {
                                         &confirmed_remotes,
                                     )
                                     .await;
-                                helpers::json_write_failure(error)
+                                match error {
+                                    db::DbDataStoreError::NotFound => Self::json_error(
+                                        404,
+                                        &format!("entity not found: {entity} id={id}"),
+                                    ),
+                                    error => helpers::json_write_failure(error),
+                                }
                             }
                         }
                     }
@@ -1832,7 +1812,6 @@ impl DbRequestHandler {
                 client_id,
                 response_topic,
                 correlation_data,
-                ..
             } => {
                 let crypto = self.resolve_vault_crypto(&entity, sender.as_deref());
                 let ctx = JsonOpContext {
@@ -1881,7 +1860,6 @@ impl DbRequestHandler {
                 client_id,
                 response_topic,
                 correlation_data,
-                ..
             } => {
                 let ctx = JsonOpContext {
                     entity: &entity,

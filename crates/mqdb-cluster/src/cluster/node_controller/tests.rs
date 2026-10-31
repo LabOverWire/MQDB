@@ -1092,7 +1092,7 @@ async fn create_session_quorum_succeeds_as_primary() {
 }
 
 #[tokio::test]
-async fn replicate_write_async_sends_without_tracking() {
+async fn replicate_primary_write_sends_without_tracking() {
     let node1 = NodeId::validated(1).unwrap();
     let node2 = NodeId::validated(2).unwrap();
     let node3 = NodeId::validated(3).unwrap();
@@ -1109,8 +1109,9 @@ async fn replicate_write_async_sends_without_tracking() {
         .unwrap();
 
     let seq = ctrl
-        .replicate_write_async(write, &[node2, node3], None)
+        .replicate_primary_write(write, &[node2, node3], None, &[])
         .await
+        .map_err(|refused| refused.error)
         .unwrap();
     assert_eq!(seq, 1);
 
@@ -1261,7 +1262,7 @@ async fn primary_has_local_data_after_replicate_write() {
 }
 
 #[tokio::test]
-async fn primary_has_local_data_after_replicate_write_async() {
+async fn primary_has_local_data_after_replicate_primary_write() {
     use crate::cluster::entity::SESSIONS;
     use bebytes::BeBytes;
 
@@ -1286,8 +1287,9 @@ async fn primary_has_local_data_after_replicate_write_async() {
     );
 
     let seq = ctrl
-        .replicate_write_async(write, &[node2], None)
+        .replicate_primary_write(write, &[node2], None, &[])
         .await
+        .map_err(|refused| refused.error)
         .unwrap();
     assert_eq!(seq, 1);
 

@@ -351,7 +351,6 @@ pub enum UniqueCheckContinuation {
         id: String,
         data: serde_json::Value,
         constraint_data: serde_json::Value,
-        data_bytes: Vec<u8>,
         partition: PartitionId,
         request_id: String,
         now_ms: u64,
@@ -364,7 +363,6 @@ pub enum UniqueCheckContinuation {
         entity: String,
         id: String,
         merged_data: serde_json::Value,
-        data_bytes: Vec<u8>,
         partition: PartitionId,
         request_id: String,
         now_ms: u64,
@@ -1043,7 +1041,7 @@ impl<T: ClusterTransport> NodeController<T> {
             }
         }
         if count > 0 {
-            let elapsed_us = crate::cluster::node_controller::elapsed_micros(start);
+            let elapsed_us = elapsed_micros(start);
             tracing::info!(
                 node = self.node_id.get(),
                 msg_count = count,
@@ -1607,16 +1605,6 @@ impl<T: ClusterTransport> NodeController<T> {
                                     &data,
                                 )
                             }
-                            Err(super::db::DbDataStoreError::AlreadyExists) => {
-                                self.release_unique_check_reservations(
-                                    &entity,
-                                    &request_id,
-                                    &local_reserved,
-                                    &confirmed_remotes,
-                                )
-                                .await;
-                                Self::json_error(409, "entity already exists")
-                            }
                             Err(error) => {
                                 self.release_unique_check_reservations(
                                     &entity,
@@ -1625,7 +1613,12 @@ impl<T: ClusterTransport> NodeController<T> {
                                     &confirmed_remotes,
                                 )
                                 .await;
-                                json_write_failure(error)
+                                match error {
+                                    super::db::DbDataStoreError::AlreadyExists => {
+                                        Self::json_error(409, "entity already exists")
+                                    }
+                                    error => json_write_failure(error),
+                                }
                             }
                         }
                     }
@@ -1697,19 +1690,6 @@ impl<T: ClusterTransport> NodeController<T> {
                                     &merged_data,
                                 )
                             }
-                            Err(super::db::DbDataStoreError::NotFound) => {
-                                self.release_unique_check_reservations(
-                                    &entity,
-                                    &request_id,
-                                    &local_reserved,
-                                    &confirmed_remotes,
-                                )
-                                .await;
-                                Self::json_error(
-                                    404,
-                                    &format!("entity not found: {entity} id={id}"),
-                                )
-                            }
                             Err(error) => {
                                 self.release_unique_check_reservations(
                                     &entity,
@@ -1718,7 +1698,13 @@ impl<T: ClusterTransport> NodeController<T> {
                                     &confirmed_remotes,
                                 )
                                 .await;
-                                json_write_failure(error)
+                                match error {
+                                    super::db::DbDataStoreError::NotFound => Self::json_error(
+                                        404,
+                                        &format!("entity not found: {entity} id={id}"),
+                                    ),
+                                    error => json_write_failure(error),
+                                }
                             }
                         }
                     }

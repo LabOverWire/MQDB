@@ -204,10 +204,11 @@ Each store implements idempotent `apply_replicated()` methods that handle Insert
 Stores expose paired methods for generating replicated writes:
 
 - `create_session_replicated()` → Returns `(SessionData, ReplicationWrite)`
-- `db_create_write()` → Returns `(DbEntity, ReplicationWrite)` without changing memory; the record is applied when the write is stored
 - `set_retained_replicated()` → Returns `(RetainedMessage, ReplicationWrite)`
 
-The caller uses the entity immediately and routes the write for cluster-wide replication.
+These change memory first; the caller uses the entity immediately and routes the write for cluster-wide replication.
+
+DB records work differently: `db_create_write()`, `db_update_write()` and `db_delete_write()` return `(DbEntity, ReplicationWrite)` without changing memory. The record is applied only when the primary stores the write, and `NodeController::db_create`/`db_update`/`db_delete` return an error if it cannot.
 
 **Key Files**: `store_manager/db_ops.rs`, `store_manager/apply.rs`, `entity.rs`
 
