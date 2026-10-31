@@ -230,16 +230,24 @@ Diagram→diagram references are the registered relationships / FKs where
 
 ```
 const MAX_CASCADE_DIAGRAMS = 256;
-visited = {}; queue = [root]
-while queue and |visited| < MAX_CASCADE_DIAGRAMS:
-    id = pop(queue); if id in visited: continue; visited.add(id)
+visited = {root}; queue = [root]; members = []; skipped = 0
+while queue:
+    id = pop(queue)
     for f in self_reference_fields(entity):
-        r = record(entity,id)[f]; if r and r not in visited: push(queue, r)
-upsert a grant for every id in visited (cascade = max-of-levels)
+        r = record(entity,id)[f]
+        if not r or r in visited or |visited| >= MAX_CASCADE_DIAGRAMS: continue
+        visited.add(r)
+        if may_share(sender, r): members.push(r); push(queue, r)
+        else: skipped += 1
+upsert a grant on root and on every id in members (cascade = max-of-levels)
 ```
 
-`MAX_CASCADE_DIAGRAMS` bounds work; `visited` is the cycle guard. `unshare
---cascade` removes grants across the same closure.
+`may_share` holds when `r` exists and the sender owns it or is an admin. A
+referenced record the sender may not share is skipped (counted in
+`resources_skipped`) and not followed, so a cascade never grants on, or walks
+through, another user's diagram, and never leaves a grant on a dangling
+reference. `MAX_CASCADE_DIAGRAMS` bounds work; `visited` is the cycle guard.
+`unshare --cascade` removes grants across the same closure.
 
 ---
 
@@ -462,7 +470,7 @@ specs, all exhaustively checked (no `limit_reached`):
 |------|----------------|--------|
 | `specs/DiagramSharing.tla` | Proposed design: view/edit/public/pending grants, child derivation, recipient-scoped event routing, ownership transfer | **13/13 invariants hold**, 26,244 states exhausted |
 | `specs/DiagramSharingCurrent.tla` | Today's behavior (owner-only diagrams, ungated children, broadcast events). Checked with two cfgs: `DiagramSharingCurrent.cfg` and `DiagramSharingCurrentChild.cfg` | `InvEventConfidentiality` (first cfg) and `InvChildNeedsParentEdit` (second cfg) **violated** (counterexamples in initial state) |
-| `specs/CascadeClosure.tla` | Transitive cascade vs. an independent fixpoint reachability, over all reference graphs on 3 diagrams | **3/3 invariants hold**, cycle-safe & terminating, 1,792 states |
+| `specs/CascadeClosure.tla` | Transitive cascade vs. an independent fixpoint reachability through shareable diagrams, over all reference graphs and shareable sets on 3 diagrams | **7/7 invariants hold**, cycle-safe & terminating, 5,376 states; following every reference instead violates `InvFrontierSound` |
 | `specs/GrantLifecycle.tla` | Level-merge and revocation rules for a grant cell (direct = set, cascade = max, unshare = remove) | **6/6 invariants hold**; a replay confirms direct demotes, cascade never downgrades, revoke clears access |
 
 Invariants proven on the proposed design:
@@ -480,8 +488,9 @@ Invariants proven on the proposed design:
   **pending grants inert**, **reserved sentinels never own**.
 - **Ownership transfer** preserves grants (the action leaves the grant set
   unchanged) and every safety invariant continues to hold in post-transfer states.
-- **Cascade = exact reference closure** (no over- or under-sharing) and terminates
-  on cyclic graphs.
+- **Cascade = exact reference closure through shareable diagrams** (no over- or
+  under-sharing; a diagram the sharer may not share is never granted and is
+  reported as skipped) and terminates on cyclic graphs.
 - **Level-merge**: direct `/share` sets exactly the requested level (demotion
   allowed); cascade is exactly `max(previous, requested)` and never downgrades.
 - **Revocation removes access**: after `/unshare`, the cell confers neither see nor

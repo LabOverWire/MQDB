@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use mqdb_agent::Database;
-use mqdb_agent::database::{CallerContext, GranteeIdentity};
+use mqdb_agent::database::{CallerContext, GranteeIdentity, ShareActor};
 use mqdb_core::config::DatabaseConfig;
 use mqdb_core::schema::{FieldDefinition, FieldType, Schema};
 use mqdb_core::types::{OwnershipConfig, ScopeConfig};
@@ -386,7 +386,6 @@ async fn test_extended_filter_operators() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn test_sorting_and_pagination() {
     use mqdb_core::Pagination;
 
@@ -1703,7 +1702,6 @@ async fn test_ownership_isolates_user_data_on_list() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn test_share_grant_gates_read_update_delete() {
     use mqdb_core::{Request, Response};
 
@@ -1842,7 +1840,6 @@ async fn test_share_grant_gates_read_update_delete() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn test_share_endpoints_and_protection() {
     use mqdb_core::{Request, Response};
 
@@ -2013,7 +2010,6 @@ async fn test_share_endpoints_and_protection() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn test_share_cascade_follows_references() {
     use mqdb_core::{Request, Response};
 
@@ -2327,7 +2323,6 @@ async fn test_delete_clears_shares_no_inheritance() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn test_child_enforcement_derives_from_parent() {
     use mqdb_core::{Request, Response};
 
@@ -3236,8 +3231,10 @@ async fn test_pending_grant_inert_then_swept() {
             "d1",
             gi("alice@x.com", None),
             "view",
-            Some("owner1"),
-            &ownership,
+            ShareActor {
+                sender: Some("owner1"),
+                ownership: &ownership,
+            },
             false,
         )
         .await
@@ -3341,8 +3338,10 @@ async fn test_unshare_pending_by_email_and_legacy_dual_key() {
         "d1",
         gi("alice@x.com", None),
         "view",
-        Some("owner1"),
-        &ownership,
+        ShareActor {
+            sender: Some("owner1"),
+            ownership: &ownership,
+        },
         false,
     )
     .await
@@ -3351,8 +3350,10 @@ async fn test_unshare_pending_by_email_and_legacy_dual_key() {
         "diagrams",
         "d1",
         gi("alice@x.com", None),
-        Some("owner1"),
-        &ownership,
+        ShareActor {
+            sender: Some("owner1"),
+            ownership: &ownership,
+        },
         false,
     )
     .await
@@ -3370,8 +3371,10 @@ async fn test_unshare_pending_by_email_and_legacy_dual_key() {
         "d1",
         gi("cid-bob", Some("cid-bob")),
         "view",
-        Some("owner1"),
-        &ownership,
+        ShareActor {
+            sender: Some("owner1"),
+            ownership: &ownership,
+        },
         false,
     )
     .await
@@ -3380,8 +3383,10 @@ async fn test_unshare_pending_by_email_and_legacy_dual_key() {
         "diagrams",
         "d1",
         gi("bob@x.com", Some("cid-bob")),
-        Some("owner1"),
-        &ownership,
+        ShareActor {
+            sender: Some("owner1"),
+            ownership: &ownership,
+        },
         false,
     )
     .await
@@ -3416,27 +3421,29 @@ async fn test_reshare_legacy_grant_no_duplicate_and_demotes() {
     .await
     .unwrap();
 
-    // legacy phase-1 shape: grantee_key == canonical id, granted at edit
     db.share_grant(
         "diagrams",
         "d1",
         gi("cid-bob", Some("cid-bob")),
         "edit",
-        Some("owner1"),
-        &ownership,
+        ShareActor {
+            sender: Some("owner1"),
+            ownership: &ownership,
+        },
         false,
     )
     .await
     .unwrap();
 
-    // re-share as the now-registered user (email key + resolved canonical), demoting to view
     db.share_grant(
         "diagrams",
         "d1",
         gi("bob@x.com", Some("cid-bob")),
         "view",
-        Some("owner1"),
-        &ownership,
+        ShareActor {
+            sender: Some("owner1"),
+            ownership: &ownership,
+        },
         false,
     )
     .await
@@ -3510,8 +3517,10 @@ async fn test_reshare_pending_updates_in_place_and_password_mode_active() {
         "d1",
         gi("alice@x.com", None),
         "view",
-        Some("owner1"),
-        &ownership,
+        ShareActor {
+            sender: Some("owner1"),
+            ownership: &ownership,
+        },
         false,
     )
     .await
@@ -3521,8 +3530,10 @@ async fn test_reshare_pending_updates_in_place_and_password_mode_active() {
         "d1",
         gi("alice@x.com", None),
         "edit",
-        Some("owner1"),
-        &ownership,
+        ShareActor {
+            sender: Some("owner1"),
+            ownership: &ownership,
+        },
         false,
     )
     .await
@@ -3544,8 +3555,10 @@ async fn test_reshare_pending_updates_in_place_and_password_mode_active() {
         "d1",
         gi("bob", Some("bob")),
         "view",
-        Some("owner1"),
-        &ownership,
+        ShareActor {
+            sender: Some("owner1"),
+            ownership: &ownership,
+        },
         false,
     )
     .await
@@ -3598,8 +3611,10 @@ async fn test_cascade_pending_sweep_fills_closure() {
         "d1",
         gi("alice@x.com", None),
         "view",
-        Some("owner1"),
-        &ownership,
+        ShareActor {
+            sender: Some("owner1"),
+            ownership: &ownership,
+        },
         true,
     )
     .await
