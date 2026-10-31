@@ -1,6 +1,6 @@
 [package]
 name = "mqdb-cluster"
-version = "0.4.38"
+version = "0.5.0"
 publish = false
 edition.workspace = true
 license = "AGPL-3.0-only"
@@ -37,7 +37,7 @@ quinn.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
 rustls-native-certs.workspace = true
-mqdb-vault = { version = "0.1.0", path = "../mqdb-vault" }
+mqdb-vault = { version = "0.2.0", path = "../mqdb-vault" }
 
 [features]
 default = []
