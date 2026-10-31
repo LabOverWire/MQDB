@@ -95,12 +95,14 @@ impl TopicIndexEntry {
             subscribers = self.subscribers.len(),
             "topic index entry has more subscribers than its encoding holds, encoding the first 65535"
         );
-        Self {
+        let mut encoded = Self {
             subscriber_count: u16::MAX,
             subscribers: self.subscribers[..usize::from(u16::MAX)].to_vec(),
             ..self.clone()
         }
-        .to_be_bytes()
+        .to_be_bytes();
+        encoded.push(TRUNCATED_ENCODING_MARKER);
+        encoded
     }
 
     #[must_use]
@@ -117,11 +119,14 @@ impl TopicIndexEntry {
     }
 }
 
+const TRUNCATED_ENCODING_MARKER: u8 = 1;
+
 fn keep_local_subscribers_past_encoding(
     imported: TopicIndexEntry,
+    truncated: bool,
     local: Option<&TopicIndexEntry>,
 ) -> TopicIndexEntry {
-    let Some(local) = local.filter(|_| imported.subscribers.len() == usize::from(u16::MAX)) else {
+    let Some(local) = local.filter(|_| truncated) else {
         return imported;
     };
     let known: HashSet<&[u8]> = imported
@@ -561,14 +566,16 @@ impl TopicIndex {
             let entry_data = &data[offset..offset + data_len];
             offset += data_len;
 
-            if let Some(entry) = Self::deserialize(entry_data) {
+            if let Ok((entry, consumed)) = TopicIndexEntry::try_from_be_bytes(entry_data) {
+                let truncated = consumed < entry_data.len();
                 tracing::debug!(
                     topic,
                     subscribers = entry.subscribers.len(),
                     "import_entries: replacing entry"
                 );
                 let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
-                let merged = keep_local_subscribers_past_encoding(entry, entries.get(topic));
+                let merged =
+                    keep_local_subscribers_past_encoding(entry, truncated, entries.get(topic));
                 entries.insert(topic.to_string(), merged);
                 imported += 1;
             }
@@ -836,5 +843,35 @@ mod tests {
         dst.import_entries(&snapshot).unwrap();
 
         assert_eq!(dst.get_subscribers("x/y").len(), total);
+    }
+
+    #[test]
+    fn import_of_an_entry_holding_exactly_its_count_drops_stale_local_subscribers() {
+        let exact = TopicIndexEntry {
+            subscriber_count: u16::MAX,
+            subscribers: (0..u16::MAX)
+                .map(|i| SubscriberLocation::create(&format!("c{i}"), partition(1), 0))
+                .collect(),
+            ..TopicIndexEntry::create("$share/g/x/y")
+        };
+        let mut with_stale = exact.clone();
+        with_stale.add_subscriber("stale", partition(1), 0);
+        let src = TopicIndex::new(node(1));
+        let dst = TopicIndex::new(node(2));
+        src.entries
+            .write()
+            .unwrap()
+            .insert("$share/g/x/y".to_string(), exact);
+        dst.entries
+            .write()
+            .unwrap()
+            .insert("$share/g/x/y".to_string(), with_stale);
+
+        let snapshot = src.export_for_partition(topic_partition("$share/g/x/y"));
+        dst.import_entries(&snapshot).unwrap();
+
+        let subscribers = dst.get_subscribers("$share/g/x/y");
+        assert_eq!(subscribers.len(), usize::from(u16::MAX));
+        assert!(subscribers.iter().all(|s| s.client_id_str() != "stale"));
     }
 }
