@@ -255,7 +255,18 @@ impl Profiler {
         match exited {
             Ok(status) => {
                 println!("{} exited with: {status}", self.name);
-                self.settle_db_agents()
+                let settled = self.settle_db_agents();
+                match (status.success(), settled) {
+                    (true, settled) => settled,
+                    (false, Ok(())) => Err(format!(
+                        "{} failed ({status}), so its output may be missing",
+                        self.name
+                    )),
+                    (false, Err(e)) => Err(format!(
+                        "{} failed ({status}), so its output may be missing; {e}",
+                        self.name
+                    )),
+                }
             }
             Err(e) => {
                 let problems = self.force_stop();
@@ -283,7 +294,7 @@ impl Drop for Profiler {
     }
 }
 
-fn combine(bench: std::io::Result<()>, stopped: Result<(), String>) -> Result<(), String> {
+fn combine(bench: Result<(), String>, stopped: Result<(), String>) -> Result<(), String> {
     match (bench, stopped) {
         (Ok(()), stopped) => stopped,
         (Err(bench), Ok(())) => Err(format!("benchmark: {bench}")),
@@ -291,15 +302,17 @@ fn combine(bench: std::io::Result<()>, stopped: Result<(), String>) -> Result<()
     }
 }
 
-fn run_bench(profiling_exe: &Path, target: &ProfileTarget) -> std::io::Result<()> {
+fn run_bench(profiling_exe: &Path, target: &ProfileTarget) -> Result<(), String> {
     println!("\nRunning benchmark...");
     let bench_status = Command::new(profiling_exe)
         .args(&target.bench_args)
-        .status()?;
-    if !bench_status.success() {
-        println!("Benchmark failed with status: {bench_status}");
+        .status()
+        .map_err(|e| format!("could not run {}: {e}", profiling_exe.display()))?;
+    if bench_status.success() {
+        Ok(())
+    } else {
+        Err(format!("failed with {bench_status}"))
     }
-    Ok(())
 }
 
 fn profile_with_samply(target: &ProfileTarget) -> Result<(), Box<dyn std::error::Error>> {

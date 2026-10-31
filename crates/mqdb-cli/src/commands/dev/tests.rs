@@ -1004,7 +1004,7 @@ fn data_len(out: &str) -> usize {
 fn denied((ok, out): &(Option<bool>, String)) -> bool {
     let out = out.to_lowercase();
     match ok {
-        Some(false) => true,
+        Some(false) => !out.contains("connectionerror"),
         Some(true) => out.contains("forbidden") || out.contains("error"),
         None => false,
     }
@@ -1074,12 +1074,13 @@ fn run_test_ownership(options: &DevTestOptions, ports: &[u16]) -> u32 {
         &format!("List as alice (sees own doc, got {alice_count})"),
         alice_count == 1,
     );
-    let bob_count = data_len(&run("bob", &["list", &entity]).1);
+    let (bob_listed, bob_list_out) = run("bob", &["list", &entity]);
+    let bob_count = data_len(&bob_list_out);
     record(
         &mut passed,
         &mut failed,
         &format!("List as bob (sees nothing, got {bob_count})"),
-        bob_count == 0,
+        bob_listed == Some(true) && bob_count == 0,
     );
     let bob_update = run(
         "bob",
@@ -1184,12 +1185,12 @@ fn sharing_checks(exe: &Path, entity: &str, ports: &[u16], passed: &mut u32, fai
     let id = id.as_str();
     std::thread::sleep(Duration::from_millis(300));
 
-    let (bob_before, _) = run_as(exe, &n2, "bob", &["read", entity, id]);
+    let bob_before = run_as(exe, &n2, "bob", &["read", entity, id]);
     record(
         passed,
         failed,
         "bob read before share denied (cross-node)",
-        bob_before == Some(false),
+        denied(&bob_before),
     );
 
     let (share_view, share_out) = run_as(
@@ -1213,7 +1214,7 @@ fn sharing_checks(exe: &Path, entity: &str, ports: &[u16], passed: &mut u32, fai
         bob_view_read == Some(true) && bob_read_out.contains("D1"),
     );
 
-    let (bob_view_update, _) = run_as(
+    let bob_view_update = run_as(
         exe,
         &n2,
         "bob",
@@ -1223,7 +1224,7 @@ fn sharing_checks(exe: &Path, entity: &str, ports: &[u16], passed: &mut u32, fai
         passed,
         failed,
         "bob update with view-only denied (cross-node)",
-        bob_view_update == Some(false),
+        denied(&bob_view_update),
     );
 
     let (share_edit, _) = run_as(
@@ -1279,12 +1280,12 @@ fn sharing_checks(exe: &Path, entity: &str, ports: &[u16], passed: &mut u32, fai
     );
     std::thread::sleep(Duration::from_millis(300));
 
-    let (bob_after, _) = run_as(exe, &n3, "bob", &["read", entity, id]);
+    let bob_after = run_as(exe, &n3, "bob", &["read", entity, id]);
     record(
         passed,
         failed,
         "bob read after unshare denied (cross-node)",
-        bob_after == Some(false),
+        denied(&bob_after),
     );
 }
 
@@ -1624,6 +1625,21 @@ mod port_tests {
         assert_eq!(ok, Some(false));
         assert!(output.contains("on-stdout"), "{output}");
         assert!(output.contains("on-stderr"), "{output}");
+    }
+
+    #[test]
+    fn an_unreachable_broker_is_not_counted_as_denied() {
+        let unreachable = run_as(
+            Path::new("/bin/sh"),
+            "127.0.0.1:1",
+            "bob",
+            &[
+                "-c",
+                "echo 'Error: ConnectionError(\"TCP connect failed\")' >&2; exit 1",
+            ],
+        );
+        assert_eq!(unreachable.0, Some(false));
+        assert!(!denied(&unreachable), "{}", unreachable.1);
     }
 
     #[test]

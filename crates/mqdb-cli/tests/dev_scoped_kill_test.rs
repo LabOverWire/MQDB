@@ -529,6 +529,13 @@ impl RecordedAgent {
     fn pid(&self) -> Option<String> {
         recorded_pid(&self.0)
     }
+
+    fn bench_waiting_for_it(&self, exit_code: u8) -> String {
+        format!(
+            "i=0\nwhile [ $i -lt 600 ]; do\n  pid=$(cat '{}' 2>/dev/null)\n  [ -n \"$pid\" ] && ps -p \"$pid\" -o command= | grep -q ' agent start ' && break\n  sleep 0.1\n  i=$((i + 1))\ndone\nexit {exit_code}",
+            self.0.display()
+        )
+    }
 }
 
 impl Drop for RecordedAgent {
@@ -551,12 +558,23 @@ impl Drop for RecordedAgent {
 }
 
 fn profile_with_samply_shim(shim: &Shimmed, samply_body: &str) -> (Output, std::path::PathBuf) {
+    profile_with_shims(shim, samply_body, "exit 0")
+}
+
+fn profile_with_shims(
+    shim: &Shimmed,
+    samply_body: &str,
+    bench_body: &str,
+) -> (Output, std::path::PathBuf) {
     let bin = shim.path().join("bin");
     install_shim(&bin.join("cargo"), "#!/bin/sh\nexit 0\n");
     install_shim(&bin.join("samply"), &format!("#!/bin/sh\n{samply_body}\n"));
     let profiling = shim.path().join("target/profiling");
     std::fs::create_dir_all(&profiling).expect("profiling dir");
-    install_shim(&profiling.join("mqdb"), "#!/bin/sh\nexit 0\n");
+    install_shim(
+        &profiling.join("mqdb"),
+        &format!("#!/bin/sh\n{bench_body}\n"),
+    );
     let db = shim.path().join("db");
     let db_arg = db.to_str().expect("utf-8 path").to_string();
     let block = free_port_block();
@@ -574,9 +592,10 @@ fn profile_stops_its_agent_after_the_profiler_exits_first() {
     let recorded = RecordedAgent(shim.path().join("agent.pid"));
     let db = shim.path().join("db");
     let (agent, agent_block) = agent_start_line(&shim, &db);
-    let (output, _) = profile_with_samply_shim(
+    let (output, _) = profile_with_shims(
         &shim,
         &format!("{agent} &\necho $! > '{}'\nexit 0", recorded.0.display()),
+        &recorded.bench_waiting_for_it(0),
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -665,13 +684,14 @@ fn profile_interrupts_only_the_agent_not_the_profiler() {
     let interrupted = shim.path().join("profiler-interrupted");
     let recorded = RecordedAgent(shim.path().join("agent.pid"));
     let (agent, agent_block) = agent_start_line(&shim, &db);
-    let (output, _) = profile_with_samply_shim(
+    let (output, _) = profile_with_shims(
         &shim,
         &format!(
             "set -m\ntrap 'echo int >> \"{}\"' INT\n{agent} &\necho $! > '{}'\nwait $!\nwait\nexit 0",
             interrupted.display(),
             recorded.0.display()
         ),
+        &recorded.bench_waiting_for_it(0),
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -686,6 +706,64 @@ fn profile_interrupts_only_the_agent_not_the_profiler() {
         !interrupted.exists(),
         "dev profile sent SIGINT to the profiler itself: {stdout}"
     );
+    assert_eq!(shim.calls(), "");
+    drop(agent_block);
+}
+
+fn interruptible_agent_samply(
+    shim: &Shimmed,
+    recorded: &RecordedAgent,
+    exit_code: u8,
+) -> PortBlock {
+    let db = shim.path().join("db");
+    let (agent, agent_block) = agent_start_line(shim, &db);
+    let body = format!(
+        "set -m\n{agent} &\necho $! > '{}'\nwait $!\nexit {exit_code}",
+        recorded.0.display()
+    );
+    install_shim(
+        &shim.path().join("samply-body"),
+        &format!("#!/bin/sh\n{body}\n"),
+    );
+    agent_block
+}
+
+#[test]
+fn profile_fails_when_the_profiler_exits_non_zero() {
+    let shim = Shimmed::new();
+    let recorded = RecordedAgent(shim.path().join("agent.pid"));
+    let agent_block = interruptible_agent_samply(&shim, &recorded, 3);
+    let body = format!("exec '{}'", shim.path().join("samply-body").display());
+    let (output, _) = profile_with_shims(&shim, &body, &recorded.bench_waiting_for_it(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("Stopping agent to save profile"),
+        "the profiler was never started and stopped: {stdout}{stderr}"
+    );
+    assert!(!output.status.success(), "{stdout}{stderr}");
+    assert!(!stdout.contains("Profile saved"), "{stdout}");
+    assert!(stderr.contains("Samply failed"), "{stderr}");
+    assert_eq!(shim.calls(), "");
+    drop(agent_block);
+}
+
+#[test]
+fn profile_fails_when_the_benchmark_fails() {
+    let shim = Shimmed::new();
+    let recorded = RecordedAgent(shim.path().join("agent.pid"));
+    let agent_block = interruptible_agent_samply(&shim, &recorded, 0);
+    let body = format!("exec '{}'", shim.path().join("samply-body").display());
+    let (output, _) = profile_with_shims(&shim, &body, &recorded.bench_waiting_for_it(1));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("Stopping agent to save profile"),
+        "the profiler was never started and stopped: {stdout}{stderr}"
+    );
+    assert!(!output.status.success(), "{stdout}{stderr}");
+    assert!(!stdout.contains("Profile saved"), "{stdout}");
+    assert!(stderr.contains("benchmark: failed"), "{stderr}");
     assert_eq!(shim.calls(), "");
     drop(agent_block);
 }
