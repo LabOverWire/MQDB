@@ -485,3 +485,31 @@ async fn cascade_delete_answered_by_a_not_yet_primary_is_not_acknowledged() {
 
     assert!(!acked.await.unwrap());
 }
+
+#[tokio::test]
+async fn unreadable_stored_record_is_never_treated_as_owned() {
+    let mut ctrl = docs_primary().await;
+    ctrl.db_create("docs", "garbled", b"not json", 1000)
+        .await
+        .unwrap();
+
+    let mut codes = Vec::new();
+    for op in [
+        JsonDbOp::Read,
+        JsonDbOp::Update,
+        JsonDbOp::Share,
+        JsonDbOp::Shares,
+    ] {
+        codes.push((
+            op,
+            codes_for_payload(&mut ctrl, op, "garbled", "bob", &op_payload(op)).await,
+        ));
+    }
+
+    assert!(
+        codes
+            .iter()
+            .all(|(_, answers)| answers == &[json!(403), json!(403)]),
+        "{codes:?}"
+    );
+}
