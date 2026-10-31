@@ -77,19 +77,51 @@ impl Shimmed {
 
 const TRANSPORT_PORT_OFFSET: u16 = 50;
 
-fn free_port_block() -> u16 {
-    loop {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind probe");
-        let port = listener.local_addr().expect("probe addr").port();
-        let Some(transport) = port.checked_add(TRANSPORT_PORT_OFFSET) else {
-            continue;
-        };
-        let transport_free = TcpListener::bind((Ipv4Addr::LOCALHOST, transport)).is_ok()
-            && UdpSocket::bind((Ipv4Addr::LOCALHOST, transport)).is_ok();
-        if port >= 1024 && transport_free {
-            return port;
+const PORT_RANGE_START: u16 = 20000;
+const PORT_RANGE_LEN: u16 = 20000;
+
+struct PortBlock {
+    port: u16,
+    locks: [std::fs::File; 2],
+}
+
+impl Drop for PortBlock {
+    fn drop(&mut self) {
+        for lock in &self.locks {
+            let _ = lock.unlock();
         }
     }
+}
+
+fn lock_port(dir: &Path, port: u16) -> Option<std::fs::File> {
+    let file = std::fs::File::create(dir.join(format!("{port}.lock"))).ok()?;
+    file.try_lock().ok()?;
+    Some(file)
+}
+
+fn port_is_free(port: u16) -> bool {
+    TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok()
+        && UdpSocket::bind((Ipv4Addr::LOCALHOST, port)).is_ok()
+}
+
+fn free_port_block() -> PortBlock {
+    let dir = std::env::temp_dir().join("mqdb-dev-scoped-kill-ports");
+    std::fs::create_dir_all(&dir).expect("port lock dir");
+    let seed = std::time::UNIX_EPOCH
+        .elapsed()
+        .map_or(0, |elapsed| elapsed.subsec_nanos())
+        ^ std::process::id();
+    (0..u32::from(PORT_RANGE_LEN))
+        .map(|step| {
+            let offset = (seed.wrapping_add(step.wrapping_mul(7919))) % u32::from(PORT_RANGE_LEN);
+            PORT_RANGE_START + u16::try_from(offset).expect("offset fits the range")
+        })
+        .find_map(|port| {
+            let transport = port + TRANSPORT_PORT_OFFSET;
+            let locks = [lock_port(&dir, port)?, lock_port(&dir, transport)?];
+            (port_is_free(port) && port_is_free(transport)).then_some(PortBlock { port, locks })
+        })
+        .expect("a free port block")
 }
 
 struct StandIn(Child);
@@ -162,7 +194,8 @@ fn profile_refuses_a_port_that_is_already_taken() {
 #[test]
 fn a_suite_cluster_signals_nothing_outside_its_own_nodes() {
     let shim = Shimmed::new();
-    let base_port = free_port_block().to_string();
+    let block = free_port_block();
+    let base_port = block.port.to_string();
     let prefix = shim.path().join("t");
     let prefix_arg = prefix.to_str().expect("utf-8 path");
     let output = shim.run(&[
@@ -244,11 +277,10 @@ fn a_suite_leaves_another_runs_nodes_under_the_same_prefix_alone() {
     let other_pid = other.0.id().to_string();
     std::fs::write(other_dir.join("mqdb.pid"), &other_pid).expect("other run's pid file");
 
-    let base_port = free_port_block().to_string();
-    let other_port = std::iter::repeat_with(free_port_block)
-        .find(|port| port.to_string() != base_port)
-        .expect("a second free port")
-        .to_string();
+    let block = free_port_block();
+    let base_port = block.port.to_string();
+    let other_block = free_port_block();
+    let other_port = other_block.port.to_string();
     let same_layout_dir = shim.path().join(format!("t-own-{other_port}-1"));
     std::fs::create_dir_all(&same_layout_dir).expect("other port's node dir");
     let mut same_layout = stand_in_node(&same_layout_dir);
@@ -326,7 +358,7 @@ fn profile_stops_its_profiler_tree_when_the_benchmark_cannot_start() {
         (
             "samply",
             format!(
-                "sleep 8 </dev/null >/dev/null 2>&1 &\necho $! > '{}'\necho $$ > '{}'\nexec sleep 8 </dev/null >/dev/null 2>&1",
+                "sleep 30 </dev/null >/dev/null 2>&1 &\necho $! > '{}'\necho $$ > '{}'\nexec sleep 8 </dev/null >/dev/null 2>&1",
                 helper_pid.display(),
                 samply_pid.display()
             ),
@@ -338,7 +370,8 @@ fn profile_stops_its_profiler_tree_when_the_benchmark_cannot_start() {
     std::fs::create_dir_all(&profiling).expect("profiling dir");
     std::fs::write(profiling.join("mqdb"), "not executable").expect("fake binary");
 
-    let port = free_port_block().to_string();
+    let block = free_port_block();
+    let port = block.port.to_string();
     let db = shim.path().join("db");
     let db_arg = db.to_str().expect("utf-8 path");
     let output = shim.run(&[
@@ -367,7 +400,8 @@ fn profile_stops_its_profiler_tree_when_the_benchmark_cannot_start() {
 #[test]
 fn suites_that_start_a_cluster_are_not_mixed_with_suites_that_need_one() {
     let shim = Shimmed::new();
-    let base_port = free_port_block().to_string();
+    let block = free_port_block();
+    let base_port = block.port.to_string();
     let prefix = shim.path().join("t");
     let prefix_arg = prefix.to_str().expect("utf-8 path");
     let output = shim.run(&[
@@ -399,7 +433,8 @@ fn bench_and_profile_refuse_a_db_another_agent_uses() {
     std::fs::write(db.join("mqdb.log"), "other run's log").expect("log");
     let mut agent = stand_in(&db, "agent");
     let db_arg = db.to_str().expect("utf-8 path");
-    let port = free_port_block().to_string();
+    let block = free_port_block();
+    let port = block.port.to_string();
 
     for args in [
         vec![
@@ -469,7 +504,7 @@ fn profile_rejects_a_privileged_port() {
     assert_eq!(shim.calls(), "");
 }
 
-fn agent_start_line(shim: &Shimmed, db: &Path) -> String {
+fn agent_start_line(shim: &Shimmed, db: &Path) -> (String, PortBlock) {
     let passwd = shim.path().join("agent-passwd");
     let created = Command::new(env!("CARGO_BIN_EXE_mqdb"))
         .args(["passwd", "admin", "-b", "admin", "-f"])
@@ -477,13 +512,42 @@ fn agent_start_line(shim: &Shimmed, db: &Path) -> String {
         .output()
         .expect("create a passwd file");
     assert!(created.status.success());
-    format!(
+    let block = free_port_block();
+    let line = format!(
         "'{}' agent start --db '{}' --bind 127.0.0.1:{} --passwd '{}' </dev/null >/dev/null 2>&1",
         env!("CARGO_BIN_EXE_mqdb"),
         db.display(),
-        free_port_block(),
+        block.port,
         passwd.display()
-    )
+    );
+    (line, block)
+}
+
+struct RecordedAgent(std::path::PathBuf);
+
+impl RecordedAgent {
+    fn pid(&self) -> Option<String> {
+        recorded_pid(&self.0)
+    }
+}
+
+impl Drop for RecordedAgent {
+    fn drop(&mut self) {
+        let Ok(pid) = std::fs::read_to_string(&self.0) else {
+            return;
+        };
+        let pid = pid.trim();
+        let still_ours = Command::new("ps")
+            .args(["-p", pid, "-o", "command="])
+            .output()
+            .is_ok_and(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .starts_with(&format!("{} agent start", env!("CARGO_BIN_EXE_mqdb")))
+            });
+        if still_ours {
+            let _ = Command::new("kill").args(["-KILL", pid]).status();
+        }
+    }
 }
 
 fn profile_with_samply_shim(shim: &Shimmed, samply_body: &str) -> (Output, std::path::PathBuf) {
@@ -495,7 +559,8 @@ fn profile_with_samply_shim(shim: &Shimmed, samply_body: &str) -> (Output, std::
     install_shim(&profiling.join("mqdb"), "#!/bin/sh\nexit 0\n");
     let db = shim.path().join("db");
     let db_arg = db.to_str().expect("utf-8 path").to_string();
-    let port = free_port_block().to_string();
+    let block = free_port_block();
+    let port = block.port.to_string();
     let output = shim.run(&[
         "dev", "profile", "--tool", "samply", "--db", &db_arg, "--port", &port, "--output", "out",
         "db",
@@ -506,24 +571,25 @@ fn profile_with_samply_shim(shim: &Shimmed, samply_body: &str) -> (Output, std::
 #[test]
 fn profile_stops_its_agent_after_the_profiler_exits_first() {
     let shim = Shimmed::new();
-    let agent_pid = shim.path().join("agent.pid");
+    let recorded = RecordedAgent(shim.path().join("agent.pid"));
     let db = shim.path().join("db");
-    let agent = agent_start_line(&shim, &db);
+    let (agent, agent_block) = agent_start_line(&shim, &db);
     let (output, _) = profile_with_samply_shim(
         &shim,
-        &format!("{agent} &\necho $! > '{}'\nexit 0", agent_pid.display()),
+        &format!("{agent} &\necho $! > '{}'\nexit 0", recorded.0.display()),
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("Stopping agent to save profile"),
         "the profiler was never started and stopped: {stdout}"
     );
-    let pid = recorded_pid(&agent_pid).expect("the shim started an agent");
+    let pid = recorded.pid().expect("the shim started an agent");
     assert!(
         !alive(&pid),
         "dev profile left its agent (pid {pid}) running after the profiler exited: {stdout}"
     );
     assert_eq!(shim.calls(), "");
+    drop(agent_block);
 }
 
 #[test]
@@ -597,21 +663,29 @@ fn profile_interrupts_only_the_agent_not_the_profiler() {
     let shim = Shimmed::new();
     let db = shim.path().join("db");
     let interrupted = shim.path().join("profiler-interrupted");
-    let agent = agent_start_line(&shim, &db);
+    let recorded = RecordedAgent(shim.path().join("agent.pid"));
+    let (agent, agent_block) = agent_start_line(&shim, &db);
     let (output, _) = profile_with_samply_shim(
         &shim,
         &format!(
-            "set -m\ntrap 'echo int >> \"{}\"' INT\n{agent} &\nwait $!\nwait\nexit 0",
-            interrupted.display()
+            "set -m\ntrap 'echo int >> \"{}\"' INT\n{agent} &\necho $! > '{}'\nwait $!\nwait\nexit 0",
+            interrupted.display(),
+            recorded.0.display()
         ),
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stdout}{stderr}");
     assert!(stdout.contains("Profile saved"), "{stdout}");
+    let pid = recorded.pid().expect("the shim started an agent");
+    assert!(
+        !alive(&pid),
+        "dev profile left its agent (pid {pid}) running: {stdout}"
+    );
     assert!(
         !interrupted.exists(),
         "dev profile sent SIGINT to the profiler itself: {stdout}"
     );
     assert_eq!(shim.calls(), "");
+    drop(agent_block);
 }

@@ -978,9 +978,14 @@ fn run_as(exe: &Path, broker: &str, user: &str, args: &[&str]) -> (Option<bool>,
         ])
         .output()
     {
+        Ok(o) if o.status.success() => (Some(true), String::from_utf8_lossy(&o.stdout).to_string()),
         Ok(o) => (
-            Some(o.status.success()),
-            String::from_utf8_lossy(&o.stdout).to_string(),
+            Some(false),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            ),
         ),
         Err(e) => {
             eprintln!("    could not run {}: {e}", exe.display());
@@ -1056,7 +1061,7 @@ fn run_test_ownership(options: &DevTestOptions, ports: &[u16]) -> u32 {
         .and_then(|v| v["data"]["id"].as_str().map(String::from));
     record(&mut passed, &mut failed, "Create as alice", id.is_some());
     let Some(id) = id else {
-        eprintln!("    stdout: {create_out}");
+        eprintln!("    output: {create_out}");
         let stop_failures = cluster.finish();
         return report(passed, failed + stop_failures);
     };
@@ -1116,7 +1121,7 @@ fn run_test_ownership(options: &DevTestOptions, ports: &[u16]) -> u32 {
         "Update as admin (bypass)",
         admin_update == Some(true),
     );
-    let (alice_update, _) = run(
+    let (alice_update, alice_update_out) = run(
         "alice",
         &[
             "update",
@@ -1132,6 +1137,9 @@ fn run_test_ownership(options: &DevTestOptions, ports: &[u16]) -> u32 {
         "Update as alice (owner)",
         alice_update == Some(true),
     );
+    if alice_update != Some(true) {
+        eprintln!("    output: {alice_update_out}");
+    }
     let (alice_delete, _) = run("alice", &["delete", &entity, &id]);
     record(
         &mut passed,
@@ -1170,6 +1178,7 @@ fn sharing_checks(exe: &Path, entity: &str, ports: &[u16], passed: &mut u32, fai
         created == Some(true) && id.is_some(),
     );
     let Some(id) = id else {
+        eprintln!("    output: {create_out}");
         return;
     };
     let id = id.as_str();
@@ -1602,6 +1611,19 @@ mod port_tests {
         assert!(node_ports(1883, 51).is_err());
         assert!(node_ports(65485, 1).is_ok());
         assert!(node_ports(65485, 2).is_err());
+    }
+
+    #[test]
+    fn a_failed_command_keeps_its_stderr() {
+        let (ok, output) = run_as(
+            Path::new("/bin/sh"),
+            "127.0.0.1:1",
+            "bob",
+            &["-c", "echo on-stdout; echo on-stderr >&2; exit 3"],
+        );
+        assert_eq!(ok, Some(false));
+        assert!(output.contains("on-stdout"), "{output}");
+        assert!(output.contains("on-stderr"), "{output}");
     }
 
     #[test]

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use super::helpers::{
     agent_args, broker_listening, chrono_timestamp, kill_processes_below, mqdb_agents_below,
-    only_mqdb_binaries, signal_pids,
+    only_mqdb_binaries, signal_pids, wait_until_gone,
 };
 use super::runners::build_bench_args;
 use crate::cli_types::DevBenchScenario;
@@ -85,6 +85,8 @@ pub(crate) fn cmd_dev_profile(
 }
 
 const PROFILER_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
+const AGENT_EXIT_GRACE: Duration = Duration::from_secs(10);
+const AGENT_KILL_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn refuse_busy_target(db: &str, port: u16) -> Result<(), Box<dyn std::error::Error>> {
     if broker_listening(port) {
@@ -185,14 +187,41 @@ impl Profiler {
         if let Err(e) = self.child.kill().and_then(|()| self.child.wait().map(drop)) {
             problems.push(format!("could not stop {} (pid {pid}): {e}", self.name));
         }
-        match self
-            .db_agents()
-            .and_then(|left| signal_pids("-KILL", &left))
-        {
-            Ok(()) => {}
-            Err(e) => problems.push(format!("could not stop the agent on --db {}: {e}", self.db)),
+        if let Err(e) = self.kill_db_agents() {
+            problems.push(e);
         }
         problems
+    }
+
+    fn kill_db_agents(&self) -> Result<(), String> {
+        let left = self.db_agents()?;
+        if left.is_empty() {
+            return Ok(());
+        }
+        signal_pids("-KILL", &left)
+            .map_err(|e| format!("could not stop the agent on --db {}: {e}", self.db))?;
+        let survivors = wait_until_gone(&left, AGENT_KILL_TIMEOUT);
+        if survivors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "agent pids {survivors:?} on --db {} are still running after SIGKILL",
+                self.db
+            ))
+        }
+    }
+
+    fn settle_db_agents(&self) -> Result<(), String> {
+        let left = self.db_agents()?;
+        if wait_until_gone(&left, AGENT_EXIT_GRACE).is_empty() {
+            return Ok(());
+        }
+        self.kill_db_agents()?;
+        println!(
+            "Warning: killed the agent still running on --db {}",
+            self.db
+        );
+        Ok(())
     }
 
     fn stop(&mut self) -> Result<(), String> {
@@ -226,15 +255,7 @@ impl Profiler {
         match exited {
             Ok(status) => {
                 println!("{} exited with: {status}", self.name);
-                let left = self.db_agents()?;
-                if !left.is_empty() {
-                    signal_pids("-KILL", &left)?;
-                    println!(
-                        "Warning: killed the agent still running on --db {}",
-                        self.db
-                    );
-                }
-                Ok(())
+                self.settle_db_agents()
             }
             Err(e) => {
                 let problems = self.force_stop();
@@ -259,6 +280,14 @@ impl Drop for Profiler {
         if let Err(e) = self.stop() {
             println!("Warning: {e}");
         }
+    }
+}
+
+fn combine(bench: std::io::Result<()>, stopped: Result<(), String>) -> Result<(), String> {
+    match (bench, stopped) {
+        (Ok(()), stopped) => stopped,
+        (Err(bench), Ok(())) => Err(format!("benchmark: {bench}")),
+        (Err(bench), Err(stopped)) => Err(format!("benchmark: {bench}; {stopped}")),
     }
 }
 
@@ -301,9 +330,7 @@ fn profile_with_samply(target: &ProfileTarget) -> Result<(), Box<dyn std::error:
 
     std::thread::sleep(Duration::from_secs(3));
     let bench = run_bench(&profiling_exe, target);
-    let stopped = samply.finish();
-    bench?;
-    stopped?;
+    combine(bench, samply.finish())?;
 
     println!("\nProfile saved: {}", target.output_path.display());
     println!("Load with: samply load {}", target.output_path.display());
@@ -331,9 +358,7 @@ fn profile_with_flamegraph(target: &ProfileTarget) -> Result<(), Box<dyn std::er
 
     std::thread::sleep(Duration::from_secs(2));
     let bench = run_bench(&bench_exe, target);
-    let stopped = flamegraph.finish();
-    bench?;
-    stopped?;
+    combine(bench, flamegraph.finish())?;
 
     println!("\nFlamegraph saved: {}", target.output_path.display());
     Ok(())

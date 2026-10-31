@@ -106,11 +106,26 @@ fn is_running(pid: u32) -> bool {
     Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "stat="])
         .output()
-        .is_ok_and(|output| {
+        .map_or(true, |output| {
             let state = String::from_utf8_lossy(&output.stdout);
             let state = state.trim();
             !state.is_empty() && !state.starts_with('Z')
         })
+}
+
+pub(super) fn wait_until_gone(pids: &[u32], timeout: Duration) -> Vec<u32> {
+    let start = std::time::Instant::now();
+    loop {
+        let running: Vec<u32> = pids
+            .iter()
+            .copied()
+            .filter(|&pid| is_running(pid))
+            .collect();
+        if running.is_empty() || start.elapsed() > timeout {
+            return running;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn send(signal: &str, pid: u32) -> Result<(), String> {

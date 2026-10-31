@@ -828,7 +828,7 @@ mod tests {
     }
 
     #[test]
-    fn a_started_node_is_stopped_even_when_its_dir_contains_a_double_dash() {
+    fn a_started_node_is_stopped_through_its_own_child_handle() {
         let root = tempfile::TempDir::new().expect("temp dir");
         let dir = root.path().join("odd --dir").join("t-own-40000-1");
         std::fs::create_dir_all(&dir).expect("node dir");
