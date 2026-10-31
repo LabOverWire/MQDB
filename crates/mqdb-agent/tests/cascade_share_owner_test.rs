@@ -289,3 +289,49 @@ async fn cascade_share_stops_at_the_same_bound_as_cluster_mode() {
         (&json!(256), &json!(0))
     );
 }
+
+#[tokio::test]
+async fn cascade_share_at_the_bound_follows_foreign_key_fields_in_a_fixed_order() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    for field in ["parent_id", "ref2"] {
+        db.add_foreign_key(
+            "diagrams".into(),
+            field.into(),
+            "diagrams".into(),
+            "id".into(),
+            mqdb_core::constraint::OnDeleteAction::Restrict,
+        )
+        .await
+        .unwrap();
+    }
+    for i in (0..200).rev() {
+        data(
+            db.execute(Request::Create {
+                entity: "diagrams".into(),
+                data: json!({"id": format!("b{i}"), "userId": "bob", "title": "b"}),
+            })
+            .await,
+        );
+        let mut rung = json!({"id": format!("c{i}"), "userId": "alice", "title": "c", "ref2": format!("b{i}")});
+        if i + 1 < 200 {
+            rung["parent_id"] = json!(format!("c{}", i + 1));
+        }
+        data(
+            db.execute(Request::Create {
+                entity: "diagrams".into(),
+                data: rung,
+            })
+            .await,
+        );
+    }
+
+    let shared = data(publish(&db, "$DB/diagrams/c0/share", CAROL_EDIT_CASCADE, "alice").await);
+
+    assert_eq!(
+        (&shared["resources_shared"], &shared["resources_skipped"]),
+        (&json!(129), &json!(127))
+    );
+}

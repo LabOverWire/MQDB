@@ -6,7 +6,7 @@ use crate::cluster::db::{DbDataStoreError, data_partition, generate_id_for_parti
 use crate::cluster::db_handler::helpers::json_write_failure;
 use mqdb_core::types::{AccessLevel, SHARES_ENTITY};
 use serde_json::{Value, json};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 
 #[cfg(feature = "http-api")]
 use super::db_ops::{EventOrigin, ForwardedJsonRequest};
@@ -208,7 +208,7 @@ impl<T: ClusterTransport> NodeController<T> {
         Ok(())
     }
 
-    fn self_ref_fields(&self, entity: &str) -> Vec<String> {
+    fn self_ref_fields(&self, entity: &str) -> BTreeSet<String> {
         self.stores
             .constraint_get_fk_constraints(entity)
             .into_iter()
@@ -572,7 +572,7 @@ impl<T: ClusterTransport> NodeController<T> {
         if cont.invalidated {
             let body = serde_json::to_vec(&json!({
                 "status": "ok",
-                "data": { "status": "superseded", "resources_shared": 0 }
+                "data": { "status": "superseded", "resources_shared": 0, "resources_skipped": 0 }
             }))
             .unwrap_or_default();
             self.transport

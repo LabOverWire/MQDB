@@ -339,3 +339,89 @@ async fn cascade_share_stops_at_the_same_bound_as_agent_mode() {
 
     assert_eq!(counts(&shared), (json!(256), json!(0)));
 }
+
+fn ladder(rungs: usize) -> Vec<(String, Value)> {
+    (0..rungs)
+        .rev()
+        .flat_map(|i| {
+            let mut rung = json!({"userId": "alice", "title": "c", "ref2": format!("b{i}")});
+            if i + 1 < rungs {
+                rung["parent_id"] = json!(format!("c{}", i + 1));
+            }
+            [
+                (format!("b{i}"), json!({"userId": "bob", "title": "b"})),
+                (format!("c{i}"), rung),
+            ]
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn cascade_share_at_the_bound_follows_reference_fields_in_a_fixed_order() {
+    let rungs = ladder(200);
+    let records: Vec<(&str, Value)> = rungs
+        .iter()
+        .map(|(id, record)| (id.as_str(), record.clone()))
+        .collect();
+    let mut outcomes = Vec::new();
+    for _ in 0..12 {
+        let mut ctrl = primary_with(&records).await;
+        let second = ClusterConstraint::foreign_key(
+            "diagrams",
+            "diagrams_ref2_fk",
+            "ref2",
+            "diagrams",
+            "id",
+            OnDeleteAction::Restrict,
+        )
+        .unwrap();
+        ctrl.constraint_add(&second).await.unwrap();
+        let shared = local(
+            &mut ctrl,
+            "$DB/diagrams/c0/share",
+            &carol_edit_cascade(),
+            "alice",
+        )
+        .await;
+        outcomes.push(counts(&shared));
+    }
+
+    assert_eq!(outcomes, vec![(json!(129), json!(127)); 12]);
+}
+
+#[cfg(feature = "http-api")]
+#[tokio::test]
+async fn a_superseded_share_reports_the_same_counts_as_any_share() {
+    let mut ctrl = primary_with(&alice_over_bob()).await;
+    let continuation = crate::cluster::node_controller::ShareResolveContinuation {
+        email_hash: "carol-email-hash".to_string(),
+        entity: "diagrams".to_string(),
+        id: "alice-d".to_string(),
+        grantee_key: "carol-email-hash".to_string(),
+        grantee_email: None,
+        permission: "edit".to_string(),
+        cascade: true,
+        granted_by: "alice".to_string(),
+        response_topic: "resp/superseded".to_string(),
+        correlation_data: None,
+        invalidated: true,
+    };
+
+    ctrl.complete_share_resolution(Vec::new(), continuation)
+        .await;
+    let replies: Vec<Value> = ctrl
+        .transport()
+        .queued_publishes()
+        .into_iter()
+        .filter_map(|published| match published {
+            QueuedPublish::Plain(topic, payload, _) if topic == "resp/superseded" => {
+                serde_json::from_slice(&payload).ok()
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0]["data"]["status"], "superseded");
+    assert_eq!(counts(&replies[0]), (json!(0), json!(0)));
+}
