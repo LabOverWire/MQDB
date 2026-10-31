@@ -31,10 +31,6 @@ const CASCADE_ACK_TIMEOUT_SECS: u64 = 5;
 /// the next sweep.
 const TTL_REAP_MAX_PER_PASS: usize = 1024;
 
-/// Parse the reserved `_expected_version` compare-and-set precondition from a delete
-/// request payload (the update path removes it from the parsed object instead). Returns the
-/// client-facing error message when the field is present but malformed, so the CAS can never
-/// be silently skipped.
 fn unresolved_cascade_ack() -> oneshot::Receiver<bool> {
     let (tx, rx) = oneshot::channel();
     let _ = tx.send(false);
@@ -467,9 +463,6 @@ impl<T: ClusterTransport> NodeController<T> {
         partition: PartitionId,
         request: &JsonDbRequest,
     ) -> Option<super::PendingConstraintWork> {
-        // The server-internal `shared` scatter lists `_shares` across primaries; it
-        // is only reachable via inter-node transport (external clients hit the
-        // client-side guard), so exempt it while still blocking forwarded direct CRUD.
         let internal_shares_scatter =
             request.op == JsonDbOp::List && request.response_topic.starts_with("_mqdb/scatter/");
         if request.entity == mqdb_core::types::SHARES_ENTITY
@@ -721,17 +714,18 @@ impl<T: ClusterTransport> NodeController<T> {
         ) {
             return None;
         }
-        let existing = self.stores.db_get(&request.entity, id)?;
+        let Some(existing) = self.stores.db_get(&request.entity, id) else {
+            return Some(Self::json_error(
+                404,
+                &format!("entity not found: {} id={id}", request.entity),
+            ));
+        };
         let Ok(data) = serde_json::from_slice::<serde_json::Value>(&existing.data) else {
             return Some(Self::json_error(403, "permission denied"));
         };
         if data.get(owner_field).and_then(serde_json::Value::as_str) == Some(uid) {
             return None;
         }
-        // Non-owner: Delete stays owner-only; Read/Update may be satisfied by a
-        // share grant on the co-located `_shares` (this primary owns the resource
-        // partition, so the grant scan is local — the access decision resolves on
-        // the primary, per the #75 read-routing decision).
         let required = match request.op {
             JsonDbOp::Read => AccessLevel::View,
             JsonDbOp::Update => AccessLevel::Edit,

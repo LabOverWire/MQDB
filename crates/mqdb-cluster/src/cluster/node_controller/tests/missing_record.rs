@@ -309,7 +309,12 @@ async fn unknown_projection_field_answers_like_agent_mode_on_every_path() {
 }
 
 #[cfg(feature = "http-api")]
-fn suspend_share_by_alice(ctrl: &mut NodeController<MockTransport>, request_id: u64, id: &str) {
+fn suspend_share(
+    ctrl: &mut NodeController<MockTransport>,
+    request_id: u64,
+    id: &str,
+    granted_by: &str,
+) {
     let continuation = ShareResolveContinuation {
         email_hash: "hash".to_string(),
         entity: "docs".to_string(),
@@ -318,7 +323,7 @@ fn suspend_share_by_alice(ctrl: &mut NodeController<MockTransport>, request_id: 
         grantee_email: None,
         permission: "view".to_string(),
         cascade: false,
-        granted_by: "alice".to_string(),
+        granted_by: granted_by.to_string(),
         response_topic: "resp/share".to_string(),
         correlation_data: None,
         invalidated: false,
@@ -351,20 +356,44 @@ fn invalidated(ctrl: &NodeController<MockTransport>, request_id: u64) -> bool {
 
 #[cfg(feature = "http-api")]
 #[tokio::test]
-async fn only_the_issuer_or_owner_cancels_a_share_whatever_the_record_state() {
+async fn only_the_issuer_owner_or_admin_cancels_a_share_whatever_the_record_state() {
     let mut ctrl = docs_primary().await;
-    for (request_id, id) in [(1, "never-created"), (2, "owned-by-alice")] {
-        suspend_share_by_alice(&mut ctrl, request_id, id);
+    let shares = [
+        (1, "never-created", "dave"),
+        (2, "owned-by-alice", "dave"),
+        (3, "owned-by-alice", "dave"),
+        (4, "never-created", "dave"),
+    ];
+    for (request_id, id, issuer) in shares {
+        suspend_share(&mut ctrl, request_id, id, issuer);
     }
 
-    for id in ["never-created", "owned-by-alice"] {
-        ctrl.invalidate_share_resolutions("docs", id, "carol-key", Some("bob"));
+    for (sender, id) in [
+        ("bob", "never-created"),
+        ("bob", "owned-by-alice"),
+        ("alice", "never-created"),
+    ] {
+        ctrl.invalidate_share_resolutions("docs", id, "carol-key", Some(sender));
     }
-    let after_bob = [invalidated(&ctrl, 1), invalidated(&ctrl, 2)];
-    ctrl.invalidate_share_resolutions("docs", "never-created", "carol-key", Some("alice"));
-    ctrl.invalidate_share_resolutions("docs", "owned-by-alice", "carol-key", Some("root"));
-    let after_issuer_and_admin = [invalidated(&ctrl, 1), invalidated(&ctrl, 2)];
+    let after_strangers = shares.map(|(request_id, ..)| invalidated(&ctrl, request_id));
+    ctrl.invalidate_share_resolutions("docs", "owned-by-alice", "carol-key", Some("alice"));
+    let after_owner = shares.map(|(request_id, ..)| invalidated(&ctrl, request_id));
+    ctrl.invalidate_share_resolutions("docs", "never-created", "carol-key", Some("dave"));
+    let after_issuer = shares.map(|(request_id, ..)| invalidated(&ctrl, request_id));
 
-    assert_eq!(after_bob, [false, false]);
-    assert_eq!(after_issuer_and_admin, [true, true]);
+    assert_eq!(after_strangers, [false, false, false, false]);
+    assert_eq!(after_owner, [false, true, true, false]);
+    assert_eq!(after_issuer, [true, true, true, true]);
+}
+
+#[tokio::test]
+async fn empty_update_payload_is_graded_by_ownership_first_on_every_path() {
+    let mut ctrl = docs_primary().await;
+
+    let missing = codes_for_payload(&mut ctrl, JsonDbOp::Update, "never-created", "bob", b"").await;
+    let existing =
+        codes_for_payload(&mut ctrl, JsonDbOp::Update, "owned-by-alice", "bob", b"").await;
+
+    assert_eq!(missing, [json!(404), json!(404)]);
+    assert_eq!(existing, [json!(403), json!(403)]);
 }

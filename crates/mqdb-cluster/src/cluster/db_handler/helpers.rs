@@ -40,6 +40,9 @@ pub(crate) fn delete_expected_version(payload: &[u8]) -> Result<Option<u64>, Str
 }
 
 pub(crate) fn update_payload_error(payload: &[u8]) -> Option<String> {
+    if payload.is_empty() {
+        return None;
+    }
     let Ok(mut value) = serde_json::from_slice::<Value>(payload) else {
         return Some("invalid JSON payload".to_string());
     };

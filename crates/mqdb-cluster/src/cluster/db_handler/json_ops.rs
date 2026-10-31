@@ -122,9 +122,6 @@ impl DbRequestHandler {
         let correlation_data = mqtt_ctx.correlation_data;
         let sender = mqtt_ctx.sender;
 
-        // `_shares` is server-managed: reject direct generic CRUD so grants are
-        // only ever written through the share ops (preserves co-location and
-        // prevents forged grants). Mirrors the agent guard in transport_execute.
         match operation {
             DbTopicOperation::JsonCreate { entity }
             | DbTopicOperation::JsonRead { entity, .. }
@@ -169,9 +166,6 @@ impl DbRequestHandler {
                             return JsonOpResult::Response(err);
                         }
                     } else {
-                        // Not the resource primary: forward so the access decision
-                        // is graded on the primary against co-located grants,
-                        // never served from a stale replica (#75 read-routing).
                         let forwarded = controller
                             .forward_json_db_request(
                                 partition,
@@ -205,8 +199,6 @@ impl DbRequestHandler {
                 let effective_payload = if let OwnershipDecision::Check { owner_field, .. } =
                     self.ownership.evaluate(entity, sender)
                 {
-                    // Grade Edit on the resource primary (grants are co-located);
-                    // when not primary, defer to the primary's forwarded check.
                     if controller.is_primary_for_partition(data_partition(entity, id))
                         && let Some(err) = controller.check_local_share_access(
                             entity,
