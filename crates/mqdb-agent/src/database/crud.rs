@@ -43,8 +43,6 @@ pub struct CallerContext<'a> {
 }
 
 impl Database {
-    /// # Errors
-    /// Returns an error if validation, constraint checks, or storage fails.
     #[tracing::instrument(skip(self, data, constraint_data, scope_config), fields(entity = %entity_name))]
     pub async fn create(
         &self,
@@ -137,8 +135,6 @@ impl Database {
         Ok(entity.to_json())
     }
 
-    /// # Errors
-    /// Returns an error if the entity is not found or deserialization fails.
     #[tracing::instrument(skip(self, includes, projection), fields(entity = %entity_name, id = %id))]
     pub async fn read(
         &self,
@@ -175,8 +171,6 @@ impl Database {
         Ok(result)
     }
 
-    /// # Errors
-    /// Returns an error if the entity is not found, validation fails, or storage fails.
     #[tracing::instrument(skip(self, fields, update_constraint_data, caller), fields(entity = %entity_name, id = %id))]
     pub async fn update(
         &self,
@@ -197,13 +191,6 @@ impl Database {
         .await
     }
 
-    /// Like [`update`](Self::update) but rejects with [`Error::PreconditionFailed`] (a
-    /// terminal, non-retried error) if the row's current `_version` differs from
-    /// `expected_version` — a client-facing compare-and-set.
-    ///
-    /// # Errors
-    /// Returns an error if the entity is not found, the version precondition fails,
-    /// validation fails, or storage fails.
     pub async fn update_with_expected(
         &self,
         entity_name: String,
@@ -342,8 +329,6 @@ impl Database {
         Ok(updated_entity.to_json())
     }
 
-    /// # Errors
-    /// Returns an error if the entity is not found or constraint validation fails.
     #[tracing::instrument(skip(self, scope_config, ownership), fields(entity = %entity_name, id = %id))]
     pub async fn delete(
         &self,
@@ -363,13 +348,6 @@ impl Database {
             .await
     }
 
-    /// Like [`delete`](Self::delete) but rejects with [`Error::PreconditionFailed`] (a
-    /// terminal, non-retried error) if the row's current `_version` differs from
-    /// `expected_version` — a client-facing compare-and-set.
-    ///
-    /// # Errors
-    /// Returns an error if the entity is not found, the version precondition fails, or
-    /// constraint validation fails.
     pub async fn delete_with_expected(
         &self,
         entity_name: String,
@@ -392,7 +370,6 @@ impl Database {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn try_delete_once(
         &self,
         entity_name: &str,
@@ -606,8 +583,6 @@ impl Database {
         Ok(())
     }
 
-    /// # Errors
-    /// Returns `NotFound` if the entity does not exist.
     pub fn is_owner(
         &self,
         entity_name: &str,
@@ -625,8 +600,6 @@ impl Database {
         Ok(owner_value == Some(sender))
     }
 
-    /// # Errors
-    /// Returns `Forbidden` if the sender doesn't own the entity, or `NotFound` if it doesn't exist.
     pub fn check_ownership(
         &self,
         entity_name: &str,
@@ -641,10 +614,6 @@ impl Database {
         }
     }
 
-    /// Highest access level granted to `sender` on a specific resource via `_shares`.
-    ///
-    /// # Errors
-    /// Returns an error if scanning the share records fails.
     pub(crate) async fn share_level(
         &self,
         entity_name: &str,
@@ -691,11 +660,6 @@ impl Database {
         Ok(best)
     }
 
-    /// Authorize an operation on an ownership-enabled entity: the sender must own
-    /// the record or hold a share grant at least as strong as `required`.
-    ///
-    /// # Errors
-    /// Returns `Forbidden` if access is denied, or `NotFound` if the record is missing.
     pub async fn check_access(
         &self,
         entity_name: &str,
@@ -713,11 +677,6 @@ impl Database {
         }
     }
 
-    /// Resolve the parent id a child record references via `fk_field`.
-    ///
-    /// # Errors
-    /// Returns `NotFound` if the child record is missing, or `Validation` if it
-    /// lacks the parent reference field.
     fn parent_ref(&self, child_entity: &str, child_id: &str, fk_field: &str) -> Result<String> {
         let key = keys::encode_data_key(child_entity, child_id);
         let data = self.storage.get(&key)?.ok_or_else(|| Error::NotFound {
@@ -754,13 +713,6 @@ impl Database {
         }
     }
 
-    /// Authorize a child operation by deriving access from its parent record. The
-    /// parent id is read from the existing child via `fk_field`.
-    ///
-    /// # Errors
-    /// Returns `Forbidden` if access is denied, `NotFound` if the child is missing,
-    /// or `Validation` if the parent reference is absent.
-    #[allow(clippy::too_many_arguments)]
     pub async fn check_derived_access(
         &self,
         access: &DerivedAccess<'_>,
@@ -777,12 +729,6 @@ impl Database {
         .await
     }
 
-    /// Authorize a child create by deriving access from the parent referenced in the
-    /// incoming `data` via `fk_field`. A child create requires `Edit` on the parent.
-    ///
-    /// # Errors
-    /// Returns `Forbidden` if access is denied, or `Validation` if `data` lacks the
-    /// parent reference.
     pub async fn check_derived_create(
         &self,
         data: &Value,
