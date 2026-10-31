@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::*;
-use crate::cluster::db::{data_partition, generate_id_for_partition};
+use crate::cluster::db::{
+    ClusterConstraint, OnDeleteAction, data_partition, generate_id_for_partition,
+};
 use crate::cluster::db_handler::{DbPublishResult, DbRequestHandler, MqttRequestContext};
 use crate::cluster::protocol::{JsonDbOp, JsonDbRequest};
 use mqdb_core::types::{OwnershipConfig, SHARES_ENTITY};
@@ -560,10 +562,13 @@ async fn unreadable_stored_record_is_never_treated_as_owned() {
     assert!(ctrl.db_get("docs", "garbled").is_some());
 }
 
-#[tokio::test]
-async fn deleting_a_missing_record_touches_no_referencing_rows_on_every_path() {
-    use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+fn ghost_note() -> Vec<u8> {
+    serde_json::to_vec(&json!({"userId": "carol", "parent_id": "ghost"})).unwrap()
+}
 
+async fn note_referencing_a_missing_doc(
+    on_delete: OnDeleteAction,
+) -> NodeController<MockTransport> {
     let mut ctrl = docs_primary().await;
     let fk = ClusterConstraint::foreign_key(
         "notes",
@@ -571,12 +576,142 @@ async fn deleting_a_missing_record_touches_no_referencing_rows_on_every_path() {
         "parent_id",
         "docs",
         "id",
-        OnDeleteAction::SetNull,
+        on_delete,
     )
     .unwrap();
     ctrl.constraint_add(&fk).await.unwrap();
-    let note = serde_json::to_vec(&json!({"userId": "carol", "parent_id": "ghost"})).unwrap();
-    ctrl.db_create("notes", "n1", &note, 1000).await.unwrap();
+    ctrl.db_create("notes", "n1", &ghost_note(), 1000)
+        .await
+        .unwrap();
+    ctrl
+}
+
+async fn internal_local_code(
+    ctrl: &mut NodeController<MockTransport>,
+    op: JsonDbOp,
+    id: &str,
+    payload: &[u8],
+) -> Value {
+    let result = DbRequestHandler::new(node(1))
+        .with_ownership(ownership())
+        .handle_publish(
+            ctrl,
+            &op_topic(op, id),
+            payload,
+            &MqttRequestContext {
+                response_topic: Some("resp/local"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
+        )
+        .await;
+    let DbPublishResult::Response(response) = result else {
+        panic!("{op:?} {id} was not answered locally");
+    };
+    let body: Value = serde_json::from_slice(&response.payload).unwrap();
+    body["code"].clone()
+}
+
+async fn internal_forwarded_code(
+    ctrl: &mut NodeController<MockTransport>,
+    op: JsonDbOp,
+    id: &str,
+    payload: &[u8],
+) -> Value {
+    let request = JsonDbRequest {
+        request_id: 7,
+        op,
+        entity: "docs".to_string(),
+        id: Some(id.to_string()),
+        payload: payload.to_vec(),
+        response_topic: "resp/forwarded".to_string(),
+        correlation_data: None,
+        sender: None,
+        client_id: None,
+    };
+    let already_sent = forwarded_replies(ctrl).len();
+    ctrl.handle_json_db_request(node(2), data_partition("docs", id), &request)
+        .await;
+    let replies = forwarded_replies(ctrl);
+    assert_eq!(replies.len(), already_sent + 1);
+    replies[already_sent]["code"].clone()
+}
+
+fn parent_of_note(ctrl: &NodeController<MockTransport>) -> Value {
+    let note: Value = serde_json::from_slice(&ctrl.db_get("notes", "n1").unwrap().data).unwrap();
+    note["parent_id"].clone()
+}
+
+#[tokio::test]
+async fn internal_writes_reaching_a_not_yet_primary_stay_retryable_on_every_path() {
+    let partition = data_partition("docs", "child-1");
+    let mut ctrl = not_yet_primary(partition);
+    let update = serde_json::to_vec(&json!({"title": "x"})).unwrap();
+
+    let codes = [
+        internal_local_code(&mut ctrl, JsonDbOp::Update, "child-1", &update).await,
+        internal_local_code(&mut ctrl, JsonDbOp::Delete, "child-1", &[]).await,
+        internal_forwarded_code(&mut ctrl, JsonDbOp::Update, "child-1", &update).await,
+        internal_forwarded_code(&mut ctrl, JsonDbOp::Delete, "child-1", &[]).await,
+    ];
+
+    assert_eq!(codes, [json!(503), json!(503), json!(503), json!(503)]);
+}
+
+#[tokio::test]
+async fn internal_delete_of_a_missing_record_touches_no_referencing_rows_on_every_path() {
+    let mut ctrl = note_referencing_a_missing_doc(OnDeleteAction::SetNull).await;
+
+    let local = internal_local_code(&mut ctrl, JsonDbOp::Delete, "ghost", &[]).await;
+    let after_local = parent_of_note(&ctrl);
+    let forwarded = internal_forwarded_code(&mut ctrl, JsonDbOp::Delete, "ghost", &[]).await;
+    let after_forwarded = parent_of_note(&ctrl);
+
+    assert_eq!(
+        [local, after_local, forwarded, after_forwarded],
+        [json!(404), json!("ghost"), json!(404), json!("ghost")]
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_missing_record_cascades_to_no_referencing_rows() {
+    let mut ctrl = note_referencing_a_missing_doc(OnDeleteAction::Cascade).await;
+
+    let admin = local_response(&mut ctrl, JsonDbOp::Delete, "ghost", "root", &[]).await;
+    let after_admin = ctrl.db_get("notes", "n1").is_some();
+    let internal = internal_local_code(&mut ctrl, JsonDbOp::Delete, "ghost", &[]).await;
+    let after_internal = ctrl.db_get("notes", "n1").is_some();
+
+    assert_eq!(
+        [
+            admin["code"].clone(),
+            json!(after_admin),
+            internal,
+            json!(after_internal)
+        ],
+        [json!(404), json!(true), json!(404), json!(true)]
+    );
+}
+
+#[tokio::test]
+async fn a_restricting_reference_does_not_hide_that_the_record_is_missing() {
+    let mut ctrl = note_referencing_a_missing_doc(OnDeleteAction::Restrict).await;
+
+    let local = local_response(&mut ctrl, JsonDbOp::Delete, "ghost", "root", &[]).await;
+    let forwarded = forwarded_response(&mut ctrl, JsonDbOp::Delete, "ghost", "root", &[]).await;
+    let internal = internal_local_code(&mut ctrl, JsonDbOp::Delete, "ghost", &[]).await;
+
+    assert_eq!(
+        [local["code"].clone(), forwarded["code"].clone(), internal],
+        [json!(404), json!(404), json!(404)]
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_missing_record_touches_no_referencing_rows_on_every_path() {
+    let mut ctrl = note_referencing_a_missing_doc(OnDeleteAction::SetNull).await;
+    let note = ghost_note();
 
     let mut answers = Vec::new();
     for sender in ["bob", "root"] {
