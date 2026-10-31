@@ -209,11 +209,15 @@ impl<T: ClusterTransport> NodeController<T> {
         id: &str,
         grant: GrantWrite<'_>,
     ) -> Result<(), String> {
-        let mut replaced = self.grant_ids(entity, id, grant.grantee_key);
+        self.clear_grant(entity, id, grant.grantee_key)
+            .await
+            .map_err(|e| format!("failed to clear grant: {e}"))?;
         if let Some(resolved) = grant.grantee
             && resolved != grant.grantee_key
         {
-            replaced.extend(self.grant_ids(entity, id, resolved));
+            self.clear_grant(entity, id, resolved)
+                .await
+                .map_err(|e| format!("failed to clear grant: {e}"))?;
         }
         let partition = data_partition(entity, id);
         let share_id = generate_id_for_partition(SHARES_ENTITY, partition);
@@ -231,13 +235,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let now = Self::current_time_ms();
         self.db_create(SHARES_ENTITY, &share_id, &bytes, now)
             .await
-            .map_err(|e| format!("failed to write grant: {e:?}"))?;
-        if let Err(e) = self.delete_grants(replaced).await {
-            if let Err(rollback) = self.db_delete(SHARES_ENTITY, &share_id).await {
-                tracing::warn!(entity, id, %rollback, "new grant left after a failed replace");
-            }
-            return Err(format!("failed to replace grant: {e}"));
-        }
+            .map_err(|e| format!("failed to write grant: {e}"))?;
         Ok(())
     }
 

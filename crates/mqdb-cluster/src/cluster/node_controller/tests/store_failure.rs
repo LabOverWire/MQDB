@@ -442,7 +442,7 @@ async fn a_resource_delete_the_primary_cannot_store_keeps_its_grants() {
 }
 
 #[tokio::test]
-async fn a_regrant_interrupted_after_its_first_write_keeps_the_grantee_level() {
+async fn a_regrant_whose_new_grant_cannot_be_stored_is_refused() {
     let backend = FaultyBackend::shared();
     let mut ctrl = primary_of_every_partition(&backend);
     let handler = sharing_handler(&mut ctrl);
@@ -457,24 +457,10 @@ async fn a_regrant_interrupted_after_its_first_write_keeps_the_grantee_level() {
         Some("alice"),
     )
     .await;
-    let permissions: Vec<Value> = ctrl
-        .db_list("_shares")
-        .iter()
-        .map(|grant| serde_json::from_slice::<Value>(&grant.data).unwrap()["permission"].clone())
-        .collect();
-
-    let highest = permissions
-        .iter()
-        .filter_map(Value::as_str)
-        .filter_map(mqdb_core::types::AccessLevel::parse)
-        .max();
 
     assert_eq!(
-        (&regranted["status"], highest),
-        (
-            &json!("error"),
-            mqdb_core::types::AccessLevel::parse("edit")
-        )
+        (&regranted["status"], ctrl.db_list("_shares").len()),
+        (&json!("error"), 0)
     );
 }
 
@@ -565,5 +551,155 @@ async fn a_binary_create_the_primary_cannot_store_is_refused() {
     assert_eq!(
         (status.status(), ctrl.db_list("items").len()),
         (DbStatus::Error, 0)
+    );
+}
+
+fn forwarded(
+    op: crate::cluster::protocol::JsonDbOp,
+    entity: &str,
+    id: Option<&str>,
+    payload: &Value,
+) -> crate::cluster::protocol::JsonDbRequest {
+    crate::cluster::protocol::JsonDbRequest {
+        request_id: 9,
+        op,
+        entity: entity.to_string(),
+        id: id.map(str::to_string),
+        payload: serde_json::to_vec(payload).unwrap(),
+        response_topic: "resp/forwarded".to_string(),
+        correlation_data: None,
+        sender: None,
+        client_id: None,
+    }
+}
+
+fn forwarded_replies(ctrl: &NodeController<MockTransport>) -> Vec<Value> {
+    ctrl.transport
+        .sent_messages()
+        .into_iter()
+        .filter_map(|(_, message)| match message {
+            ClusterMessage::JsonDbResponse(response) => {
+                Some(serde_json::from_slice(&response.payload).unwrap())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn forwarded_writes_the_primary_cannot_store_are_refused() {
+    use crate::cluster::protocol::JsonDbOp;
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_of_every_partition(&backend);
+    let kept = request(
+        &mut ctrl,
+        "$DB/items/create",
+        &json!({"id": "kept", "n": 1}),
+    )
+    .await;
+    assert_eq!(kept["status"], "ok");
+    backend.fail_writes(true);
+
+    for (op, id, payload) in [
+        (JsonDbOp::Create, None, json!({"id": "r1", "n": 1})),
+        (JsonDbOp::Update, Some("kept"), json!({"n": 2})),
+        (JsonDbOp::Delete, Some("kept"), json!({})),
+    ] {
+        let partition = crate::cluster::db::data_partition("items", id.unwrap_or("r1"));
+        ctrl.handle_json_db_request(node(2), partition, &forwarded(op, "items", id, &payload))
+            .await;
+    }
+
+    let codes: Vec<Value> = forwarded_replies(&ctrl)
+        .iter()
+        .map(|reply| reply["code"].clone())
+        .collect();
+    assert_eq!(
+        (
+            codes,
+            ctrl.db_get("items", "r1").is_some(),
+            ctrl.db_get("items", "kept").map(|record| record.data)
+        ),
+        (
+            vec![json!(500), json!(500), json!(500)],
+            false,
+            Some(serde_json::to_vec(&json!({"id": "kept", "n": 1, "_version": 1})).unwrap())
+        )
+    );
+}
+
+async fn create_with_unique(ctrl: &mut NodeController<MockTransport>, payload: &Value) -> Value {
+    let handler = DbRequestHandler::new(node(1));
+    let ctx = MqttRequestContext {
+        response_topic: Some("resp/t"),
+        correlation_data: None,
+        sender: None,
+        client_id: None,
+    };
+    let bytes = serde_json::to_vec(payload).unwrap();
+    let response = match handler
+        .handle_publish(ctrl, "$DB/users/create", &bytes, &ctx)
+        .await
+    {
+        DbPublishResult::Response(response) => Some(response),
+        DbPublishResult::PendingUniqueCheck(pending) => {
+            handler
+                .complete_pending_unique_check(
+                    ctrl,
+                    pending.phase1.local_reserved,
+                    Ok(Vec::new()),
+                    pending.continuation,
+                )
+                .await
+        }
+        DbPublishResult::NoResponse
+        | DbPublishResult::PendingFkCheck(_)
+        | DbPublishResult::PendingFkDelete(_) => None,
+    };
+    let Some(response) = response else {
+        panic!("create got no response");
+    };
+    serde_json::from_slice(&response.payload).unwrap()
+}
+
+#[tokio::test]
+async fn a_create_the_primary_cannot_store_releases_its_unique_reservation() {
+    let backend = FaultyBackend::shared();
+    let storage: Arc<dyn StorageBackend> = backend.clone();
+    let mut ctrl = NodeController::new_with_storage(
+        node(1),
+        MockTransport::new(node(1)),
+        TransportConfig::default(),
+        Some(storage),
+        flume::unbounded().0,
+        flume::unbounded().0,
+    );
+    let mut map = PartitionMap::default();
+    for i in 0..NUM_PARTITIONS {
+        map.set(
+            PartitionId::new(i).unwrap(),
+            PartitionAssignment {
+                primary: Some(node(1)),
+                replicas: Vec::new(),
+                epoch: Epoch::new(1),
+            },
+        );
+    }
+    ctrl.update_partition_map(map);
+    for i in 0..NUM_PARTITIONS {
+        ctrl.become_primary(PartitionId::new(i).unwrap(), Epoch::new(1));
+    }
+    ctrl.seed_unique_voters(std::iter::once(node(1)).collect());
+    ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
+        .await
+        .unwrap();
+    backend.fail_writes_to_keys_containing("users/u1");
+
+    let refused = create_with_unique(&mut ctrl, &json!({"id": "u1", "email": "a@x"})).await;
+    let second = create_with_unique(&mut ctrl, &json!({"id": "u2", "email": "a@x"})).await;
+
+    assert_eq!(
+        (&refused["code"], &second["status"]),
+        (&json!(500), &json!("ok"))
     );
 }
