@@ -14,6 +14,7 @@ use crate::cluster::heartbeat::NodeStatus;
 use std::time::{Duration, Instant};
 
 pub(super) const SNAPSHOT_RETRY_AFTER: Duration = Duration::from_secs(10);
+pub(super) const DEFERRED_SNAPSHOT_CAPACITY: usize = 1024;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SnapshotRequestState {
@@ -62,21 +63,47 @@ impl<T: ClusterTransport> NodeController<T> {
             .get(&partition)
             .is_some_and(|request| request.source == from);
         if self.role(partition) == ReplicaRole::AwaitingSnapshot && !waits_on_requester {
-            tracing::info!(
-                ?partition,
-                requester = from.get(),
-                "refusing a snapshot request while waiting for this partition's data"
-            );
-            let _ = self
-                .transport
-                .send(
-                    from,
-                    ClusterMessage::SnapshotComplete(SnapshotComplete::failed(partition)),
-                )
-                .await;
+            self.defer_snapshot_request(from, partition);
             return;
         }
 
+        self.start_snapshot_send(from, partition).await;
+    }
+
+    fn defer_snapshot_request(&mut self, from: NodeId, partition: PartitionId) {
+        if self.deferred_snapshot_requests.contains(&(from, partition)) {
+            return;
+        }
+        if self.deferred_snapshot_requests.len() >= DEFERRED_SNAPSHOT_CAPACITY
+            && let Some((dropped_from, dropped_partition)) =
+                self.deferred_snapshot_requests.pop_front()
+        {
+            tracing::warn!(
+                partition = ?dropped_partition,
+                requester = dropped_from.get(),
+                "deferred snapshot request dropped: too many deferred"
+            );
+        }
+        tracing::info!(
+            ?partition,
+            requester = from.get(),
+            "deferring a snapshot request until this node holds the partition"
+        );
+        self.deferred_snapshot_requests.push_back((from, partition));
+    }
+
+    pub(super) async fn serve_deferred_snapshots(&mut self) {
+        let deferred = std::mem::take(&mut self.deferred_snapshot_requests);
+        for (from, partition) in deferred {
+            if self.role(partition) == ReplicaRole::AwaitingSnapshot {
+                self.deferred_snapshot_requests.push_back((from, partition));
+            } else {
+                self.start_snapshot_send(from, partition).await;
+            }
+        }
+    }
+
+    async fn start_snapshot_send(&mut self, from: NodeId, partition: PartitionId) {
         tracing::info!(
             ?partition,
             requester = from.get(),
@@ -192,6 +219,7 @@ impl<T: ClusterTransport> NodeController<T> {
                         self.take_role_after_import(partition, epoch, sequence);
                     }
                     self.release_held_writes().await;
+                    self.serve_deferred_snapshots().await;
 
                     let complete = SnapshotComplete::ok(partition, sequence);
                     let _ = self
@@ -268,7 +296,7 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     fn source_is_alive(&self, source: NodeId) -> bool {
-        self.node_status(source) == NodeStatus::Alive
+        self.node_status(source) != NodeStatus::Dead
     }
 
     pub(super) fn snapshot_source(&self, partition: PartitionId) -> Option<NodeId> {

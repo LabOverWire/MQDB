@@ -17,8 +17,8 @@ fn create_test_controller(
     node_id: NodeId,
     transport: MockTransport,
 ) -> NodeController<MockTransport> {
-    let (tx_raft_messages, _rx_raft_messages) = flume::unbounded();
-    let (tx_raft_events, _rx_raft_events) = flume::unbounded();
+    let (tx_raft_messages, _) = flume::unbounded();
+    let (tx_raft_events, _) = flume::unbounded();
     NodeController::new(
         node_id,
         transport,
@@ -85,8 +85,8 @@ impl ClusterTransport for MockTransport {
 
     async fn send_to_partition_primary(
         &self,
-        _partition: PartitionId,
-        _message: ClusterMessage,
+        _: PartitionId,
+        _: ClusterMessage,
     ) -> Result<(), super::super::transport::TransportError> {
         Ok(())
     }
@@ -99,7 +99,7 @@ impl ClusterTransport for MockTransport {
         self.inbox.lock().unwrap().pop_front()
     }
 
-    fn try_recv_timeout(&self, _timeout_ms: u64) -> Option<InboundMessage> {
+    fn try_recv_timeout(&self, _: u64) -> Option<InboundMessage> {
         self.inbox.lock().unwrap().pop_front()
     }
 
@@ -111,9 +111,9 @@ impl ClusterTransport for MockTransport {
         self.inbox.lock().unwrap().push_front(msg);
     }
 
-    async fn queue_local_publish(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
+    async fn queue_local_publish(&self, _: String, _: Vec<u8>, _: u8) {}
 
-    async fn queue_local_publish_retained(&self, topic: String, payload: Vec<u8>, _qos: u8) {
+    async fn queue_local_publish_retained(&self, topic: String, payload: Vec<u8>, _: u8) {
         self.retained_publishes
             .lock()
             .unwrap()
@@ -2176,7 +2176,7 @@ async fn resp_json(
 
 #[tokio::test]
 async fn cluster_share_grants_view_then_edit_then_revoke() {
-    let (handler, mut ctrl, _o) = share_setup().await;
+    let (handler, mut ctrl, _) = share_setup().await;
 
     assert_eq!(
         resp_json(&handler, &mut ctrl, "$DB/diagrams/d1", &[], "bob").await["code"],
@@ -2233,7 +2233,7 @@ async fn cluster_share_grants_view_then_edit_then_revoke() {
 
 #[tokio::test]
 async fn cluster_shares_listing_owner_only() {
-    let (handler, mut ctrl, _o) = share_setup().await;
+    let (handler, mut ctrl, _) = share_setup().await;
     resp_json(
         &handler,
         &mut ctrl,
@@ -2255,7 +2255,7 @@ async fn cluster_shares_listing_owner_only() {
 
 #[tokio::test]
 async fn cluster_non_owner_cannot_share() {
-    let (handler, mut ctrl, _o) = share_setup().await;
+    let (handler, mut ctrl, _) = share_setup().await;
     assert_eq!(
         resp_json(
             &handler,
@@ -2271,7 +2271,7 @@ async fn cluster_non_owner_cannot_share() {
 
 #[tokio::test]
 async fn cluster_delete_clears_grants() {
-    let (handler, mut ctrl, _o) = share_setup().await;
+    let (handler, mut ctrl, _) = share_setup().await;
     resp_json(
         &handler,
         &mut ctrl,
@@ -2287,7 +2287,7 @@ async fn cluster_delete_clears_grants() {
 
 #[tokio::test]
 async fn cluster_direct_shares_crud_forbidden() {
-    let (handler, mut ctrl, _o) = share_setup().await;
+    let (handler, mut ctrl, _) = share_setup().await;
     for topic in [
         "$DB/_shares/create",
         "$DB/_shares/some-id",
@@ -2303,7 +2303,7 @@ async fn cluster_direct_shares_crud_forbidden() {
 
 #[tokio::test]
 async fn cluster_shared_hydrates_resources_for_grantee() {
-    let (handler, mut ctrl, _o) = share_setup().await;
+    let (handler, mut ctrl, _) = share_setup().await;
     let d2 = serde_json::to_vec(&serde_json::json!({"userId": "alice", "title": "D2"})).unwrap();
     ctrl.db_create("diagrams", "d2", &d2, 1000).await.unwrap();
 
@@ -2353,7 +2353,7 @@ async fn cluster_shared_hydrates_resources_for_grantee() {
 
 #[tokio::test]
 async fn cluster_shared_scatter_primary_hydrates_co_located_resource() {
-    let (handler, mut ctrl, _o) = share_setup().await;
+    let (handler, mut ctrl, _) = share_setup().await;
     resp_json(
         &handler,
         &mut ctrl,
@@ -2721,7 +2721,7 @@ async fn cluster_identity_share_resolves_canonical_grantee() {
 #[cfg(feature = "http-api")]
 #[tokio::test]
 async fn cluster_identity_share_unresolved_is_pending() {
-    let (handler, mut ctrl, _crypto) = identity_share_setup().await;
+    let (handler, mut ctrl, _) = identity_share_setup().await;
 
     let out = resp_json(
         &handler,
@@ -2938,7 +2938,7 @@ async fn cluster_presence_publishes_locally_and_broadcasts() {
 async fn cluster_presence_skips_internal_clients_and_takeover() {
     use mqtt5::broker::events::BrokerEventHandler;
 
-    let (handler, retained, _outbox) = presence_handler_with_transport();
+    let (handler, retained, _) = presence_handler_with_transport();
 
     handler
         .on_client_connect(cluster_connect_event("mqdb-admin-1"))
@@ -3221,7 +3221,7 @@ fn retained_write(
 
 #[tokio::test]
 async fn a_replicated_set_and_clear_written_to_the_broker_are_not_replicated_again() {
-    let (router, writer, store, refreshes, _ctrl) = retained_sync_harness();
+    let (router, writer, store, refreshes, _) = retained_sync_harness();
 
     store.set("plant/state", 1, b"on", 0);
     writer.refresh("plant/state").await;
@@ -3246,7 +3246,7 @@ async fn a_replicated_set_and_clear_written_to_the_broker_are_not_replicated_aga
 
 #[tokio::test]
 async fn a_client_retained_change_is_replicated_and_refreshed() {
-    let (router, _writer, store, refreshes, _ctrl) = retained_sync_harness();
+    let (router, _, store, refreshes, _) = retained_sync_harness();
 
     let publish = mqtt5::packet::publish::PublishPacket::new(
         "plant/state",
@@ -3272,7 +3272,7 @@ async fn a_client_retained_change_is_replicated_and_refreshed() {
 async fn every_replicated_retained_write_refreshes_the_broker() {
     use super::super::protocol::Operation;
 
-    let (_router, _writer, _store, refreshes, ctrl) = retained_sync_harness();
+    let (_, _, _, refreshes, ctrl) = retained_sync_harness();
     let ctrl = ctrl.read().await;
 
     ctrl.sync_retained_to_broker(&retained_write("plant/state", Operation::Insert, b"on"))
@@ -3419,7 +3419,7 @@ async fn internal_clients_are_not_tracked() {
 async fn cluster_presence_skips_cli_clients() {
     use mqtt5::broker::events::BrokerEventHandler;
 
-    let (handler, retained, _outbox) = presence_handler_with_transport();
+    let (handler, retained, _) = presence_handler_with_transport();
     handler
         .on_client_connect(cluster_connect_event("mqdb-cli-request"))
         .await;
@@ -3801,7 +3801,7 @@ fn grants_for(ctrl: &NodeController<MockTransport>, grantee: &str) -> usize {
 
 #[tokio::test]
 async fn a_forwarded_unshare_on_a_node_that_lost_the_partition_is_refused() {
-    let (handler, mut ctrl, _ownership) = share_setup().await;
+    let (handler, mut ctrl, _) = share_setup().await;
     resp_json(
         &handler,
         &mut ctrl,
@@ -3831,7 +3831,7 @@ async fn a_forwarded_unshare_on_a_node_that_lost_the_partition_is_refused() {
 
 #[tokio::test]
 async fn a_forwarded_share_on_a_node_that_lost_the_partition_is_refused() {
-    let (_handler, mut ctrl, _ownership) = share_setup().await;
+    let (_, mut ctrl, _) = share_setup().await;
     let partition = data_partition("diagrams", "d1");
     lose_primary_role(&mut ctrl, partition, NodeId::validated(3).unwrap());
 
@@ -3937,8 +3937,8 @@ fn controller_all_partitions_with_storage(
     backend: &Arc<dyn mqdb_core::storage::StorageBackend>,
 ) -> NodeController<MockTransport> {
     let node1 = NodeId::validated(1).unwrap();
-    let (tx_raft_messages, _rx_raft_messages) = flume::unbounded();
-    let (tx_raft_events, _rx_raft_events) = flume::unbounded();
+    let (tx_raft_messages, _) = flume::unbounded();
+    let (tx_raft_events, _) = flume::unbounded();
     let mut ctrl = NodeController::new_with_storage(
         node1,
         MockTransport::new(node1),

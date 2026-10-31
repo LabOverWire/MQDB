@@ -217,6 +217,7 @@ async fn a_forwarded_write_is_held_by_a_primary_that_lost_the_primary_role() {
 
     assert!(ctrl.stores().sessions.get("c1").is_none());
     assert!(replicated_ids(&ctrl, node(3)).is_empty());
+    assert_eq!(ctrl.held_writes.len(), 1);
 }
 
 #[tokio::test]

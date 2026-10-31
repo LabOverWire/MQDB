@@ -188,7 +188,10 @@ impl<T: ClusterTransport> NodeController<T> {
             let assignment_epoch = self.partition_map.get(entry.write.partition).epoch;
             let partition = entry.write.partition;
             if entry.write.epoch <= assignment_epoch && !self.waiting_to_take(partition) {
-                if entry.waiting && !self.is_primary_for_partition(partition) {
+                if entry.waiting
+                    && entry.from == self.node_id
+                    && !self.is_primary_for_partition(partition)
+                {
                     let mut write = entry.write;
                     let event = write.event.take();
                     self.write_or_forward_impl(write, event, &[]).await;
@@ -412,6 +415,7 @@ impl<T: ClusterTransport> NodeController<T> {
         if self.partition_map == raft_map {
             self.retry_stalled_snapshots().await;
             self.release_held_writes().await;
+            self.serve_deferred_snapshots().await;
             return std::mem::take(&mut self.primary_taken_by_import);
         }
         let held = *self
@@ -461,6 +465,7 @@ impl<T: ClusterTransport> NodeController<T> {
         self.update_partition_map(raft_map);
         self.retry_stalled_snapshots().await;
         self.release_held_writes().await;
+        self.serve_deferred_snapshots().await;
         became_primary | std::mem::take(&mut self.primary_taken_by_import)
     }
 
