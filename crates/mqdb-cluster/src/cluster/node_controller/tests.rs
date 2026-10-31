@@ -62,6 +62,8 @@ struct MockTransport {
     queued_publishes: Arc<Mutex<Vec<QueuedPublish>>>,
     refuse_local_delivery: Arc<std::sync::atomic::AtomicBool>,
     refuse_sends: Arc<std::sync::atomic::AtomicBool>,
+    queue_full: Arc<std::sync::atomic::AtomicBool>,
+    full_peers: Arc<Mutex<std::collections::HashSet<NodeId>>>,
 }
 
 impl MockTransport {
@@ -74,7 +76,13 @@ impl MockTransport {
             queued_publishes: Arc::new(Mutex::new(Vec::new())),
             refuse_local_delivery: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             refuse_sends: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            queue_full: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            full_peers: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
+    }
+
+    fn take_sent(&self) -> Vec<(NodeId, ClusterMessage)> {
+        std::mem::take(&mut *self.outbox.lock().unwrap())
     }
 
     fn inject_message(&self, from: NodeId, message: ClusterMessage) {
@@ -106,6 +114,11 @@ impl ClusterTransport for MockTransport {
     ) -> Result<(), super::super::transport::TransportError> {
         if self.refuse_sends.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(super::super::transport::TransportError::NotConnected);
+        }
+        if self.queue_full.load(std::sync::atomic::Ordering::SeqCst)
+            || self.full_peers.lock().unwrap().contains(&to)
+        {
+            return Err(super::super::transport::TransportError::SendQueueFull(to));
         }
         self.outbox.lock().unwrap().push((to, message));
         Ok(())
@@ -2417,7 +2430,7 @@ async fn cascade_delete_fan_out_propagates_sender_to_remote_primary() {
     );
     ctrl.update_partition_map(map);
 
-    let _rx = ctrl
+    let pending_response = ctrl
         .send_cascade_request(
             partition,
             JsonDbOp::Delete,
@@ -2443,6 +2456,7 @@ async fn cascade_delete_fan_out_propagates_sender_to_remote_primary() {
         "cascade delete fan-out must carry the deleter identity so the remote re-cascade stays \
          owner-aware instead of blindly deleting cross-owned descendants"
     );
+    drop(pending_response);
 }
 
 #[tokio::test]
@@ -3121,6 +3135,7 @@ async fn forwarded_delete_cascade_events_carry_the_deleters_origin() {
 mod change_events;
 mod forwarded_write;
 mod partition_map;
+mod snapshot;
 
 #[tokio::test]
 async fn forwarded_create_refuses_an_id_longer_than_the_record_id_limit() {

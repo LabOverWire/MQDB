@@ -20,12 +20,14 @@ use tracing::{debug, error, info, trace, warn};
 const INBOX_CHANNEL_CAPACITY: usize = 16384;
 const PEER_CONTROL_QUEUE_CAPACITY: usize = 256;
 const PEER_BULK_QUEUE_CAPACITY: usize = 1024;
+const PEER_SNAPSHOT_QUEUE_CAPACITY: usize = 64;
 const REDIAL_DIAL_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct PeerConnection {
-    _connection: Connection,
+    connection: Connection,
     control_tx: flume::Sender<Vec<u8>>,
     bulk_tx: flume::Sender<Vec<u8>>,
+    snapshot_tx: flume::Sender<Vec<u8>>,
     generation: u64,
 }
 
@@ -274,19 +276,24 @@ impl QuicDirectTransport {
 
         let (control_tx, control_rx) = flume::bounded(PEER_CONTROL_QUEUE_CAPACITY);
         let (bulk_tx, bulk_rx) = flume::bounded(PEER_BULK_QUEUE_CAPACITY);
+        let (snapshot_tx, snapshot_rx) = flume::bounded(PEER_SNAPSHOT_QUEUE_CAPACITY);
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let peer_conn = PeerConnection {
-            _connection: connection.clone(),
+            connection: connection.clone(),
             control_tx,
             bulk_tx,
+            snapshot_tx,
             generation,
         };
         self.peers.write().await.insert(peer_id, peer_conn);
 
         tokio::spawn(peer_writer_task(
             send_stream,
-            control_rx,
-            bulk_rx,
+            PeerLanes {
+                control: control_rx,
+                bulk: bulk_rx,
+                snapshot: snapshot_rx,
+            },
             peer_id,
             self.peers.clone(),
             generation,
@@ -380,6 +387,8 @@ impl QuicDirectTransport {
 
         let lane = if message.is_control_plane() {
             &peer.control_tx
+        } else if message.is_snapshot_transfer() {
+            &peer.snapshot_tx
         } else {
             &peer.bulk_tx
         };
@@ -639,12 +648,14 @@ async fn handle_incoming_connection(
 
     let (control_tx, control_rx) = flume::bounded(PEER_CONTROL_QUEUE_CAPACITY);
     let (bulk_tx, bulk_rx) = flume::bounded(PEER_BULK_QUEUE_CAPACITY);
+    let (snapshot_tx, snapshot_rx) = flume::bounded(PEER_SNAPSHOT_QUEUE_CAPACITY);
     let peer_generation = generation.fetch_add(1, Ordering::SeqCst) + 1;
     {
         let peer_conn = PeerConnection {
-            _connection: connection.clone(),
+            connection: connection.clone(),
             control_tx,
             bulk_tx,
+            snapshot_tx,
             generation: peer_generation,
         };
         peers.write().await.insert(peer_node, peer_conn);
@@ -652,8 +663,11 @@ async fn handle_incoming_connection(
 
     tokio::spawn(peer_writer_task(
         send_stream,
-        control_rx,
-        bulk_rx,
+        PeerLanes {
+            control: control_rx,
+            bulk: bulk_rx,
+            snapshot: snapshot_rx,
+        },
         peer_node,
         peers.clone(),
         peer_generation,
@@ -663,10 +677,15 @@ async fn handle_incoming_connection(
     Ok(())
 }
 
+struct PeerLanes {
+    control: flume::Receiver<Vec<u8>>,
+    bulk: flume::Receiver<Vec<u8>>,
+    snapshot: flume::Receiver<Vec<u8>>,
+}
+
 async fn peer_writer_task(
     mut send_stream: SendStream,
-    control_rx: flume::Receiver<Vec<u8>>,
-    bulk_rx: flume::Receiver<Vec<u8>>,
+    lanes: PeerLanes,
     peer_node: NodeId,
     peers: Arc<RwLock<HashMap<NodeId, PeerConnection>>>,
     generation: u64,
@@ -676,11 +695,15 @@ async fn peer_writer_task(
     loop {
         let frame = tokio::select! {
             biased;
-            control = control_rx.recv_async() => match control {
+            control = lanes.control.recv_async() => match control {
                 Ok(frame) => frame,
                 Err(_) => break,
             },
-            bulk = bulk_rx.recv_async() => match bulk {
+            bulk = lanes.bulk.recv_async() => match bulk {
+                Ok(frame) => frame,
+                Err(_) => break,
+            },
+            snapshot = lanes.snapshot.recv_async() => match snapshot {
                 Ok(frame) => frame,
                 Err(_) => break,
             },
@@ -705,8 +728,9 @@ async fn remove_peer_generation(
     if map
         .get(&peer_node)
         .is_some_and(|peer| peer.generation == generation)
+        && let Some(dead) = map.remove(&peer_node)
     {
-        map.remove(&peer_node);
+        dead.connection.close(0u32.into(), b"peer writer failed");
     }
 }
 
