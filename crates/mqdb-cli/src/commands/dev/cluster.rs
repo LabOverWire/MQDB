@@ -295,19 +295,27 @@ mod tests {
     }
 
     #[test]
-    fn a_node_added_later_never_binds_a_transport_port() {
-        let bind_port = |node_id: u8| node_port(32000, node_id);
-        let transport_port = |node_id: u8| bind_port(node_id) + u16::from(TRANSPORT_PORT_OFFSET);
-        for added in 1..=TRANSPORT_PORT_OFFSET {
-            for existing in 1..=TRANSPORT_PORT_OFFSET {
-                assert_ne!(bind_port(added), transport_port(existing));
+    fn no_accepted_cluster_size_puts_a_node_on_a_transport_port() {
+        let ports = |node_id: u8| {
+            let [_, bind, _, offset] = node_bind_args(32000, node_id, "127.0.0.1");
+            let bind_port: u16 = bind
+                .rsplit_once(':')
+                .and_then(|(_, port)| port.parse().ok())
+                .expect("bind port");
+            let offset: u16 = offset.parse().expect("offset");
+            (bind_port, bind_port + offset)
+        };
+        for nodes in (1..=u8::MAX).filter(|&nodes| check_port_block(32000, nodes).is_ok()) {
+            for added in 1..=nodes {
+                for existing in 1..=nodes {
+                    assert_ne!(
+                        ports(added).0,
+                        ports(existing).1,
+                        "with {nodes} nodes, node {added} binds node {existing}'s transport port"
+                    );
+                }
             }
         }
-        assert_eq!(
-            node_bind_args(32000, 4, "127.0.0.1")[3],
-            node_bind_args(32000, 1, "127.0.0.1")[3],
-            "the transport offset does not depend on how many nodes started first"
-        );
     }
 
     #[test]
