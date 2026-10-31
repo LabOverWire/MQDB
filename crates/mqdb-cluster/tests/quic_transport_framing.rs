@@ -110,7 +110,9 @@ struct StalledPeer {
 }
 
 async fn setup_stalled_peer() -> StalledPeer {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
 
     let certs = generate_certs();
     let dir = tempfile::tempdir().unwrap();
@@ -391,29 +393,33 @@ async fn reconnecting_far_end(
     accepted_tx: flume::Sender<()>,
 ) {
     let conn1: Connection = endpoint.accept().await.unwrap().await.unwrap();
-    let (_s1, mut r1): (SendStream, RecvStream) = conn1.accept_bi().await.unwrap();
+    let (s1, mut r1): (SendStream, RecvStream) = conn1.accept_bi().await.unwrap();
     let mut header = [0u8; 2];
     r1.read_exact(&mut header).await.unwrap();
     accepted_tx.send(()).ok();
 
     close_first.await.ok();
     conn1.close(0u32.into(), b"test-close");
+    drop(s1);
     drop(r1);
     drop(conn1);
 
     let conn2: Connection = endpoint.accept().await.unwrap().await.unwrap();
-    let (_s2, mut r2): (SendStream, RecvStream) = conn2.accept_bi().await.unwrap();
+    let (s2, mut r2): (SendStream, RecvStream) = conn2.accept_bi().await.unwrap();
     let mut header2 = [0u8; 2];
     r2.read_exact(&mut header2).await.unwrap();
     accepted_tx.send(()).ok();
 
     std::future::pending::<()>().await;
+    drop(s2);
     drop(conn2);
 }
 
 #[tokio::test]
 async fn dead_peer_is_removed_and_redialled() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
 
     let certs = generate_certs();
     let dir = tempfile::tempdir().unwrap();
@@ -453,7 +459,7 @@ async fn dead_peer_is_removed_and_redialled() {
     close_tx.send(()).ok();
     let mut removed = false;
     for _ in 0..200 {
-        let _ = transport.send(peer, heartbeat(local, 1)).await;
+        transport.send(peer, heartbeat(local, 1)).await.ok();
         if !transport.direct_peers().await.unwrap().contains(&peer) {
             removed = true;
             break;
@@ -474,6 +480,66 @@ async fn dead_peer_is_removed_and_redialled() {
         transport.direct_peers().await.unwrap().contains(&peer),
         "peer should be re-linked after redial_disconnected"
     );
+
+    far_handle.abort();
+}
+
+async fn stream_stopping_far_end(endpoint: Endpoint, closed_tx: oneshot::Sender<()>) {
+    let connection: Connection = endpoint.accept().await.unwrap().await.unwrap();
+    let (send_stream, mut recv): (SendStream, RecvStream) = connection.accept_bi().await.unwrap();
+    let mut header = [0u8; 2];
+    recv.read_exact(&mut header).await.unwrap();
+    recv.stop(0u32.into()).unwrap();
+    connection.closed().await;
+    closed_tx.send(()).ok();
+    drop(send_stream);
+}
+
+#[tokio::test]
+async fn a_failed_writer_closes_the_peer_connection() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
+
+    let certs = generate_certs();
+    let dir = tempfile::tempdir().unwrap();
+    let ca_path = dir.path().join("ca.pem");
+    let leaf_path = dir.path().join("leaf.pem");
+    let leaf_key_path = dir.path().join("leaf.key");
+    std::fs::write(&ca_path, &certs.ca_pem).unwrap();
+    std::fs::write(&leaf_path, &certs.leaf_pem).unwrap();
+    std::fs::write(&leaf_key_path, &certs.leaf_key_pem).unwrap();
+
+    let endpoint = server_endpoint(&certs, 1024 * 1024);
+    let far_addr: SocketAddr = endpoint.local_addr().unwrap();
+    let (closed_tx, closed_rx) = oneshot::channel();
+    let far_handle = tokio::spawn(stream_stopping_far_end(endpoint, closed_tx));
+
+    let local = NodeId::validated(1).unwrap();
+    let peer = NodeId::validated(2).unwrap();
+    let transport = QuicDirectTransport::new(local);
+    transport.set_ca_file(ca_path);
+    transport
+        .bind("127.0.0.1:0".parse().unwrap(), &leaf_path, &leaf_key_path)
+        .await
+        .unwrap();
+    transport.connect_to_peer(peer, far_addr).await.unwrap();
+
+    let mut removed = false;
+    for tick in 0..200 {
+        transport.send(peer, heartbeat(local, tick)).await.ok();
+        if !transport.direct_peers().await.unwrap().contains(&peer) {
+            removed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(removed, "a stopped stream should remove the peer");
+
+    tokio::time::timeout(Duration::from_secs(10), closed_rx)
+        .await
+        .expect("the connection behind a failed writer was left open")
+        .unwrap();
 
     far_handle.abort();
 }

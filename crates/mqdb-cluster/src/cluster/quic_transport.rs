@@ -24,7 +24,7 @@ const PEER_SNAPSHOT_QUEUE_CAPACITY: usize = 64;
 const REDIAL_DIAL_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct PeerConnection {
-    _connection: Connection,
+    connection: Connection,
     control_tx: flume::Sender<Vec<u8>>,
     bulk_tx: flume::Sender<Vec<u8>>,
     snapshot_tx: flume::Sender<Vec<u8>>,
@@ -279,7 +279,7 @@ impl QuicDirectTransport {
         let (snapshot_tx, snapshot_rx) = flume::bounded(PEER_SNAPSHOT_QUEUE_CAPACITY);
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let peer_conn = PeerConnection {
-            _connection: connection.clone(),
+            connection: connection.clone(),
             control_tx,
             bulk_tx,
             snapshot_tx,
@@ -652,7 +652,7 @@ async fn handle_incoming_connection(
     let peer_generation = generation.fetch_add(1, Ordering::SeqCst) + 1;
     {
         let peer_conn = PeerConnection {
-            _connection: connection.clone(),
+            connection: connection.clone(),
             control_tx,
             bulk_tx,
             snapshot_tx,
@@ -728,8 +728,9 @@ async fn remove_peer_generation(
     if map
         .get(&peer_node)
         .is_some_and(|peer| peer.generation == generation)
+        && let Some(dead) = map.remove(&peer_node)
     {
-        map.remove(&peer_node);
+        dead.connection.close(0u32.into(), b"peer writer failed");
     }
 }
 
