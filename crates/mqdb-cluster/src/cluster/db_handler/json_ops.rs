@@ -541,7 +541,11 @@ impl DbRequestHandler {
         owner_field: &str,
         sender: &str,
     ) -> Option<Vec<u8>> {
-        let existing = controller.db_get(entity, id)?;
+        let Some(existing) = controller.db_get(entity, id) else {
+            return controller
+                .holds_primary_role(data_partition(entity, id))
+                .then(|| Self::json_error(404, &format!("entity not found: {entity} id={id}")));
+        };
         let Ok(data) = serde_json::from_slice::<Value>(&existing.data) else {
             return Some(Self::json_error(403, "permission denied"));
         };

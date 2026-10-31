@@ -518,3 +518,69 @@ async fn unreadable_stored_record_is_never_treated_as_owned() {
         "{codes:?}"
     );
 }
+
+#[tokio::test]
+async fn deleting_a_missing_record_touches_no_referencing_rows_on_every_path() {
+    use crate::cluster::db::{ClusterConstraint, OnDeleteAction};
+
+    let mut ctrl = docs_primary().await;
+    let fk = ClusterConstraint::foreign_key(
+        "notes",
+        "notes_parent_fk",
+        "parent_id",
+        "docs",
+        "id",
+        OnDeleteAction::SetNull,
+    )
+    .unwrap();
+    ctrl.constraint_add(&fk).await.unwrap();
+    let note = serde_json::to_vec(&json!({"userId": "carol", "parent_id": "ghost"})).unwrap();
+    ctrl.db_create("notes", "n1", &note, 1000).await.unwrap();
+
+    let codes = codes_for_payload(&mut ctrl, JsonDbOp::Delete, "ghost", "bob", &[]).await;
+
+    let note_after: Value =
+        serde_json::from_slice(&ctrl.db_get("notes", "n1").unwrap().data).unwrap();
+    assert_eq!(codes, [json!(404), json!(404)]);
+    assert_eq!(note_after["parent_id"], "ghost");
+}
+
+#[tokio::test]
+async fn a_node_that_is_not_primary_forwards_a_delete_it_cannot_see() {
+    let partition = data_partition("docs", "held-elsewhere");
+    let mut ctrl = create_test_controller(node(1), MockTransport::new(node(1)));
+    ctrl.set_ownership(ownership());
+    let mut map = PartitionMap::default();
+    map.set(
+        partition,
+        crate::cluster::PartitionAssignment::new(node(2), vec![], Epoch::new(1)),
+    );
+    ctrl.update_partition_map(map);
+
+    let result = DbRequestHandler::new(node(1))
+        .with_ownership(ownership())
+        .handle_publish(
+            &mut ctrl,
+            "$DB/docs/held-elsewhere/delete",
+            &[],
+            &MqttRequestContext {
+                response_topic: Some("resp/local"),
+                correlation_data: None,
+                sender: Some("bob"),
+                client_id: None,
+            },
+        )
+        .await;
+
+    let forwarded: Vec<JsonDbOp> = ctrl
+        .transport()
+        .sent_messages()
+        .into_iter()
+        .filter_map(|(to, message)| match message {
+            ClusterMessage::JsonDbRequest { request, .. } if to == node(2) => Some(request.op),
+            _ => None,
+        })
+        .collect();
+    assert!(matches!(result, DbPublishResult::NoResponse));
+    assert_eq!(forwarded, [JsonDbOp::Delete]);
+}
