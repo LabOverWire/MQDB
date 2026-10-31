@@ -66,10 +66,13 @@ pub struct SnapshotChunk {
     pub total_chunks: u32,
     pub sequence_at_snapshot: u64,
     pub data: Vec<u8>,
+    pub transfer_id: Option<u64>,
 }
 
 impl SnapshotChunk {
     pub const VERSION: u8 = 1;
+    const HEADER_LEN: usize = 23;
+    const TRANSFER_ID_LEN: usize = 8;
 
     #[must_use]
     pub fn new(
@@ -85,7 +88,14 @@ impl SnapshotChunk {
             total_chunks,
             sequence_at_snapshot,
             data,
+            transfer_id: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_transfer_id(mut self, transfer_id: u64) -> Self {
+        self.transfer_id = Some(transfer_id);
+        self
     }
 
     #[must_use]
@@ -94,43 +104,48 @@ impl SnapshotChunk {
     }
 
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(19 + self.data.len());
+        let data_len = u32::try_from(self.data.len()).unwrap_or(u32::MAX);
+        let mut buf =
+            Vec::with_capacity(Self::HEADER_LEN + self.data.len() + Self::TRANSFER_ID_LEN);
         buf.push(Self::VERSION);
         buf.extend_from_slice(&self.partition.get().to_be_bytes());
         buf.extend_from_slice(&self.chunk_index.to_be_bytes());
         buf.extend_from_slice(&self.total_chunks.to_be_bytes());
         buf.extend_from_slice(&self.sequence_at_snapshot.to_be_bytes());
-        buf.extend_from_slice(&(self.data.len() as u32).to_be_bytes());
+        buf.extend_from_slice(&data_len.to_be_bytes());
         buf.extend_from_slice(&self.data);
+        if let Some(transfer_id) = self.transfer_id {
+            buf.extend_from_slice(&transfer_id.to_be_bytes());
+        }
         buf
     }
 
     #[must_use]
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() < 23 {
+        let header = bytes.get(..Self::HEADER_LEN)?;
+        if header[0] != Self::VERSION {
             return None;
         }
 
-        let version = bytes[0];
-        if version != Self::VERSION {
-            return None;
-        }
-
-        let partition = u16::from_be_bytes([bytes[1], bytes[2]]);
-        let chunk_index = u32::from_be_bytes([bytes[3], bytes[4], bytes[5], bytes[6]]);
-        let total_chunks = u32::from_be_bytes([bytes[7], bytes[8], bytes[9], bytes[10]]);
+        let partition = u16::from_be_bytes([header[1], header[2]]);
+        let chunk_index = u32::from_be_bytes([header[3], header[4], header[5], header[6]]);
+        let total_chunks = u32::from_be_bytes([header[7], header[8], header[9], header[10]]);
         let sequence_at_snapshot = u64::from_be_bytes([
-            bytes[11], bytes[12], bytes[13], bytes[14], bytes[15], bytes[16], bytes[17], bytes[18],
+            header[11], header[12], header[13], header[14], header[15], header[16], header[17],
+            header[18],
         ]);
-        let data_len = u32::from_be_bytes([bytes[19], bytes[20], bytes[21], bytes[22]]) as usize;
+        let data_len = usize::try_from(u32::from_be_bytes([
+            header[19], header[20], header[21], header[22],
+        ]))
+        .ok()?;
 
-        if bytes.len() < 23 + data_len {
-            return None;
-        }
-
-        let data = bytes[23..23 + data_len].to_vec();
+        let data_end = Self::HEADER_LEN.checked_add(data_len)?;
+        let data = bytes.get(Self::HEADER_LEN..data_end)?.to_vec();
+        let transfer_id = bytes
+            .get(data_end..data_end + Self::TRANSFER_ID_LEN)
+            .and_then(|trailer| <[u8; 8]>::try_from(trailer).ok())
+            .map(u64::from_be_bytes);
 
         Some(Self {
             partition: PartitionId::new(partition)?,
@@ -138,6 +153,7 @@ impl SnapshotChunk {
             total_chunks,
             sequence_at_snapshot,
             data,
+            transfer_id,
         })
     }
 }
@@ -204,49 +220,57 @@ impl SnapshotComplete {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkOutcome {
+    Accepted,
+    Stale,
+    Gap,
+}
+
 #[derive(Debug)]
 pub struct SnapshotBuilder {
     partition: PartitionId,
-    expected_chunks: u32,
-    received_chunks: Vec<Option<Vec<u8>>>,
+    transfer_id: Option<u64>,
+    total_chunks: u32,
+    next_index: u32,
     sequence_at_snapshot: u64,
-    chunks_received: u32,
+    data: Vec<u8>,
 }
 
 impl SnapshotBuilder {
     #[must_use]
-    pub fn new(partition: PartitionId, total_chunks: u32, sequence_at_snapshot: u64) -> Self {
-        Self {
-            partition,
-            expected_chunks: total_chunks,
-            received_chunks: vec![None; total_chunks as usize],
-            sequence_at_snapshot,
-            chunks_received: 0,
+    pub fn start(chunk: &SnapshotChunk) -> Option<Self> {
+        if chunk.chunk_index != 0 || chunk.total_chunks == 0 {
+            return None;
         }
+        Some(Self {
+            partition: chunk.partition,
+            transfer_id: chunk.transfer_id,
+            total_chunks: chunk.total_chunks,
+            next_index: 1,
+            sequence_at_snapshot: chunk.sequence_at_snapshot,
+            data: chunk.data.clone(),
+        })
     }
 
-    pub fn add_chunk(&mut self, chunk: &SnapshotChunk) -> bool {
-        if chunk.partition != self.partition {
-            return false;
+    pub fn offer(&mut self, chunk: &SnapshotChunk) -> ChunkOutcome {
+        if chunk.partition != self.partition || chunk.transfer_id != self.transfer_id {
+            return ChunkOutcome::Stale;
         }
-        if chunk.chunk_index >= self.expected_chunks {
-            return false;
+        if chunk.total_chunks != self.total_chunks || chunk.chunk_index > self.next_index {
+            return ChunkOutcome::Gap;
         }
-        if chunk.total_chunks != self.expected_chunks {
-            return false;
+        if chunk.chunk_index < self.next_index {
+            return ChunkOutcome::Stale;
         }
-
-        let idx = chunk.chunk_index as usize;
-        if self.received_chunks[idx].is_none() {
-            self.received_chunks[idx] = Some(chunk.data.clone());
-            self.chunks_received += 1;
-        }
-        true
+        self.data.extend_from_slice(&chunk.data);
+        self.next_index += 1;
+        ChunkOutcome::Accepted
     }
 
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.chunks_received == self.expected_chunks
+        self.next_index >= self.total_chunks
     }
 
     #[must_use]
@@ -261,21 +285,7 @@ impl SnapshotBuilder {
 
     #[must_use]
     pub fn assemble(self) -> Option<Vec<u8>> {
-        if !self.is_complete() {
-            return None;
-        }
-
-        let total_len: usize = self
-            .received_chunks
-            .iter()
-            .filter_map(|c| c.as_ref().map(Vec::len))
-            .sum();
-
-        let mut data = Vec::with_capacity(total_len);
-        for chunk in self.received_chunks {
-            data.extend(chunk?);
-        }
-        Some(data)
+        self.is_complete().then_some(self.data)
     }
 }
 
@@ -287,58 +297,59 @@ pub struct SnapshotSender {
     current_chunk: u32,
     total_chunks: u32,
     sequence_at_snapshot: u64,
+    transfer_id: Option<u64>,
 }
 
 impl SnapshotSender {
     pub const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
 
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn new(partition: PartitionId, data: Vec<u8>, sequence_at_snapshot: u64) -> Self {
         let chunk_size = Self::DEFAULT_CHUNK_SIZE;
-        let total_chunks = if data.is_empty() {
-            1
-        } else {
-            data.len().div_ceil(chunk_size) as u32
-        };
-
         Self {
             partition,
+            total_chunks: Self::chunk_count(data.len(), chunk_size),
             data,
             chunk_size,
             current_chunk: 0,
-            total_chunks,
             sequence_at_snapshot,
+            transfer_id: None,
+        }
+    }
+
+    fn chunk_count(len: usize, chunk_size: usize) -> u32 {
+        if len == 0 {
+            1
+        } else {
+            u32::try_from(len.div_ceil(chunk_size)).unwrap_or(u32::MAX)
         }
     }
 
     #[must_use]
     pub fn with_chunk_size(mut self, chunk_size: usize) -> Self {
-        self.chunk_size = chunk_size;
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            self.total_chunks = if self.data.is_empty() {
-                1
-            } else {
-                self.data.len().div_ceil(chunk_size) as u32
-            };
-        }
+        self.chunk_size = chunk_size.max(1);
+        self.total_chunks = Self::chunk_count(self.data.len(), self.chunk_size);
         self
     }
 
     #[must_use]
-    pub fn next_chunk(&mut self) -> Option<SnapshotChunk> {
+    pub fn with_transfer_id(mut self, transfer_id: u64) -> Self {
+        self.transfer_id = Some(transfer_id);
+        self
+    }
+
+    #[must_use]
+    pub fn current_chunk(&self) -> Option<SnapshotChunk> {
         if self.current_chunk >= self.total_chunks {
             return None;
         }
 
-        let start = (self.current_chunk as usize) * self.chunk_size;
-        let end = (start + self.chunk_size).min(self.data.len());
-        let chunk_data = if start < self.data.len() {
-            self.data[start..end].to_vec()
-        } else {
-            Vec::new()
-        };
+        let start = (self.current_chunk as usize).saturating_mul(self.chunk_size);
+        let end = start.saturating_add(self.chunk_size).min(self.data.len());
+        let chunk_data = self
+            .data
+            .get(start..end)
+            .map_or_else(Vec::new, <[u8]>::to_vec);
 
         let chunk = SnapshotChunk::new(
             self.partition,
@@ -347,8 +358,22 @@ impl SnapshotSender {
             self.sequence_at_snapshot,
             chunk_data,
         );
+        Some(match self.transfer_id {
+            Some(transfer_id) => chunk.with_transfer_id(transfer_id),
+            None => chunk,
+        })
+    }
 
-        self.current_chunk += 1;
+    pub fn advance(&mut self) {
+        if self.current_chunk < self.total_chunks {
+            self.current_chunk += 1;
+        }
+    }
+
+    #[must_use]
+    pub fn next_chunk(&mut self) -> Option<SnapshotChunk> {
+        let chunk = self.current_chunk()?;
+        self.advance();
         Some(chunk)
     }
 
@@ -437,20 +462,25 @@ mod tests {
         assert_eq!(decoded.status(), Some(SnapshotStatus::Failed));
     }
 
+    fn chunk(index: u32, total: u32, transfer_id: u64, data: &[u8]) -> SnapshotChunk {
+        SnapshotChunk::new(partition(1), index, total, 500, data.to_vec())
+            .with_transfer_id(transfer_id)
+    }
+
     #[test]
     fn snapshot_builder_assembly() {
-        let mut builder = SnapshotBuilder::new(partition(1), 3, 500);
-
-        let chunk0 = SnapshotChunk::new(partition(1), 0, 3, 500, b"AAA".to_vec());
-        let chunk1 = SnapshotChunk::new(partition(1), 1, 3, 500, b"BBB".to_vec());
-        let chunk2 = SnapshotChunk::new(partition(1), 2, 3, 500, b"CCC".to_vec());
+        let mut builder = SnapshotBuilder::start(&chunk(0, 3, 9, b"AAA")).unwrap();
 
         assert!(!builder.is_complete());
-        assert!(builder.add_chunk(&chunk0));
+        assert_eq!(
+            builder.offer(&chunk(1, 3, 9, b"BBB")),
+            ChunkOutcome::Accepted
+        );
         assert!(!builder.is_complete());
-        assert!(builder.add_chunk(&chunk2));
-        assert!(!builder.is_complete());
-        assert!(builder.add_chunk(&chunk1));
+        assert_eq!(
+            builder.offer(&chunk(2, 3, 9, b"CCC")),
+            ChunkOutcome::Accepted
+        );
         assert!(builder.is_complete());
 
         let data = builder.assemble().unwrap();
@@ -458,11 +488,93 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_builder_rejects_wrong_partition() {
-        let mut builder = SnapshotBuilder::new(partition(1), 2, 100);
-        let wrong_chunk = SnapshotChunk::new(partition(2), 0, 2, 100, b"data".to_vec());
+    fn snapshot_builder_starts_only_at_chunk_zero() {
+        assert!(SnapshotBuilder::start(&chunk(1, 3, 9, b"BBB")).is_none());
+        assert!(SnapshotBuilder::start(&chunk(0, 0, 9, b"")).is_none());
+    }
 
-        assert!(!builder.add_chunk(&wrong_chunk));
+    #[test]
+    fn snapshot_builder_reports_a_skipped_chunk_as_a_gap() {
+        let mut builder = SnapshotBuilder::start(&chunk(0, 3, 9, b"AAA")).unwrap();
+        assert_eq!(builder.offer(&chunk(2, 3, 9, b"CCC")), ChunkOutcome::Gap);
+        assert!(!builder.is_complete());
+    }
+
+    #[test]
+    fn snapshot_builder_ignores_duplicates_and_other_transfers() {
+        let mut builder = SnapshotBuilder::start(&chunk(0, 3, 9, b"AAA")).unwrap();
+        assert_eq!(builder.offer(&chunk(0, 3, 9, b"AAA")), ChunkOutcome::Stale);
+        assert_eq!(builder.offer(&chunk(1, 3, 7, b"XXX")), ChunkOutcome::Stale);
+        assert_eq!(
+            builder.offer(&chunk(1, 3, 9, b"BBB")),
+            ChunkOutcome::Accepted
+        );
+        assert_eq!(
+            builder.offer(&chunk(2, 3, 9, b"CCC")),
+            ChunkOutcome::Accepted
+        );
+        assert_eq!(builder.assemble().unwrap(), b"AAABBBCCC");
+    }
+
+    #[test]
+    fn snapshot_builder_reports_a_changed_total_as_a_gap() {
+        let mut builder = SnapshotBuilder::start(&chunk(0, 3, 9, b"AAA")).unwrap();
+        assert_eq!(builder.offer(&chunk(1, 4, 9, b"BBB")), ChunkOutcome::Gap);
+    }
+
+    #[test]
+    fn snapshot_builder_rejects_wrong_partition() {
+        let mut builder = SnapshotBuilder::start(&chunk(0, 2, 9, b"data")).unwrap();
+        let wrong_chunk =
+            SnapshotChunk::new(partition(2), 1, 2, 500, b"data".to_vec()).with_transfer_id(9);
+
+        assert_eq!(builder.offer(&wrong_chunk), ChunkOutcome::Stale);
+    }
+
+    #[test]
+    fn snapshot_chunk_carries_its_transfer_id_after_the_data() {
+        let tagged =
+            SnapshotChunk::new(partition(7), 1, 4, 3, b"abc".to_vec()).with_transfer_id(42);
+        let bytes = tagged.to_bytes();
+        let decoded = SnapshotChunk::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.transfer_id, Some(42));
+        assert_eq!(decoded.data, b"abc");
+
+        let legacy_len = bytes.len() - 8;
+        let legacy = SnapshotChunk::from_bytes(&bytes[..legacy_len]).unwrap();
+        assert_eq!(legacy.transfer_id, None);
+        assert_eq!(legacy.data, b"abc");
+        assert_eq!(legacy.chunk_index, 1);
+        assert_eq!(legacy.total_chunks, 4);
+    }
+
+    #[test]
+    fn snapshot_chunk_rejects_truncated_data() {
+        let bytes = SnapshotChunk::new(partition(7), 0, 1, 3, b"abcdef".to_vec()).to_bytes();
+        assert!(SnapshotChunk::from_bytes(&bytes[..bytes.len() - 1]).is_none());
+        assert!(SnapshotChunk::from_bytes(&bytes[..10]).is_none());
+    }
+
+    #[test]
+    fn snapshot_sender_repeats_the_current_chunk_until_advanced() {
+        let mut sender = SnapshotSender::new(partition(5), b"Hello, World!".to_vec(), 1)
+            .with_chunk_size(5)
+            .with_transfer_id(77);
+
+        let first = sender.current_chunk().unwrap();
+        let again = sender.current_chunk().unwrap();
+        assert_eq!(first.chunk_index, 0);
+        assert_eq!(again.chunk_index, 0);
+        assert_eq!(first.transfer_id, Some(77));
+
+        sender.advance();
+        assert_eq!(sender.current_chunk().unwrap().chunk_index, 1);
+        sender.advance();
+        sender.advance();
+        assert!(sender.is_complete());
+        assert!(sender.current_chunk().is_none());
+        sender.advance();
+        assert_eq!(sender.chunks_sent(), 3);
     }
 
     #[test]

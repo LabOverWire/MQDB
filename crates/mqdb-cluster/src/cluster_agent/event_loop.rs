@@ -239,6 +239,7 @@ impl ClusteredAgent {
         ctrl.sweep_unique_seals(now);
         ctrl.drain_pending_seals().await;
         ctrl.drive_change_events(now).await;
+        ctrl.drive_snapshots(now).await;
     }
 
     async fn handle_processing_batch(&self, batch: ProcessingBatch) {

@@ -67,6 +67,7 @@ struct MockTransport {
     queued_publishes: Arc<Mutex<Vec<QueuedPublish>>>,
     refuse_local_delivery: Arc<std::sync::atomic::AtomicBool>,
     refuse_sends: Arc<std::sync::atomic::AtomicBool>,
+    queue_full: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MockTransport {
@@ -79,7 +80,12 @@ impl MockTransport {
             queued_publishes: Arc::new(Mutex::new(Vec::new())),
             refuse_local_delivery: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             refuse_sends: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            queue_full: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    fn take_sent(&self) -> Vec<(NodeId, ClusterMessage)> {
+        std::mem::take(&mut *self.outbox.lock().unwrap())
     }
 
     fn inject_message(&self, from: NodeId, message: ClusterMessage) {
@@ -111,6 +117,9 @@ impl ClusterTransport for MockTransport {
     ) -> Result<(), super::super::transport::TransportError> {
         if self.refuse_sends.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(super::super::transport::TransportError::NotConnected);
+        }
+        if self.queue_full.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(super::super::transport::TransportError::SendQueueFull(to));
         }
         self.outbox.lock().unwrap().push((to, message));
         Ok(())
@@ -3171,6 +3180,7 @@ async fn forwarded_delete_cascade_events_carry_the_deleters_origin() {
 mod change_events;
 mod forwarded_write;
 mod partition_map;
+mod snapshot;
 
 #[tokio::test]
 async fn forwarded_create_refuses_an_id_longer_than_the_record_id_limit() {

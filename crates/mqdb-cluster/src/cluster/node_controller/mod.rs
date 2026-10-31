@@ -37,7 +37,6 @@ use super::raft::{
 use super::raft_task::RaftEvent;
 use super::replication::{ReplicaRole, ReplicaState};
 use super::retained_store::RetainedMessage;
-use super::snapshot::{SnapshotBuilder, SnapshotRequest, SnapshotSender};
 use super::store_manager::StoreManager;
 use super::transport::{
     ClusterMessage, ClusterTransport, InboundMessage, RoutedPublish, TransportConfig,
@@ -476,9 +475,9 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) tx_raft_events: flume::Sender<RaftEvent>,
     pub(super) dead_nodes_for_session_update: VecDeque<NodeId>,
     pub(super) migration_manager: MigrationManager,
-    pub(super) pending_snapshots: HashMap<PartitionId, SnapshotBuilder>,
-    pub(super) requested_snapshots: HashSet<PartitionId>,
-    pub(super) outgoing_snapshots: HashMap<(NodeId, PartitionId), SnapshotSender>,
+    pub(super) incoming_snapshots: HashMap<PartitionId, snapshot::IncomingSnapshot>,
+    pub(super) outgoing_snapshots: VecDeque<snapshot::OutgoingSnapshot>,
+    pub(super) snapshot_clock_ms: u64,
     pub(super) draining: bool,
     pub(super) query_coordinator: QueryCoordinator,
     pub(super) pending_retained_queries: HashMap<u64, oneshot::Sender<Vec<RetainedMessage>>>,
@@ -554,9 +553,9 @@ impl<T: ClusterTransport> NodeController<T> {
             tx_raft_events,
             dead_nodes_for_session_update: VecDeque::new(),
             migration_manager: MigrationManager::new(node_id),
-            pending_snapshots: HashMap::new(),
-            requested_snapshots: HashSet::new(),
-            outgoing_snapshots: HashMap::new(),
+            incoming_snapshots: HashMap::new(),
+            outgoing_snapshots: VecDeque::new(),
+            snapshot_clock_ms: 0,
             draining: false,
             query_coordinator: QueryCoordinator::new(node_id),
             pending_retained_queries: HashMap::new(),
@@ -781,7 +780,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
     /// Synchronous tick used only by tests (`send_tick_output` drives the collected output). The
     /// production cluster-agent event loop uses its own async `handle_tick`, which additionally runs
-    /// `manage_unique_voters`, `sweep_unique_quorum`, and `sweep_unique_seals` — this path does NOT,
+    /// `manage_unique_voters`, `sweep_unique_quorum`, `sweep_unique_seals`, and `drive_snapshots` — this path does NOT,
     /// so a test exercising unique voter management must invoke those explicitly.
     pub fn tick(&mut self, now: u64) -> TickOutput {
         let start = std::time::Instant::now();
@@ -966,46 +965,6 @@ impl<T: ClusterTransport> NodeController<T> {
                 .push((primary, ClusterMessage::CatchupRequest(req)));
 
             state.mark_catchup_requested(now);
-        }
-
-        self.collect_awaiting_snapshot_requests(output);
-    }
-
-    fn collect_awaiting_snapshot_requests(&mut self, output: &mut TickOutput) {
-        for (&partition_id, state) in &self.replicas {
-            if state.role() != ReplicaRole::AwaitingSnapshot {
-                continue;
-            }
-
-            let Some(partition) = PartitionId::new(partition_id) else {
-                continue;
-            };
-
-            if self.requested_snapshots.contains(&partition)
-                || self.pending_snapshots.contains_key(&partition)
-            {
-                continue;
-            }
-
-            let Some(primary) = self.partition_map.get(partition).primary else {
-                continue;
-            };
-
-            if primary == self.node_id {
-                continue;
-            }
-
-            tracing::info!(
-                ?partition,
-                ?primary,
-                "retrying snapshot request for awaiting replica"
-            );
-
-            self.requested_snapshots.insert(partition);
-            let req = SnapshotRequest::create(partition, self.node_id);
-            output
-                .catchup_requests
-                .push((primary, ClusterMessage::SnapshotRequest(req)));
         }
     }
 

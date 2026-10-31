@@ -628,6 +628,7 @@ async fn a_failed_snapshot_import_keeps_the_replica_copy() {
         replica.transport.inject_message(node(1), message);
     }
     replica.process_messages().await;
+    replica.request_snapshot(partition, node(1)).await;
 
     let section = crate::cluster::entity::CHANGE_EVENTS.as_bytes();
     let mut malformed = vec![1, u8::try_from(section.len()).unwrap()];
