@@ -508,7 +508,8 @@ async fn dispatch_dev(action: DevAction) -> Result<(), Box<dyn std::error::Error
             ownership,
             presence: false,
             license,
-        })?,
+        })
+        .map(drop)?,
         DevAction::Bench {
             scenario,
             output,

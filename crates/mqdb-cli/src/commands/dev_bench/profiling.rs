@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
-use std::time::Duration;
+use std::process::{Child, Command, ExitStatus};
+use std::time::{Duration, Instant};
 
 use super::helpers::{agent_args, broker_listening, chrono_timestamp, interrupt_agents_under};
 use super::runners::build_bench_args;
@@ -86,6 +86,8 @@ pub(crate) fn cmd_dev_profile(
     }
 }
 
+const PROFILER_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn build_profiling_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
     println!("\nBuilding with profiling profile (full DWARF symbols)...");
     let build_status = Command::new("cargo")
@@ -94,25 +96,92 @@ fn build_profiling_binary() -> Result<PathBuf, Box<dyn std::error::Error>> {
     if !build_status.success() {
         return Err("Failed to build with profiling profile".into());
     }
-    Ok(std::env::current_dir()?.join("target/profiling/mqdb"))
+    let profiling_exe = std::env::current_dir()?.join("target/profiling/mqdb");
+    if !profiling_exe.is_file() {
+        return Err(format!(
+            "profiling build has no {}; run dev profile from the workspace root",
+            profiling_exe.display()
+        )
+        .into());
+    }
+    Ok(profiling_exe)
 }
 
-fn stop_profiled_agent(profiler: &mut Child, name: &str) {
-    println!("\nStopping agent to save profile...");
-    match interrupt_agents_under(profiler.id()) {
-        Ok(agents) if agents.is_empty() => {
-            println!(
-                "Warning: no agent found under {name} (pid {})",
-                profiler.id()
-            );
+fn wait_with_timeout(child: &mut Child, timeout: Duration) -> std::io::Result<Option<ExitStatus>> {
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
         }
-        Ok(_) => {}
-        Err(e) => println!("Warning: could not stop the profiled agent: {e}"),
+        if start.elapsed() > timeout {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
-    match profiler.wait() {
-        Ok(status) => println!("{name} exited with: {status}"),
-        Err(e) => println!("Warning: Failed to wait for {name}: {e}"),
+}
+
+struct OwnedChild {
+    child: Child,
+    name: &'static str,
+}
+
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        let stopped = match self.child.try_wait() {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => self.child.kill().and_then(|()| self.child.wait().map(drop)),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = stopped {
+            println!("Warning: could not stop the {}: {e}", self.name);
+        }
     }
+}
+
+struct Profiler {
+    child: Child,
+    name: &'static str,
+}
+
+impl Drop for Profiler {
+    fn drop(&mut self) {
+        println!("\nStopping agent to save profile...");
+        let pid = self.child.id();
+        let interrupted = match interrupt_agents_under(pid) {
+            Ok(agents) if agents.is_empty() => {
+                println!("Warning: no agent found under {} (pid {pid})", self.name);
+                false
+            }
+            Ok(_) => true,
+            Err(e) => {
+                println!("Warning: could not interrupt the profiled agent: {e}");
+                false
+            }
+        };
+        let exited = if interrupted {
+            wait_with_timeout(&mut self.child, PROFILER_EXIT_TIMEOUT)
+        } else {
+            Ok(None)
+        };
+        match exited {
+            Ok(Some(status)) => println!("{} exited with: {status}", self.name),
+            Ok(None) | Err(_) => match self.child.kill().and_then(|()| self.child.wait()) {
+                Ok(status) => println!("{} stopped: {status}", self.name),
+                Err(e) => println!("Warning: could not stop {} (pid {pid}): {e}", self.name),
+            },
+        }
+    }
+}
+
+fn run_bench(profiling_exe: &Path, target: &ProfileTarget) -> std::io::Result<()> {
+    println!("\nRunning benchmark...");
+    let bench_status = Command::new(profiling_exe)
+        .args(&target.bench_args)
+        .status()?;
+    if !bench_status.success() {
+        println!("Benchmark failed with status: {bench_status}");
+    }
+    Ok(())
 }
 
 fn profile_with_samply(target: &ProfileTarget) -> Result<(), Box<dyn std::error::Error>> {
@@ -120,32 +189,28 @@ fn profile_with_samply(target: &ProfileTarget) -> Result<(), Box<dyn std::error:
     let symbol_dir = std::env::current_dir()?.join("target/profiling");
     println!("Starting agent under samply profiler...");
 
-    let mut samply = Command::new("samply")
-        .args([
-            "record",
-            "--save-only",
-            "--unstable-presymbolicate",
-            "--symbol-dir",
-        ])
-        .arg(&symbol_dir)
-        .arg("-o")
-        .arg(&target.output_path)
-        .arg("--")
-        .arg(&profiling_exe)
-        .args(agent_args(target.db, target.port))
-        .spawn()?;
+    let samply = Profiler {
+        child: Command::new("samply")
+            .args([
+                "record",
+                "--save-only",
+                "--unstable-presymbolicate",
+                "--symbol-dir",
+            ])
+            .arg(&symbol_dir)
+            .arg("-o")
+            .arg(&target.output_path)
+            .arg("--")
+            .arg(&profiling_exe)
+            .args(agent_args(target.db, target.port))
+            .spawn()?,
+        name: "Samply",
+    };
 
     std::thread::sleep(Duration::from_secs(3));
-
-    println!("\nRunning benchmark...");
-    let bench_status = Command::new(&profiling_exe)
-        .args(&target.bench_args)
-        .status()?;
-    if !bench_status.success() {
-        println!("Benchmark failed with status: {bench_status}");
-    }
-
-    stop_profiled_agent(&mut samply, "Samply");
+    let bench = run_bench(&profiling_exe, target);
+    drop(samply);
+    bench?;
 
     println!("\nProfile saved: {}", target.output_path.display());
     println!("Load with: samply load {}", target.output_path.display());
@@ -157,24 +222,20 @@ fn profile_with_flamegraph(target: &ProfileTarget) -> Result<(), Box<dyn std::er
 
     println!("Starting agent under flamegraph profiler...\n");
 
-    let mut flamegraph = Command::new("cargo")
-        .args(["flamegraph", "--profile=profiling", "-o"])
-        .arg(&target.output_path)
-        .arg("--")
-        .args(agent_args(target.db, target.port))
-        .spawn()?;
+    let flamegraph = Profiler {
+        child: Command::new("cargo")
+            .args(["flamegraph", "--profile=profiling", "-o"])
+            .arg(&target.output_path)
+            .arg("--")
+            .args(agent_args(target.db, target.port))
+            .spawn()?,
+        name: "Flamegraph",
+    };
 
     std::thread::sleep(Duration::from_secs(2));
-
-    println!("Running benchmark...");
-    let bench_status = Command::new(&profiling_exe)
-        .args(&target.bench_args)
-        .status()?;
-    if !bench_status.success() {
-        println!("Benchmark failed with status: {bench_status}");
-    }
-
-    stop_profiled_agent(&mut flamegraph, "Flamegraph");
+    let bench = run_bench(&profiling_exe, target);
+    drop(flamegraph);
+    bench?;
 
     println!("\nFlamegraph saved: {}", target.output_path.display());
     Ok(())
@@ -187,23 +248,29 @@ fn profile_with_sample(
     let profiling_exe = build_profiling_binary()?;
 
     println!("Starting agent...");
-    let mut agent = Command::new(&profiling_exe)
-        .args(agent_args(target.db, target.port))
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
+    let agent = OwnedChild {
+        child: Command::new(&profiling_exe)
+            .args(agent_args(target.db, target.port))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?,
+        name: "agent",
+    };
 
     std::thread::sleep(Duration::from_secs(2));
 
-    let agent_pid = agent.id();
+    let agent_pid = agent.child.id();
     println!("Agent started with PID: {agent_pid}");
 
     println!("\nRunning benchmark in background...");
-    let mut bench = Command::new(&profiling_exe)
-        .args(&target.bench_args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
+    let bench = OwnedChild {
+        child: Command::new(&profiling_exe)
+            .args(&target.bench_args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?,
+        name: "benchmark",
+    };
 
     std::thread::sleep(Duration::from_millis(500));
 
@@ -212,17 +279,15 @@ fn profile_with_sample(
     let sample_status = Command::new("sample")
         .args([&agent_pid.to_string(), &duration.to_string(), "-f"])
         .arg(&sample_output)
-        .status()?;
-
-    if !sample_status.success() {
-        println!("Warning: sample command failed with status: {sample_status}");
-    }
+        .status();
 
     println!("\nStopping benchmark and agent...");
-    for (name, child) in [("benchmark", &mut bench), ("agent", &mut agent)] {
-        if let Err(e) = child.kill().and_then(|()| child.wait().map(drop)) {
-            println!("Warning: could not stop the {name}: {e}");
-        }
+    drop(bench);
+    drop(agent);
+
+    let sample_status = sample_status?;
+    if !sample_status.success() {
+        println!("Warning: sample command failed with status: {sample_status}");
     }
 
     println!("\nProfile saved: {}", sample_output.display());

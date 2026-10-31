@@ -482,13 +482,15 @@ mqdb dev test --all --base-port 33601
 `--base-port` (default 1883) is the port of node 1; node N is on `base+N-1`.
 
 > **Note:** `--ownership`, `--sharing` and `--presence` are excluded from `--all` because each
-> starts its own authenticated cluster on the `--base-port` block, under
-> `--db-prefix` (default `/tmp/mqdb-test`) plus `-own`, `-share` or `-presence`. They refuse
-> to start if any of those ports (or their `+50` cluster transport ports) is already in use,
-> so run them on a free block, not on top of a running `dev start-cluster`. At the end they
-> stop only the nodes they started, by recorded pid; after an interrupted run, stop the
-> leftovers with `mqdb dev kill --db-prefix /tmp/mqdb-test-own` (or `-share`, `-presence`).
-> They require `--license` to provide a valid Enterprise license for the nodes they spawn.
+> starts its own authenticated cluster on the `--base-port` block, under `--db-prefix`
+> (default `/tmp/mqdb-test`) plus `-own-<base-port>`, `-share-<base-port>` or
+> `-presence-<base-port>`. They cannot be combined with suites that test a running cluster,
+> and they refuse to start if any of their ports (or the `+50` cluster transport ports) is
+> already in use, so run them on a free block, not on top of a running `dev start-cluster`.
+> At the end they stop only the nodes they started. After an interrupted run, stop the
+> leftovers with `mqdb dev kill --db-prefix /tmp/mqdb-test-own-1883` (or `-share-`,
+> `-presence-`). They require `--license` to provide a valid Enterprise license for the
+> nodes they spawn. `dev test` exits non-zero when any check fails.
 
 ### Dev Bench (Benchmarking with Auto-Start)
 

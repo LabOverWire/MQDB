@@ -4,7 +4,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::helpers::{NODE_PID_FILE, absolute_prefix, cmd_dev_clean, refuse_if_in_use};
+use super::helpers::{
+    NODE_PID_FILE, StartedNode, absolute_prefix, cmd_dev_clean, refuse_if_in_use,
+    stop_started_nodes,
+};
 
 fn ensure_dev_passwd(exe: &Path, db_prefix: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let path = format!("{db_prefix}-passwd");
@@ -187,7 +190,7 @@ fn node_command(
 
 pub(crate) fn cmd_dev_start_cluster(
     options: &StartClusterOptions,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<Vec<StartedNode>, Box<dyn std::error::Error>> {
     let nodes = options.nodes;
     check_port_block(options.base_port, nodes)?;
     let db_prefix = absolute_prefix(&options.db_prefix)?;
@@ -219,45 +222,19 @@ pub(crate) fn cmd_dev_start_cluster(
         options.bind_host
     );
 
+    let mut started: Vec<StartedNode> = Vec::with_capacity(usize::from(nodes));
     for node_id in 1..=nodes {
-        let port = node_port(options.base_port, node_id);
-        let db_path = format!("{db_prefix}-{node_id}");
-        let mut cmd = node_command(&exe, options, node_id, &db_path, passwd)?;
-
-        std::fs::create_dir_all(&db_path)?;
-        let pid_path = format!("{db_path}/{NODE_PID_FILE}");
-        let mut pid_file = std::fs::File::create(&pid_path)
-            .map_err(|e| format!("record node {node_id} in {pid_path}: {e}"))?;
-        let log_file = std::fs::File::create(format!("{db_path}/mqdb.log"))?;
-        cmd.stdout(log_file.try_clone()?);
-        cmd.stderr(log_file);
-
-        let transport_mode = if options.no_quic { " (TCP)" } else { " (QUIC)" };
-        println!("Starting node {node_id} on port {port}{transport_mode}...");
-
-        let mut child = match cmd.spawn() {
-            Ok(child) => child,
+        match start_node(&exe, options, &db_prefix, node_id, passwd) {
+            Ok(node) => started.push(node),
             Err(e) => {
-                drop(pid_file);
-                std::fs::remove_file(&pid_path).map_err(|remove| {
-                    format!("start node {node_id}: {e}; remove {pid_path}: {remove}")
-                })?;
-                return Err(format!("start node {node_id}: {e}").into());
+                return Err(match stop_started_nodes(&started) {
+                    Ok(()) => e,
+                    Err(stop) => {
+                        format!("{e}; could not stop the nodes already started: {stop}").into()
+                    }
+                });
             }
-        };
-        if let Err(e) = std::io::Write::write_all(&mut pid_file, child.id().to_string().as_bytes())
-        {
-            let stopped = child.kill().and_then(|()| child.wait());
-            return Err(match stopped {
-                Ok(_) => format!("record node {node_id} in {pid_path}: {e}; stopped it"),
-                Err(stop) => format!(
-                    "record node {node_id} in {pid_path}: {e}; could not stop pid {}: {stop}",
-                    child.id()
-                ),
-            }
-            .into());
         }
-
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
 
@@ -265,7 +242,57 @@ pub(crate) fn cmd_dev_start_cluster(
     println!("Use 'mqdb dev ps' to check status");
     println!("Use 'mqdb dev kill --db-prefix {db_prefix}' to stop");
 
-    Ok(())
+    Ok(started)
+}
+
+fn start_node(
+    exe: &Path,
+    options: &StartClusterOptions,
+    db_prefix: &str,
+    node_id: u8,
+    passwd: &str,
+) -> Result<StartedNode, Box<dyn std::error::Error>> {
+    let port = node_port(options.base_port, node_id);
+    let db_path = format!("{db_prefix}-{node_id}");
+    let mut cmd = node_command(exe, options, node_id, &db_path, passwd)?;
+
+    std::fs::create_dir_all(&db_path)?;
+    let pid_path = format!("{db_path}/{NODE_PID_FILE}");
+    let mut pid_file = std::fs::File::create(&pid_path)
+        .map_err(|e| format!("record node {node_id} in {pid_path}: {e}"))?;
+    let log_file = std::fs::File::create(format!("{db_path}/mqdb.log"))?;
+    cmd.stdout(log_file.try_clone()?);
+    cmd.stderr(log_file);
+
+    let transport_mode = if options.no_quic { " (TCP)" } else { " (QUIC)" };
+    println!("Starting node {node_id} on port {port}{transport_mode}...");
+
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            drop(pid_file);
+            std::fs::remove_file(&pid_path).map_err(|remove| {
+                format!("start node {node_id}: {e}; remove {pid_path}: {remove}")
+            })?;
+            return Err(format!("start node {node_id}: {e}").into());
+        }
+    };
+    if let Err(e) = std::io::Write::write_all(&mut pid_file, child.id().to_string().as_bytes()) {
+        let stopped = child.kill().and_then(|()| child.wait());
+        return Err(match stopped {
+            Ok(_) => format!("record node {node_id} in {pid_path}: {e}; stopped it"),
+            Err(stop) => format!(
+                "record node {node_id} in {pid_path}: {e}; could not stop pid {}: {stop}",
+                child.id()
+            ),
+        }
+        .into());
+    }
+    Ok(StartedNode {
+        node_id,
+        pid: child.id(),
+        dir: PathBuf::from(db_path),
+    })
 }
 
 #[cfg(test)]

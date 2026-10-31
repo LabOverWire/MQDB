@@ -454,11 +454,11 @@ mqdb dev test --ownership --nodes 3
 
 This command:
 1. Refuses to start if the `--base-port` block (default 1883) or its cluster transport ports are in use
-2. Creates a password file with users `alice`, `bob`, and `admin` at `<db-prefix>-own-passwd`
-3. Starts a fresh 3-node cluster under `<db-prefix>-own` with `--passwd`, `--admin-users admin`, and `--ownership test_owned_<ts>=userId`
+2. Creates a password file with users `alice`, `bob`, and `admin` at `<db-prefix>-own-<base-port>-passwd`
+3. Starts a fresh 3-node cluster under `<db-prefix>-own-<base-port>` with `--passwd`, `--admin-users admin`, and `--ownership test_owned_<ts>=userId`
 4. Waits for the authenticated cluster to become ready
 5. Runs the test cases (see below)
-6. Stops only the nodes it started and removes the password file
+6. Stops only the nodes it started and removes the password file; exits non-zero if any check failed
 
 ### Test Cases
 
@@ -469,8 +469,10 @@ This command:
 | 3 | List as bob | Sees 0 records (filtered out) |
 | 4 | Update alice's record as bob | Forbidden error |
 | 5 | Delete alice's record as bob | Forbidden error |
-| 6 | Update alice's record as alice | Success (owner) |
-| 7 | Delete alice's record as alice | Success (owner) |
+| 6 | List as admin | Sees 1 record (admin sees all) |
+| 7 | Update alice's record as admin | Success (admin bypass) |
+| 8 | Update alice's record as alice | Success (owner) |
+| 9 | Delete alice's record as alice | Success (owner) |
 
 ### Manual Testing
 

@@ -365,10 +365,83 @@ fn forget_node(node: &RecordedNode, pid: u32, state: &str) -> Result<(), String>
     std::fs::remove_file(&node.pid_file).map_err(|e| format!("{}: {e}", node.pid_file.display()))
 }
 
-pub(crate) fn kill_cluster(
-    db_prefix: &str,
-    node: Option<u16>,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) struct StartedNode {
+    pub(crate) node_id: u8,
+    pub(crate) pid: u32,
+    pub(crate) dir: PathBuf,
+}
+
+impl StartedNode {
+    fn pid_file(&self) -> PathBuf {
+        self.dir.join(NODE_PID_FILE)
+    }
+
+    fn forget(&self) -> Result<(), String> {
+        let pid_file = self.pid_file();
+        match read_pid(&pid_file) {
+            Ok(recorded) if recorded == self.pid => {
+                std::fs::remove_file(&pid_file).map_err(|e| format!("{}: {e}", pid_file.display()))
+            }
+            Ok(_) | Err(_) => Ok(()),
+        }
+    }
+}
+
+pub(crate) fn stop_started_nodes(nodes: &[StartedNode]) -> Result<(), String> {
+    let processes = node_processes()?;
+    let mut failures = Vec::new();
+    let mut waiting = Vec::new();
+    for node in nodes {
+        match node_state(&processes, node.pid, &node.dir) {
+            Ok(NodeState::Running) => match signal(node.pid) {
+                Ok(()) => waiting.push(node),
+                Err(e) => failures.push(format!("node {}: {e}", node.node_id)),
+            },
+            Ok(NodeState::Stopped) => {
+                if let Err(e) = node.forget() {
+                    failures.push(e);
+                }
+            }
+            Err(e) => failures.push(format!("node {}: {e}", node.node_id)),
+        }
+    }
+
+    let start = Instant::now();
+    while !waiting.is_empty() && start.elapsed() <= NODE_STOP_TIMEOUT {
+        let processes = node_processes()?;
+        let mut still_running = Vec::new();
+        for node in waiting {
+            match node_state(&processes, node.pid, &node.dir) {
+                Ok(NodeState::Running) => still_running.push(node),
+                Ok(NodeState::Stopped) => {
+                    println!("Node {} (pid {}) stopped", node.node_id, node.pid);
+                    if let Err(e) = node.forget() {
+                        failures.push(e);
+                    }
+                }
+                Err(e) => failures.push(format!("node {}: {e}", node.node_id)),
+            }
+        }
+        waiting = still_running;
+        if !waiting.is_empty() {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    failures.extend(waiting.iter().map(|node| {
+        format!(
+            "node {} (pid {}) did not stop within {NODE_STOP_TIMEOUT:?}",
+            node.node_id, node.pid
+        )
+    }));
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
+fn kill_cluster(db_prefix: &str, node: Option<u16>) -> Result<(), Box<dyn std::error::Error>> {
     let prefix = absolute_prefix(db_prefix)?;
     let recorded = recorded_nodes(&prefix)?;
     let targets: Vec<RecordedNode> = match node {
@@ -513,7 +586,13 @@ pub(crate) fn cmd_dev_kill(
 }
 
 const DEV_TEST_SUITE_DIRS: [&str; 3] = ["own", "share", "presence"];
-const DEV_TEST_SUITE_PASSWDS: [&str; 5] = ["own", "share", "ownership", "sharing", "presence"];
+const DEV_TEST_SUITE_PASSWDS: [&str; 3] = ["ownership", "sharing", "presence"];
+
+fn is_suite_on_port(name: &str) -> bool {
+    name.split_once('-').is_some_and(|(suite, port)| {
+        DEV_TEST_SUITE_DIRS.contains(&suite) && port.parse::<u16>().is_ok()
+    })
+}
 
 fn is_dev_test_prefix(db_prefix: &str) -> bool {
     let prefix = Path::new(db_prefix);
@@ -530,11 +609,13 @@ fn is_dev_entry(rest: &str, is_dir: bool, with_dev_test_leftovers: bool) -> bool
         (None, false) => rest == "passwd",
         (Some((suite, node_id)), true) => {
             with_dev_test_leftovers
-                && DEV_TEST_SUITE_DIRS.contains(&suite)
+                && (DEV_TEST_SUITE_DIRS.contains(&suite) || is_suite_on_port(suite))
                 && node_id.parse::<u16>().is_ok()
         }
         (Some((suite, tail)), false) => {
-            with_dev_test_leftovers && DEV_TEST_SUITE_PASSWDS.contains(&suite) && tail == "passwd"
+            with_dev_test_leftovers
+                && (DEV_TEST_SUITE_PASSWDS.contains(&suite) || is_suite_on_port(suite))
+                && tail == "passwd"
         }
     }
 }
@@ -711,6 +792,11 @@ mod tests {
         assert!(is_dev_entry("ownership-passwd", false, true));
         assert!(is_dev_entry("sharing-passwd", false, true));
         assert!(is_dev_entry("presence-passwd", false, true));
+        assert!(is_dev_entry("own-33601-2", true, true));
+        assert!(is_dev_entry("share-33601-passwd", false, true));
+        assert!(!is_dev_entry("own-33601-2", true, false));
+        assert!(!is_dev_entry("own-x-2", true, true));
+        assert!(!is_dev_entry("x-33601-passwd", false, true));
         assert!(!is_dev_entry("x-1", true, true));
         assert!(!is_dev_entry("x-passwd", false, true));
         assert!(!is_dev_entry("passwd", true, true));

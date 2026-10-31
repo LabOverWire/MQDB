@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
@@ -47,12 +48,12 @@ pub(super) fn start_agent_for_bench(
 struct ProcessEntry {
     pid: u32,
     ppid: u32,
-    command: String,
+    executable: String,
 }
 
 fn process_table() -> Result<Vec<ProcessEntry>, String> {
     let output = Command::new("ps")
-        .args(["-ww", "-ax", "-o", "pid=,ppid=,command="])
+        .args(["-ww", "-ax", "-o", "pid=,ppid=,comm="])
         .output()
         .map_err(|e| format!("run ps: {e}"))?;
     if !output.status.success() {
@@ -64,28 +65,30 @@ fn process_table() -> Result<Vec<ProcessEntry>, String> {
     Ok(String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let pid = fields.next()?.parse().ok()?;
-            let ppid = fields.next()?.parse().ok()?;
-            let command = fields.collect::<Vec<_>>().join(" ");
-            Some(ProcessEntry { pid, ppid, command })
+            let (pid, rest) = line.trim_start().split_once(char::is_whitespace)?;
+            let (ppid, executable) = rest.trim_start().split_once(char::is_whitespace)?;
+            Some(ProcessEntry {
+                pid: pid.parse().ok()?,
+                ppid: ppid.parse().ok()?,
+                executable: executable.trim().to_string(),
+            })
         })
         .collect())
 }
 
-fn is_mqdb_agent(command: &str) -> bool {
-    command
-        .split_once(" agent start ")
-        .is_some_and(|(program, _)| program == "mqdb" || program.ends_with("/mqdb"))
+fn is_mqdb_binary(executable: &str) -> bool {
+    Path::new(executable)
+        .file_name()
+        .is_some_and(|name| name == "mqdb")
 }
 
-fn agents_below(table: &[ProcessEntry], root: u32) -> Vec<u32> {
+fn mqdb_processes_below(table: &[ProcessEntry], root: u32) -> Vec<u32> {
     let mut frontier = vec![root];
     let mut found = Vec::new();
     while let Some(parent) = frontier.pop() {
         for entry in table.iter().filter(|entry| entry.ppid == parent) {
             frontier.push(entry.pid);
-            if is_mqdb_agent(&entry.command) {
+            if is_mqdb_binary(&entry.executable) {
                 found.push(entry.pid);
             }
         }
@@ -94,7 +97,7 @@ fn agents_below(table: &[ProcessEntry], root: u32) -> Vec<u32> {
 }
 
 pub(super) fn interrupt_agents_under(root: u32) -> Result<Vec<u32>, String> {
-    let agents = agents_below(&process_table()?, root);
+    let agents = mqdb_processes_below(&process_table()?, root);
     for pid in &agents {
         let status = Command::new("kill")
             .args(["-INT", &pid.to_string()])
@@ -215,38 +218,34 @@ impl BenchMetrics {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProcessEntry, agents_below};
+    use super::{ProcessEntry, mqdb_processes_below};
 
-    fn entry(pid: u32, ppid: u32, command: &str) -> ProcessEntry {
+    fn entry(pid: u32, ppid: u32, executable: &str) -> ProcessEntry {
         ProcessEntry {
             pid,
             ppid,
-            command: command.to_string(),
+            executable: executable.to_string(),
         }
     }
 
     #[test]
-    fn only_agents_below_the_profiler_are_found() {
+    fn only_mqdb_binaries_below_the_profiler_are_found() {
         let table = [
-            entry(10, 1, "samply record -- mqdb agent start --db /a"),
-            entry(
-                11,
-                10,
-                "/repos/My Disk/target/profiling/mqdb agent start --db /a",
-            ),
-            entry(12, 10, "/x/mqdb-helper agent start --db /a"),
-            entry(20, 1, "cargo flamegraph -- agent start --db /b"),
-            entry(21, 20, "dtrace -c mqdb agent start --db /b"),
-            entry(22, 21, "/x/mqdb agent start --db /b --bind 127.0.0.1:1884"),
-            entry(
-                30,
-                1,
-                "/y/mqdb agent start --db /other --bind 127.0.0.1:1883",
-            ),
+            entry(10, 1, "/Users/me/.cargo/bin/samply"),
+            entry(11, 10, "/repos/My Disk/target/profiling/mqdb"),
+            entry(12, 10, "/x/mqdb-helper"),
+            entry(20, 1, "/Users/me/.cargo/bin/cargo"),
+            entry(21, 20, "/Users/me/.cargo/bin/cargo-flamegraph"),
+            entry(22, 21, "/usr/bin/xctrace"),
+            entry(23, 22, "/repos/My Disk/target/profiling/mqdb"),
+            entry(30, 1, "/y/target/release/mqdb"),
+            entry(40, 1, "perf"),
+            entry(41, 40, "mqdb"),
         ];
-        assert_eq!(agents_below(&table, 10), [11]);
-        assert_eq!(agents_below(&table, 20), [22]);
-        assert!(agents_below(&table, 30).is_empty());
-        assert!(agents_below(&table, 99).is_empty());
+        assert_eq!(mqdb_processes_below(&table, 10), [11]);
+        assert_eq!(mqdb_processes_below(&table, 20), [23]);
+        assert_eq!(mqdb_processes_below(&table, 40), [41]);
+        assert!(mqdb_processes_below(&table, 30).is_empty());
+        assert!(mqdb_processes_below(&table, 99).is_empty());
     }
 }

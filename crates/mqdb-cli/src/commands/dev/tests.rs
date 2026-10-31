@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use super::cluster::{
     BridgeDirection, StartClusterOptions, TRANSPORT_PORT_OFFSET, cmd_dev_start_cluster,
 };
-use super::helpers::{absolute_prefix, cmd_dev_clean, kill_cluster};
+use super::helpers::{StartedNode, absolute_prefix, cmd_dev_clean, stop_started_nodes};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Suite {
@@ -127,13 +127,17 @@ pub(crate) fn cmd_dev_test(
         .filter(|&&(suite, wanted)| wanted || (run_defaults && suite.runs_by_default()))
         .map(|&(suite, _)| suite);
 
-    if selected.clone().any(|suite| !suite.starts_own_cluster()) {
+    let tests_running_cluster = selected.clone().any(|suite| !suite.starts_own_cluster());
+    if tests_running_cluster && selected.clone().any(Suite::starts_own_cluster) {
+        return Err("--ownership, --sharing and --presence start their own cluster on the --base-port block, so they cannot run together with suites that test a running cluster there; run them in a separate dev test".into());
+    }
+    if tests_running_cluster {
         wait_for_cluster_ready(&ports, 10);
     }
 
     let nodes = options.nodes;
-    for suite in selected {
-        match suite {
+    let failed: u32 = selected
+        .map(|suite| match suite {
             Suite::Pubsub => run_test_pubsub(nodes, &ports),
             Suite::Db => run_test_db(nodes, &ports),
             Suite::Constraints => run_test_constraints(nodes, &ports),
@@ -145,16 +149,20 @@ pub(crate) fn cmd_dev_test(
             Suite::Sharing => run_test_sharing(options, &ports),
             Suite::Presence => run_test_presence(options, &ports),
             Suite::StressConstraints => run_test_stress_constraints(nodes, &ports),
-        }
+        })
+        .sum();
+    if failed == 0 {
+        Ok(())
+    } else {
+        Err(format!("{failed} dev test check(s) failed").into())
     }
-    Ok(())
 }
 
-fn run_test_pubsub(nodes: u8, ports: &[u16]) {
+fn run_test_pubsub(nodes: u8, ports: &[u16]) -> u32 {
     println!("=== Cross-Node Pub/Sub Matrix Test ({nodes} nodes) ===\n");
 
-    let mut passed = 0;
-    let mut failed = 0;
+    let mut passed = 0u32;
+    let mut failed = 0u32;
 
     for (src_idx, &src_port) in ports.iter().enumerate() {
         for (dst_idx, &dst_port) in ports.iter().enumerate() {
@@ -181,15 +189,15 @@ fn run_test_pubsub(nodes: u8, ports: &[u16]) {
         }
     }
 
-    println!("\nResults: {passed} passed, {failed} failed\n");
+    report(passed, failed)
 }
 
-fn run_test_db(nodes: u8, ports: &[u16]) {
+fn run_test_db(nodes: u8, ports: &[u16]) -> u32 {
     println!("=== Cross-Node DB CRUD Test ({nodes} nodes) ===\n");
 
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mqdb"));
-    let mut passed = 0;
-    let mut failed = 0;
+    let mut passed = 0u32;
+    let mut failed = 0u32;
 
     for (idx, &port) in ports.iter().enumerate() {
         let node = idx + 1;
@@ -229,7 +237,7 @@ fn run_test_db(nodes: u8, ports: &[u16]) {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
 
-    println!("\nResults: {passed} passed, {failed} failed\n");
+    report(passed, failed)
 }
 
 fn mqdb_cmd(
@@ -243,12 +251,12 @@ fn mqdb_cmd(
     Command::new(exe).args(&full_args).output()
 }
 
-fn run_test_constraints(nodes: u8, ports: &[u16]) {
+fn run_test_constraints(nodes: u8, ports: &[u16]) -> u32 {
     println!("=== Unique Constraint Test ({nodes} nodes) ===\n");
 
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mqdb"));
-    let mut passed = 0;
-    let mut failed = 0;
+    let mut passed = 0u32;
+    let mut failed = 0u32;
 
     let ts = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_millis());
     let entity = format!("test_products_{ts}");
@@ -283,8 +291,7 @@ fn run_test_constraints(nodes: u8, ports: &[u16]) {
             eprintln!("    stderr: {}", String::from_utf8_lossy(&o.stderr));
         }
         failed += 1;
-        println!("\nResults: {passed} passed, {failed} failed\n");
-        return;
+        return report(passed, failed);
     }
 
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -342,14 +349,14 @@ fn run_test_constraints(nodes: u8, ports: &[u16]) {
         failed += 1;
     }
 
-    println!("\nResults: {passed} passed, {failed} failed\n");
+    report(passed, failed)
 }
 
-fn run_test_wildcards(nodes: u8, ports: &[u16]) {
+fn run_test_wildcards(nodes: u8, ports: &[u16]) -> u32 {
     println!("=== Cross-Node Wildcard Subscription Test ({nodes} nodes) ===\n");
 
-    let mut passed = 0;
-    let mut failed = 0;
+    let mut passed = 0u32;
+    let mut failed = 0u32;
 
     let sub_port = ports[0];
     let pub_port = ports[ports.len() - 1];
@@ -400,14 +407,14 @@ fn run_test_wildcards(nodes: u8, ports: &[u16]) {
         failed += 1;
     }
 
-    println!("\nResults: {passed} passed, {failed} failed\n");
+    report(passed, failed)
 }
 
-fn run_test_retained(nodes: u8, ports: &[u16]) {
+fn run_test_retained(nodes: u8, ports: &[u16]) -> u32 {
     println!("=== Cross-Node Retained Message Test ({nodes} nodes) ===\n");
 
-    let mut passed = 0;
-    let mut failed = 0;
+    let mut passed = 0u32;
+    let mut failed = 0u32;
 
     let ts = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_millis());
     let topic = format!("retained/test/{ts}");
@@ -491,14 +498,14 @@ fn run_test_retained(nodes: u8, ports: &[u16]) {
         ])
         .output();
 
-    println!("\nResults: {passed} passed, {failed} failed\n");
+    report(passed, failed)
 }
 
-fn run_test_lwt(nodes: u8, ports: &[u16]) {
+fn run_test_lwt(nodes: u8, ports: &[u16]) -> u32 {
     println!("=== Cross-Node Last Will & Testament Test ({nodes} nodes) ===\n");
 
-    let mut passed = 0;
-    let mut failed = 0;
+    let mut passed = 0u32;
+    let mut failed = 0u32;
 
     let ts = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_millis());
     let will_topic = format!("lwt/status/{ts}");
@@ -531,15 +538,15 @@ fn run_test_lwt(nodes: u8, ports: &[u16]) {
         failed += 1;
     }
 
-    println!("\nResults: {passed} passed, {failed} failed\n");
+    report(passed, failed)
 }
 
-fn run_test_events(nodes: u8, ports: &[u16]) {
+fn run_test_events(nodes: u8, ports: &[u16]) -> u32 {
     println!("=== Cross-Node Change Event Test ({nodes} nodes) ===\n");
 
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mqdb"));
-    let mut passed = 0;
-    let mut failed = 0;
+    let mut passed = 0u32;
+    let mut failed = 0u32;
 
     let ts = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_millis());
     let entity = format!("events_test_{ts}");
@@ -599,7 +606,7 @@ fn run_test_events(nodes: u8, ports: &[u16]) {
         );
     }
 
-    println!("\nResults: {passed} passed, {failed} failed\n");
+    report(passed, failed)
 }
 
 fn spawn_event_watcher(
@@ -805,22 +812,23 @@ struct SuiteSetup<'a> {
 }
 
 struct SuiteCluster {
-    prefix: String,
+    nodes: Vec<StartedNode>,
+    passwd: PathBuf,
 }
 
 impl Drop for SuiteCluster {
     fn drop(&mut self) {
-        if let Err(e) = kill_cluster(&self.prefix, None) {
+        if let Err(e) = stop_started_nodes(&self.nodes) {
             eprintln!(
-                "  could not stop the suite nodes under {}: {e}",
-                self.prefix
+                "  could not stop the suite nodes; kept {} for them: {e}",
+                self.passwd.display()
             );
+            return;
         }
-        let passwd = format!("{}-passwd", self.prefix);
-        if let Err(e) = std::fs::remove_file(&passwd)
+        if let Err(e) = std::fs::remove_file(&self.passwd)
             && e.kind() != ErrorKind::NotFound
         {
-            eprintln!("  could not remove {passwd}: {e}");
+            eprintln!("  could not remove {}: {e}", self.passwd.display());
         }
     }
 }
@@ -854,17 +862,21 @@ fn start_suite_cluster(
         ));
     }
 
-    let prefix = absolute_prefix(&format!("{}-{}", options.db_prefix, setup.dir))
-        .map_err(|e| e.to_string())?;
+    let prefix = absolute_prefix(&format!(
+        "{}-{}-{}",
+        options.db_prefix, setup.dir, options.base_port
+    ))
+    .map_err(|e| e.to_string())?;
     cmd_dev_clean(&prefix).map_err(|e| e.to_string())?;
     let passwd = format!("{prefix}-passwd");
-    let cluster = SuiteCluster {
-        prefix: prefix.clone(),
+    let mut cluster = SuiteCluster {
+        nodes: Vec::new(),
+        passwd: PathBuf::from(&passwd),
     };
     create_suite_passwd(exe, &passwd, setup.users)?;
 
     println!("  Starting {} nodes ({})...", ports.len(), setup.label);
-    cmd_dev_start_cluster(&StartClusterOptions {
+    cluster.nodes = cmd_dev_start_cluster(&StartClusterOptions {
         nodes: options.nodes,
         clean: false,
         quic_cert: PathBuf::from("test_certs/server.pem"),
@@ -905,6 +917,11 @@ fn wait_for_suite_cluster(ports: &[u16], timeout_secs: u64) -> Result<(), String
     ))
 }
 
+fn report(passed: u32, failed: u32) -> u32 {
+    println!("\nResults: {passed} passed, {failed} failed\n");
+    failed
+}
+
 fn record(passed: &mut u32, failed: &mut u32, label: &str, ok: bool) {
     if ok {
         println!("  {label}: ✓");
@@ -915,22 +932,23 @@ fn record(passed: &mut u32, failed: &mut u32, label: &str, ok: bool) {
     }
 }
 
-fn run_as(exe: &Path, broker: &str, user: &str, args: &[&str]) -> (bool, String) {
-    Command::new(exe)
+fn run_as(exe: &Path, broker: &str, user: &str, args: &[&str]) -> (Option<bool>, String) {
+    match Command::new(exe)
         .args(args)
         .args([
             "--broker", broker, "--user", user, "--pass", user, "--format", "json",
         ])
         .output()
-        .map_or_else(
-            |_| (false, String::new()),
-            |o| {
-                (
-                    o.status.success(),
-                    String::from_utf8_lossy(&o.stdout).to_string(),
-                )
-            },
-        )
+    {
+        Ok(o) => (
+            Some(o.status.success()),
+            String::from_utf8_lossy(&o.stdout).to_string(),
+        ),
+        Err(e) => {
+            eprintln!("    could not run {}: {e}", exe.display());
+            (None, String::new())
+        }
+    }
 }
 
 fn data_len(out: &str) -> usize {
@@ -940,9 +958,13 @@ fn data_len(out: &str) -> usize {
         .unwrap_or(0)
 }
 
-fn denied((ok, out): &(bool, String)) -> bool {
+fn denied((ok, out): &(Option<bool>, String)) -> bool {
     let out = out.to_lowercase();
-    !ok || out.contains("forbidden") || out.contains("error")
+    match ok {
+        Some(false) => true,
+        Some(true) => out.contains("forbidden") || out.contains("error"),
+        None => false,
+    }
 }
 
 fn suite_entity(kind: &str) -> String {
@@ -950,7 +972,7 @@ fn suite_entity(kind: &str) -> String {
     format!("test_{kind}_{ts}")
 }
 
-fn run_test_ownership(options: &DevTestOptions, ports: &[u16]) {
+fn run_test_ownership(options: &DevTestOptions, ports: &[u16]) -> u32 {
     println!(
         "=== Ownership Enforcement Test ({} nodes) ===\n",
         options.nodes
@@ -974,8 +996,7 @@ fn run_test_ownership(options: &DevTestOptions, ports: &[u16]) {
         Ok(cluster) => cluster,
         Err(e) => {
             println!("  Cluster failed to become ready: {e}");
-            println!("\nResults: {passed} passed, 1 failed\n");
-            return;
+            return report(passed, 1);
         }
     };
     println!("  Authenticated cluster ready!\n");
@@ -999,8 +1020,7 @@ fn run_test_ownership(options: &DevTestOptions, ports: &[u16]) {
     let Some(id) = id else {
         eprintln!("    stdout: {create_out}");
         drop(cluster);
-        println!("\nResults: {passed} passed, {failed} failed\n");
-        return;
+        return report(passed, failed);
     };
     std::thread::sleep(Duration::from_millis(500));
 
@@ -1056,7 +1076,7 @@ fn run_test_ownership(options: &DevTestOptions, ports: &[u16]) {
         &mut passed,
         &mut failed,
         "Update as admin (bypass)",
-        admin_update,
+        admin_update == Some(true),
     );
     let (alice_update, _) = run(
         "alice",
@@ -1072,18 +1092,18 @@ fn run_test_ownership(options: &DevTestOptions, ports: &[u16]) {
         &mut passed,
         &mut failed,
         "Update as alice (owner)",
-        alice_update,
+        alice_update == Some(true),
     );
     let (alice_delete, _) = run("alice", &["delete", &entity, &id]);
     record(
         &mut passed,
         &mut failed,
         "Delete as alice (owner)",
-        alice_delete,
+        alice_delete == Some(true),
     );
 
     drop(cluster);
-    println!("\nResults: {passed} passed, {failed} failed\n");
+    report(passed, failed)
 }
 
 fn sharing_checks(exe: &Path, entity: &str, ports: &[u16], passed: &mut u32, failed: &mut u32) {
@@ -1105,7 +1125,12 @@ fn sharing_checks(exe: &Path, entity: &str, ports: &[u16], passed: &mut u32, fai
     let id = serde_json::from_str::<serde_json::Value>(&create_out)
         .ok()
         .and_then(|v| v["data"]["id"].as_str().map(String::from));
-    record(passed, failed, "create as alice", created && id.is_some());
+    record(
+        passed,
+        failed,
+        "create as alice",
+        created == Some(true) && id.is_some(),
+    );
     let Some(id) = id else {
         return;
     };
@@ -1117,7 +1142,7 @@ fn sharing_checks(exe: &Path, entity: &str, ports: &[u16], passed: &mut u32, fai
         passed,
         failed,
         "bob read before share denied (cross-node)",
-        !bob_before,
+        bob_before == Some(false),
     );
 
     let (share_view, share_out) = run_as(
@@ -1130,7 +1155,7 @@ fn sharing_checks(exe: &Path, entity: &str, ports: &[u16], passed: &mut u32, fai
         passed,
         failed,
         "alice shares view with bob",
-        share_view && share_out.contains("shared"),
+        share_view == Some(true) && share_out.contains("shared"),
     );
 
     let (bob_view_read, bob_read_out) = run_as(exe, &n2, "bob", &["read", entity, id]);
@@ -1138,7 +1163,7 @@ fn sharing_checks(exe: &Path, entity: &str, ports: &[u16], passed: &mut u32, fai
         passed,
         failed,
         "bob read after view grant (cross-node)",
-        bob_view_read && bob_read_out.contains("D1"),
+        bob_view_read == Some(true) && bob_read_out.contains("D1"),
     );
 
     let (bob_view_update, _) = run_as(
@@ -1151,7 +1176,7 @@ fn sharing_checks(exe: &Path, entity: &str, ports: &[u16], passed: &mut u32, fai
         passed,
         failed,
         "bob update with view-only denied (cross-node)",
-        !bob_view_update,
+        bob_view_update == Some(false),
     );
 
     let (share_edit, _) = run_as(
@@ -1160,7 +1185,12 @@ fn sharing_checks(exe: &Path, entity: &str, ports: &[u16], passed: &mut u32, fai
         "alice",
         &["share", entity, id, "bob", "--permission", "edit"],
     );
-    record(passed, failed, "alice upgrades bob to edit", share_edit);
+    record(
+        passed,
+        failed,
+        "alice upgrades bob to edit",
+        share_edit == Some(true),
+    );
 
     let (bob_edit_update, _) = run_as(
         exe,
@@ -1172,7 +1202,7 @@ fn sharing_checks(exe: &Path, entity: &str, ports: &[u16], passed: &mut u32, fai
         passed,
         failed,
         "bob update with edit grant (cross-node)",
-        bob_edit_update,
+        bob_edit_update == Some(true),
     );
 
     let (_, shares_out) = run_as(exe, &n1, "alice", &["shares", entity, id]);
@@ -1194,7 +1224,12 @@ fn sharing_checks(exe: &Path, entity: &str, ports: &[u16], passed: &mut u32, fai
     );
 
     let (unshared, _) = run_as(exe, &n2, "alice", &["unshare", entity, id, "bob"]);
-    record(passed, failed, "alice unshares bob (cross-node)", unshared);
+    record(
+        passed,
+        failed,
+        "alice unshares bob (cross-node)",
+        unshared == Some(true),
+    );
     std::thread::sleep(Duration::from_millis(300));
 
     let (bob_after, _) = run_as(exe, &n3, "bob", &["read", entity, id]);
@@ -1202,11 +1237,11 @@ fn sharing_checks(exe: &Path, entity: &str, ports: &[u16], passed: &mut u32, fai
         passed,
         failed,
         "bob read after unshare denied (cross-node)",
-        !bob_after,
+        bob_after == Some(false),
     );
 }
 
-fn run_test_sharing(options: &DevTestOptions, ports: &[u16]) {
+fn run_test_sharing(options: &DevTestOptions, ports: &[u16]) -> u32 {
     println!(
         "=== Cluster Diagram Sharing E2E ({} nodes) ===\n",
         options.nodes
@@ -1230,8 +1265,7 @@ fn run_test_sharing(options: &DevTestOptions, ports: &[u16]) {
         Ok(cluster) => cluster,
         Err(e) => {
             println!("  Cluster failed to become ready: {e}");
-            println!("\nResults: {passed} passed, 1 failed\n");
-            return;
+            return report(passed, 1);
         }
     };
     println!("  Authenticated cluster ready!\n");
@@ -1239,7 +1273,7 @@ fn run_test_sharing(options: &DevTestOptions, ports: &[u16]) {
     sharing_checks(&exe, &entity, ports, &mut passed, &mut failed);
 
     drop(cluster);
-    println!("\nResults: {passed} passed, {failed} failed\n");
+    report(passed, failed)
 }
 
 fn add_stress_constraint(exe: &Path, entity: &str, port: u16) -> bool {
@@ -1340,25 +1374,24 @@ fn stress_conflicting_creates(exe: &Path, entity: &str, ports: &[u16], sku: &str
         })
 }
 
-fn run_test_stress_constraints(nodes: u8, ports: &[u16]) {
+fn run_test_stress_constraints(nodes: u8, ports: &[u16]) -> u32 {
     if nodes < 2 {
         println!("=== Stress Test: Cross-Node Unique Constraints (skipped, need >= 2 nodes) ===\n");
-        return;
+        return 0;
     }
 
     println!("=== Stress Test: Cross-Node Unique Constraints ({nodes} nodes) ===\n");
 
     let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("mqdb"));
-    let mut passed = 0;
-    let mut failed = 0;
+    let mut passed = 0u32;
+    let mut failed = 0u32;
 
     let ts = std::time::UNIX_EPOCH.elapsed().map_or(0, |d| d.as_millis());
     let entity = format!("stress_products_{ts}");
 
     if !add_stress_constraint(&exe, &entity, ports[0]) {
         println!("  Add unique constraint: ✗ (aborting stress test)");
-        println!("\nResults: 0 passed, 1 failed\n");
-        return;
+        return report(0, 1);
     }
 
     std::thread::sleep(Duration::from_millis(500));
@@ -1378,7 +1411,7 @@ fn run_test_stress_constraints(nodes: u8, ports: &[u16]) {
     );
     record(&mut passed, &mut failed, "Same-SKU creates", successes <= 1);
 
-    println!("\nResults: {passed} passed, {failed} failed\n");
+    report(passed, failed)
 }
 
 fn presence_line_has(out: &str, client_id: &str, event: &str) -> bool {
@@ -1398,9 +1431,9 @@ fn shell_output(timeout_secs: &str, script: &str) -> String {
 
 fn capture_presence(sub_port: u16, holder_id: &str, holder_port: u16) -> String {
     shell_output(
-        "10",
+        "12",
         &format!(
-            "mosquitto_sub -i 'janitor-{sub_port}' -h 127.0.0.1 -p {sub_port} -u alice -P alice -t '$DB/_presence/#' -v -W 5 & \
+            "mosquitto_sub -i 'janitor-{sub_port}' -h 127.0.0.1 -p {sub_port} -u alice -P alice -t '$DB/_presence/#' -v -W 8 & \
              sleep 2; \
              mosquitto_pub -i '{holder_id}' -h 127.0.0.1 -p {holder_port} -u alice -P alice -t 'presence/noop' -m 'x'; \
              wait"
@@ -1480,7 +1513,7 @@ fn presence_checks(ports: &[u16], check: &mut dyn FnMut(&str, bool)) {
     check("a client cannot forge presence", !victim.contains("forged"));
 }
 
-fn run_test_presence(options: &DevTestOptions, ports: &[u16]) {
+fn run_test_presence(options: &DevTestOptions, ports: &[u16]) -> u32 {
     println!(
         "=== Cluster Presence Feed E2E ({} nodes) ===\n",
         options.nodes
@@ -1501,8 +1534,7 @@ fn run_test_presence(options: &DevTestOptions, ports: &[u16]) {
         Ok(cluster) => cluster,
         Err(e) => {
             println!("  Cluster failed to become ready: {e}");
-            println!("\nResults: 0 passed, 1 failed\n");
-            return;
+            return report(0, 1);
         }
     };
     println!("  Authenticated cluster ready!\n");
@@ -1512,7 +1544,7 @@ fn run_test_presence(options: &DevTestOptions, ports: &[u16]) {
     });
 
     drop(cluster);
-    println!("\nResults: {passed} passed, {failed} failed\n");
+    report(passed, failed)
 }
 
 #[cfg(test)]
@@ -1532,6 +1564,24 @@ mod port_tests {
         assert!(node_ports(1883, 51).is_err());
         assert!(node_ports(65485, 1).is_ok());
         assert!(node_ports(65485, 2).is_err());
+    }
+
+    #[test]
+    fn a_command_that_never_ran_is_not_counted_as_denied() {
+        let never_ran = run_as(
+            Path::new("/nonexistent/mqdb"),
+            "127.0.0.1:1",
+            "bob",
+            &["delete", "x", "y"],
+        );
+        assert_eq!(never_ran.0, None);
+        assert!(!denied(&never_ran));
+        assert!(denied(&(Some(false), String::new())));
+        assert!(denied(&(
+            Some(true),
+            r#"{"error":"forbidden"}"#.to_string()
+        )));
+        assert!(!denied(&(Some(true), r#"{"status":"ok"}"#.to_string())));
     }
 
     #[test]
