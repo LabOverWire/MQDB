@@ -1331,7 +1331,7 @@ Special entities that must exist on ALL nodes (not just partition owners):
 
 **Broadcast Write Flow**:
 1. Apply locally FIRST (regardless of partition ownership)
-2. Then forward to partition primary for official replication
+2. Then send the write to every other alive node
 3. Ensures every node has complete index for publish routing
 
 ### 5.3 write_or_forward() Logic

@@ -594,7 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn create_and_get() {
+    fn applied_insert_is_readable() {
         let store = DbDataStore::new(node(1));
 
         put_record(&store, "users", "123", b"{\"name\":\"Alice\"}", 1000);
@@ -606,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    fn update_existing() {
+    fn applied_insert_over_a_record_replaces_it() {
         let store = DbDataStore::new(node(1));
 
         put_record(&store, "users", "123", b"{\"name\":\"Alice\"}", 1000);
@@ -618,7 +618,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_existing() {
+    fn applied_delete_removes_the_record() {
         let store = DbDataStore::new(node(1));
 
         put_record(&store, "users", "123", b"{}", 1000);
