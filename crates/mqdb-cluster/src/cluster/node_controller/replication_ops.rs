@@ -122,8 +122,12 @@ impl<T: ClusterTransport> NodeController<T> {
     async fn route_write_request(&mut self, from: NodeId, write: ReplicationWrite) {
         let partition = write.partition;
         let assignment_epoch = self.partition_map.get(partition).epoch;
-        if write.epoch > assignment_epoch || self.waiting_to_take(partition) {
-            self.hold_write_request(from, write).await;
+        if write.epoch > assignment_epoch {
+            self.hold_write_request(from, write, false).await;
+            return;
+        }
+        if self.waiting_to_take(partition) {
+            self.hold_write_request(from, write, true).await;
             return;
         }
         if self.is_primary_for_partition(partition) {
@@ -150,7 +154,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    async fn hold_write_request(&mut self, from: NodeId, write: ReplicationWrite) {
+    async fn hold_write_request(&mut self, from: NodeId, write: ReplicationWrite, waiting: bool) {
         if self.held_writes.len() >= HELD_WRITE_CAPACITY
             && let Some(dropped) = self.held_writes.pop_front()
         {
@@ -173,6 +177,7 @@ impl<T: ClusterTransport> NodeController<T> {
         self.held_writes.push_back(HeldWrite {
             from,
             write,
+            waiting,
             since: std::time::Instant::now(),
         });
     }
@@ -181,9 +186,15 @@ impl<T: ClusterTransport> NodeController<T> {
         let held = std::mem::take(&mut self.held_writes);
         for entry in held {
             let assignment_epoch = self.partition_map.get(entry.write.partition).epoch;
-            if entry.write.epoch <= assignment_epoch && !self.waiting_to_take(entry.write.partition)
-            {
-                self.route_write_request(entry.from, entry.write).await;
+            let partition = entry.write.partition;
+            if entry.write.epoch <= assignment_epoch && !self.waiting_to_take(partition) {
+                if entry.waiting && !self.is_primary_for_partition(partition) {
+                    let mut write = entry.write;
+                    let event = write.event.take();
+                    self.write_or_forward_impl(write, event, &[]).await;
+                } else {
+                    self.route_write_request(entry.from, entry.write).await;
+                }
             } else if entry.since.elapsed() >= HELD_WRITE_TIMEOUT {
                 tracing::warn!(
                     partition = ?entry.write.partition,
@@ -401,7 +412,7 @@ impl<T: ClusterTransport> NodeController<T> {
         if self.partition_map == raft_map {
             self.retry_stalled_snapshots().await;
             self.release_held_writes().await;
-            return false;
+            return std::mem::take(&mut self.primary_taken_by_import);
         }
         let held = *self
             .held_primaries
@@ -418,7 +429,7 @@ impl<T: ClusterTransport> NodeController<T> {
             if new_assignment.primary == Some(self.node_id) {
                 match self.source_needed_before_primary(partition, new_assignment, &held) {
                     Some(source) => {
-                        self.await_snapshot(partition, new_assignment.epoch, source)
+                        self.await_snapshot(partition, new_assignment.epoch, source, true)
                             .await;
                     }
                     None => {
@@ -450,7 +461,7 @@ impl<T: ClusterTransport> NodeController<T> {
         self.update_partition_map(raft_map);
         self.retry_stalled_snapshots().await;
         self.release_held_writes().await;
-        became_primary
+        became_primary | std::mem::take(&mut self.primary_taken_by_import)
     }
 
     fn waiting_to_take(&self, partition: PartitionId) -> bool {
@@ -467,8 +478,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let holds_data = matches!(
             self.role(partition),
             ReplicaRole::Primary | ReplicaRole::Replica
-        ) || (!self.held_since_boot[usize::from(partition.get())]
-            && held.trusts(partition, assignment.epoch));
+        ) || held.trusts(partition, assignment.epoch);
         if holds_data {
             return None;
         }
@@ -560,7 +570,7 @@ impl<T: ClusterTransport> NodeController<T> {
         if self.waiting_to_take(partition) && extra_outbox.is_empty() {
             write.event = event;
             let own = self.node_id;
-            self.hold_write_request(own, write).await;
+            self.hold_write_request(own, write, true).await;
         } else if self.is_primary_for_partition(partition)
             && self.role(partition) != ReplicaRole::Primary
         {

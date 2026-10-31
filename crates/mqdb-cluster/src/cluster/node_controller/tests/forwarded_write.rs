@@ -189,9 +189,10 @@ async fn a_forwarded_write_is_stored_once_by_the_primary() {
 }
 
 #[tokio::test]
-async fn a_forwarded_write_is_not_stored_by_a_primary_outside_the_primary_role() {
+async fn a_forwarded_write_is_held_by_a_primary_that_lost_the_primary_role() {
     let partition = session_partition("c1");
     let mut ctrl = controller(2);
+    ctrl.become_primary(partition, Epoch::new(1));
     ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
         .await;
     let mut far_ahead = session_write("c1", 1);
@@ -223,6 +224,7 @@ async fn a_forwarded_write_the_primary_cannot_store_is_not_replicated() {
     let partition = session_partition("c1");
     let backend = FaultyBackend::shared();
     let mut ctrl = controller_with_storage(2, &backend);
+    ctrl.become_primary(partition, Epoch::new(1));
     ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
         .await;
     backend.fail_writes(true);

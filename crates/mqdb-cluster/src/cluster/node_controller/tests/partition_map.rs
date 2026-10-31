@@ -250,6 +250,7 @@ async fn a_snapshot_for_a_partition_no_longer_assigned_leaves_no_role() {
     let partition = session_partition("c1");
     let mut source = controller(1);
     source.become_primary(partition, Epoch::new(1));
+    source.stores().create_session_replicated("c1").unwrap();
     let mut ctrl = controller(2);
     ctrl.apply_raft_partition_map(map_with(partition, node(1), &[node(2)], 1))
         .await;
@@ -260,6 +261,7 @@ async fn a_snapshot_for_a_partition_no_longer_assigned_leaves_no_role() {
 
     assert_eq!(ctrl.role(partition), ReplicaRole::None);
     assert!(!ctrl.can_serve_reads(partition));
+    assert!(ctrl.stores().sessions.get("c1").is_none());
 }
 
 #[tokio::test]
@@ -579,4 +581,175 @@ async fn held_writes_are_applied_as_soon_as_the_snapshot_lands() {
     serve_snapshot(&mut replica, &mut ctrl, partition).await;
 
     assert!(ctrl.stores().sessions.get("c1").is_some());
+}
+
+#[tokio::test]
+async fn a_waiting_primary_keeps_its_live_source_when_the_replica_moves() {
+    let partition = session_partition("c1");
+    let mut holder = controller(2);
+    holder.become_replica(partition, Epoch::new(1), 3);
+    holder.stores().create_session_replicated("c1").unwrap();
+    let mut ctrl = controller(1);
+    ctrl.heartbeat.receive_heartbeat(
+        node(2),
+        &crate::cluster::protocol::Heartbeat::create(node(2), 0),
+        0,
+    );
+    ctrl.apply_raft_partition_map(map_with(partition, node(1), &[node(2)], 1))
+        .await;
+    assert_eq!(snapshot_requests_to(&ctrl, node(2)), 1);
+
+    ctrl.apply_raft_partition_map(map_with(partition, node(1), &[node(3)], 2))
+        .await;
+    assert_eq!(snapshot_requests_to(&ctrl, node(3)), 0);
+
+    serve_snapshot(&mut holder, &mut ctrl, partition).await;
+
+    assert_eq!(ctrl.role(partition), ReplicaRole::Primary);
+    assert!(ctrl.stores().sessions.get("c1").is_some());
+}
+
+#[tokio::test]
+async fn a_held_write_is_forwarded_when_the_partition_moves_away_during_the_wait() {
+    let partition = session_partition("c1");
+    let mut ctrl = controller(2);
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
+        .await;
+    ctrl.write_or_forward(session_write("c1", 0)).await;
+
+    ctrl.apply_raft_partition_map(map_with(partition, node(3), &[node(2)], 2))
+        .await;
+
+    let forwarded = ctrl
+        .transport
+        .sent_messages()
+        .into_iter()
+        .filter(|(to, message)| {
+            *to == node(3) && matches!(message, ClusterMessage::WriteRequest(_))
+        })
+        .count();
+    assert_eq!(forwarded, 1);
+}
+
+#[tokio::test]
+async fn a_held_write_times_out_while_the_primary_still_waits() {
+    let partition = session_partition("c1");
+    let mut replica = controller(3);
+    replica.become_replica(partition, Epoch::new(1), 0);
+    let map = map_with(partition, node(2), &[node(3)], 1);
+    let mut ctrl = controller(2);
+    ctrl.apply_raft_partition_map(map.clone()).await;
+    ctrl.transport.inject_message(
+        node(1),
+        ClusterMessage::WriteRequest(session_write("c1", 1)),
+    );
+    ctrl.process_messages().await;
+
+    let expired = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(31))
+        .unwrap();
+    for held in &mut ctrl.held_writes {
+        held.since = expired;
+    }
+    ctrl.apply_raft_partition_map(map).await;
+    serve_snapshot(&mut replica, &mut ctrl, partition).await;
+
+    assert_eq!(ctrl.role(partition), ReplicaRole::Primary);
+    assert!(ctrl.stores().sessions.get("c1").is_none());
+}
+
+#[tokio::test]
+async fn new_ids_are_only_placed_on_partitions_held_in_the_primary_role() {
+    let waiting = PartitionId::new(10).unwrap();
+    let held = PartitionId::new(11).unwrap();
+    let mut ctrl = controller(2);
+    ctrl.become_primary(held, Epoch::new(1));
+    let mut map = map_with(waiting, node(2), &[node(3)], 1);
+    map.set(
+        held,
+        PartitionAssignment::new(node(2), vec![node(3)], Epoch::new(1)),
+    );
+    ctrl.apply_raft_partition_map(map).await;
+    assert_eq!(ctrl.role(waiting), ReplicaRole::AwaitingSnapshot);
+
+    for _ in 0..512 {
+        assert_eq!(ctrl.pick_partition_for_create(), held);
+    }
+}
+
+#[tokio::test]
+async fn a_primary_built_from_a_topic_index_snapshot_takes_a_snapshot_after_a_restart() {
+    let topic = "probe/topic/a";
+    let partition = crate::cluster::topic_index::topic_partition(topic);
+    let other = PartitionId::new((partition.get() + 1) % 256).unwrap();
+    let mut replica = controller(3);
+    replica.become_replica(partition, Epoch::new(1), 0);
+    replica
+        .stores()
+        .topics
+        .subscribe(topic, "remote-client", other, 1)
+        .unwrap();
+    let backend = crate::cluster::test_support::FaultyBackend::shared();
+    let map = map_with(partition, node(2), &[node(3)], 1);
+
+    let mut fresh = controller_on(2, &backend);
+    fresh.apply_raft_partition_map(map.clone()).await;
+    serve_snapshot(&mut replica, &mut fresh, partition).await;
+    assert_eq!(fresh.role(partition), ReplicaRole::Primary);
+    drop(fresh);
+
+    let mut restarted = controller_on(2, &backend);
+    restarted.stores().recover().unwrap();
+    restarted.apply_raft_partition_map(map).await;
+
+    assert_eq!(restarted.role(partition), ReplicaRole::AwaitingSnapshot);
+}
+
+#[tokio::test]
+async fn taking_the_primary_role_by_import_is_reported_on_the_next_map_apply() {
+    let partition = session_partition("c1");
+    let mut replica = controller(3);
+    replica.become_replica(partition, Epoch::new(1), 0);
+    let map = map_with(partition, node(2), &[node(3)], 1);
+    let mut ctrl = controller(2);
+    assert!(!ctrl.apply_raft_partition_map(map.clone()).await);
+
+    serve_snapshot(&mut replica, &mut ctrl, partition).await;
+
+    assert!(ctrl.apply_raft_partition_map(map.clone()).await);
+    assert!(!ctrl.apply_raft_partition_map(map).await);
+}
+
+#[tokio::test]
+async fn a_node_waiting_for_data_does_not_hand_out_an_empty_snapshot() {
+    let partition = session_partition("c1");
+    let mut waiting = controller(1);
+    waiting
+        .apply_raft_partition_map(map_with(partition, node(1), &[node(2)], 1))
+        .await;
+    let mut new_replica = controller(3);
+    new_replica
+        .apply_raft_partition_map(map_with(partition, node(1), &[node(3)], 2))
+        .await;
+    assert_eq!(new_replica.role(partition), ReplicaRole::AwaitingSnapshot);
+
+    serve_snapshot(&mut waiting, &mut new_replica, partition).await;
+
+    assert_eq!(new_replica.role(partition), ReplicaRole::AwaitingSnapshot);
+}
+
+#[tokio::test]
+async fn two_empty_nodes_waiting_on_each_other_both_take_their_roles() {
+    let partition = session_partition("c1");
+    let map = map_with(partition, node(1), &[node(2)], 1);
+    let mut primary = controller(1);
+    let mut replica = controller(2);
+    primary.apply_raft_partition_map(map.clone()).await;
+    replica.apply_raft_partition_map(map).await;
+
+    serve_snapshot(&mut replica, &mut primary, partition).await;
+    serve_snapshot(&mut primary, &mut replica, partition).await;
+
+    assert_eq!(primary.role(partition), ReplicaRole::Primary);
+    assert_eq!(replica.role(partition), ReplicaRole::Replica);
 }

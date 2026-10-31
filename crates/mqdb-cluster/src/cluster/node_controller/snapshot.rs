@@ -10,6 +10,7 @@ use super::super::snapshot::{
 use super::super::transport::{ClusterMessage, ClusterTransport};
 use super::super::{Epoch, NUM_PARTITIONS, NodeId, PartitionId};
 use super::NodeController;
+use crate::cluster::heartbeat::NodeStatus;
 use std::time::{Duration, Instant};
 
 pub(super) const SNAPSHOT_RETRY_AFTER: Duration = Duration::from_secs(10);
@@ -55,6 +56,26 @@ impl<T: ClusterTransport> NodeController<T> {
             tracing::warn!(?from, "received snapshot request with invalid partition");
             return;
         };
+
+        let waits_on_requester = self
+            .requested_snapshots
+            .get(&partition)
+            .is_some_and(|request| request.source == from);
+        if self.role(partition) == ReplicaRole::AwaitingSnapshot && !waits_on_requester {
+            tracing::info!(
+                ?partition,
+                requester = from.get(),
+                "refusing a snapshot request while waiting for this partition's data"
+            );
+            let _ = self
+                .transport
+                .send(
+                    from,
+                    ClusterMessage::SnapshotComplete(SnapshotComplete::failed(partition)),
+                )
+                .await;
+            return;
+        }
 
         tracing::info!(
             ?partition,
@@ -227,6 +248,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
         if self.partition_map.primary(partition) == Some(self.node_id) {
             self.become_primary(partition, epoch);
+            self.primary_taken_by_import = true;
             if let Some(state) = self.replicas.get_mut(&partition.get()) {
                 state.set_sequence(sequence);
             }
@@ -243,6 +265,10 @@ impl<T: ClusterTransport> NodeController<T> {
                 "replica now active after snapshot import"
             );
         }
+    }
+
+    fn source_is_alive(&self, source: NodeId) -> bool {
+        self.node_status(source) == NodeStatus::Alive
     }
 
     pub(super) fn snapshot_source(&self, partition: PartitionId) -> Option<NodeId> {
@@ -264,7 +290,14 @@ impl<T: ClusterTransport> NodeController<T> {
         partition: PartitionId,
         epoch: Epoch,
         source: NodeId,
+        keep_live_source: bool,
     ) {
+        let source = match self.requested_snapshots.get(&partition) {
+            Some(request) if keep_live_source && self.source_is_alive(request.source) => {
+                request.source
+            }
+            _ => source,
+        };
         self.replicas
             .entry(partition.get())
             .or_insert_with(|| {
@@ -309,19 +342,26 @@ impl<T: ClusterTransport> NodeController<T> {
 
     pub(super) async fn retry_stalled_snapshots(&mut self) {
         for partition in PartitionId::all() {
-            let stalled = self
+            let Some(stalled_source) = self
                 .requested_snapshots
                 .get(&partition)
-                .is_some_and(|request| request.last_activity.elapsed() >= SNAPSHOT_RETRY_AFTER);
-            if !stalled {
+                .filter(|request| request.last_activity.elapsed() >= SNAPSHOT_RETRY_AFTER)
+                .map(|request| request.source)
+            else {
                 continue;
-            }
+            };
             self.requested_snapshots.remove(&partition);
             self.pending_snapshots.remove(&partition);
             if self.role(partition) != ReplicaRole::AwaitingSnapshot {
                 continue;
             }
-            if let Some(source) = self.snapshot_source(partition) {
+            let waiting_to_take = self.partition_map.primary(partition) == Some(self.node_id);
+            let source = if waiting_to_take && self.source_is_alive(stalled_source) {
+                Some(stalled_source)
+            } else {
+                self.snapshot_source(partition)
+            };
+            if let Some(source) = source {
                 tracing::info!(
                     ?partition,
                     source = source.get(),

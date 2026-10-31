@@ -9,7 +9,12 @@
 (* only while a node is down, so a fast restart can beat it. Detection     *)
 (* promotes the replica, or any live node when no replica is alive         *)
 (* (select_new_primary). AddReplica is add_missing_replicas; Swap is the   *)
-(* rebalancer moving the primary to the replica.                           *)
+(* rebalancer moving the primary to the replica; MoveReplica is it moving *)
+(* the replica to another node (redistribute_replicas), at most MaxMoves  *)
+(* times. With EarlyMove = FALSE a                                        *)
+(* replica moves only after the primary applied the current assignment;   *)
+(* EarlyMove = TRUE also lets it move in the gap between a restart and    *)
+(* the primary's first ApplyMap.                                          *)
 (*                                                                          *)
 (* VERIFIED FACTS MODELLED (Design = "current"):                            *)
 (*  - apply_raft_partition_map calls become_primary whenever the map names *)
@@ -23,12 +28,18 @@
 (*  - any node answers a snapshot request with what its store holds        *)
 (*                                                                          *)
 (* Design = "fix": a node takes the primary role only if it already holds  *)
-(* the partition (Primary or Replica role), or if it has not held the      *)
-(* partition since boot and its disk records that it held the primary role *)
-(* at this very assignment (marker). Otherwise it waits for a snapshot from *)
-(* the replica and becomes primary on import. A waiting node asks again    *)
+(* the partition (Primary or Replica role), or if its disk records that it *)
+(* held the primary role at this very assignment (marker). Otherwise it   *)
+(* waits for a snapshot from the replica and becomes primary on import. A  *)
+(* waiting node asks again                                                  *)
 (* when its assignment changes or its request is lost (Retry stands for    *)
-(* the retry timeout and for a failed transfer).                           *)
+(* the retry timeout and for a failed transfer). With KeepSource, a node *)
+(* waiting to become primary keeps a live source it already asked, even  *)
+(* when a newer assignment names another replica: that source still holds *)
+(* the data, while a replica added during the wait does not. With        *)
+(* RefuseWhileWaiting, a node that is itself waiting for a snapshot does   *)
+(* not answer one, unless it waits on the requester (two empty nodes of a  *)
+(* fresh partition); the requester asks again later.                       *)
 (*                                                                          *)
 (* A node keeps records in memory (mem) and on disk. A write reaches both; *)
 (* a snapshot import reaches memory only (import_partition does not        *)
@@ -43,7 +54,8 @@
 (* only while every other node is up and every assigned node holds every  *)
 (* acked write, and the primary only while a replica has the Replica role.*)
 (* With Lag = FALSE the rebalancer moves only a primary that holds the     *)
-(* Primary role, and it steps down in the same step. Lag = TRUE lets the   *)
+(* Primary role, and it steps down in the same step; a replica moved away  *)
+(* also applies its removal in the same step. Lag = TRUE lets the          *)
 (* old primary (or a node still waiting to become primary) act on its old *)
 (* map until its own ApplyMap.                                              *)
 (*                                                                          *)
@@ -52,17 +64,39 @@
 (* records on disk) are trusted as before; that upgrade path is not       *)
 (* modelled.                                                               *)
 (*                                                                          *)
-(* RESULTS (3 nodes, MaxWrites 2, MaxCrashes 2, MaxWipes 1, MaxSwaps 1):    *)
+(* RESULTS (3 nodes, MaxWrites 2, MaxWipes 1, MaxSwaps 1; MaxCrashes 2 and *)
+(* MaxMoves 0 unless noted):                                               *)
 (*  _current:        ServeCorrect fails in 3 steps: the primary crashes    *)
 (*                   with a wipe, restarts before Detect, takes the role.  *)
 (*  _current_live:   liveness holds (the bug is a safety one).             *)
-(*  _fix:            all invariants and both properties hold (254,470).   *)
+(*  _current_move_nowipe (1 crash, 1 move): ServeCorrect fails without a   *)
+(*                   crash: a replica moved in is promoted before its      *)
+(*                   snapshot lands.                                        *)
+(*  _fix:            all invariants and both properties hold (254,506).   *)
+(*  _fix_move (1 crash, 1 move): all invariants and both properties hold  *)
+(*                   (34,398).                                              *)
+(*  _fix_move_nowipe (1 crash without a wipe, 1 move): invariants hold    *)
+(*                   (22,020); the same setting fails for _current.        *)
 (*  _fix_noretry:    EventuallyServing fails: a request lost with its     *)
 (*                   source is never sent again.                            *)
+(*  _fix_switchsource (KeepSource FALSE, 1 crash, 1 move): ServeCorrect    *)
+(*                   fails: the replica moves away while the wiped primary *)
+(*                   waits, and it imports the new, empty replica.         *)
+(*  _fix_move_serveempty (RefuseWhileWaiting FALSE): ServeCorrect fails:  *)
+(*                   the new replica imports the waiting primary's empty   *)
+(*                   store and is promoted later.                          *)
+(*  _fix_earlymove:  ServeCorrect fails: a replica move committed between *)
+(*                   the wiped primary's restart and its first ApplyMap    *)
+(*                   leaves it no replica with the data to ask. Not fixed.*)
+(*  _fix_move2 (2 crashes, 1 move): ServeCorrect fails: a primary         *)
+(*                   restarted without a wipe after its assignment changed *)
+(*                   imports a replica that was moved out and back and     *)
+(*                   missed writes; the merge lets the stale copy win.     *)
+(*                   Not fixed.                                             *)
 (*  _fix_lag, _current_lag: ServeCorrect fails without any crash: the old  *)
 (*                   primary of a rebalance keeps serving on its old map   *)
-(*                   after the new primary took over. Not caused or fixed  *)
-(*                   by this change.                                        *)
+(*                   after the new primary took over (#153). Not caused or *)
+(*                   fixed by this change.                                  *)
 (*  _markimport:     Design "markimport" also writes the marker after an   *)
 (*                   import; ServeCorrect fails: a wiped node fills from a *)
 (*                   snapshot, restarts without a wipe, and trusts a disk  *)
@@ -79,18 +113,18 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
-CONSTANTS Design, MaxWrites, MaxCrashes, MaxWipes, MaxSwaps, Lag, RetryLost
+CONSTANTS Design, MaxWrites, MaxCrashes, MaxWipes, MaxSwaps, MaxMoves, Lag, RetryLost, KeepSource, EarlyMove, RefuseWhileWaiting
 
 Nodes == {1, 2, 3}
 Keys == {1}
 None == 0
 Roles == {"none", "primary", "replica", "awaiting"}
 
-VARIABLES up, mem, disk, role, applied, requested, src, live, held, imported,
-          marker, hist, dead, truth, writes, crashes, wipes, swaps
+VARIABLES up, mem, disk, role, applied, requested, src, live, imported,
+          marker, hist, dead, truth, writes, crashes, wipes, swaps, moves
 
-vars == <<up, mem, disk, role, applied, requested, src, live, held, imported,
-          marker, hist, dead, truth, writes, crashes, wipes, swaps>>
+vars == <<up, mem, disk, role, applied, requested, src, live, imported,
+          marker, hist, dead, truth, writes, crashes, wipes, swaps, moves>>
 
 Empty == [k \in Keys |-> 0]
 Latest == hist[Len(hist)]
@@ -118,7 +152,6 @@ Init ==
     /\ requested = [n \in Nodes |-> FALSE]
     /\ src = [n \in Nodes |-> None]
     /\ live = [n \in Nodes |-> FALSE]
-    /\ held = [n \in Nodes |-> n \in {1, 2}]
     /\ imported = [n \in Nodes |-> FALSE]
     /\ marker = [n \in Nodes |-> IF n = 1 THEN 1 ELSE 0]
     /\ hist = <<[p |-> 1, r |-> 2]>>
@@ -128,6 +161,7 @@ Init ==
     /\ crashes = 0
     /\ wipes = 0
     /\ swaps = 0
+    /\ moves = 0
 
 Ask(n, from) ==
     /\ requested' = [requested EXCEPT ![n] = TRUE]
@@ -150,15 +184,24 @@ TakeRole(n, r) ==
 
 HeldData(n) == role[n] \in {"primary", "replica"}
 TrustDisk(n) ==
-    /\ ~held[n]
-    /\ IF Design = "recovered"
-       THEN \E k \in Keys : disk[n][k] # 0
-       ELSE marker[n] = Len(hist)
+    IF Design = "recovered"
+    THEN \E k \in Keys : disk[n][k] # 0
+    ELSE marker[n] = Len(hist)
+
+KeepsLiveSource(n) ==
+    /\ Design = "fix"
+    /\ KeepSource
+    /\ role[n] = "awaiting"
+    /\ requested[n]
+    /\ live[n]
 
 ApplyAsPrimary(n, m) ==
     IF Design = "current" \/ HeldData(n) \/ TrustDisk(n) \/ m.r = None
     THEN TakeRole(n, "primary")
-    ELSE AwaitFrom(n, m.r)
+    ELSE IF KeepsLiveSource(n)
+         THEN /\ role' = role
+              /\ KeepRequest
+         ELSE AwaitFrom(n, m.r)
 
 ApplyAsReplica(n, m) ==
     IF HeldData(n) THEN TakeRole(n, "replica") ELSE AwaitFrom(n, m.p)
@@ -171,10 +214,9 @@ ApplyMap(n) ==
             [] m.r = n -> ApplyAsReplica(n, m)
             [] OTHER -> TakeRole(n, "none")
     /\ applied' = [applied EXCEPT ![n] = Len(hist)]
-    /\ held' = [held EXCEPT ![n] = held[n] \/ role'[n] \in {"primary", "replica"}]
     /\ marker' = [marker EXCEPT ![n] =
                       IF role'[n] = "primary" /\ ~imported[n] THEN Len(hist) ELSE marker[n]]
-    /\ UNCHANGED <<up, mem, disk, imported, hist, dead, truth, writes, crashes, wipes, swaps>>
+    /\ UNCHANGED <<up, mem, disk, imported, hist, dead, truth, writes, crashes, wipes, swaps, moves>>
 
 ImportedRole(n) ==
     LET m == LocalMap(n) IN
@@ -182,24 +224,27 @@ ImportedRole(n) ==
       [] m.r = n -> "replica"
       [] OTHER -> IF Design # "current" THEN "none" ELSE "replica"
 
+Serves(s, n) ==
+    ~(Design = "fix" /\ RefuseWhileWaiting /\ role[s] = "awaiting" /\ src[s] # n)
+
 ServeSnapshot(n) ==
     /\ up[n]
     /\ role[n] = "awaiting"
     /\ live[n]
     /\ up[src[n]]
+    /\ Serves(src[n], n)
     /\ mem' = [mem EXCEPT ![n] = [k \in Keys |->
                    IF mem[src[n]][k] # 0 THEN mem[src[n]][k] ELSE mem[n][k]]]
     /\ role' = [role EXCEPT ![n] = ImportedRole(n)]
     /\ requested' = [requested EXCEPT ![n] = FALSE]
     /\ live' = [live EXCEPT ![n] = FALSE]
     /\ src' = [src EXCEPT ![n] = None]
-    /\ held' = [held EXCEPT ![n] = held[n] \/ ImportedRole(n) \in {"primary", "replica"}]
     /\ imported' = [imported EXCEPT ![n] =
                         imported[n] \/ (Design \in {"fix", "recovered"} /\ \E k \in Keys : mem[src[n]][k] # 0)]
     /\ marker' = [marker EXCEPT ![n] =
                       IF ImportedRole(n) = "primary" /\ Design \in {"current", "markimport"}
                       THEN applied[n] ELSE marker[n]]
-    /\ UNCHANGED <<up, disk, applied, hist, dead, truth, writes, crashes, wipes, swaps>>
+    /\ UNCHANGED <<up, disk, applied, hist, dead, truth, writes, crashes, wipes, swaps, moves>>
 
 Retry(n) ==
     /\ Design # "current"
@@ -213,7 +258,7 @@ Retry(n) ==
           /\ from # n
           /\ up[from]
           /\ Ask(n, from)
-    /\ UNCHANGED <<up, mem, disk, role, applied, held, imported, marker, hist, dead, truth, writes, crashes, wipes, swaps>>
+    /\ UNCHANGED <<up, mem, disk, role, applied, imported, marker, hist, dead, truth, writes, crashes, wipes, swaps, moves>>
 
 Write(k) ==
     /\ writes < MaxWrites + 1
@@ -227,7 +272,7 @@ Write(k) ==
               /\ disk' = [n \in Nodes |-> IF gets(n) THEN [disk[n] EXCEPT ![k] = v] ELSE disk[n]]
               /\ truth' = [truth EXCEPT ![k] = v]
               /\ writes' = v
-    /\ UNCHANGED <<up, role, applied, requested, src, live, held, imported, marker, hist, dead, crashes, wipes, swaps>>
+    /\ UNCHANGED <<up, role, applied, requested, src, live, imported, marker, hist, dead, crashes, wipes, swaps, moves>>
 
 Crash(n, wipe) ==
     /\ up[n]
@@ -245,16 +290,15 @@ Crash(n, wipe) ==
     /\ requested' = [requested EXCEPT ![n] = FALSE]
     /\ src' = [src EXCEPT ![n] = None]
     /\ live' = [m \in Nodes |-> IF m = n \/ src[m] = n THEN FALSE ELSE live[m]]
-    /\ held' = [held EXCEPT ![n] = FALSE]
     /\ crashes' = crashes + 1
     /\ wipes' = IF wipe THEN wipes + 1 ELSE wipes
-    /\ UNCHANGED <<hist, dead, truth, writes, swaps>>
+    /\ UNCHANGED <<hist, dead, truth, writes, swaps, moves>>
 
 Restart(n) ==
     /\ ~up[n]
     /\ up' = [up EXCEPT ![n] = TRUE]
     /\ dead' = dead \ {n}
-    /\ UNCHANGED <<mem, disk, marker, role, applied, requested, src, live, held, imported, hist, truth, writes, crashes, wipes, swaps>>
+    /\ UNCHANGED <<mem, disk, marker, role, applied, requested, src, live, imported, hist, truth, writes, crashes, wipes, swaps, moves>>
 
 Detect(n) ==
     /\ ~up[n]
@@ -268,7 +312,7 @@ Detect(n) ==
                  ELSE \E q \in alive : hist' = Append(hist, [p |-> q, r |-> None])
             [] m.r = n -> hist' = Append(hist, [p |-> m.p, r |-> None])
             [] OTHER -> UNCHANGED hist
-    /\ UNCHANGED <<up, mem, disk, role, applied, requested, src, live, held, imported, marker, truth, writes, crashes, wipes, swaps>>
+    /\ UNCHANGED <<up, mem, disk, role, applied, requested, src, live, imported, marker, truth, writes, crashes, wipes, swaps, moves>>
 
 AddReplica(n) ==
     /\ up[n]
@@ -276,7 +320,7 @@ AddReplica(n) ==
     /\ Latest.r = None
     /\ Latest.p # n
     /\ hist' = Append(hist, [p |-> Latest.p, r |-> n])
-    /\ UNCHANGED <<up, mem, disk, role, applied, requested, src, live, held, imported, marker, dead, truth, writes, crashes, wipes, swaps>>
+    /\ UNCHANGED <<up, mem, disk, role, applied, requested, src, live, imported, marker, dead, truth, writes, crashes, wipes, swaps, moves>>
 
 Swap ==
     /\ swaps < MaxSwaps
@@ -292,10 +336,28 @@ Swap ==
                /\ role' = [role EXCEPT ![m.p] = "replica"]
                /\ applied' = [applied EXCEPT ![m.p] = Len(hist) + 1]
     /\ swaps' = swaps + 1
-    /\ UNCHANGED <<up, mem, disk, requested, src, live, held, imported, marker, dead, truth, writes, crashes, wipes>>
+    /\ UNCHANGED <<up, mem, disk, requested, src, live, imported, marker, dead, truth, writes, crashes, wipes, moves>>
+
+MoveReplica(z) ==
+    /\ moves < MaxMoves
+    /\ LET m == Latest IN
+       /\ m.r # None
+       /\ z \notin {m.p, m.r}
+       /\ \A n \in Nodes : up[n] /\ n \notin dead
+       /\ EarlyMove \/ applied[m.p] = Len(hist)
+       /\ hist' = Append(hist, [p |-> m.p, r |-> z])
+       /\ IF Lag
+          THEN UNCHANGED <<role, applied, requested, src, live>>
+          ELSE /\ role' = [role EXCEPT ![m.r] = "none"]
+               /\ applied' = [applied EXCEPT ![m.r] = Len(hist) + 1]
+               /\ requested' = [requested EXCEPT ![m.r] = FALSE]
+               /\ src' = [src EXCEPT ![m.r] = None]
+               /\ live' = [live EXCEPT ![m.r] = FALSE]
+    /\ moves' = moves + 1
+    /\ UNCHANGED <<up, mem, disk, imported, marker, dead, truth, writes, crashes, wipes, swaps>>
 
 Next ==
-    \/ \E n \in Nodes : ApplyMap(n) \/ ServeSnapshot(n) \/ Retry(n) \/ Restart(n) \/ Detect(n) \/ AddReplica(n)
+    \/ \E n \in Nodes : ApplyMap(n) \/ ServeSnapshot(n) \/ Retry(n) \/ Restart(n) \/ Detect(n) \/ AddReplica(n) \/ MoveReplica(n)
     \/ \E n \in Nodes, wipe \in BOOLEAN : Crash(n, wipe)
     \/ \E k \in Keys : Write(k)
     \/ Swap

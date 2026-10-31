@@ -73,6 +73,7 @@ const HELD_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3
 pub(super) struct HeldWrite {
     pub(super) from: NodeId,
     pub(super) write: ReplicationWrite,
+    pub(super) waiting: bool,
     pub(super) since: std::time::Instant,
 }
 
@@ -465,7 +466,7 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) pending_snapshots: HashMap<PartitionId, SnapshotBuilder>,
     pub(super) requested_snapshots: snapshot::SnapshotRequests,
     pub(super) imported_partitions: [bool; super::NUM_PARTITIONS as usize],
-    pub(super) held_since_boot: [bool; super::NUM_PARTITIONS as usize],
+    pub(super) primary_taken_by_import: bool,
     pub(super) held_primaries: Option<super::store_manager::HeldPrimaries>,
     pub(super) outgoing_snapshots: HashMap<(NodeId, PartitionId), SnapshotSender>,
     pub(super) draining: bool,
@@ -546,7 +547,7 @@ impl<T: ClusterTransport> NodeController<T> {
             pending_snapshots: HashMap::new(),
             requested_snapshots: snapshot::SnapshotRequests::new(),
             imported_partitions: [false; super::NUM_PARTITIONS as usize],
-            held_since_boot: [false; super::NUM_PARTITIONS as usize],
+            primary_taken_by_import: false,
             held_primaries: None,
             outgoing_snapshots: HashMap::new(),
             draining: false,
@@ -704,7 +705,6 @@ impl<T: ClusterTransport> NodeController<T> {
             .entry(partition.get())
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
         state.become_primary(epoch);
-        self.held_since_boot[usize::from(partition.get())] = true;
         self.requested_snapshots.remove(&partition);
         self.pending_snapshots.remove(&partition);
         if !self.imported_partitions[usize::from(partition.get())]
@@ -722,7 +722,6 @@ impl<T: ClusterTransport> NodeController<T> {
             .entry(partition.get())
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
         state.become_replica(epoch, sequence);
-        self.held_since_boot[usize::from(partition.get())] = true;
         self.requested_snapshots.remove(&partition);
         self.pending_snapshots.remove(&partition);
         self.stop_sending_change_events(partition);
@@ -734,13 +733,15 @@ impl<T: ClusterTransport> NodeController<T> {
         epoch: Epoch,
         primary: NodeId,
     ) {
-        self.await_snapshot(partition, epoch, primary).await;
+        self.await_snapshot(partition, epoch, primary, false).await;
     }
 
     pub fn step_down(&mut self, partition: PartitionId) {
         if let Some(state) = self.replicas.get_mut(&partition.get()) {
             state.step_down();
         }
+        self.requested_snapshots.remove(&partition);
+        self.pending_snapshots.remove(&partition);
         self.stop_sending_change_events(partition);
     }
 

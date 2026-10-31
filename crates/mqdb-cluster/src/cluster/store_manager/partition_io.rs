@@ -5,11 +5,9 @@ use super::outbox::ClusterOutbox;
 use super::{StoreApplyError, StoreManager};
 use crate::cluster::{PartitionId, entity};
 
-const SHARED_SECTIONS: [&str; 5] = [
+const SHARED_SECTIONS: [&str; 3] = [
     entity::DB_SCHEMA,
     entity::DB_CONSTRAINT,
-    entity::TOPIC_INDEX,
-    entity::WILDCARDS,
     entity::CHANGE_EVENTS,
 ];
 
