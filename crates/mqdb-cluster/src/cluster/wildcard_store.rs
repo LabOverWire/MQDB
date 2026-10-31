@@ -371,13 +371,15 @@ impl WildcardStore {
                 Ok(())
             }
             Operation::Delete => {
-                let (pattern, client_id) = id
-                    .split_once(':')
-                    .ok_or(WildcardStoreError::InvalidPattern)?;
-                self.trie
-                    .write()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .remove(pattern, client_id);
+                if !id.contains(':') {
+                    return Err(WildcardStoreError::InvalidPattern);
+                }
+                let mut trie = self.trie.write().unwrap_or_else(PoisonError::into_inner);
+                for (at, _) in id.match_indices(':') {
+                    if trie.remove(&id[..at], &id[at + 1..]) {
+                        break;
+                    }
+                }
                 Ok(())
             }
         }
@@ -804,6 +806,25 @@ mod tests {
         assert_eq!(
             store.get_client_patterns("client1"),
             vec![("urn:dev/+".to_string(), 1)]
+        );
+    }
+
+    #[test]
+    fn replicated_delete_removes_a_filter_containing_a_colon() {
+        let store = WildcardStore::new(node(1));
+        store
+            .subscribe_mqtt("urn:dev/+", "cert:client1", 1)
+            .unwrap();
+        store.subscribe_mqtt("urn/+", "dev:x", 1).unwrap();
+
+        store
+            .apply_replicated(Operation::Delete, "urn:dev/+:cert:client1", &[])
+            .unwrap();
+
+        assert!(store.get_client_patterns("cert:client1").is_empty());
+        assert_eq!(
+            store.get_client_patterns("dev:x"),
+            vec![("urn/+".to_string(), 1)]
         );
     }
 }

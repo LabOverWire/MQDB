@@ -80,17 +80,27 @@ impl TopicIndexEntry {
         {
             return;
         }
-        let Ok(subscriber_count) = u16::try_from(self.subscribers.len() + 1) else {
-            tracing::warn!(
-                topic = self.topic_str(),
-                client_id,
-                "topic index entry is full, subscriber not recorded"
-            );
-            return;
-        };
         self.subscribers
             .push(SubscriberLocation::create(client_id, client_partition, qos));
-        self.subscriber_count = subscriber_count;
+        self.subscriber_count = u16::try_from(self.subscribers.len()).unwrap_or(u16::MAX);
+    }
+
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        if u16::try_from(self.subscribers.len()).is_ok() {
+            return self.to_be_bytes();
+        }
+        tracing::warn!(
+            topic = self.topic_str(),
+            subscribers = self.subscribers.len(),
+            "topic index entry has more subscribers than its encoding holds, encoding the first 65535"
+        );
+        Self {
+            subscriber_count: u16::MAX,
+            subscribers: self.subscribers[..usize::from(u16::MAX)].to_vec(),
+            ..self.clone()
+        }
+        .to_be_bytes()
     }
 
     #[must_use]
@@ -402,7 +412,7 @@ impl TopicIndex {
 
     #[must_use]
     pub fn serialize(entry: &TopicIndexEntry) -> Vec<u8> {
-        super::store_utils::serialize(entry)
+        entry.encode()
     }
 
     #[must_use]
@@ -474,7 +484,7 @@ impl TopicIndex {
             buf.extend_from_slice(&(id_bytes.len() as u16).to_be_bytes());
             buf.extend_from_slice(id_bytes);
 
-            let data = entry.to_be_bytes();
+            let data = entry.encode();
             buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
             buf.extend_from_slice(&data);
         }
@@ -751,7 +761,7 @@ mod tests {
     }
 
     #[test]
-    fn entry_refuses_a_subscriber_its_count_cannot_hold() {
+    fn entry_keeps_routing_past_its_count_and_encodes_a_consistent_prefix() {
         let subscribers: Vec<SubscriberLocation> = (0..u16::MAX)
             .map(|i| SubscriberLocation::create(&format!("c{i}"), partition(1), 0))
             .collect();
@@ -761,11 +771,20 @@ mod tests {
             ..TopicIndexEntry::create("topic/a")
         };
 
-        entry.add_subscriber("one-too-many", partition(1), 0);
+        entry.add_subscriber("one-past-the-count", partition(1), 0);
 
-        assert_eq!(entry.subscribers.len(), usize::from(u16::MAX));
-        assert_eq!(entry.subscriber_count, u16::MAX);
+        assert_eq!(entry.subscribers.len(), usize::from(u16::MAX) + 1);
+        assert!(
+            entry
+                .subscribers
+                .iter()
+                .any(|s| s.client_id_str() == "one-past-the-count")
+        );
         let parsed = TopicIndex::deserialize(&TopicIndex::serialize(&entry)).unwrap();
         assert_eq!(parsed.subscribers.len(), usize::from(u16::MAX));
+        assert_eq!(
+            parsed.subscribers[..],
+            entry.subscribers[..usize::from(u16::MAX)]
+        );
     }
 }

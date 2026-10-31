@@ -79,18 +79,28 @@ impl MqttSubscriptionSnapshot {
         if self.topics.iter().any(|t| t.topic_str() == topic) {
             return;
         }
-        let Ok(topic_count) = u16::try_from(self.topics.len() + 1) else {
-            tracing::warn!(
-                client_id = self.client_id_str(),
-                topic,
-                "subscription snapshot is full, subscription not recorded"
-            );
-            return;
-        };
         self.topics
             .push(MqttTopicEntry::create(topic, qos, is_wildcard));
-        self.topic_count = topic_count;
+        self.topic_count = u16::try_from(self.topics.len()).unwrap_or(u16::MAX);
         self.snapshot_version += 1;
+    }
+
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        if u16::try_from(self.topics.len()).is_ok() {
+            return self.to_be_bytes();
+        }
+        tracing::warn!(
+            client_id = self.client_id_str(),
+            topics = self.topics.len(),
+            "subscription record has more topics than its encoding holds, encoding the first 65535"
+        );
+        Self {
+            topic_count: u16::MAX,
+            topics: self.topics[..usize::from(u16::MAX)].to_vec(),
+            ..self.clone()
+        }
+        .to_be_bytes()
     }
 
     #[must_use]
@@ -412,7 +422,7 @@ impl SubscriptionCache {
 
     #[must_use]
     pub fn serialize(snapshot: &MqttSubscriptionSnapshot) -> Vec<u8> {
-        snapshot.to_be_bytes()
+        snapshot.encode()
     }
 
     #[must_use]
@@ -468,7 +478,7 @@ impl SubscriptionCache {
             buf.extend_from_slice(&(id_bytes.len() as u16).to_be_bytes());
             buf.extend_from_slice(id_bytes);
 
-            let data = snapshot.to_be_bytes();
+            let data = snapshot.encode();
             buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
             buf.extend_from_slice(&data);
         }
@@ -897,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_refuses_a_topic_its_count_cannot_hold() {
+    fn snapshot_keeps_topics_past_its_count_and_encodes_a_consistent_prefix() {
         let topics: Vec<MqttTopicEntry> = (0..u16::MAX)
             .map(|i| MqttTopicEntry::create(&format!("t/{i}"), 0, false))
             .collect();
@@ -907,12 +917,14 @@ mod tests {
             ..MqttSubscriptionSnapshot::create("client1")
         };
 
-        snapshot.add_subscription("one/too/many", 0);
+        snapshot.add_subscription("one/past/the/count", 0);
 
-        assert_eq!(snapshot.topics.len(), usize::from(u16::MAX));
-        assert_eq!(snapshot.topic_count, u16::MAX);
+        assert_eq!(snapshot.topics.len(), usize::from(u16::MAX) + 1);
+        assert!(snapshot.has_subscription("one/past/the/count"));
         let parsed =
             SubscriptionCache::deserialize(&SubscriptionCache::serialize(&snapshot)).unwrap();
         assert_eq!(parsed.topics.len(), usize::from(u16::MAX));
+        assert_eq!(parsed.topics[..], snapshot.topics[..usize::from(u16::MAX)]);
+        assert_eq!(parsed.snapshot_version, snapshot.snapshot_version);
     }
 }
