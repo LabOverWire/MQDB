@@ -177,7 +177,7 @@ impl<T: ClusterTransport> NodeController<T> {
         });
     }
 
-    async fn release_held_writes(&mut self) {
+    pub(super) async fn release_held_writes(&mut self) {
         let held = std::mem::take(&mut self.held_writes);
         for entry in held {
             let assignment_epoch = self.partition_map.get(entry.write.partition).epoch;
@@ -557,7 +557,12 @@ impl<T: ClusterTransport> NodeController<T> {
             return;
         }
 
-        if self.is_primary_for_partition(partition) && self.role(partition) != ReplicaRole::Primary
+        if self.waiting_to_take(partition) && extra_outbox.is_empty() {
+            write.event = event;
+            let own = self.node_id;
+            self.hold_write_request(own, write).await;
+        } else if self.is_primary_for_partition(partition)
+            && self.role(partition) != ReplicaRole::Primary
         {
             tracing::warn!(
                 ?partition,

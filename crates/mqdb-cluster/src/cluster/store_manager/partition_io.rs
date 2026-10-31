@@ -5,8 +5,21 @@ use super::outbox::ClusterOutbox;
 use super::{StoreApplyError, StoreManager};
 use crate::cluster::{PartitionId, entity};
 
+const SHARED_SECTIONS: [&str; 5] = [
+    entity::DB_SCHEMA,
+    entity::DB_CONSTRAINT,
+    entity::TOPIC_INDEX,
+    entity::WILDCARDS,
+    entity::CHANGE_EVENTS,
+];
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ImportCounts {
+    pub(crate) total: usize,
+    pub(crate) partition_records: usize,
+}
+
 impl StoreManager {
-    #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub fn export_partition(&self, partition: PartitionId) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -63,13 +76,13 @@ impl StoreManager {
             (entity::CHANGE_EVENTS, self.export_change_events(partition)),
         ];
 
-        buf.extend_from_slice(&(store_data.len() as u8).to_be_bytes());
+        buf.push(u8::try_from(store_data.len()).unwrap_or(u8::MAX));
 
         for (entity_name, data) in store_data {
             let name_bytes = entity_name.as_bytes();
-            buf.push(name_bytes.len() as u8);
+            buf.push(u8::try_from(name_bytes.len()).unwrap_or(u8::MAX));
             buf.extend_from_slice(name_bytes);
-            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            buf.extend_from_slice(&u32::try_from(data.len()).unwrap_or(u32::MAX).to_be_bytes());
             buf.extend_from_slice(&data);
         }
 
@@ -79,13 +92,21 @@ impl StoreManager {
     /// # Errors
     /// Returns `StoreApplyError` if the snapshot data is malformed or a store import fails.
     pub fn import_partition(&self, data: &[u8]) -> Result<usize, StoreApplyError> {
+        self.import_partition_counted(data)
+            .map(|counts| counts.total)
+    }
+
+    pub(crate) fn import_partition_counted(
+        &self,
+        data: &[u8],
+    ) -> Result<ImportCounts, StoreApplyError> {
+        let mut counts = ImportCounts::default();
         if data.is_empty() {
-            return Ok(0);
+            return Ok(counts);
         }
 
         let store_count = data[0] as usize;
         let mut offset = 1;
-        let mut total_imported = 0;
 
         for _ in 0..store_count {
             if offset >= data.len() {
@@ -184,12 +205,15 @@ impl StoreManager {
                 _ => continue,
             };
 
-            total_imported += imported;
+            counts.total += imported;
+            if !SHARED_SECTIONS.contains(&entity_name) {
+                counts.partition_records += imported;
+            }
         }
 
         self.rebuild_fk_indexes_after_import();
 
-        Ok(total_imported)
+        Ok(counts)
     }
 
     fn export_change_events(&self, partition: PartitionId) -> Vec<u8> {

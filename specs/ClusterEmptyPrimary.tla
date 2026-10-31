@@ -33,7 +33,8 @@
 (* A node keeps records in memory (mem) and on disk. A write reaches both; *)
 (* a snapshot import reaches memory only (import_partition does not        *)
 (* persist); a crash reloads memory from disk. So the marker is written     *)
-(* only for a partition the node did not fill by an import in this run.    *)
+(* only for a partition the node did not fill with records by an import  *)
+(* in this run (an empty import changes nothing).                         *)
 (*                                                                          *)
 (* ABSTRACTIONS: a snapshot transfer is one step (export and import), so  *)
 (* writes cannot fall between them; a write reaches the replica named by  *)
@@ -55,7 +56,7 @@
 (*  _current:        ServeCorrect fails in 3 steps: the primary crashes    *)
 (*                   with a wipe, restarts before Detect, takes the role.  *)
 (*  _current_live:   liveness holds (the bug is a safety one).             *)
-(*  _fix:            all invariants and both properties hold.             *)
+(*  _fix:            all invariants and both properties hold (254,470).   *)
 (*  _fix_noretry:    EventuallyServing fails: a request lost with its     *)
 (*                   source is never sent again.                            *)
 (*  _fix_lag, _current_lag: ServeCorrect fails without any crash: the old  *)
@@ -193,7 +194,8 @@ ServeSnapshot(n) ==
     /\ live' = [live EXCEPT ![n] = FALSE]
     /\ src' = [src EXCEPT ![n] = None]
     /\ held' = [held EXCEPT ![n] = held[n] \/ ImportedRole(n) \in {"primary", "replica"}]
-    /\ imported' = [imported EXCEPT ![n] = Design \in {"fix", "recovered"}]
+    /\ imported' = [imported EXCEPT ![n] =
+                        imported[n] \/ (Design \in {"fix", "recovered"} /\ \E k \in Keys : mem[src[n]][k] # 0)]
     /\ marker' = [marker EXCEPT ![n] =
                       IF ImportedRole(n) = "primary" /\ Design \in {"current", "markimport"}
                       THEN applied[n] ELSE marker[n]]

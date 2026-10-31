@@ -16,8 +16,8 @@ fn controller(id: u16) -> NodeController<MockTransport> {
 }
 
 fn controller_with_storage(id: u16, backend: &Arc<FaultyBackend>) -> NodeController<MockTransport> {
-    let (tx_raft_messages, _rx_raft_messages) = flume::unbounded();
-    let (tx_raft_events, _rx_raft_events) = flume::unbounded();
+    let tx_raft_messages = flume::unbounded().0;
+    let tx_raft_events = flume::unbounded().0;
     let storage: Arc<dyn StorageBackend> = backend.clone();
     NodeController::new_with_storage(
         node(id),

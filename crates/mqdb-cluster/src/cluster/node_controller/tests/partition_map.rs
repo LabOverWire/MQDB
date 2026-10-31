@@ -126,8 +126,8 @@ fn controller_on(
     id: u16,
     backend: &Arc<crate::cluster::test_support::FaultyBackend>,
 ) -> NodeController<MockTransport> {
-    let (tx_raft_messages, _rx_raft_messages) = flume::unbounded();
-    let (tx_raft_events, _rx_raft_events) = flume::unbounded();
+    let tx_raft_messages = flume::unbounded().0;
+    let tx_raft_events = flume::unbounded().0;
     let storage: Arc<dyn mqdb_core::storage::StorageBackend> = backend.clone();
     NodeController::new_with_storage(
         node(id),
@@ -436,6 +436,12 @@ async fn a_marked_primary_still_trusts_its_disk_after_a_stale_map_named_it_repli
         .await;
     drop(before_crash);
 
+    let mut stale_source = controller(3);
+    stale_source.become_primary(partition, Epoch::new(1));
+    stale_source
+        .stores()
+        .create_session_replicated("c1")
+        .unwrap();
     let mut restarted = controller_on(2, &backend);
     restarted
         .apply_raft_partition_map(map_with(partition, node(3), &[node(2)], 1))
@@ -444,8 +450,12 @@ async fn a_marked_primary_still_trusts_its_disk_after_a_stale_map_named_it_repli
     restarted
         .apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 2))
         .await;
+    assert_eq!(restarted.role(partition), ReplicaRole::Primary);
+
+    serve_snapshot(&mut stale_source, &mut restarted, partition).await;
 
     assert_eq!(restarted.role(partition), ReplicaRole::Primary);
+    assert!(restarted.stores().sessions.get("c1").is_none());
 }
 
 #[tokio::test]
@@ -476,4 +486,97 @@ async fn a_store_from_before_the_marker_is_trusted_only_for_its_first_map() {
     upgraded.apply_raft_partition_map(map).await;
 
     assert_eq!(upgraded.role(later), ReplicaRole::AwaitingSnapshot);
+}
+
+#[tokio::test]
+async fn a_primary_built_from_an_empty_snapshot_trusts_its_disk_after_a_restart() {
+    let partition = session_partition("c1");
+    let mut replica = controller(3);
+    replica.become_replica(partition, Epoch::new(1), 0);
+    replica
+        .stores()
+        .db_schema
+        .register("bigdocs", b"{\"fields\":[]}")
+        .unwrap();
+    let backend = crate::cluster::test_support::FaultyBackend::shared();
+    let map = map_with(partition, node(2), &[node(3)], 1);
+
+    let mut fresh = controller_on(2, &backend);
+    fresh.apply_raft_partition_map(map.clone()).await;
+    serve_snapshot(&mut replica, &mut fresh, partition).await;
+    assert_eq!(fresh.role(partition), ReplicaRole::Primary);
+    drop(fresh);
+
+    let mut restarted = controller_on(2, &backend);
+    restarted.stores().recover().unwrap();
+    restarted.apply_raft_partition_map(map).await;
+
+    assert_eq!(restarted.role(partition), ReplicaRole::Primary);
+}
+
+#[tokio::test]
+async fn a_snapshot_arriving_after_the_partition_is_held_is_ignored() {
+    let partition = crate::cluster::db::data_partition("bigdocs", "r1");
+    let mut replica = controller(3);
+    replica.become_replica(partition, Epoch::new(1), 0);
+    replica
+        .stores()
+        .db_create_replicated("bigdocs", "r1", b"{\"v\":1}", 1)
+        .unwrap();
+    let mut ctrl = controller(2);
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
+        .await;
+    serve_snapshot(&mut replica, &mut ctrl, partition).await;
+    assert_eq!(ctrl.role(partition), ReplicaRole::Primary);
+    ctrl.stores()
+        .db_update_replicated("bigdocs", "r1", b"{\"v\":2}", 2)
+        .unwrap();
+
+    for (to, message) in replica.transport.sent_messages() {
+        if to == node(2) && matches!(message, ClusterMessage::SnapshotChunk(_)) {
+            ctrl.transport.inject_message(node(3), message);
+        }
+    }
+    ctrl.process_messages().await;
+
+    let stored = ctrl.stores().db_get("bigdocs", "r1").unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&stored.data).unwrap();
+    assert_eq!(value["v"], 2);
+}
+
+#[tokio::test]
+async fn a_local_write_waits_while_the_primary_waits_for_its_snapshot() {
+    let partition = session_partition("c1");
+    let mut replica = controller(3);
+    replica.become_replica(partition, Epoch::new(1), 0);
+    let mut ctrl = controller(2);
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
+        .await;
+
+    ctrl.write_or_forward(session_write("c1", 1)).await;
+    assert!(ctrl.stores().sessions.get("c1").is_none());
+
+    serve_snapshot(&mut replica, &mut ctrl, partition).await;
+
+    assert_eq!(ctrl.role(partition), ReplicaRole::Primary);
+    assert!(ctrl.stores().sessions.get("c1").is_some());
+}
+
+#[tokio::test]
+async fn held_writes_are_applied_as_soon_as_the_snapshot_lands() {
+    let partition = session_partition("c1");
+    let mut replica = controller(3);
+    replica.become_replica(partition, Epoch::new(1), 0);
+    let mut ctrl = controller(2);
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
+        .await;
+    ctrl.transport.inject_message(
+        node(1),
+        ClusterMessage::WriteRequest(session_write("c1", 1)),
+    );
+    ctrl.process_messages().await;
+
+    serve_snapshot(&mut replica, &mut ctrl, partition).await;
+
+    assert!(ctrl.stores().sessions.get("c1").is_some());
 }

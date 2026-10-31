@@ -99,17 +99,18 @@ impl<T: ClusterTransport> NodeController<T> {
             "received snapshot chunk"
         );
 
-        if let Some(request) = self.requested_snapshots.get_mut(&partition) {
-            if request.source != from {
+        match self.requested_snapshots.get_mut(&partition) {
+            Some(request) if request.source == from => {
+                request.last_activity = Instant::now();
+            }
+            _ => {
                 tracing::debug!(
                     ?partition,
                     from = from.get(),
-                    source = request.source.get(),
-                    "ignoring snapshot chunk from a node this snapshot was not requested from"
+                    "ignoring a snapshot chunk this node is not waiting for from that node"
                 );
                 return;
             }
-            request.last_activity = Instant::now();
         }
 
         let builder = self.pending_snapshots.entry(partition).or_insert_with(|| {
@@ -144,12 +145,15 @@ impl<T: ClusterTransport> NodeController<T> {
             };
 
             let saved_events = self.set_aside_change_events(partition);
-            match self.stores.import_partition(&data) {
-                Ok(count) => {
-                    self.imported_partitions[usize::from(partition.get())] = true;
+            match self.stores.import_partition_counted(&data) {
+                Ok(counts) => {
+                    if counts.partition_records > 0 {
+                        self.imported_partitions[usize::from(partition.get())] = true;
+                    }
                     tracing::info!(
                         ?partition,
-                        imported = count,
+                        imported = counts.total,
+                        partition_records = counts.partition_records,
                         sequence,
                         "snapshot import complete"
                     );
@@ -166,6 +170,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     if let Some(epoch) = self.epoch(partition) {
                         self.take_role_after_import(partition, epoch, sequence);
                     }
+                    self.release_held_writes().await;
 
                     let complete = SnapshotComplete::ok(partition, sequence);
                     let _ = self
