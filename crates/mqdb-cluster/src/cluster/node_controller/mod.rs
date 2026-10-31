@@ -46,7 +46,6 @@ use super::write_log::PartitionWriteLog;
 use super::{Epoch, NodeId, PartitionId, PartitionMap};
 use crate::cluster::db_handler::helpers::json_write_failure;
 use db_ops::EventOrigin;
-use mqdb_core::events::ChangeEvent;
 use mqdb_core::storage::StorageBackend;
 use mqdb_core::types::{MAX_LIST_RESULTS, OwnershipConfig, ScopeConfig};
 use mqdb_vault::VaultKeyStore;
@@ -106,10 +105,6 @@ pub struct PendingScatterRequest {
     pub continuation: Option<ShareResolveContinuation>,
 }
 
-/// A share whose grantee is an email awaiting cross-partition identity
-/// resolution. Carried on the scatter that lists `_identity_links` by
-/// `email_hash`; on completion the grant is written to the resolved canonical id
-/// (or left pending when unresolved) and routed to the resource primary.
 #[cfg(feature = "http-api")]
 pub struct ShareResolveContinuation {
     pub email_hash: String,
@@ -122,10 +117,6 @@ pub struct ShareResolveContinuation {
     pub granted_by: String,
     pub response_topic: String,
     pub correlation_data: Option<Vec<u8>>,
-    /// Set when an unshare/clear for this `(entity, id, grantee_key)` lands on
-    /// this node while the resolution is still in flight; the completing write
-    /// is then skipped so a revoked grant is not resurrected (see
-    /// `specs/ShareResolveRace.tla`).
     pub invalidated: bool,
 }
 
@@ -146,8 +137,6 @@ pub struct PendingUniqueReserve {
     pub receiver: oneshot::Receiver<UniqueReserveStatus>,
 }
 
-/// Identity of a unique claim, enough to release it: the reservation is keyed by
-/// `(entity, field, value)` and owned by `idempotency_key`.
 pub(crate) struct UniqueClaimId {
     pub entity: String,
     pub field: String,
@@ -185,9 +174,6 @@ pub struct UniqueCheckPhase1Result {
     pub pending_quorum: Vec<(String, oneshot::Receiver<bool>)>,
 }
 
-/// Why a unique reserve failed, so the create can return the right status: a real conflict is a
-/// permanent `409`, while a not-yet-durable reserve (partition unsealed, no primary/quorum) is a
-/// transient `503` the client should retry.
 pub enum ReserveFailure {
     Conflict(String),
     NotDurable(String),
@@ -228,10 +214,6 @@ pub struct PendingUniqueWork {
     pub continuation: UniqueCheckContinuation,
 }
 
-/// Result of completing an FK check whose entity also has unique constraints. `Done` means the
-/// response was already sent (FK failed, or the reserve failed synchronously). `NeedUnique` means
-/// the unique reserve has started and its majority-await must run **outside the controller lock**
-/// (via `spawn_unique_completion`), which is why this is returned rather than awaited inline.
 pub enum FkThenUniqueOutcome {
     Done,
     NeedUnique(Box<PendingUniqueWork>),
@@ -317,7 +299,6 @@ pub enum FkCheckContinuation {
         data: serde_json::Value,
         partition: PartitionId,
         request_id: String,
-        now_ms: u64,
         sender: Option<String>,
         client_id: Option<String>,
         response_topic: String,
@@ -329,7 +310,6 @@ pub enum FkCheckContinuation {
         merged_data: serde_json::Value,
         partition: PartitionId,
         request_id: String,
-        now_ms: u64,
         new_diff: serde_json::Value,
         old_diff: serde_json::Value,
         sender: Option<String>,
@@ -371,7 +351,6 @@ pub enum UniqueCheckContinuation {
         id: String,
         data: serde_json::Value,
         constraint_data: serde_json::Value,
-        data_bytes: Vec<u8>,
         partition: PartitionId,
         request_id: String,
         now_ms: u64,
@@ -384,7 +363,6 @@ pub enum UniqueCheckContinuation {
         entity: String,
         id: String,
         merged_data: serde_json::Value,
-        data_bytes: Vec<u8>,
         partition: PartitionId,
         request_id: String,
         now_ms: u64,
@@ -654,8 +632,6 @@ impl<T: ClusterTransport> NodeController<T> {
             && self.role(partition) == ReplicaRole::Replica
     }
 
-    /// Pick a local partition for creating new entities (round-robin).
-    ///
     /// # Panics
     /// Panics if no valid partition can be created.
     #[must_use]
@@ -686,9 +662,6 @@ impl<T: ClusterTransport> NodeController<T> {
         self.heartbeat.alive_or_suspected_nodes()
     }
 
-    /// Cluster members this node knows about, excluding itself: every node that owns a partition
-    /// as primary or replica, plus any node named in voter gossip. A node can appear here without
-    /// being reachable, which is exactly the case `unlinked_nodes` reports.
     pub fn known_members(&self) -> Vec<NodeId> {
         let mut members: std::collections::BTreeSet<NodeId> =
             self.partition_map().all_nodes().into_iter().collect();
@@ -697,15 +670,10 @@ impl<T: ClusterTransport> NodeController<T> {
         members.into_iter().collect()
     }
 
-    /// Known cluster members this node has no direct link to. Broadcasts are a single hop and
-    /// targeted sends are not routed, so any node listed here silently misses subscriptions,
-    /// presence, client locations and forwarded publishes.
     pub async fn unlinked_nodes(&self) -> Vec<NodeId> {
         self.unlinked_from(&self.known_members()).await
     }
 
-    /// `unlinked_nodes` against an already-computed member set, so a caller that needs both does
-    /// not walk every partition twice.
     pub async fn unlinked_from(&self, members: &[NodeId]) -> Vec<NodeId> {
         let Some(linked) = self.transport().direct_peers().await else {
             return Vec::new();
@@ -779,10 +747,6 @@ impl<T: ClusterTransport> NodeController<T> {
         self.heartbeat.update_partition_map(map);
     }
 
-    /// Synchronous tick used only by tests (`send_tick_output` drives the collected output). The
-    /// production cluster-agent event loop uses its own async `handle_tick`, which additionally runs
-    /// `manage_unique_voters`, `sweep_unique_quorum`, and `sweep_unique_seals` — this path does NOT,
-    /// so a test exercising unique voter management must invoke those explicitly.
     pub fn tick(&mut self, now: u64) -> TickOutput {
         let start = std::time::Instant::now();
 
@@ -1047,7 +1011,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    #[allow(clippy::cast_possible_truncation)]
     pub async fn process_messages(&mut self) {
         const BATCH_SIZE: u32 = 8;
         let queue_depth_start = self.transport.pending_count();
@@ -1078,7 +1041,7 @@ impl<T: ClusterTransport> NodeController<T> {
             }
         }
         if count > 0 {
-            let elapsed_us = start.elapsed().as_micros() as u64;
+            let elapsed_us = elapsed_micros(start);
             tracing::info!(
                 node = self.node_id.get(),
                 msg_count = count,
@@ -1582,14 +1545,10 @@ impl<T: ClusterTransport> NodeController<T> {
         self.migration_manager.migration_count()
     }
 
-    #[allow(clippy::too_many_lines, clippy::type_complexity)]
     pub async fn complete_pending_unique_work(
         &mut self,
         local_reserved: Vec<(String, Vec<u8>)>,
-        remote_results: Result<
-            Vec<(String, Vec<u8>, NodeId)>,
-            (ReserveFailure, Vec<(String, Vec<u8>, NodeId)>),
-        >,
+        remote_results: RemoteReserveResult,
         continuation: UniqueCheckContinuation,
     ) {
         match continuation {
@@ -1620,13 +1579,18 @@ impl<T: ClusterTransport> NodeController<T> {
                         Self::json_error(failure.http_code(), &failure.message())
                     }
                     Ok(confirmed_remotes) => {
-                        match self.db_create_prepare(&entity, &id, &data_bytes, now_ms) {
-                            Ok((db_entity, write)) => {
-                                let event = self.change_event(
-                                    ChangeEvent::create(entity.clone(), id.clone(), data.clone()),
-                                    origin,
-                                );
-                                self.commit_with_change_event(write, event).await;
+                        match self
+                            .db_create_with_event(
+                                &entity,
+                                &id,
+                                &data_bytes,
+                                data.clone(),
+                                now_ms,
+                                origin,
+                            )
+                            .await
+                        {
+                            Ok(db_entity) => {
                                 self.commit_unique_constraints(
                                     &entity,
                                     &id,
@@ -1641,16 +1605,6 @@ impl<T: ClusterTransport> NodeController<T> {
                                     &data,
                                 )
                             }
-                            Err(super::db::DbDataStoreError::AlreadyExists) => {
-                                self.release_unique_check_reservations(
-                                    &entity,
-                                    &request_id,
-                                    &local_reserved,
-                                    &confirmed_remotes,
-                                )
-                                .await;
-                                Self::json_error(409, "entity already exists")
-                            }
                             Err(error) => {
                                 self.release_unique_check_reservations(
                                     &entity,
@@ -1659,7 +1613,12 @@ impl<T: ClusterTransport> NodeController<T> {
                                     &confirmed_remotes,
                                 )
                                 .await;
-                                json_write_failure(error)
+                                match error {
+                                    super::db::DbDataStoreError::AlreadyExists => {
+                                        Self::json_error(409, "entity already exists")
+                                    }
+                                    error => json_write_failure(error),
+                                }
                             }
                         }
                     }
@@ -1701,17 +1660,18 @@ impl<T: ClusterTransport> NodeController<T> {
                         Self::json_error(failure.http_code(), &failure.message())
                     }
                     Ok(confirmed_remotes) => {
-                        match self.db_update_prepare(&entity, &id, &data_bytes, now_ms) {
-                            Ok((db_entity, write)) => {
-                                let event = self.change_event(
-                                    ChangeEvent::update(
-                                        entity.clone(),
-                                        id.clone(),
-                                        merged_data.clone(),
-                                    ),
-                                    origin,
-                                );
-                                self.commit_with_change_event(write, event).await;
+                        match self
+                            .db_update_with_event(
+                                &entity,
+                                &id,
+                                &data_bytes,
+                                merged_data.clone(),
+                                now_ms,
+                                origin,
+                            )
+                            .await
+                        {
+                            Ok(db_entity) => {
                                 self.commit_unique_constraints(
                                     &entity,
                                     &id,
@@ -1730,19 +1690,6 @@ impl<T: ClusterTransport> NodeController<T> {
                                     &merged_data,
                                 )
                             }
-                            Err(super::db::DbDataStoreError::NotFound) => {
-                                self.release_unique_check_reservations(
-                                    &entity,
-                                    &request_id,
-                                    &local_reserved,
-                                    &confirmed_remotes,
-                                )
-                                .await;
-                                Self::json_error(
-                                    404,
-                                    &format!("entity not found: {entity} id={id}"),
-                                )
-                            }
                             Err(error) => {
                                 self.release_unique_check_reservations(
                                     &entity,
@@ -1751,7 +1698,13 @@ impl<T: ClusterTransport> NodeController<T> {
                                     &confirmed_remotes,
                                 )
                                 .await;
-                                json_write_failure(error)
+                                match error {
+                                    super::db::DbDataStoreError::NotFound => Self::json_error(
+                                        404,
+                                        &format!("entity not found: {entity} id={id}"),
+                                    ),
+                                    error => json_write_failure(error),
+                                }
                             }
                         }
                     }
@@ -1770,7 +1723,20 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) fn elapsed_micros(start: std::time::Instant) -> u64 {
+    u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+pub(crate) type RemoteReservations = Vec<(String, Vec<u8>, NodeId)>;
+pub(crate) type RemoteReserveResult =
+    Result<RemoteReservations, (ReserveFailure, RemoteReservations)>;
+
+pub(crate) struct RefusedWrite {
+    pub(crate) error: ReplicationError,
+    pub(crate) event: Option<crate::cluster::protocol::ChangeEventRecord>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplicationError {
     NotPrimary,
     TooManyPending,

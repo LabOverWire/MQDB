@@ -10,7 +10,7 @@ use super::super::session::session_partition;
 use super::super::store_manager::StoreApplyError;
 use super::super::transport::{ClusterMessage, ClusterTransport};
 use super::super::{Epoch, NodeId, PartitionId};
-use super::{NodeController, ReplicationError};
+use super::{NodeController, RefusedWrite, ReplicationError};
 
 impl<T: ClusterTransport> NodeController<T> {
     /// # Errors
@@ -116,19 +116,6 @@ impl<T: ClusterTransport> NodeController<T> {
         Ok((session, rx))
     }
 
-    /// # Errors
-    /// Returns `NotPrimary` if this node is not in the primary role for the partition, or
-    /// `StoreFailed` if the write cannot be persisted.
-    pub async fn replicate_write_async(
-        &mut self,
-        write: ReplicationWrite,
-        replicas: &[NodeId],
-        event: Option<ChangeEventRecord>,
-    ) -> Result<u64, ReplicationError> {
-        self.replicate_write_async_with_extra(write, replicas, event, &[])
-            .await
-    }
-
     fn apply_primary_write(
         &self,
         write_msg: &ReplicationWrite,
@@ -169,28 +156,26 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    /// # Errors
-    /// Returns `NotPrimary` if this node is not in the primary role for the partition, or
-    /// `StoreFailed` if the write cannot be persisted, in which case nothing is logged or
-    /// replicated and its change event is published untracked.
-    pub async fn replicate_write_async_with_extra(
+    pub(crate) async fn replicate_primary_write(
         &mut self,
         write: ReplicationWrite,
         replicas: &[NodeId],
         event: Option<ChangeEventRecord>,
         extra_outbox: &[(Vec<u8>, Vec<u8>)],
-    ) -> Result<u64, ReplicationError> {
+    ) -> Result<u64, RefusedWrite> {
         let start = std::time::Instant::now();
         let partition = write.partition;
 
-        let state = self
+        let Some(state) = self
             .replicas
             .get(&partition.get())
-            .ok_or(ReplicationError::NotPrimary)?;
-
-        if state.role() != ReplicaRole::Primary {
-            return Err(ReplicationError::NotPrimary);
-        }
+            .filter(|state| state.role() == ReplicaRole::Primary)
+        else {
+            return Err(RefusedWrite {
+                error: ReplicationError::NotPrimary,
+                event,
+            });
+        };
 
         let sequence = state.sequence() + 1;
         let write_msg = ReplicationWrite::new(
@@ -203,23 +188,25 @@ impl<T: ClusterTransport> NodeController<T> {
             write.data,
         )
         .with_event(event);
-        let t_state = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let t_state = super::elapsed_micros(start);
 
         let change_event = Self::change_event_entry(&write_msg);
-        if let Err(e) = self.apply_primary_write(&write_msg, change_event.as_ref(), extra_outbox) {
-            if let Some(record) = write_msg.event {
-                self.publish_unowned_change_event(partition, record).await;
-            }
-            return Err(e);
+        if let Err(error) =
+            self.apply_primary_write(&write_msg, change_event.as_ref(), extra_outbox)
+        {
+            return Err(RefusedWrite {
+                error,
+                event: write_msg.event,
+            });
         }
-        let t_apply = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let t_apply = super::elapsed_micros(start);
 
         if let Some(state) = self.replicas.get_mut(&partition.get()) {
             state.advance_sequence();
         }
         self.write_log
             .append(partition, sequence, write_msg.clone());
-        let t_writelog = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let t_writelog = super::elapsed_micros(start);
 
         for &replica in replicas {
             let _ = self
@@ -227,7 +214,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 .send(replica, ClusterMessage::Write(write_msg.clone()))
                 .await;
         }
-        let t_send = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let t_send = super::elapsed_micros(start);
 
         tracing::trace!(
             node = self.node_id.get(),
