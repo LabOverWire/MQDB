@@ -30,6 +30,24 @@ impl DbRequestHandler {
     }
 }
 
+pub(crate) fn delete_expected_version(payload: &[u8]) -> Result<Option<u64>, String> {
+    if payload.is_empty() {
+        return Ok(None);
+    }
+    let mut value: Value =
+        serde_json::from_slice(payload).map_err(|e| format!("invalid JSON payload: {e}"))?;
+    mqdb_core::protocol::take_expected_version(&mut value).map_err(|e| e.to_string())
+}
+
+pub(crate) fn update_payload_error(payload: &[u8]) -> Option<String> {
+    let Ok(mut value) = serde_json::from_slice::<Value>(payload) else {
+        return Some("invalid JSON payload".to_string());
+    };
+    mqdb_core::protocol::take_expected_version(&mut value)
+        .err()
+        .map(|e| e.to_string())
+}
+
 pub(crate) fn json_write_failure(error: DbDataStoreError) -> Vec<u8> {
     match error {
         DbDataStoreError::NotPrimary => DbRequestHandler::json_error(503, &error.to_string()),

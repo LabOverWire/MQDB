@@ -66,13 +66,14 @@ async fn local_response(
     op: JsonDbOp,
     id: &str,
     sender: &str,
+    payload: &[u8],
 ) -> Value {
     let result = DbRequestHandler::new(node(1))
         .with_ownership(ownership())
         .handle_publish(
             ctrl,
             &op_topic(op, id),
-            &op_payload(op),
+            payload,
             &MqttRequestContext {
                 response_topic: Some("resp/local"),
                 correlation_data: None,
@@ -92,13 +93,14 @@ async fn forwarded_response(
     op: JsonDbOp,
     id: &str,
     sender: &str,
+    payload: &[u8],
 ) -> Value {
     let request = JsonDbRequest {
         request_id: 1,
         op,
         entity: "docs".to_string(),
         id: Some(id.to_string()),
-        payload: op_payload(op),
+        payload: payload.to_vec(),
         response_topic: "resp/forwarded".to_string(),
         correlation_data: None,
         sender: Some(sender.to_string()),
@@ -136,9 +138,9 @@ async fn codes_on_both_paths(
 ) -> Vec<(JsonDbOp, &'static str, Value)> {
     let mut codes = Vec::new();
     for op in OPS {
-        let local = local_response(ctrl, op, id, sender).await;
+        let local = local_response(ctrl, op, id, sender, &op_payload(op)).await;
         codes.push((op, "local", local["code"].clone()));
-        let forwarded = forwarded_response(ctrl, op, id, sender).await;
+        let forwarded = forwarded_response(ctrl, op, id, sender, &op_payload(op)).await;
         codes.push((op, "forwarded", forwarded["code"].clone()));
     }
     codes
@@ -166,15 +168,29 @@ async fn missing_record_is_not_found_and_existing_one_forbidden_on_every_path() 
     assert!(ctrl.db_get("docs", "never-created").is_none());
 
     for answer in [
-        local_response(&mut ctrl, JsonDbOp::Share, "never-created", "root").await,
-        forwarded_response(&mut ctrl, JsonDbOp::Share, "never-created", "root").await,
+        local_response(
+            &mut ctrl,
+            JsonDbOp::Share,
+            "never-created",
+            "root",
+            &op_payload(JsonDbOp::Share),
+        )
+        .await,
+        forwarded_response(
+            &mut ctrl,
+            JsonDbOp::Share,
+            "never-created",
+            "root",
+            &op_payload(JsonDbOp::Share),
+        )
+        .await,
     ] {
         assert_eq!(answer["code"], 404, "admin share {answer}");
     }
     for op in [JsonDbOp::Unshare, JsonDbOp::Shares] {
         for answer in [
-            local_response(&mut ctrl, op, "never-created", "root").await,
-            forwarded_response(&mut ctrl, op, "never-created", "root").await,
+            local_response(&mut ctrl, op, "never-created", "root", &op_payload(op)).await,
+            forwarded_response(&mut ctrl, op, "never-created", "root", &op_payload(op)).await,
         ] {
             assert_eq!(answer["status"], "ok", "admin {op:?} {answer}");
         }
@@ -203,4 +219,152 @@ async fn grant_left_on_a_missing_record_answers_not_found_on_every_path() {
     assert_eq!(codes, expected(404));
     assert!(ctrl.db_get("docs", "deleted-later").is_none());
     assert_eq!(ctrl.db_list(SHARES_ENTITY).len(), 1);
+}
+
+async fn codes_for_payload(
+    ctrl: &mut NodeController<MockTransport>,
+    op: JsonDbOp,
+    id: &str,
+    sender: &str,
+    payload: &[u8],
+) -> [Value; 2] {
+    [
+        local_response(ctrl, op, id, sender, payload).await["code"].clone(),
+        forwarded_response(ctrl, op, id, sender, payload).await["code"].clone(),
+    ]
+}
+
+#[tokio::test]
+async fn malformed_payload_is_refused_before_the_ownership_check_on_every_path() {
+    let mut ctrl = docs_primary().await;
+    let bad_version =
+        serde_json::to_vec(&json!({"title": "x", "_expected_version": "one"})).unwrap();
+    let cases: [(JsonDbOp, &str, &[u8]); 6] = [
+        (JsonDbOp::Update, "never-created", b"not json"),
+        (JsonDbOp::Update, "owned-by-alice", b"not json"),
+        (JsonDbOp::Update, "never-created", &bad_version),
+        (JsonDbOp::Update, "owned-by-alice", &bad_version),
+        (JsonDbOp::Delete, "owned-by-alice", b"not json"),
+        (JsonDbOp::Delete, "owned-by-alice", &bad_version),
+    ];
+
+    let mut codes = Vec::new();
+    for (op, id, payload) in cases {
+        codes.push((
+            op,
+            id,
+            codes_for_payload(&mut ctrl, op, id, "bob", payload).await,
+        ));
+    }
+
+    let refused: Vec<(JsonDbOp, &str, [Value; 2])> = cases
+        .iter()
+        .map(|&(op, id, _)| (op, id, [json!(400), json!(400)]))
+        .collect();
+    assert_eq!(codes, refused);
+    let record: Value =
+        serde_json::from_slice(&ctrl.db_get("docs", "owned-by-alice").unwrap().data).unwrap();
+    assert_eq!(record["title"], "a");
+}
+
+#[tokio::test]
+async fn unknown_projection_field_answers_like_agent_mode_on_every_path() {
+    let mut ctrl = docs_primary().await;
+    let schema = mqdb_core::schema::Schema::new("docs")
+        .add_field(mqdb_core::schema::FieldDefinition::new(
+            "userId",
+            mqdb_core::schema::FieldType::String,
+        ))
+        .add_field(mqdb_core::schema::FieldDefinition::new(
+            "title",
+            mqdb_core::schema::FieldType::String,
+        ));
+    ctrl.schema_register("docs", &serde_json::to_vec(&schema).unwrap())
+        .await
+        .unwrap();
+    let projection = serde_json::to_vec(&json!({"projection": ["nope"]})).unwrap();
+    let cases = [
+        ("never-created", "bob", 404),
+        ("never-created", "alice", 404),
+        ("never-created", "root", 404),
+        ("owned-by-alice", "bob", 403),
+        ("owned-by-alice", "alice", 400),
+        ("owned-by-alice", "root", 400),
+    ];
+
+    let mut codes = Vec::new();
+    for (id, sender, _) in cases {
+        codes.push((
+            id,
+            sender,
+            codes_for_payload(&mut ctrl, JsonDbOp::Read, id, sender, &projection).await,
+        ));
+    }
+
+    let agent_answers: Vec<(&str, &str, [Value; 2])> = cases
+        .iter()
+        .map(|&(id, sender, code)| (id, sender, [json!(code), json!(code)]))
+        .collect();
+    assert_eq!(codes, agent_answers);
+}
+
+#[cfg(feature = "http-api")]
+fn suspend_share_by_alice(ctrl: &mut NodeController<MockTransport>, request_id: u64, id: &str) {
+    let continuation = ShareResolveContinuation {
+        email_hash: "hash".to_string(),
+        entity: "docs".to_string(),
+        id: id.to_string(),
+        grantee_key: "carol-key".to_string(),
+        grantee_email: None,
+        permission: "view".to_string(),
+        cascade: false,
+        granted_by: "alice".to_string(),
+        response_topic: "resp/share".to_string(),
+        correlation_data: None,
+        invalidated: false,
+    };
+    ctrl.pending_scatter_requests.insert(
+        request_id,
+        PendingScatterRequest {
+            expected_count: 1,
+            received: Vec::new(),
+            client_response_topic: "resp/share".to_string(),
+            created_at_ms: 0,
+            filters: Vec::new(),
+            sorts: Vec::new(),
+            projection: None,
+            pagination: None,
+            entity: "_identity_links".to_string(),
+            vault_sender: None,
+            continuation: Some(continuation),
+        },
+    );
+}
+
+#[cfg(feature = "http-api")]
+fn invalidated(ctrl: &NodeController<MockTransport>, request_id: u64) -> bool {
+    ctrl.pending_scatter_requests[&request_id]
+        .continuation
+        .as_ref()
+        .is_some_and(|cont| cont.invalidated)
+}
+
+#[cfg(feature = "http-api")]
+#[tokio::test]
+async fn only_the_issuer_or_owner_cancels_a_share_whatever_the_record_state() {
+    let mut ctrl = docs_primary().await;
+    for (request_id, id) in [(1, "never-created"), (2, "owned-by-alice")] {
+        suspend_share_by_alice(&mut ctrl, request_id, id);
+    }
+
+    for id in ["never-created", "owned-by-alice"] {
+        ctrl.invalidate_share_resolutions("docs", id, "carol-key", Some("bob"));
+    }
+    let after_bob = [invalidated(&ctrl, 1), invalidated(&ctrl, 2)];
+    ctrl.invalidate_share_resolutions("docs", "never-created", "carol-key", Some("alice"));
+    ctrl.invalidate_share_resolutions("docs", "owned-by-alice", "carol-key", Some("root"));
+    let after_issuer_and_admin = [invalidated(&ctrl, 1), invalidated(&ctrl, 2)];
+
+    assert_eq!(after_bob, [false, false]);
+    assert_eq!(after_issuer_and_admin, [true, true]);
 }
