@@ -30,6 +30,7 @@ enum IncomingState {
         builder: Option<SnapshotBuilder>,
     },
     BackingOff,
+    CatchingUp,
 }
 
 #[derive(Debug)]
@@ -42,8 +43,12 @@ impl IncomingSnapshot {
     fn requested_from(&self) -> Option<NodeId> {
         match self.state {
             IncomingState::Requested { source, .. } => Some(source),
-            IncomingState::BackingOff => None,
+            IncomingState::BackingOff | IncomingState::CatchingUp => None,
         }
+    }
+
+    fn catching_up(&self) -> bool {
+        matches!(self.state, IncomingState::CatchingUp)
     }
 
     fn expired(&self, now: u64) -> bool {
@@ -52,7 +57,7 @@ impl IncomingSnapshot {
         };
         let limit = match self.state {
             IncomingState::Requested { .. } => SNAPSHOT_STALL_TIMEOUT_MS,
-            IncomingState::BackingOff => SNAPSHOT_RETRY_BACKOFF_MS,
+            IncomingState::BackingOff | IncomingState::CatchingUp => SNAPSHOT_RETRY_BACKOFF_MS,
         };
         now.saturating_sub(since) >= limit
     }
@@ -182,6 +187,12 @@ impl<T: ClusterTransport> NodeController<T> {
         for incoming in self.incoming_snapshots.values_mut() {
             incoming.since_ms.get_or_insert(now);
         }
+        let unanswered_catchups: Vec<PartitionId> = self
+            .incoming_snapshots
+            .iter()
+            .filter(|(_, incoming)| incoming.catching_up() && incoming.expired(now))
+            .map(|(partition, _)| *partition)
+            .collect();
         let replicas = &self.replicas;
         let partition_map = &self.partition_map;
         self.incoming_snapshots.retain(|partition, incoming| {
@@ -207,6 +218,10 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             true
         });
+
+        for partition in unanswered_catchups {
+            self.request_catchup(partition).await;
+        }
 
         for partition in PartitionId::all() {
             if self.role(partition) != ReplicaRole::AwaitingSnapshot
@@ -393,15 +408,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 }
 
                 if self.role(partition) == ReplicaRole::Replica {
-                    let catchup =
-                        CatchupRequest::create(partition, sequence + 1, u64::MAX, self.node_id);
-                    if let Err(error) = self
-                        .transport
-                        .send(from, ClusterMessage::CatchupRequest(catchup))
-                        .await
-                    {
-                        tracing::debug!(?partition, to = from.get(), %error, "post-snapshot catchup not requested");
-                    }
+                    self.request_catchup(partition).await;
                 }
             }
             Err(e) => {
@@ -442,7 +449,54 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
+    pub(super) async fn request_catchup(&mut self, partition: PartitionId) {
+        let primary = self.partition_map.primary(partition);
+        let Some(primary) = primary.filter(|primary| *primary != self.node_id) else {
+            self.incoming_snapshots.remove(&partition);
+            return;
+        };
+        let since_ms = self.snapshot_stamp();
+        self.incoming_snapshots.insert(
+            partition,
+            IncomingSnapshot {
+                state: IncomingState::CatchingUp,
+                since_ms,
+            },
+        );
+        let from_seq = self.sequence(partition).unwrap_or(0) + 1;
+        let request = CatchupRequest::create(partition, from_seq, u64::MAX, self.node_id);
+        if let Err(error) = self
+            .transport
+            .send(primary, ClusterMessage::CatchupRequest(request))
+            .await
+        {
+            tracing::debug!(?partition, to = primary.get(), %error, "catchup request not sent");
+        }
+    }
+
+    pub(super) async fn catchup_answered(&mut self, partition: PartitionId, answered_empty: bool) {
+        if !self
+            .incoming_snapshots
+            .get(&partition)
+            .is_some_and(IncomingSnapshot::catching_up)
+        {
+            return;
+        }
+        if answered_empty {
+            self.incoming_snapshots.remove(&partition);
+        } else {
+            self.request_catchup(partition).await;
+        }
+    }
+
     pub async fn request_snapshot(&mut self, partition: PartitionId, from: NodeId) {
+        if self
+            .incoming_snapshots
+            .get(&partition)
+            .is_some_and(IncomingSnapshot::catching_up)
+        {
+            self.incoming_snapshots.remove(&partition);
+        }
         if let Some(existing) = self.incoming_snapshots.get(&partition) {
             match existing.requested_from() {
                 Some(source) if source != from => {

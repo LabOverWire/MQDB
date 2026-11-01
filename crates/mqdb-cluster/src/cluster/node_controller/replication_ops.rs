@@ -263,7 +263,11 @@ impl<T: ClusterTransport> NodeController<T> {
             "replica has sequence gap, sending catchup"
         );
 
-        let writes = self.write_log.get_range(partition, from_seq, current_seq);
+        let writes = super::catchup::limit_catchup_bytes(self.write_log.get_range(
+            partition,
+            from_seq,
+            current_seq,
+        ));
         if writes.is_empty() {
             tracing::warn!(
                 ?partition,

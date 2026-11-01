@@ -6,8 +6,9 @@ use crate::cluster::data_partition;
 use crate::cluster::node_controller::snapshot::{
     SNAPSHOT_CHUNKS_PER_PUMP, SNAPSHOT_RETRY_BACKOFF_MS, SNAPSHOT_STALL_TIMEOUT_MS,
 };
-use crate::cluster::protocol::{Operation, ReplicationWrite};
+use crate::cluster::protocol::{CatchupResponse, Operation, ReplicationWrite};
 use crate::cluster::snapshot::{SnapshotChunk, SnapshotComplete, SnapshotRequest, SnapshotSender};
+use crate::cluster::write_log::PartitionWriteLog;
 use crate::cluster::{PartitionAssignment, PartitionMap};
 use std::sync::atomic::Ordering;
 
@@ -743,4 +744,193 @@ async fn a_write_made_during_a_transfer_reaches_the_replica_after_the_import() {
     deliver(&primary, &mut replica).await;
 
     assert_eq!(replica.sequence(partition), primary.sequence(partition));
+}
+
+fn counter_value(n: u64) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({"id": ID, "v": n})).unwrap()
+}
+
+fn counter(ctrl: &NodeController<MockTransport>) -> Option<u64> {
+    let found = ctrl.db_get(ENTITY, ID)?;
+    let json: serde_json::Value = serde_json::from_slice(&found.data).unwrap();
+    json["v"].as_u64()
+}
+
+async fn write_counter(primary: &mut NodeController<MockTransport>, n: u64) {
+    primary
+        .db_upsert(ENTITY, ID, &counter_value(n), n + 1)
+        .await
+        .unwrap();
+}
+
+async fn start_transfer(
+    primary: &mut NodeController<MockTransport>,
+    replica: &mut NodeController<MockTransport>,
+) -> Vec<SnapshotChunk> {
+    deliver(replica, primary).await;
+    let chunks = chunks_in(&primary.transport.take_sent());
+    assert!(!chunks.is_empty());
+    chunks
+}
+
+async fn finish_transfer(replica: &mut NodeController<MockTransport>, chunks: &[SnapshotChunk]) {
+    for chunk in chunks {
+        replica
+            .transport
+            .inject_message(node(1), ClusterMessage::SnapshotChunk(chunk.clone()));
+    }
+    replica.process_messages().await;
+}
+
+async fn exchange(
+    primary: &mut NodeController<MockTransport>,
+    replica: &mut NodeController<MockTransport>,
+) {
+    for _ in 0..6 {
+        deliver(replica, primary).await;
+        deliver(primary, replica).await;
+    }
+}
+
+#[tokio::test]
+async fn several_writes_and_a_delete_during_a_transfer_reach_the_replica() {
+    let (mut primary, partition) = primary_holding(1, 1024);
+    let (mut replica, _) = awaiting_replica(node(1)).await;
+    let chunks = start_transfer(&mut primary, &mut replica).await;
+    write_counter(&mut primary, 1).await;
+    write_counter(&mut primary, 2).await;
+    deliver(&primary, &mut replica).await;
+    finish_transfer(&mut replica, &chunks).await;
+    exchange(&mut primary, &mut replica).await;
+    assert_eq!(counter(&replica), Some(2));
+    assert_eq!(replica.sequence(partition), Some(2));
+
+    let (mut primary, _) = primary_holding(1, 1024);
+    let (mut replica, _) = awaiting_replica(node(1)).await;
+    let chunks = start_transfer(&mut primary, &mut replica).await;
+    primary.db_delete(ENTITY, ID).await.unwrap();
+    deliver(&primary, &mut replica).await;
+    finish_transfer(&mut replica, &chunks).await;
+    exchange(&mut primary, &mut replica).await;
+    assert!(replica.db_get(ENTITY, ID).is_none());
+}
+
+#[tokio::test]
+async fn a_log_that_no_longer_reaches_the_replica_leads_to_a_new_snapshot() {
+    let (mut primary, partition) = primary_holding(1, 1024);
+    primary.write_log = PartitionWriteLog::with_max_entries(2);
+    let (mut replica, _) = awaiting_replica(node(1)).await;
+    let chunks = start_transfer(&mut primary, &mut replica).await;
+    for n in 1..=5 {
+        write_counter(&mut primary, n).await;
+    }
+    deliver(&primary, &mut replica).await;
+    finish_transfer(&mut replica, &chunks).await;
+    exchange(&mut primary, &mut replica).await;
+
+    assert_eq!(counter(&replica), Some(5));
+    assert_eq!(replica.sequence(partition), primary.sequence(partition));
+    assert_eq!(replica.role(partition), ReplicaRole::Replica);
+}
+
+#[tokio::test]
+async fn an_epoch_bump_during_a_transfer_does_not_strand_the_replica() {
+    let (mut primary, partition) = primary_holding(1, 1024);
+    let (mut replica, _) = awaiting_replica(node(1)).await;
+    let chunks = start_transfer(&mut primary, &mut replica).await;
+    write_counter(&mut primary, 1).await;
+    deliver(&primary, &mut replica).await;
+
+    let bumped = map_for(node(1), &[node(2), node(3)], 2);
+    primary.apply_raft_partition_map(bumped.clone()).await;
+    replica.apply_raft_partition_map(bumped).await;
+    write_counter(&mut primary, 2).await;
+    deliver(&primary, &mut replica).await;
+
+    finish_transfer(&mut replica, &chunks).await;
+    exchange(&mut primary, &mut replica).await;
+    for n in 3..=6 {
+        write_counter(&mut primary, n).await;
+        exchange(&mut primary, &mut replica).await;
+    }
+
+    assert_eq!(counter(&replica), Some(6));
+    assert_eq!(replica.sequence(partition), primary.sequence(partition));
+}
+
+#[tokio::test]
+async fn a_lost_post_import_catchup_is_asked_for_again() {
+    let (mut primary, partition) = primary_holding(1, 1024);
+    let (mut replica, _) = awaiting_replica(node(1)).await;
+    replica.drive_snapshots(START).await;
+    let chunks = start_transfer(&mut primary, &mut replica).await;
+    write_counter(&mut primary, 1).await;
+    deliver(&primary, &mut replica).await;
+    replica.transport.take_sent();
+
+    replica.transport.queue_full.store(true, Ordering::SeqCst);
+    finish_transfer(&mut replica, &chunks).await;
+    replica.transport.queue_full.store(false, Ordering::SeqCst);
+    exchange(&mut primary, &mut replica).await;
+    assert_eq!(replica.sequence(partition), Some(0));
+
+    replica
+        .drive_snapshots(START + SNAPSHOT_RETRY_BACKOFF_MS)
+        .await;
+    exchange(&mut primary, &mut replica).await;
+
+    assert_eq!(replica.sequence(partition), Some(1));
+    assert_eq!(counter(&replica), Some(1));
+}
+
+#[tokio::test]
+async fn a_catchup_too_large_for_one_frame_arrives_in_pieces() {
+    let (mut primary, partition) = primary_holding(1, 1024);
+    let (mut replica, _) = awaiting_replica(node(1)).await;
+    let chunks = start_transfer(&mut primary, &mut replica).await;
+    let large = record(100 * 1024);
+    for n in 0..110 {
+        primary.db_upsert(ENTITY, ID, &large, n + 1).await.unwrap();
+    }
+    primary.transport.take_sent();
+    finish_transfer(&mut replica, &chunks).await;
+
+    let mut responses = 0;
+    for _ in 0..6 {
+        deliver(&replica, &mut primary).await;
+        for (_, message) in primary.transport.sent_messages() {
+            if let ClusterMessage::CatchupResponse(response) = message {
+                responses += 1;
+                let bytes: usize = response.writes.iter().map(|write| write.data.len()).sum();
+                assert!(bytes <= 8 * 1024 * 1024, "response of {bytes} bytes");
+            }
+        }
+        deliver(&primary, &mut replica).await;
+    }
+
+    assert!(responses >= 3);
+    assert_eq!(replica.sequence(partition), primary.sequence(partition));
+}
+
+#[tokio::test]
+async fn a_late_catchup_response_does_not_demote_a_primary() {
+    let mut ctrl = controller(2);
+    let partition = assign(&mut ctrl, node(2));
+    ctrl.become_primary(partition, Epoch::new(2));
+    let write = ReplicationWrite::new(
+        partition,
+        Operation::Insert,
+        Epoch::new(1),
+        5_000,
+        ENTITY.to_string(),
+        format!("{ENTITY}/{ID}"),
+        counter_value(1),
+    );
+    ctrl.transport.inject_message(
+        node(1),
+        ClusterMessage::CatchupResponse(CatchupResponse::create(partition, node(1), vec![write])),
+    );
+    ctrl.process_messages().await;
+
+    assert_eq!(ctrl.role(partition), ReplicaRole::Primary);
 }
