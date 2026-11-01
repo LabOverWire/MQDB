@@ -17,6 +17,13 @@ use super::{ClusterMessage, NodeId, PartitionId, PendingScatterRequest, ShareRes
 
 const MAX_CASCADE_RESOURCES: usize = 256;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResourceOwnership {
+    Missing,
+    Owner,
+    NotOwner,
+}
+
 #[derive(Clone, Copy)]
 struct GrantWrite<'a> {
     grantee_key: &'a str,
@@ -31,14 +38,27 @@ impl<T: ClusterTransport> NodeController<T> {
         self.ownership.owner_field(entity).map(str::to_string)
     }
 
-    fn is_resource_owner(&self, entity: &str, id: &str, owner_field: &str, sender: &str) -> bool {
+    fn resource_ownership(
+        &self,
+        entity: &str,
+        id: &str,
+        owner_field: &str,
+        sender: &str,
+    ) -> ResourceOwnership {
         let Some(record) = self.db_get(entity, id) else {
-            return false;
+            return ResourceOwnership::Missing;
         };
-        let Ok(data) = serde_json::from_slice::<Value>(&record.data) else {
-            return false;
-        };
-        data.get(owner_field).and_then(Value::as_str) == Some(sender)
+        let owned = serde_json::from_slice::<Value>(&record.data)
+            .is_ok_and(|data| data.get(owner_field).and_then(Value::as_str) == Some(sender));
+        if owned {
+            ResourceOwnership::Owner
+        } else {
+            ResourceOwnership::NotOwner
+        }
+    }
+
+    fn resource_not_found(entity: &str, id: &str) -> Vec<u8> {
+        Self::json_error(404, &format!("entity not found: {entity} id={id}"))
     }
 
     fn require_owner_or_admin(
@@ -54,10 +74,13 @@ impl<T: ClusterTransport> NodeController<T> {
             ));
         };
         let uid = sender?;
-        if self.ownership.is_admin(uid) || self.is_resource_owner(entity, id, &owner_field, uid) {
-            None
-        } else {
-            Some(Self::json_error(403, "permission denied"))
+        if self.ownership.is_admin(uid) {
+            return None;
+        }
+        match self.resource_ownership(entity, id, &owner_field, uid) {
+            ResourceOwnership::Owner => None,
+            ResourceOwnership::NotOwner => Some(Self::json_error(403, "permission denied")),
+            ResourceOwnership::Missing => Some(Self::resource_not_found(entity, id)),
         }
     }
 
@@ -109,8 +132,10 @@ impl<T: ClusterTransport> NodeController<T> {
         let Some(uid) = sender else {
             return Some(Self::json_error(403, "permission denied"));
         };
-        if self.is_resource_owner(entity, id, owner_field, uid) {
-            return None;
+        match self.resource_ownership(entity, id, owner_field, uid) {
+            ResourceOwnership::Owner => return None,
+            ResourceOwnership::Missing => return Some(Self::resource_not_found(entity, id)),
+            ResourceOwnership::NotOwner => {}
         }
         if self
             .cluster_share_level(entity, id, uid)
@@ -279,7 +304,7 @@ impl<T: ClusterTransport> NodeController<T> {
             return err;
         }
         if self.db_get(entity, id).is_none() {
-            return Self::json_error(404, &format!("entity not found: {entity} id={id}"));
+            return Self::resource_not_found(entity, id);
         }
         let grantee_key = payload
             .get("grantee_key")
@@ -393,18 +418,22 @@ impl<T: ClusterTransport> NodeController<T> {
         if let Some(err) = self.require_owner_or_admin(entity, id, sender) {
             return err;
         }
-        #[cfg_attr(not(feature = "http-api"), allow(unused_mut))]
-        let mut grants: Vec<Value> = self
+        let grants: Vec<Value> = self
             .shares_for_resource(entity, id)
             .into_iter()
             .map(|(_, value)| value)
             .collect();
         #[cfg(feature = "http-api")]
-        if let Some(crypto) = self.identity_crypto() {
-            for grant in &mut grants {
-                crypto.decrypt_json_fields(SHARES_ENTITY, grant, &["grantee_email"]);
-            }
-        }
+        let grants: Vec<Value> = match self.identity_crypto() {
+            Some(crypto) => grants
+                .into_iter()
+                .map(|mut grant| {
+                    crypto.decrypt_json_fields(SHARES_ENTITY, &mut grant, &["grantee_email"]);
+                    grant
+                })
+                .collect(),
+            None => grants,
+        };
         serde_json::to_vec(&json!({ "status": "ok", "data": grants })).unwrap_or_default()
     }
 }
@@ -449,7 +478,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
         let request_id = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos() as u64);
+            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
 
         let filter = mqdb_core::Filter::new(
             "email_hash".to_string(),
@@ -507,9 +536,9 @@ impl<T: ClusterTransport> NodeController<T> {
             return;
         };
         let sender_authorized = self.ownership.is_admin(uid)
-            || self
-                .share_owner_field(entity)
-                .is_some_and(|field| self.is_resource_owner(entity, id, &field, uid));
+            || self.share_owner_field(entity).is_some_and(|field| {
+                self.resource_ownership(entity, id, &field, uid) == ResourceOwnership::Owner
+            });
         for pending in self.pending_scatter_requests.values_mut() {
             if let Some(cont) = pending.continuation.as_mut()
                 && cont.entity == entity

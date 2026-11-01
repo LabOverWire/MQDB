@@ -20,21 +20,13 @@ use serde_json::Value;
 use tokio::sync::oneshot;
 
 use crate::cluster::db_handler::helpers::{
-    json_write_failure, parse_projection, validate_projection_against_schema,
+    delete_expected_version, json_write_failure, parse_projection, update_fields,
+    update_payload_error, validate_projection_against_schema,
 };
 
 const CASCADE_ACK_TIMEOUT_SECS: u64 = 5;
 
 const TTL_REAP_MAX_PER_PASS: usize = 1024;
-
-fn expected_version_from_payload(payload: &[u8]) -> Result<Option<u64>, String> {
-    if payload.is_empty() {
-        return Ok(None);
-    }
-    let mut value: Value =
-        serde_json::from_slice(payload).map_err(|e| format!("invalid JSON payload: {e}"))?;
-    mqdb_core::protocol::take_expected_version(&mut value).map_err(|e| e.to_string())
-}
 
 fn unresolved_cascade_ack() -> oneshot::Receiver<bool> {
     let (tx, rx) = oneshot::channel();
@@ -471,7 +463,7 @@ impl<T: ClusterTransport> NodeController<T> {
             return None;
         }
 
-        if let Some(err) = self.check_forwarded_ownership(request) {
+        if let Some(err) = Self::forwarded_payload_error(request) {
             self.reply_to_json_db_request(from, request, err).await;
             return None;
         }
@@ -487,6 +479,11 @@ impl<T: ClusterTransport> NodeController<T> {
                 json_write_failure(super::db::DbDataStoreError::NotPrimary),
             )
             .await;
+            return None;
+        }
+
+        if let Some(err) = self.check_forwarded_ownership(request) {
+            self.reply_to_json_db_request(from, request, err).await;
             return None;
         }
 
@@ -669,6 +666,15 @@ impl<T: ClusterTransport> NodeController<T> {
         serde_json::to_vec(&parsed).unwrap_or(payload)
     }
 
+    fn forwarded_payload_error(request: &JsonDbRequest) -> Option<Vec<u8>> {
+        let message = match request.op {
+            JsonDbOp::Update => update_payload_error(&request.payload),
+            JsonDbOp::Delete => delete_expected_version(&request.payload).err(),
+            _ => None,
+        }?;
+        Some(Self::json_error(400, &message))
+    }
+
     fn check_forwarded_ownership(&self, request: &JsonDbRequest) -> Option<Vec<u8>> {
         let OwnershipDecision::Check {
             owner_field,
@@ -686,7 +692,12 @@ impl<T: ClusterTransport> NodeController<T> {
         ) {
             return None;
         }
-        let existing = self.stores.db_get(&request.entity, id)?;
+        let Some(existing) = self.stores.db_get(&request.entity, id) else {
+            return Some(Self::json_error(
+                404,
+                &format!("entity not found: {} id={id}", request.entity),
+            ));
+        };
         let Ok(data) = serde_json::from_slice::<serde_json::Value>(&existing.data) else {
             return Some(Self::json_error(403, "permission denied"));
         };
@@ -711,16 +722,15 @@ impl<T: ClusterTransport> NodeController<T> {
     fn handle_json_read_local(&self, entity: &str, id: &str, payload: &[u8]) -> Vec<u8> {
         let projection = parse_projection(payload);
 
-        if let Some(ref fields) = projection
-            && let Some(cluster_schema) = self.stores.schema_get(entity)
-            && let Some(msg) =
-                validate_projection_against_schema(&cluster_schema.data, entity, fields)
-        {
-            return Self::json_error(400, &msg);
-        }
-
         match self.stores.db_get(entity, id) {
             Some(db_entity) => {
+                if let Some(ref fields) = projection
+                    && let Some(cluster_schema) = self.stores.schema_get(entity)
+                    && let Some(msg) =
+                        validate_projection_against_schema(&cluster_schema.data, entity, fields)
+                {
+                    return Self::json_error(400, &msg);
+                }
                 let data_json: serde_json::Value =
                     serde_json::from_slice(&db_entity.data).unwrap_or(serde_json::Value::Null);
                 let data_json = if let Some(ref fields) = projection {
@@ -742,9 +752,9 @@ impl<T: ClusterTransport> NodeController<T> {
         request: &JsonDbRequest,
         from: NodeId,
     ) -> (Vec<u8>, Option<super::PendingConstraintWork>) {
-        let mut data: Value = match serde_json::from_slice(payload) {
+        let mut data = match update_fields(payload) {
             Ok(v) => v,
-            Err(_) => return (Self::json_error(400, "invalid JSON payload"), None),
+            Err(message) => return (Self::json_error(400, &message), None),
         };
 
         let fk_expected = data
@@ -981,13 +991,17 @@ impl<T: ClusterTransport> NodeController<T> {
         request: &JsonDbRequest,
         from: NodeId,
     ) -> (Vec<u8>, Option<super::PendingConstraintWork>) {
-        let expected_version = match expected_version_from_payload(&request.payload) {
+        let expected_version = match delete_expected_version(&request.payload) {
             Ok(v) => v,
             Err(msg) => return (Self::json_error(400, &msg), None),
         };
-        if let Some(expected) = expected_version
-            && let Some(existing) = self.db_get(entity, id)
-        {
+        let Some(existing) = self.db_get(entity, id) else {
+            return (
+                Self::json_error(404, &format!("entity not found: {entity} id={id}")),
+                None,
+            );
+        };
+        if let Some(expected) = expected_version {
             let current = serde_json::from_slice::<Value>(&existing.data)
                 .ok()
                 .and_then(|d| d.get("_version").and_then(Value::as_u64))

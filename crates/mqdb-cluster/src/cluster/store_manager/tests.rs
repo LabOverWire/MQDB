@@ -75,6 +75,48 @@ fn apply_unknown_entity_fails() {
 }
 
 #[test]
+fn recovery_restores_unique_and_fk_constraints() -> Result<(), StoreApplyError> {
+    use crate::cluster::db::{ClusterConstraint, ConstraintStore, OnDeleteAction, constraint_key};
+
+    let backend: std::sync::Arc<dyn mqdb_core::StorageBackend> =
+        std::sync::Arc::new(mqdb_core::MemoryBackend::new());
+    let writer = StoreManager::new_with_storage(node(1), Some(backend.clone()));
+    let constraints = [
+        ClusterConstraint::unique("docs", "unique_docs_code", "code"),
+        ClusterConstraint::foreign_key(
+            "docs",
+            "fk_docs_ref",
+            "ref",
+            "docs",
+            "id",
+            OnDeleteAction::SetNull,
+        ),
+    ];
+    for constraint in constraints.iter().flatten() {
+        writer.apply_write(&ReplicationWrite::new(
+            PartitionId::ZERO,
+            Operation::Insert,
+            Epoch::ZERO,
+            0,
+            entity::DB_CONSTRAINT.to_string(),
+            constraint_key(constraint.entity_str(), constraint.name_str()),
+            ConstraintStore::serialize(constraint),
+        ))?;
+    }
+
+    let recovered = StoreManager::new_with_storage(node(1), Some(backend));
+    let stats = recovered.recover()?;
+
+    assert_eq!(stats.db_constraint, 2);
+    assert_eq!(
+        recovered.constraint_get_unique_fields("docs"),
+        vec!["code".to_string()]
+    );
+    assert_eq!(recovered.constraint_get_fk_constraints("docs").len(), 1);
+    Ok(())
+}
+
+#[test]
 fn recovery_rebuilds_index_without_response_topics() {
     let backend: std::sync::Arc<dyn mqdb_core::StorageBackend> =
         std::sync::Arc::new(mqdb_core::MemoryBackend::new());
