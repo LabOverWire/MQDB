@@ -424,4 +424,53 @@ async fn a_superseded_share_reports_the_same_counts_as_any_share() {
     assert_eq!(replies.len(), 1);
     assert_eq!(replies[0]["data"]["status"], "superseded");
     assert_eq!(counts(&replies[0]), (json!(0), json!(0)));
+    assert_eq!(replies[0]["data"]["cascade_truncated"], false);
+}
+
+fn chain(length: usize, last_points_at: &str) -> Vec<(String, Value)> {
+    (0..length)
+        .map(|i| {
+            let next = if i + 1 < length {
+                format!("c{}", i + 1)
+            } else {
+                last_points_at.to_string()
+            };
+            let record = json!({"userId": "alice", "title": "c", "parent_id": next});
+            (format!("c{i}"), record)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn cascade_share_reports_a_reference_dropped_at_the_bound() {
+    let mut answers = Vec::new();
+    for (length, last_points_at) in [(300, "c300"), (256, "c0"), (10, "c0")] {
+        let records = chain(length, last_points_at);
+        let records: Vec<(&str, Value)> = records
+            .iter()
+            .map(|(id, record)| (id.as_str(), record.clone()))
+            .collect();
+        let mut ctrl = primary_with(&records).await;
+        let shared = local(
+            &mut ctrl,
+            "$DB/diagrams/c0/share",
+            &carol_edit_cascade(),
+            "alice",
+        )
+        .await;
+        answers.push((
+            length,
+            shared["data"]["resources_shared"].clone(),
+            shared["data"]["cascade_truncated"].clone(),
+        ));
+    }
+
+    assert_eq!(
+        answers,
+        [
+            (300, json!(256), json!(true)),
+            (256, json!(256), json!(false)),
+            (10, json!(10), json!(false)),
+        ]
+    );
 }

@@ -33,9 +33,11 @@ struct GrantWrite<'a> {
     granted_by: &'a str,
 }
 
+#[derive(Default)]
 struct CascadeOutcome {
     granted: usize,
     skipped: usize,
+    truncated: bool,
 }
 
 impl<T: ClusterTransport> NodeController<T> {
@@ -263,10 +265,7 @@ impl<T: ClusterTransport> NodeController<T> {
         sender: Option<&str>,
     ) -> CascadeOutcome {
         let fields = self.self_ref_fields(entity);
-        let mut outcome = CascadeOutcome {
-            granted: 0,
-            skipped: 0,
-        };
+        let mut outcome = CascadeOutcome::default();
         let mut visited: HashSet<String> = HashSet::from([root_id.to_string()]);
         let mut queue: VecDeque<String> = VecDeque::from([root_id.to_string()]);
         let mut skipped_remote = 0;
@@ -284,9 +283,14 @@ impl<T: ClusterTransport> NodeController<T> {
                     .collect()
             };
             for child in children {
-                if visited.len() >= MAX_CASCADE_RESOURCES || !visited.insert(child.clone()) {
+                if visited.contains(&child) {
                     continue;
                 }
+                if visited.len() >= MAX_CASCADE_RESOURCES {
+                    outcome.truncated = true;
+                    continue;
+                }
+                visited.insert(child.clone());
                 if !self.holds_primary_role(data_partition(entity, &child)) {
                     skipped_remote += 1;
                     outcome.skipped += 1;
@@ -380,10 +384,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let outcome = if payload.get("cascade").and_then(Value::as_bool) == Some(true) {
             self.cascade_share(entity, id, grant, sender).await
         } else {
-            CascadeOutcome {
-                granted: 0,
-                skipped: 0,
-            }
+            CascadeOutcome::default()
         };
         let status = if grantee.is_none() {
             "pending"
@@ -405,6 +406,7 @@ impl<T: ClusterTransport> NodeController<T> {
             "permission": level.as_str(),
             "resources_shared": 1 + outcome.granted,
             "resources_skipped": outcome.skipped,
+            "cascade_truncated": outcome.truncated,
         });
         serde_json::to_vec(&json!({ "status": "ok", "data": data })).unwrap_or_default()
     }
@@ -598,7 +600,7 @@ impl<T: ClusterTransport> NodeController<T> {
         if cont.invalidated {
             let body = serde_json::to_vec(&json!({
                 "status": "ok",
-                "data": { "status": "superseded", "resources_shared": 0, "resources_skipped": 0 }
+                "data": { "status": "superseded", "resources_shared": 0, "resources_skipped": 0, "cascade_truncated": false }
             }))
             .unwrap_or_default();
             self.transport

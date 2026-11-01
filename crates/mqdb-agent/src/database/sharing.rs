@@ -38,6 +38,7 @@ struct ShareableClosure {
     members: Vec<String>,
     missing: Vec<String>,
     skipped: usize,
+    truncated: bool,
 }
 
 enum MemberAccess {
@@ -237,9 +238,14 @@ impl Database {
                 let Some(ref_id) = record.data.get(field).and_then(Value::as_str) else {
                     continue;
                 };
-                if visited.len() >= MAX_CASCADE_DIAGRAMS || !visited.insert(ref_id.to_string()) {
+                if visited.contains(ref_id) {
                     continue;
                 }
+                if visited.len() >= MAX_CASCADE_DIAGRAMS {
+                    closure.truncated = true;
+                    continue;
+                }
+                visited.insert(ref_id.to_string());
                 match self.member_access(entity, ref_id, owner_field, actor)? {
                     MemberAccess::Shareable => {
                         closure.members.push(ref_id.to_string());
@@ -302,6 +308,7 @@ impl Database {
             "permission": level.as_str(),
             "resources_shared": 1 + closure.members.len(),
             "resources_skipped": closure.skipped,
+            "cascade_truncated": closure.truncated,
         }))
     }
 

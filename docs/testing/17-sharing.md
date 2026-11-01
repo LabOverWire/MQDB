@@ -46,6 +46,7 @@ mqdb share docs d1 carol                                           # bob: 403, o
 ```json
 {
   "data": {
+    "cascade_truncated": false,
     "grantee": "bob",
     "permission": "view",
     "resources_shared": 1,
@@ -144,7 +145,7 @@ mqdb read docs "$D2" --broker 127.0.0.1:1884          # dave: 403
 mqdb share docs "$D3" dave --broker 127.0.0.1:1883    # alice: resources_shared 2 (the CLI sends cascade: true)
 mqdb read docs "$D2" --broker 127.0.0.1:1884          # dave: ok
 ```
-**Expected:** the raw share prints `{"data":{"grantee":"dave","permission":"view","resources_shared":1,"resources_skipped":0,"status":"shared"},"status":"ok"}`. In agent mode the same raw share reports `"resources_shared":2`.
+**Expected:** the raw share prints `{"data":{"cascade_truncated":false,"grantee":"dave","permission":"view","resources_shared":1,"resources_skipped":0,"status":"shared"},"status":"ok"}`. In agent mode the same raw share reports `"resources_shared":2`.
 
 ## Verification Checklist
 

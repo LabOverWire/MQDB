@@ -230,12 +230,13 @@ Diagram→diagram references are the registered relationships / FKs where
 
 ```
 const MAX_CASCADE_DIAGRAMS = 256;
-visited = {root}; queue = [root]; members = []; skipped = 0
+visited = {root}; queue = [root]; members = []; skipped = 0; truncated = false
 while queue:
     id = pop(queue)
     for f in self_reference_fields(entity):
         r = record(entity,id)[f]
-        if not r or r in visited or |visited| >= MAX_CASCADE_DIAGRAMS: continue
+        if not r or r in visited: continue
+        if |visited| >= MAX_CASCADE_DIAGRAMS: truncated = true; continue
         visited.add(r)
         if may_share(sender, r): members.push(r); push(queue, r)
         else: skipped += 1
@@ -246,7 +247,8 @@ upsert a grant on root and on every id in members (cascade = max-of-levels)
 referenced record the sender may not share is skipped (counted in
 `resources_skipped`) and not followed, so a cascade never grants on, or walks
 through, another user's diagram, and never leaves a grant on a dangling
-reference. `MAX_CASCADE_DIAGRAMS` bounds work; `visited` is the cycle guard.
+reference. `MAX_CASCADE_DIAGRAMS` bounds work and a dropped reference is reported
+as `cascade_truncated`; `visited` is the cycle guard.
 `unshare --cascade` removes grants across the same closure, and on any reference
 whose record no longer exists, so a stale grant is not inherited by a later record
 with that id.
