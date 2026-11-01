@@ -883,3 +883,37 @@ fn profile_kills_an_agent_that_outlives_the_profiler_and_ignores_sigint() {
     assert_eq!(shim.calls(), "");
     drop(agent_block);
 }
+
+#[test]
+fn profile_gives_a_slow_agent_time_to_exit_after_the_profiler_exits() {
+    let shim = Shimmed::new();
+    let recorded = RecordedAgent::in_shim(&shim);
+    let (agent, agent_block) = agent_start_line(&shim, &recorded.db);
+    let slow_exit = format!(
+        "{}\npid=\"$(cat '{}')\"\nkill -STOP \"$pid\"\n(sleep 3; kill -CONT \"$pid\") </dev/null >/dev/null 2>&1 &\nexit 0",
+        bench_waiting_for_agent(&agent_block, 0).trim_end_matches("exit 0"),
+        recorded.pid_file.display()
+    );
+    let (output, _) = profile_with_shims(
+        &shim,
+        &format!(
+            "{agent} &\necho $! > '{}'\nexit 0",
+            recorded.pid_file.display()
+        ),
+        &slow_exit,
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let pid = recorded.pid().expect("the shim started an agent");
+    assert!(
+        !alive(&pid),
+        "the agent (pid {pid}) is still running: {stdout}{stderr}"
+    );
+    assert!(output.status.success(), "{stdout}{stderr}");
+    assert!(
+        !stdout.contains("Warning: killed the agent"),
+        "dev profile killed a slow agent instead of waiting for it: {stdout}"
+    );
+    assert_eq!(shim.calls(), "");
+    drop(agent_block);
+}
