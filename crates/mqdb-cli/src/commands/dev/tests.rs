@@ -853,6 +853,9 @@ impl Drop for SuiteCluster {
 }
 
 fn create_suite_passwd(exe: &Path, passwd: &str, users: &[&str]) -> Result<(), String> {
+    if let Some(parent) = Path::new(passwd).parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
     for user in users {
         let output = Command::new(exe)
             .args(["passwd", user, "-b", user, "-f", passwd])

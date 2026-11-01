@@ -917,3 +917,29 @@ fn profile_gives_a_slow_agent_time_to_exit_after_the_profiler_exits() {
     assert_eq!(shim.calls(), "");
     drop(agent_block);
 }
+
+#[test]
+fn a_suite_creates_the_missing_parent_of_its_db_prefix() {
+    let shim = Shimmed::new();
+    let block = free_port_block();
+    let base_port = block.port.to_string();
+    let prefix = shim.path().join("missing").join("t");
+    let prefix_arg = prefix.to_str().expect("utf-8 path");
+    let output = shim.run(&[
+        "dev",
+        "test",
+        "--ownership",
+        "--nodes",
+        "1",
+        "--base-port",
+        &base_port,
+        "--db-prefix",
+        prefix_arg,
+    ]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!("Starting node 1 on port {base_port}")),
+        "{stdout}"
+    );
+    assert_eq!(shim.calls(), "");
+}

@@ -430,12 +430,14 @@ Run through this checklist to verify topic protection:
 
 ## 22. Ownership Enforcement Testing
 
-Ownership enforcement restricts list, update, and delete operations based on the authenticated
+Ownership enforcement restricts list, read, update, and delete operations based on the authenticated
 user's identity. When `--ownership entity=field` is configured, the broker:
 
 - **List:** Injects a mandatory filter `field = sender` so users only see their own records
-- **Update/Delete:** Checks that `record.data.field == sender` before allowing the operation
-- **Create/Read:** Not restricted (IDs are UUIDs, not guessable)
+- **Read:** Allowed when `record.data.field == sender` or with a `view` or `edit` share grant; otherwise 403
+- **Update:** Allowed when `record.data.field == sender` or with an `edit` share grant; otherwise 403
+- **Delete:** Allowed only when `record.data.field == sender`; otherwise 403
+- **Create:** Not restricted
 - **No sender (internal):** Bypasses all ownership checks (for replication, outbox, etc.)
 
 ### Prerequisites
