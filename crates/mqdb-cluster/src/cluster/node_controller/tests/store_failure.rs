@@ -726,11 +726,56 @@ async fn a_create_the_primary_cannot_store_releases_its_unique_reservation() {
         &json!({"id": "u2", "email": "a@x"}),
     )
     .await;
+    let duplicate = publish_completing_unique(
+        &mut ctrl,
+        "$DB/users/create",
+        &json!({"id": "u3", "email": "a@x"}),
+    )
+    .await;
 
     assert_eq!(
-        (&refused["code"], &second["status"]),
-        (&json!(500), &json!("ok"))
+        (&refused["code"], &second["status"], &duplicate["code"]),
+        (&json!(500), &json!("ok"), &json!(409))
     );
+}
+
+#[tokio::test]
+async fn a_forwarded_create_the_primary_cannot_store_releases_its_unique_reservation() {
+    use crate::cluster::protocol::JsonDbOp;
+    let backend = FaultyBackend::shared();
+    let mut ctrl = controller_where(Some(&backend), |_| node(1), &[]);
+    ctrl.seed_unique_voters(std::iter::once(node(1)).collect());
+    ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
+        .await
+        .unwrap();
+    backend.fail_writes_to_keys_containing("users/u1");
+
+    for id in ["u1", "u2", "u3"] {
+        let partition = crate::cluster::db::data_partition("users", id);
+        let request = forwarded(
+            JsonDbOp::Create,
+            "users",
+            None,
+            &json!({"id": id, "email": "a@x"}),
+        );
+        if let Some(PendingConstraintWork::Unique(pending)) = ctrl
+            .handle_json_db_request(node(2), partition, &request)
+            .await
+        {
+            ctrl.complete_pending_unique_work(
+                pending.phase1.local_reserved,
+                Ok(Vec::new()),
+                pending.continuation,
+            )
+            .await;
+        }
+    }
+
+    let codes: Vec<Value> = forwarded_replies(&ctrl)
+        .iter()
+        .map(|reply| reply["code"].clone())
+        .collect();
+    assert_eq!(codes, vec![json!(500), json!(null), json!(409)]);
 }
 
 fn remote_unique_controller(
@@ -858,6 +903,33 @@ async fn a_stored_create_commits_its_remote_unique_claim_once() {
         &mut ctrl,
         "$DB/users/create",
         &json!({"id": "u1", "email": "a@x"}),
+        value,
+    )
+    .await;
+
+    assert_eq!((&reply["status"], commits, releases), (&json!("ok"), 1, 0));
+}
+
+#[tokio::test]
+async fn a_stored_update_commits_its_remote_unique_claim_once() {
+    let backend = FaultyBackend::shared();
+    let value = serde_json::to_vec(&json!("a@x")).unwrap();
+    let mut ctrl = remote_unique_controller(&backend, &value);
+    let created = request(
+        &mut ctrl,
+        "$DB/users/create",
+        &json!({"id": "u1", "email": "old@x"}),
+    )
+    .await;
+    assert_eq!(created["status"], "ok");
+    ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
+        .await
+        .unwrap();
+
+    let (reply, commits, releases) = write_with_remote_unique(
+        &mut ctrl,
+        "$DB/users/u1/update",
+        &json!({"email": "a@x"}),
         value,
     )
     .await;

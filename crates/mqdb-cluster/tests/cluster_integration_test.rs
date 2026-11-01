@@ -2284,7 +2284,6 @@ async fn raft_command_application_updates_partition_map() {
     let n2 = cluster.nodes[1].id;
     let n3 = cluster.nodes[2].id;
 
-    let leader = cluster.nodes[0].id;
     cluster.nodes[0].raft.tick(0);
     let outputs = cluster.nodes[0].raft.tick(1000);
     assert_eq!(cluster.nodes[0].raft.role(), RaftRole::Candidate);
@@ -2292,7 +2291,7 @@ async fn raft_command_application_updates_partition_map() {
         if let RaftOutput::SendRequestVote { to, request } = output
             && let Some(follower) = cluster.nodes.iter_mut().find(|n| n.id == to)
         {
-            let (resp, _) = follower.raft.handle_request_vote(leader, request, 1000);
+            let (resp, _) = follower.raft.handle_request_vote(n1, request, 1000);
             cluster.nodes[0].raft.handle_request_vote_response(to, resp);
         }
     }
@@ -2917,8 +2916,6 @@ async fn schema_update_increments_version() {
 #[tokio::test]
 async fn index_add_and_lookup() {
     let mut cluster = TestCluster::new(3);
-    let n2 = cluster.nodes[1].id;
-    let n3 = cluster.nodes[2].id;
 
     for i in 0..NUM_PARTITIONS {
         let partition = PartitionId::new(i).unwrap();
@@ -2961,16 +2958,7 @@ async fn index_add_and_lookup() {
     assert_eq!(entry.value, value.to_vec());
     assert_eq!(entry.record_id_str(), record_id);
 
-    cluster.nodes[0]
-        .controller
-        .replicate_write(write, &[n2, n3], 2)
-        .await
-        .expect("replication should succeed");
-
-    cluster.advance_ms(10);
-    for node in &mut cluster.nodes {
-        node.controller.process_messages().await;
-    }
+    cluster.replicate_from_first(write).await;
 
     let results = cluster.nodes[0]
         .controller
@@ -3121,15 +3109,7 @@ async fn unique_constraint_reserve_commit_release() {
         .expect("commit should succeed");
     assert!(committed.is_committed());
 
-    cluster.nodes[0]
-        .controller
-        .replicate_write(commit_write, &[n2, n3], 2)
-        .await
-        .unwrap();
-    cluster.advance_ms(10);
-    for node in &mut cluster.nodes {
-        node.controller.process_messages().await;
-    }
+    cluster.replicate_from_first(commit_write).await;
 
     let post_commit_params = UniqueReserveParams {
         entity,
@@ -3890,7 +3870,7 @@ async fn no_oversell_when_new_primary_missed_a_reservation() {
 
 #[tokio::test]
 async fn unique_seal_fences_superseded_primary_reserve() {
-    use mqdb_cluster::cluster::db::{ReserveResult, UniqueReserveParams};
+    use mqdb_cluster::cluster::db::ReserveResult;
     use mqdb_cluster::cluster::{ClusterMessage, InboundMessage, UniqueSealRequest};
 
     let mut cluster = TestCluster::new(3);
@@ -3917,15 +3897,7 @@ async fn unique_seal_fences_superseded_primary_reserve() {
         cluster.nodes[i].controller.process_messages().await;
     }
 
-    let params = UniqueReserveParams {
-        entity: "products",
-        field: "sku",
-        value,
-        record_id: "old",
-        request_id: "req-old",
-        data_partition: PartitionId::new(5).unwrap(),
-        ttl_ms: 30_000,
-    };
+    let params = sku_reservation(value, "old", "req-old");
     let (result, write) = cluster.nodes[0]
         .controller
         .stores()
@@ -4233,22 +4205,14 @@ async fn unique_write_replicates_to_quorum_group() {
 
 #[tokio::test]
 async fn unique_replicate_fences_stale_epoch() {
-    use mqdb_cluster::cluster::db::{ReserveResult, UniqueReserveParams};
+    use mqdb_cluster::cluster::db::ReserveResult;
     use mqdb_cluster::cluster::{ClusterMessage, InboundMessage};
 
     let mut cluster = TestCluster::new(3);
     cluster.setup_all_primaries().await;
 
     let value = b"widget".as_slice();
-    let params = UniqueReserveParams {
-        entity: "products",
-        field: "sku",
-        value,
-        record_id: "p1",
-        request_id: "req-1",
-        data_partition: PartitionId::new(5).unwrap(),
-        ttl_ms: 30_000,
-    };
+    let params = sku_reservation(value, "p1", "req-1");
     let (result, insert_write) = cluster.nodes[0]
         .controller
         .stores()

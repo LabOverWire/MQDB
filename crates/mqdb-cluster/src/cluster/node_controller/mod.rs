@@ -44,7 +44,6 @@ use super::transport::{
 };
 use super::write_log::PartitionWriteLog;
 use super::{Epoch, NodeId, PartitionId, PartitionMap};
-use crate::cluster::db_handler::helpers::json_write_failure;
 use db_ops::EventOrigin;
 use mqdb_core::storage::StorageBackend;
 use mqdb_core::types::{MAX_LIST_RESULTS, OwnershipConfig, ScopeConfig};
@@ -1613,12 +1612,9 @@ impl<T: ClusterTransport> NodeController<T> {
                                     &confirmed_remotes,
                                 )
                                 .await;
-                                match error {
-                                    super::db::DbDataStoreError::AlreadyExists => {
-                                        Self::json_error(409, "entity already exists")
-                                    }
-                                    error => json_write_failure(error),
-                                }
+                                crate::cluster::db_handler::helpers::json_record_write_failure(
+                                    &entity, &id, error,
+                                )
                             }
                         }
                     }
@@ -1698,13 +1694,9 @@ impl<T: ClusterTransport> NodeController<T> {
                                     &confirmed_remotes,
                                 )
                                 .await;
-                                match error {
-                                    super::db::DbDataStoreError::NotFound => Self::json_error(
-                                        404,
-                                        &format!("entity not found: {entity} id={id}"),
-                                    ),
-                                    error => json_write_failure(error),
-                                }
+                                crate::cluster::db_handler::helpers::json_record_write_failure(
+                                    &entity, &id, error,
+                                )
                             }
                         }
                     }

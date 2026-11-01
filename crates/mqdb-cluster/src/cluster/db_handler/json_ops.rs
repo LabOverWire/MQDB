@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::super::PartitionId;
-use super::super::db::{self, data_partition};
+use super::super::db::data_partition;
 use super::super::db_topic::DbTopicOperation;
 #[cfg(feature = "http-api")]
 use super::super::node_controller::ShareResolveContinuation;
@@ -601,7 +601,7 @@ impl DbRequestHandler {
             response_topic,
             correlation_data,
         };
-        self.execute_local_create(controller, &ctx, &data, vault_crypto.as_ref())
+        self.execute_local_create(controller, &ctx, data, vault_crypto.as_ref())
             .await
     }
 
@@ -642,7 +642,7 @@ impl DbRequestHandler {
         &self,
         controller: &mut NodeController<T>,
         ctx: &JsonOpContext<'_>,
-        data: &Value,
+        mut data: Value,
         vault_crypto: Option<&mqdb_vault::VaultCrypto>,
     ) -> JsonOpResult {
         let entity = ctx.entity;
@@ -653,7 +653,6 @@ impl DbRequestHandler {
         let response_topic = ctx.response_topic;
         let correlation_data = ctx.correlation_data;
 
-        let mut data = data.clone();
         if let Some(obj) = data.as_object_mut() {
             obj.remove("__mqdb_fk_expected");
         }
@@ -737,7 +736,7 @@ impl DbRequestHandler {
             }));
         }
 
-        self.complete_create(
+        Self::complete_create(
             controller,
             ctx,
             &data,
@@ -749,7 +748,6 @@ impl DbRequestHandler {
     }
 
     async fn complete_create<T: ClusterTransport>(
-        &self,
         controller: &mut NodeController<T>,
         ctx: &JsonOpContext<'_>,
         data: &Value,
@@ -801,12 +799,7 @@ impl DbRequestHandler {
                             now_ms,
                         )
                         .await;
-                    match error {
-                        db::DbDataStoreError::AlreadyExists => {
-                            Self::json_error(409, "entity already exists")
-                        }
-                        error => helpers::json_write_failure(error),
-                    }
+                    helpers::json_record_write_failure(entity, id, error)
                 }
             },
         )
@@ -1023,7 +1016,7 @@ impl DbRequestHandler {
             }));
         }
 
-        self.reserve_unique_then_update(
+        Self::reserve_unique_then_update(
             controller,
             ctx,
             merged_data,
@@ -1035,7 +1028,6 @@ impl DbRequestHandler {
     }
 
     async fn reserve_unique_then_update<T: ClusterTransport>(
-        &self,
         controller: &mut NodeController<T>,
         ctx: &JsonOpContext<'_>,
         merged_data: Value,
@@ -1100,7 +1092,7 @@ impl DbRequestHandler {
             new_diff: &new_diff,
             old_diff: &old_diff,
         };
-        self.complete_update(
+        Self::complete_update(
             controller,
             ctx,
             &merged_data,
@@ -1112,7 +1104,6 @@ impl DbRequestHandler {
     }
 
     async fn complete_update<T: ClusterTransport>(
-        &self,
         controller: &mut NodeController<T>,
         ctx: &JsonOpContext<'_>,
         merged_data: &Value,
@@ -1164,12 +1155,7 @@ impl DbRequestHandler {
                             )
                             .await;
                     }
-                    match error {
-                        db::DbDataStoreError::NotFound => {
-                            Self::json_error(404, &format!("entity not found: {entity} id={id}"))
-                        }
-                        error => helpers::json_write_failure(error),
-                    }
+                    helpers::json_record_write_failure(entity, id, error)
                 }
             },
         )
@@ -1285,11 +1271,10 @@ impl DbRequestHandler {
             response_topic,
             correlation_data,
         };
-        JsonOpResult::Response(self.execute_delete(controller, &ctx, &plan).await)
+        JsonOpResult::Response(Self::execute_delete(controller, &ctx, &plan).await)
     }
 
     async fn execute_delete<T: ClusterTransport>(
-        &self,
         controller: &mut NodeController<T>,
         ctx: &JsonOpContext<'_>,
         plan: &FkDeletePlan,
@@ -1310,10 +1295,7 @@ impl DbRequestHandler {
                 });
                 serde_json::to_vec(&result).unwrap_or_default()
             }
-            Err(db::DbDataStoreError::NotFound) => {
-                Self::json_error(404, &format!("entity not found: {entity} id={id}"))
-            }
-            Err(error) => helpers::json_write_failure(error),
+            Err(error) => helpers::json_record_write_failure(entity, id, error),
         }
     }
 
@@ -1582,12 +1564,7 @@ impl DbRequestHandler {
                                         &confirmed_remotes,
                                     )
                                     .await;
-                                match error {
-                                    db::DbDataStoreError::AlreadyExists => {
-                                        Self::json_error(409, "entity already exists")
-                                    }
-                                    error => helpers::json_write_failure(error),
-                                }
+                                helpers::json_record_write_failure(&entity, &id, error)
                             }
                         }
                     }
@@ -1671,13 +1648,7 @@ impl DbRequestHandler {
                                         &confirmed_remotes,
                                     )
                                     .await;
-                                match error {
-                                    db::DbDataStoreError::NotFound => Self::json_error(
-                                        404,
-                                        &format!("entity not found: {entity} id={id}"),
-                                    ),
-                                    error => helpers::json_write_failure(error),
-                                }
+                                helpers::json_record_write_failure(&entity, &id, error)
                             }
                         }
                     }
@@ -1759,7 +1730,7 @@ impl DbRequestHandler {
                     response_topic: &response_topic,
                     correlation_data: correlation_data.as_deref(),
                 };
-                let payload = self.execute_delete(controller, &ctx, &plan).await;
+                let payload = Self::execute_delete(controller, &ctx, &plan).await;
                 Some(super::DbPublishResponse {
                     topic: response_topic,
                     payload,
@@ -1870,16 +1841,15 @@ impl DbRequestHandler {
                     response_topic: &response_topic,
                     correlation_data: correlation_data.as_deref(),
                 };
-                let result = self
-                    .reserve_unique_then_update(
-                        controller,
-                        &ctx,
-                        merged_data,
-                        new_diff,
-                        old_diff,
-                        request_id,
-                    )
-                    .await;
+                let result = Self::reserve_unique_then_update(
+                    controller,
+                    &ctx,
+                    merged_data,
+                    new_diff,
+                    old_diff,
+                    request_id,
+                )
+                .await;
                 match result {
                     JsonOpResult::Response(payload) => {
                         let payload = self.vault_decrypt_response_payload(

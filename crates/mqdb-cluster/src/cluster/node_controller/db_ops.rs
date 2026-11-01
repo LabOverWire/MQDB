@@ -303,13 +303,13 @@ impl<T: ClusterTransport> NodeController<T> {
     pub(crate) async fn commit_delete_with_change_event(
         &mut self,
         write: ReplicationWrite,
-        event: ChangeEvent,
+        event: &ChangeEvent,
         data: &Value,
         cascade: Option<&CascadeOutboxPayload>,
     ) -> Result<(), super::db::DbDataStoreError> {
         match cascade {
-            Some(cascade) => self.db_commit_with_cascade(write, &event, cascade).await?,
-            None => self.db_commit(write, &event).await?,
+            Some(cascade) => self.db_commit_with_cascade(write, event, cascade).await?,
+            None => self.db_commit(write, event).await?,
         }
         self.release_unique_for_deleted_record(&event.entity, &event.id, data)
             .await;
@@ -1015,12 +1015,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     )
                     .await;
                 }
-                match error {
-                    super::db::DbDataStoreError::NotFound => {
-                        Self::json_error(404, &format!("entity not found: {entity} id={id}"))
-                    }
-                    error => json_write_failure(error),
-                }
+                crate::cluster::db_handler::helpers::json_record_write_failure(entity, id, error)
             }
         };
 
@@ -1143,7 +1138,7 @@ impl<T: ClusterTransport> NodeController<T> {
             ChangeEvent::delete(entity.to_string(), id.to_string(), data.clone()),
             origin,
         );
-        self.commit_delete_with_change_event(write, event, &data, plan.cascade())
+        self.commit_delete_with_change_event(write, &event, &data, plan.cascade())
             .await?;
         let ack_receivers = self.run_fk_delete_plan(plan, origin).await;
         if self.ownership.owner_field(entity).is_some()
@@ -1380,7 +1375,7 @@ impl<T: ClusterTransport> NodeController<T> {
             origin,
         );
         if let Err(e) = self
-            .commit_delete_with_change_event(write, event, &data, None)
+            .commit_delete_with_change_event(write, &event, &data, None)
             .await
         {
             tracing::warn!(%entity, %id, %e, "cascade delete not committed");
@@ -1717,7 +1712,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     ChangeEvent::delete(entity.to_string(), id.to_string(), data.clone()),
                     origin,
                 );
-                self.commit_delete_with_change_event(write, event, &data, None)
+                self.commit_delete_with_change_event(write, &event, &data, None)
                     .await
                     .is_ok()
             }
@@ -1911,12 +1906,7 @@ impl<T: ClusterTransport> NodeController<T> {
             Err(error) => {
                 self.release_all_reservations(entity, &request_id, &local_reserved)
                     .await;
-                match error {
-                    super::db::DbDataStoreError::AlreadyExists => {
-                        Self::json_error(409, "entity already exists")
-                    }
-                    error => json_write_failure(error),
-                }
+                crate::cluster::db_handler::helpers::json_record_write_failure(entity, &id, error)
             }
         };
 

@@ -223,7 +223,7 @@ impl<T: ClusterTransport> NodeController<T> {
             t_writelog,
             t_send,
             replica_count = replicas.len(),
-            "replicate_write_async_timing"
+            "replicate_primary_write_timing"
         );
 
         if let Some(event) = change_event {
