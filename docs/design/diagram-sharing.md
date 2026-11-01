@@ -36,7 +36,7 @@ example.
 - Owner shares a diagram **publicly** (anyone with the link, including not-logged-in
   users) at view (optionally edit).
 - Sharing follows references: sharing diagram A shares the diagrams A references
-  (transitive closure) at the same level.
+  that the sharer may share (transitive closure) at the same level.
 - The grant holds **everywhere**: CRUD on the diagram, CRUD on its child entities,
   and the live event stream. View-only genuinely prevents edits and genuinely
   prevents seeing data you weren't granted.
@@ -224,9 +224,9 @@ open editors refresh), delivered via the recipient-scoped routing below. The
 
 ### Transitive sharing
 
-Diagram→diagram references are the registered relationships / FKs where
-`source_entity == target_entity == "diagrams"` (`mqdb-core/src/relationship.rs`,
-`constraint.rs`). The handler walks them with a bounded, cycle-safe BFS:
+Diagram→diagram references are the registered relationships / FKs (FKs only in a
+cluster) where `source_entity == target_entity == "diagrams"`
+(`mqdb-core/src/relationship.rs`, `constraint.rs`). The handler walks them with a bounded, cycle-safe BFS:
 
 ```
 const MAX_CASCADE_DIAGRAMS = 256;
@@ -243,13 +243,13 @@ while queue:
 upsert a grant on root and on every id in members (cascade = max-of-levels)
 ```
 
-`may_share` holds when `r` exists and the sender owns it or is an admin. A
+`may_share` holds when `r` exists and the sender owns it, is an admin, or is absent. A
 referenced record the sender may not share is skipped (counted in
 `resources_skipped`) and not followed, so a cascade never grants on, or walks
 through, another user's diagram, and never leaves a grant on a dangling
 reference. `MAX_CASCADE_DIAGRAMS` bounds work and a dropped reference is reported
 as `cascade_truncated`; `visited` is the cycle guard.
-`unshare --cascade` removes grants across the same closure, and on any reference
+A cascading `unshare` removes grants across the same closure, and on any reference
 whose record no longer exists, so a stale grant is not inherited by a later record
 with that id.
 
@@ -259,8 +259,8 @@ with that id.
 
 A public grant is a `_shares` row with `grantee = "_public"` and a level (default
 `view`). `can_see`/`can_edit` treat a `_public` grant as matching *any* reader
-(including `_anonymous`). Cascade applies, so a public diagram's referenced
-diagrams become public too. Revoke = remove the `_public` grant.
+(including `_anonymous`). Cascade applies, so the referenced diagrams the sharer
+may share become public too. Revoke = remove the `_public` grant.
 
 The diagram UUID *is* the link (UUIDs are unguessable); "public" simply lifts the
 auth requirement for that resource. Public **edit** is supported as an explicit
@@ -467,7 +467,7 @@ including the cross-node event-routing case.
 
 ## Formal verification (TLA+)
 
-The authorization core was model-checked with the `specs/` TLA+ toolchain. Three
+The authorization core was model-checked with the `specs/` TLA+ toolchain. Four
 specs, all exhaustively checked (no `limit_reached`):
 
 | Spec | What it checks | Result |

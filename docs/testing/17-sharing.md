@@ -152,7 +152,7 @@ mqdb read docs "$D2" --broker 127.0.0.1:1884          # dave: ok
 - [ ] View grant allows read, denies update; edit grant allows update; delete stays owner-only
 - [ ] Only the owner or an admin can share or list `shares`; `shared` returns the granted records
 - [ ] Cascade grants the referenced record; `--no-cascade` grants only the named record
-- [ ] Cascade skips a referenced record the sharer does not own (`resources_skipped`), unless the sharer is an admin; a cascading unshare leaves its grants alone
+- [ ] Cascade skips a referenced record the sharer does not own (`resources_skipped`), unless the sharer is an admin; a non-admin's cascading unshare leaves its grants alone
 - [ ] Unshare revokes access (agent: across the cascade too)
 - [ ] A direct delete clears the record's grants
 - [ ] Cluster: the same results across nodes, with the differences shown in section 52 (the full list of cluster gaps is in the [repository README](../../README.md#sharing-operations))
