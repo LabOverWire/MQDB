@@ -430,12 +430,14 @@ Run through this checklist to verify topic protection:
 
 ## 22. Ownership Enforcement Testing
 
-Ownership enforcement restricts list, update, and delete operations based on the authenticated
+Ownership enforcement restricts list, read, update, and delete operations based on the authenticated
 user's identity. When `--ownership entity=field` is configured, the broker:
 
 - **List:** Injects a mandatory filter `field = sender` so users only see their own records
-- **Update/Delete:** Checks that `record.data.field == sender` before allowing the operation
-- **Create/Read:** Not restricted (IDs are UUIDs, not guessable)
+- **Read:** Allowed when `record.data.field == sender` or with a `view` or `edit` share grant; otherwise 403
+- **Update:** Allowed when `record.data.field == sender` or with an `edit` share grant; otherwise 403
+- **Delete:** Allowed only when `record.data.field == sender`; otherwise 403
+- **Create:** Not restricted
 - **No sender (internal):** Bypasses all ownership checks (for replication, outbox, etc.)
 
 ### Prerequisites
@@ -449,16 +451,16 @@ when authentication succeeds.
 The `mqdb dev test --ownership` command is fully self-contained:
 
 ```bash
-mqdb dev test --ownership --nodes 3
+mqdb dev test --ownership --nodes 3 --license /path/to/license.key
 ```
 
 This command:
-1. Creates a temporary password file with users `alice`, `bob`, and `admin`
-2. Kills any running cluster
-3. Starts a fresh 3-node cluster with `--passwd`, `--admin-users admin`, and `--ownership test_owned=userId`
+1. Refuses to start if the `--base-port` block (default 1883) or its cluster transport ports are in use
+2. Creates a password file with users `alice`, `bob`, and `admin` at `<db-prefix>-own-<base-port>-passwd`
+3. Starts a fresh 3-node cluster under `<db-prefix>-own-<base-port>` with `--passwd`, `--admin-users admin`, and `--ownership test_owned_<ts>=userId`
 4. Waits for the authenticated cluster to become ready
-5. Runs 7 test cases (see below)
-6. Kills the cluster and cleans up
+5. Runs the test cases (see below)
+6. Stops only the nodes it started and removes the password file; exits non-zero if any check failed
 
 ### Test Cases
 
@@ -469,8 +471,10 @@ This command:
 | 3 | List as bob | Sees 0 records (filtered out) |
 | 4 | Update alice's record as bob | Forbidden error |
 | 5 | Delete alice's record as bob | Forbidden error |
-| 6 | Update alice's record as alice | Success (owner) |
-| 7 | Delete alice's record as alice | Success (owner) |
+| 6 | List as admin | Sees 1 record (admin sees all) |
+| 7 | Update alice's record as admin | Success (admin bypass) |
+| 8 | Update alice's record as alice | Success (owner) |
+| 9 | Delete alice's record as alice | Success (owner) |
 
 ### Manual Testing
 

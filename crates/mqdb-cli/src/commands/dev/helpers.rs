@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, ExitStatus};
 use std::time::{Duration, Instant};
 
 pub(crate) const NODE_PID_FILE: &str = "mqdb.pid";
@@ -81,6 +81,58 @@ fn db_argument(command: &str) -> Option<&str> {
     flag_argument(command, "--db")
 }
 
+fn flag_values<'a>(command: &'a str, flag: &str) -> Option<Vec<&'a str>> {
+    let (_, rest) = command
+        .split_once(&format!(" {flag}="))
+        .or_else(|| command.split_once(&format!(" {flag} ")))?;
+    let mut values: Vec<&str> = rest
+        .match_indices(" --")
+        .map(|(cut, _)| rest[..cut].trim())
+        .collect();
+    values.push(rest.trim());
+    Some(values)
+}
+
+fn locate_flag(pid: u32, command: &str, flag: &str) -> Option<PathLocation> {
+    let values = flag_values(command, flag)?;
+    let cwd = if values.iter().any(|value| Path::new(value).is_relative()) {
+        process_cwd(pid)
+    } else {
+        None
+    };
+    let located: Vec<PathLocation> = values
+        .iter()
+        .map(|value| locate_in(pid, cwd.as_deref(), value))
+        .collect();
+    if located
+        .iter()
+        .any(|location| matches!(location, PathLocation::Unresolved))
+    {
+        return Some(PathLocation::Unresolved);
+    }
+    Some(
+        located
+            .into_iter()
+            .rev()
+            .find(|location| matches!(location, PathLocation::Dir(_)))
+            .unwrap_or(PathLocation::Gone),
+    )
+}
+
+fn locate_in(pid: u32, cwd: Option<&Path>, path: &str) -> PathLocation {
+    let path = Path::new(path);
+    let full = if path.is_absolute() {
+        Some(path.to_path_buf())
+    } else {
+        cwd.map(|cwd| cwd.join(path))
+    };
+    match full {
+        Some(full) => std::fs::canonicalize(full).map_or(PathLocation::Gone, PathLocation::Dir),
+        None if process_exists(pid) => PathLocation::Unresolved,
+        None => PathLocation::Gone,
+    }
+}
+
 fn is_node_command(command: &str) -> bool {
     let padded = format!(" {command} ");
     padded.contains(" cluster start ") || padded.contains(" agent start ")
@@ -113,20 +165,6 @@ fn process_cwd(pid: u32) -> Option<PathBuf> {
         .lines()
         .find_map(|line| line.strip_prefix('n'))
         .map(PathBuf::from)
-}
-
-fn locate_path(pid: u32, path: &str) -> PathLocation {
-    let path = Path::new(path);
-    let full = if path.is_absolute() {
-        Some(path.to_path_buf())
-    } else {
-        process_cwd(pid).map(|cwd| cwd.join(path))
-    };
-    match full {
-        Some(full) => std::fs::canonicalize(full).map_or(PathLocation::Gone, PathLocation::Dir),
-        None if process_exists(pid) => PathLocation::Unresolved,
-        None => PathLocation::Gone,
-    }
 }
 
 fn is_zombie(state: &str) -> bool {
@@ -162,11 +200,11 @@ fn node_processes() -> Result<Vec<NodeProcess>, String> {
             let (pid, rest) = line.trim_start().split_once(char::is_whitespace)?;
             let (state, command) = rest.trim_start().split_once(char::is_whitespace)?;
             let pid = pid.parse().ok().filter(|_| !is_zombie(state))?;
-            let db = db_argument(command).filter(|_| is_node_command(command))?;
+            db_argument(command).filter(|_| is_node_command(command))?;
             Some(NodeProcess {
                 pid,
-                db: locate_path(pid, db),
-                passwd: flag_argument(command, "--passwd").map(|passwd| locate_path(pid, passwd)),
+                db: locate_flag(pid, command, "--db")?,
+                passwd: locate_flag(pid, command, "--passwd"),
             })
         })
         .collect())
@@ -223,6 +261,28 @@ fn paths_in_use(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
         .filter(|path| std::fs::canonicalize(path).is_ok_and(|path| live.contains(&&path)))
         .cloned()
         .collect())
+}
+
+pub(crate) fn pids_using_db(db: &str) -> Result<Vec<u32>, String> {
+    let Ok(dir) = std::fs::canonicalize(db) else {
+        return Ok(Vec::new());
+    };
+    Ok(node_processes()?
+        .into_iter()
+        .filter(|process| matches!(&process.db, PathLocation::Dir(used) if *used == dir))
+        .map(|process| process.pid)
+        .collect())
+}
+
+pub(crate) fn refuse_db_in_use(db: &str) -> Result<(), String> {
+    let dir = PathBuf::from(db);
+    if paths_in_use(std::slice::from_ref(&dir))?.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "another mqdb process uses --db {db}; pass a different --db"
+        ))
+    }
 }
 
 fn listed(dirs: &[PathBuf]) -> String {
@@ -363,6 +423,93 @@ fn read_pid(pid_file: &Path) -> Result<u32, String> {
 fn forget_node(node: &RecordedNode, pid: u32, state: &str) -> Result<(), String> {
     println!("Node {} (pid {pid}) {state}", node.node_id);
     std::fs::remove_file(&node.pid_file).map_err(|e| format!("{}: {e}", node.pid_file.display()))
+}
+
+pub(crate) struct StartedNode {
+    pub(crate) node_id: u8,
+    pub(crate) child: Child,
+    pub(crate) dir: PathBuf,
+}
+
+impl StartedNode {
+    fn forget(&self) -> Result<(), String> {
+        let pid_file = self.dir.join(NODE_PID_FILE);
+        match read_pid(&pid_file) {
+            Ok(recorded) if recorded == self.child.id() => {
+                std::fs::remove_file(&pid_file).map_err(|e| format!("{}: {e}", pid_file.display()))
+            }
+            Ok(_) | Err(_) => Ok(()),
+        }
+    }
+
+    pub(crate) fn exit_status(&mut self) -> Result<Option<ExitStatus>, String> {
+        self.child
+            .try_wait()
+            .map_err(|e| format!("node {}: {e}", self.node_id))
+    }
+
+    fn exited(&mut self) -> Result<bool, String> {
+        self.exit_status().map(|status| status.is_some())
+    }
+}
+
+pub(crate) fn stop_started_nodes(nodes: &mut [StartedNode]) -> Result<(), String> {
+    let mut failures = Vec::new();
+    for node in nodes.iter_mut() {
+        if matches!(node.exited(), Ok(false))
+            && let Err(e) = signal(node.child.id())
+        {
+            failures.push(format!("node {}: {e}", node.node_id));
+        }
+    }
+
+    let start = Instant::now();
+    while start.elapsed() <= NODE_STOP_TIMEOUT
+        && nodes
+            .iter_mut()
+            .any(|node| matches!(node.exited(), Ok(false)))
+    {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    for node in nodes.iter_mut() {
+        let pid = node.child.id();
+        let stopped = match node.exited() {
+            Ok(true) => {
+                println!("Node {} (pid {pid}) stopped", node.node_id);
+                true
+            }
+            Ok(false) => match node.child.kill().and_then(|()| node.child.wait()) {
+                Ok(_) => {
+                    failures.push(format!(
+                        "node {} (pid {pid}) did not stop within {NODE_STOP_TIMEOUT:?}; killed it",
+                        node.node_id
+                    ));
+                    true
+                }
+                Err(e) => {
+                    failures.push(format!(
+                        "node {} (pid {pid}) did not stop within {NODE_STOP_TIMEOUT:?} and could not be killed: {e}",
+                        node.node_id
+                    ));
+                    false
+                }
+            },
+            Err(e) => {
+                failures.push(e);
+                false
+            }
+        };
+        if stopped && let Err(e) = node.forget() {
+            failures.push(e);
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
 }
 
 fn kill_cluster(db_prefix: &str, node: Option<u16>) -> Result<(), Box<dyn std::error::Error>> {
@@ -681,6 +828,41 @@ mod tests {
     }
 
     #[test]
+    fn a_started_node_is_stopped_through_its_own_child_handle() {
+        let root = tempfile::TempDir::new().expect("temp dir");
+        let dir = root.path().join("odd --dir").join("t-own-40000-1");
+        std::fs::create_dir_all(&dir).expect("node dir");
+        let child = Command::new("sh")
+            .args([
+                "-c",
+                "while :; do sleep 1; done",
+                "stand-in",
+                "mqdb",
+                "cluster",
+                "start",
+            ])
+            .args(["--node-id", "1", "--db"])
+            .arg(&dir)
+            .spawn()
+            .expect("spawn a stand-in node");
+        std::fs::write(dir.join(super::NODE_PID_FILE), child.id().to_string()).expect("pid file");
+        let mut nodes = [super::StartedNode {
+            node_id: 1,
+            child,
+            dir: dir.clone(),
+        }];
+        let stopped = super::stop_started_nodes(&mut nodes);
+        let still_running = nodes[0].child.try_wait().expect("poll").is_none();
+        if still_running {
+            let _ = nodes[0].child.kill();
+            let _ = nodes[0].child.wait();
+        }
+        assert_eq!(stopped, Ok(()));
+        assert!(!still_running, "the stand-in was still running");
+        assert!(!dir.join(super::NODE_PID_FILE).exists());
+    }
+
+    #[test]
     fn the_legacy_node_pattern_matches_only_that_node_id() {
         let node_1 = sleeper("1");
         let node_10 = sleeper("10");
@@ -708,6 +890,8 @@ mod tests {
         assert!(is_dev_entry("ownership-passwd", false, true));
         assert!(is_dev_entry("sharing-passwd", false, true));
         assert!(is_dev_entry("presence-passwd", false, true));
+        assert!(!is_dev_entry("own-33601-2", true, true));
+        assert!(!is_dev_entry("share-33601-passwd", false, true));
         assert!(!is_dev_entry("x-1", true, true));
         assert!(!is_dev_entry("x-passwd", false, true));
         assert!(!is_dev_entry("passwd", true, true));
