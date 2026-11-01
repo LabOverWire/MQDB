@@ -57,8 +57,10 @@
 (* import; more than one partition (transfers for different partitions     *)
 (* are independent state keyed by partition); legacy senders, which only    *)
 (* ever send chunk 0 (a single-chunk transfer from them is exactly a        *)
-(* SendAll transfer with total 1). Bounded constants: verified for these   *)
-(* sizes, not proven for all.                                               *)
+(* SendAll transfer with total 1); legacy receivers, whose builder has no  *)
+(* transfer id check, no chunk 0 reset and no source filter, so InvWholeImport *)
+(* does not extend to them. Bounded constants: verified for these sizes,    *)
+(* not proven for all.                                                      *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 

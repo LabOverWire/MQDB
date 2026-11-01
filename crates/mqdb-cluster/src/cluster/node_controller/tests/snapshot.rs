@@ -648,3 +648,61 @@ async fn a_drive_abandons_a_request_to_a_node_that_is_no_longer_primary() {
         |(to, message)| *to == node(3) && matches!(message, ClusterMessage::SnapshotRequest(_))
     ));
 }
+
+#[tokio::test]
+async fn a_late_chunk_of_an_abandoned_transfer_does_not_abort_the_retry() {
+    let old = export_of(1024, 256, 1);
+    let new = export_of(1024, 256, 2);
+    let (mut replica, _) = awaiting_replica(node(1)).await;
+    replica.drive_snapshots(START).await;
+    replica
+        .drive_snapshots(START + SNAPSHOT_STALL_TIMEOUT_MS)
+        .await;
+    replica.transport.take_sent();
+
+    replica
+        .transport
+        .inject_message(node(1), ClusterMessage::SnapshotChunk(old[2].clone()));
+    for chunk in &new {
+        replica
+            .transport
+            .inject_message(node(1), ClusterMessage::SnapshotChunk(chunk.clone()));
+    }
+    replica.process_messages().await;
+
+    assert_eq!(failures_in(&replica.transport.take_sent()), 0);
+    assert!(imported(&replica));
+}
+
+#[tokio::test]
+async fn a_snapshot_finishing_after_the_node_became_a_replica_is_not_imported() {
+    let (mut primary, _) = primary_holding(1, 200 * 1024);
+    let (mut replica, partition) = awaiting_replica(node(1)).await;
+    deliver(&replica, &mut primary).await;
+
+    replica.become_replica(partition, Epoch::new(1), 0);
+    deliver(&primary, &mut replica).await;
+
+    assert!(!imported(&replica));
+    assert_eq!(replica.role(partition), ReplicaRole::Replica);
+}
+
+#[tokio::test]
+async fn a_migration_request_is_kept_when_the_map_names_another_primary() {
+    let (mut primary, partition) = primary_holding(1, 200 * 1024);
+    let mut target = controller(2);
+    assign(&mut target, node(3));
+    target.become_replica(partition, Epoch::new(1), 0);
+    target
+        .start_partition_migration(partition, node(1), node(2), Epoch::new(2))
+        .await;
+    deliver(&target, &mut primary).await;
+
+    target.drive_snapshots(START).await;
+    for _ in 0..8 {
+        deliver(&primary, &mut target).await;
+        primary.drive_snapshots(START).await;
+    }
+
+    assert!(imported(&target));
+}
