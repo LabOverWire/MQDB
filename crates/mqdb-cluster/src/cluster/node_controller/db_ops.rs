@@ -97,12 +97,6 @@ pub(crate) struct FkDeletePlan {
     cascade: Option<CascadeOutboxPayload>,
 }
 
-impl FkDeletePlan {
-    pub(crate) fn cascade(&self) -> Option<&CascadeOutboxPayload> {
-        self.cascade.as_ref()
-    }
-}
-
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct EventOrigin<'a> {
     pub(crate) sender: Option<&'a str>,
@@ -1152,7 +1146,7 @@ impl<T: ClusterTransport> NodeController<T> {
             ChangeEvent::delete(entity.to_string(), id.to_string(), data.clone()),
             origin,
         );
-        self.commit_delete_with_change_event(write, &event, &data, plan.cascade())
+        self.commit_delete_with_change_event(write, &event, &data, plan.cascade.as_ref())
             .await?;
         let ack_receivers = self.run_fk_delete_plan(plan, origin).await;
         if self.ownership.owner_field(entity).is_some()
@@ -1160,7 +1154,7 @@ impl<T: ClusterTransport> NodeController<T> {
         {
             tracing::warn!(entity, id, %e, "grants of a deleted resource not removed");
         }
-        if let Some(cas) = plan.cascade() {
+        if let Some(cas) = plan.cascade.as_ref() {
             spawn_cascade_ack_waiter(
                 self.stores.cluster_outbox().cloned(),
                 cas.operation_id.clone(),

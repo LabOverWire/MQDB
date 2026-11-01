@@ -382,7 +382,9 @@ impl<T: ClusterTransport> NodeController<T> {
                 Err(failed) => {
                     return Self::json_error(
                         500,
-                        &format!("cascade share incomplete: {failed} resource(s) not granted"),
+                        &format!(
+                            "cascade share incomplete: at least {failed} resource(s) not granted"
+                        ),
                     );
                 }
             }
