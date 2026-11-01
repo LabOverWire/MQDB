@@ -6,6 +6,7 @@ use crate::cluster::data_partition;
 use crate::cluster::node_controller::snapshot::{
     SNAPSHOT_CHUNKS_PER_PUMP, SNAPSHOT_RETRY_BACKOFF_MS, SNAPSHOT_STALL_TIMEOUT_MS,
 };
+use crate::cluster::protocol::{Operation, ReplicationWrite};
 use crate::cluster::snapshot::{SnapshotChunk, SnapshotComplete, SnapshotRequest, SnapshotSender};
 use crate::cluster::{PartitionAssignment, PartitionMap};
 use std::sync::atomic::Ordering;
@@ -705,4 +706,41 @@ async fn a_migration_request_is_kept_when_the_map_names_another_primary() {
     }
 
     assert!(imported(&target));
+}
+
+#[tokio::test]
+async fn a_write_made_during_a_transfer_reaches_the_replica_after_the_import() {
+    let (mut primary, partition) = primary_holding(1, 200 * 1024);
+    let (mut replica, _) = awaiting_replica(node(1)).await;
+    deliver(&replica, &mut primary).await;
+    let chunks = chunks_in(&primary.transport.take_sent());
+    let (last, earlier) = chunks.split_last().unwrap();
+    assert!(!earlier.is_empty());
+    for chunk in earlier {
+        replica
+            .transport
+            .inject_message(node(1), ClusterMessage::SnapshotChunk(chunk.clone()));
+    }
+
+    let write = ReplicationWrite::new(
+        partition,
+        Operation::Insert,
+        Epoch::new(1),
+        0,
+        ENTITY.to_string(),
+        "written-during-transfer".to_string(),
+        record(16),
+    );
+    primary.replicate_write(write, &[node(2)], 1).await.unwrap();
+    deliver(&primary, &mut replica).await;
+    replica
+        .transport
+        .inject_message(node(1), ClusterMessage::SnapshotChunk(last.clone()));
+    replica.process_messages().await;
+    assert!(imported(&replica));
+
+    deliver(&replica, &mut primary).await;
+    deliver(&primary, &mut replica).await;
+
+    assert_eq!(replica.sequence(partition), primary.sequence(partition));
 }

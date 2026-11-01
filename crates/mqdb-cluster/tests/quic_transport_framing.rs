@@ -297,7 +297,7 @@ async fn control_plane_survives_a_full_bulk_queue() {
         assert_eq!(
             &frame[0..2],
             &local.get().to_be_bytes(),
-            "stream mis-framed under the two-lane writer"
+            "stream mis-framed under the lane writer"
         );
         if frame[2] == heartbeat_type {
             heartbeat_delivered = true;
@@ -478,7 +478,7 @@ async fn dead_peer_is_removed_and_redialled() {
         .unwrap();
     assert!(
         transport.direct_peers().await.unwrap().contains(&peer),
-        "peer should be re-linked after redial_disconnected"
+        "peer should be re-linked after redial_unlinked"
     );
 
     far_handle.abort();
@@ -587,6 +587,79 @@ async fn a_snapshot_chunk_is_not_held_behind_a_full_bulk_lane() {
     assert!(
         frames_before < bulk_accepted,
         "the snapshot chunk waited behind all {bulk_accepted} queued bulk frames"
+    );
+
+    far_handle.abort();
+}
+
+#[tokio::test]
+async fn bulk_gets_a_byte_share_while_snapshot_chunks_are_queued() {
+    let StalledPeer {
+        transport,
+        local,
+        peer,
+        frame_rx,
+        release_tx,
+        far_handle,
+    } = setup_stalled_peer().await;
+
+    for index in 0..SEND_ATTEMPTS {
+        if transport.send(peer, snapshot_chunk(index)).await.is_err() {
+            break;
+        }
+    }
+    for _ in 0..SEND_ATTEMPTS {
+        if transport.send(peer, bulk_message(local)).await.is_err() {
+            break;
+        }
+    }
+    release_tx.send(()).ok();
+
+    let snapshot_type = snapshot_chunk(0).message_type();
+    let mut frame = collect_frame(&frame_rx).await;
+    while frame[2] == snapshot_type {
+        frame = collect_frame(&frame_rx).await;
+    }
+    while frame[2] != snapshot_type {
+        frame = collect_frame(&frame_rx).await;
+    }
+    let chunk_len = frame.len();
+    let mut bulk_len = 0;
+    frame = collect_frame(&frame_rx).await;
+    while frame[2] != snapshot_type {
+        bulk_len += frame.len();
+        frame = collect_frame(&frame_rx).await;
+    }
+    assert!(
+        bulk_len * 2 >= chunk_len,
+        "only {bulk_len} bulk bytes went out between chunks of {chunk_len} bytes"
+    );
+
+    far_handle.abort();
+}
+
+#[tokio::test]
+async fn a_frame_over_the_receive_limit_is_refused_at_send() {
+    let StalledPeer {
+        transport,
+        local,
+        peer,
+        far_handle,
+        ..
+    } = setup_stalled_peer().await;
+
+    let oversized = ClusterMessage::ForwardedPublish(ForwardedPublish::new(
+        local,
+        "oversized".to_string(),
+        0,
+        false,
+        vec![0u8; 10 * 1024 * 1024 + 1],
+        Vec::new(),
+    ));
+    let result = transport.send(peer, oversized).await;
+    assert!(
+        matches!(result, Err(TransportError::SendFailed(_))),
+        "a frame the receiver would reject was accepted: {result:?}"
     );
 
     far_handle.abort();

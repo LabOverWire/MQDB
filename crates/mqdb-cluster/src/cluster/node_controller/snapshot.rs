@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::super::migration::MigrationPhase;
+use super::super::protocol::CatchupRequest;
 use super::super::replication::ReplicaRole;
 use super::super::snapshot::{
     ChunkOutcome, SnapshotBuilder, SnapshotChunk, SnapshotComplete, SnapshotRequest, SnapshotSender,
@@ -389,6 +390,18 @@ impl<T: ClusterTransport> NodeController<T> {
                     .await
                 {
                     tracing::debug!(?partition, to = from.get(), %error, "snapshot completion notice not sent");
+                }
+
+                if self.role(partition) == ReplicaRole::Replica {
+                    let catchup =
+                        CatchupRequest::create(partition, sequence + 1, u64::MAX, self.node_id);
+                    if let Err(error) = self
+                        .transport
+                        .send(from, ClusterMessage::CatchupRequest(catchup))
+                        .await
+                    {
+                        tracing::debug!(?partition, to = from.get(), %error, "post-snapshot catchup not requested");
+                    }
                 }
             }
             Err(e) => {

@@ -364,6 +364,12 @@ impl QuicDirectTransport {
 
     fn frame_message(&self, message: &ClusterMessage) -> Result<Vec<u8>, TransportError> {
         let payload = self.serialize_message(message);
+        if payload.len() > MAX_MESSAGE_SIZE {
+            return Err(TransportError::SendFailed(format!(
+                "message of {} bytes is over the {MAX_MESSAGE_SIZE} byte limit",
+                payload.len()
+            )));
+        }
         let len = u32::try_from(payload.len())
             .map_err(|_| TransportError::SendFailed("message too large to frame".to_string()))?;
 
@@ -714,15 +720,15 @@ async fn peer_writer_task(
 ) {
     trace!(peer = peer_node.get(), "peer writer task started");
 
-    let mut snapshot_turn = false;
+    let mut bulk_bytes_owed = 0usize;
     loop {
-        let Some((lane, frame)) = lanes.next_frame(snapshot_turn).await else {
+        let Some((lane, frame)) = lanes.next_frame(bulk_bytes_owed == 0).await else {
             break;
         };
         match lane {
             Lane::Control => {}
-            Lane::Bulk => snapshot_turn = true,
-            Lane::Snapshot => snapshot_turn = false,
+            Lane::Bulk => bulk_bytes_owed = bulk_bytes_owed.saturating_sub(frame.len()),
+            Lane::Snapshot => bulk_bytes_owed = frame.len(),
         }
 
         if let Err(e) = send_stream.write_all(&frame).await {
