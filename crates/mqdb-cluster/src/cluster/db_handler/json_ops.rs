@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::super::PartitionId;
-use super::super::db::data_partition;
+use super::super::db::{self, data_partition};
 use super::super::db_topic::DbTopicOperation;
 #[cfg(feature = "http-api")]
 use super::super::node_controller::ShareResolveContinuation;
