@@ -20,28 +20,13 @@ use serde_json::Value;
 use tokio::sync::oneshot;
 
 use crate::cluster::db_handler::helpers::{
-    json_write_failure, parse_projection, validate_projection_against_schema,
+    delete_expected_version, json_write_failure, parse_projection, update_fields,
+    update_payload_error, validate_projection_against_schema,
 };
 
 const CASCADE_ACK_TIMEOUT_SECS: u64 = 5;
 
-/// Upper bound on rows reaped in a single TTL sweep pass, so a mass expiry cannot hold the
-/// controller write lock long enough to stall heartbeats/Raft. The remainder is reaped on
-/// the next sweep.
 const TTL_REAP_MAX_PER_PASS: usize = 1024;
-
-/// Parse the reserved `_expected_version` compare-and-set precondition from a delete
-/// request payload (the update path removes it from the parsed object instead). Returns the
-/// client-facing error message when the field is present but malformed, so the CAS can never
-/// be silently skipped.
-fn expected_version_from_payload(payload: &[u8]) -> Result<Option<u64>, String> {
-    if payload.is_empty() {
-        return Ok(None);
-    }
-    let mut value: Value =
-        serde_json::from_slice(payload).map_err(|e| format!("invalid JSON payload: {e}"))?;
-    mqdb_core::protocol::take_expected_version(&mut value).map_err(|e| e.to_string())
-}
 
 fn unresolved_cascade_ack() -> oneshot::Receiver<bool> {
     let (tx, rx) = oneshot::channel();
@@ -93,6 +78,16 @@ fn change_event_user_properties(event: &ChangeEvent) -> Vec<(String, String)> {
         .as_ref()
         .map(|cid| vec![("x-origin-client-id".to_string(), cid.clone())])
         .unwrap_or_default()
+}
+
+pub(crate) struct ForwardedJsonRequest<'a> {
+    pub(crate) op: JsonDbOp,
+    pub(crate) entity: &'a str,
+    pub(crate) id: Option<&'a str>,
+    pub(crate) payload: &'a [u8],
+    pub(crate) response_topic: &'a str,
+    pub(crate) correlation_data: Option<&'a [u8]>,
+    pub(crate) origin: EventOrigin<'a>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -175,8 +170,6 @@ impl<T: ClusterTransport> NodeController<T> {
         unique_field_diffs(&unique_fields, old_data, new_data)
     }
 
-    /// # Errors
-    /// Returns `DbDataStoreError::AlreadyExists` if an entity with the given ID already exists.
     pub fn db_create_prepare(
         &mut self,
         entity_type: &str,
@@ -205,8 +198,6 @@ impl<T: ClusterTransport> NodeController<T> {
         self.role(partition) == ReplicaRole::Primary
     }
 
-    /// # Errors
-    /// Returns `DbDataStoreError::AlreadyExists` if an entity with the given ID already exists.
     pub async fn db_create(
         &mut self,
         entity_type: &str,
@@ -219,8 +210,6 @@ impl<T: ClusterTransport> NodeController<T> {
         Ok(db_entity)
     }
 
-    /// # Errors
-    /// Returns `DbDataStoreError::NotFound` if the entity does not exist.
     pub fn db_update_prepare(
         &mut self,
         entity_type: &str,
@@ -233,8 +222,6 @@ impl<T: ClusterTransport> NodeController<T> {
             .db_update_replicated(entity_type, id, data, timestamp_ms)
     }
 
-    /// # Errors
-    /// Returns `DbDataStoreError::NotFound` if the entity does not exist.
     pub async fn db_update(
         &mut self,
         entity_type: &str,
@@ -247,8 +234,6 @@ impl<T: ClusterTransport> NodeController<T> {
         Ok(db_entity)
     }
 
-    /// # Errors
-    /// Returns `DbDataStoreError::SerializationError` if a length does not fit the record format.
     pub async fn db_upsert(
         &mut self,
         entity_type: &str,
@@ -263,8 +248,6 @@ impl<T: ClusterTransport> NodeController<T> {
         Ok(db_entity)
     }
 
-    /// # Errors
-    /// Returns `DbDataStoreError::NotFound` if the entity does not exist.
     pub fn db_delete_prepare(
         &mut self,
         entity_type: &str,
@@ -274,8 +257,6 @@ impl<T: ClusterTransport> NodeController<T> {
         self.stores.db_delete_replicated(entity_type, id)
     }
 
-    /// # Errors
-    /// Returns `DbDataStoreError::NotFound` if the entity does not exist.
     pub async fn db_delete(
         &mut self,
         entity_type: &str,
@@ -347,11 +328,6 @@ impl<T: ClusterTransport> NodeController<T> {
             .collect()
     }
 
-    /// # Errors
-    /// Returns `SchemaStoreError::AlreadyExists` if the schema already exists.
-    ///
-    /// # Panics
-    /// Panics if partition 0 is invalid (should never happen as 0-63 are valid).
     pub async fn schema_register(
         &mut self,
         entity: &str,
@@ -372,11 +348,6 @@ impl<T: ClusterTransport> NodeController<T> {
         Ok(schema)
     }
 
-    /// # Errors
-    /// Returns `SchemaStoreError::NotFound` if the schema does not exist.
-    ///
-    /// # Panics
-    /// Panics if partition 0 is invalid (should never happen as 0-63 are valid).
     pub async fn schema_update(
         &mut self,
         entity: &str,
@@ -412,8 +383,6 @@ impl<T: ClusterTransport> NodeController<T> {
         self.stores.schema_is_valid_for_write(entity)
     }
 
-    /// # Errors
-    /// Returns `ConstraintStoreError::AlreadyExists` if the constraint already exists.
     pub async fn constraint_add(
         &mut self,
         constraint: &super::db::ClusterConstraint,
@@ -423,8 +392,6 @@ impl<T: ClusterTransport> NodeController<T> {
         Ok(())
     }
 
-    /// # Errors
-    /// Returns `ConstraintStoreError::NotFound` if the constraint does not exist.
     pub async fn constraint_remove(
         &mut self,
         entity: &str,
@@ -468,16 +435,12 @@ impl<T: ClusterTransport> NodeController<T> {
             .await;
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(crate) async fn handle_json_db_request(
         &mut self,
         from: NodeId,
         partition: PartitionId,
         request: &JsonDbRequest,
     ) -> Option<super::PendingConstraintWork> {
-        // The server-internal `shared` scatter lists `_shares` across primaries; it
-        // is only reachable via inter-node transport (external clients hit the
-        // client-side guard), so exempt it while still blocking forwarded direct CRUD.
         let internal_shares_scatter =
             request.op == JsonDbOp::List && request.response_topic.starts_with("_mqdb/scatter/");
         if request.entity == mqdb_core::types::SHARES_ENTITY
@@ -500,7 +463,7 @@ impl<T: ClusterTransport> NodeController<T> {
             return None;
         }
 
-        if let Some(err) = self.check_forwarded_ownership(request) {
+        if let Some(err) = Self::forwarded_payload_error(request) {
             self.reply_to_json_db_request(from, request, err).await;
             return None;
         }
@@ -516,6 +479,11 @@ impl<T: ClusterTransport> NodeController<T> {
                 json_write_failure(super::db::DbDataStoreError::NotPrimary),
             )
             .await;
+            return None;
+        }
+
+        if let Some(err) = self.check_forwarded_ownership(request) {
+            self.reply_to_json_db_request(from, request, err).await;
             return None;
         }
 
@@ -698,6 +666,15 @@ impl<T: ClusterTransport> NodeController<T> {
         serde_json::to_vec(&parsed).unwrap_or(payload)
     }
 
+    fn forwarded_payload_error(request: &JsonDbRequest) -> Option<Vec<u8>> {
+        let message = match request.op {
+            JsonDbOp::Update => update_payload_error(&request.payload),
+            JsonDbOp::Delete => delete_expected_version(&request.payload).err(),
+            _ => None,
+        }?;
+        Some(Self::json_error(400, &message))
+    }
+
     fn check_forwarded_ownership(&self, request: &JsonDbRequest) -> Option<Vec<u8>> {
         let OwnershipDecision::Check {
             owner_field,
@@ -715,17 +692,18 @@ impl<T: ClusterTransport> NodeController<T> {
         ) {
             return None;
         }
-        let existing = self.stores.db_get(&request.entity, id)?;
+        let Some(existing) = self.stores.db_get(&request.entity, id) else {
+            return Some(Self::json_error(
+                404,
+                &format!("entity not found: {} id={id}", request.entity),
+            ));
+        };
         let Ok(data) = serde_json::from_slice::<serde_json::Value>(&existing.data) else {
             return Some(Self::json_error(403, "permission denied"));
         };
         if data.get(owner_field).and_then(serde_json::Value::as_str) == Some(uid) {
             return None;
         }
-        // Non-owner: Delete stays owner-only; Read/Update may be satisfied by a
-        // share grant on the co-located `_shares` (this primary owns the resource
-        // partition, so the grant scan is local — the access decision resolves on
-        // the primary, per the #75 read-routing decision).
         let required = match request.op {
             JsonDbOp::Read => AccessLevel::View,
             JsonDbOp::Update => AccessLevel::Edit,
@@ -744,16 +722,15 @@ impl<T: ClusterTransport> NodeController<T> {
     fn handle_json_read_local(&self, entity: &str, id: &str, payload: &[u8]) -> Vec<u8> {
         let projection = parse_projection(payload);
 
-        if let Some(ref fields) = projection
-            && let Some(cluster_schema) = self.stores.schema_get(entity)
-            && let Some(msg) =
-                validate_projection_against_schema(&cluster_schema.data, entity, fields)
-        {
-            return Self::json_error(400, &msg);
-        }
-
         match self.stores.db_get(entity, id) {
             Some(db_entity) => {
+                if let Some(ref fields) = projection
+                    && let Some(cluster_schema) = self.stores.schema_get(entity)
+                    && let Some(msg) =
+                        validate_projection_against_schema(&cluster_schema.data, entity, fields)
+                {
+                    return Self::json_error(400, &msg);
+                }
                 let data_json: serde_json::Value =
                     serde_json::from_slice(&db_entity.data).unwrap_or(serde_json::Value::Null);
                 let data_json = if let Some(ref fields) = projection {
@@ -767,7 +744,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn handle_json_update_local(
         &mut self,
         entity: &str,
@@ -776,9 +752,9 @@ impl<T: ClusterTransport> NodeController<T> {
         request: &JsonDbRequest,
         from: NodeId,
     ) -> (Vec<u8>, Option<super::PendingConstraintWork>) {
-        let mut data: Value = match serde_json::from_slice(payload) {
+        let mut data = match update_fields(payload) {
             Ok(v) => v,
-            Err(_) => return (Self::json_error(400, "invalid JSON payload"), None),
+            Err(message) => return (Self::json_error(400, &message), None),
         };
 
         let fk_expected = data
@@ -1015,13 +991,17 @@ impl<T: ClusterTransport> NodeController<T> {
         request: &JsonDbRequest,
         from: NodeId,
     ) -> (Vec<u8>, Option<super::PendingConstraintWork>) {
-        let expected_version = match expected_version_from_payload(&request.payload) {
+        let expected_version = match delete_expected_version(&request.payload) {
             Ok(v) => v,
             Err(msg) => return (Self::json_error(400, &msg), None),
         };
-        if let Some(expected) = expected_version
-            && let Some(existing) = self.db_get(entity, id)
-        {
+        let Some(existing) = self.db_get(entity, id) else {
+            return (
+                Self::json_error(404, &format!("entity not found: {entity} id={id}")),
+                None,
+            );
+        };
+        if let Some(expected) = expected_version {
             let current = serde_json::from_slice::<Value>(&existing.data)
                 .ok()
                 .and_then(|d| d.get("_version").and_then(Value::as_u64))
@@ -1116,9 +1096,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    /// The effectful core of a delete, shared by the client-facing delete and the TTL
-    /// reap: prepare + replicate the delete, release the record's unique guards, emit the
-    /// change event, and clear resource grants. Returns `NotFound` if the row is gone.
     async fn delete_record_replicated(
         &mut self,
         entity: &str,
@@ -1149,23 +1126,19 @@ impl<T: ClusterTransport> NodeController<T> {
         Ok(())
     }
 
-    /// Reap TTL-expired rows this node is the data-partition primary for, routing each
-    /// through the replicated delete core so it releases the row's unique guards, emits a
-    /// change event, and replicates to the replicas. Non-primary nodes skip; the primary's
-    /// replicated delete reaches them. Runs under the controller write lock, so the scan
-    /// and the deletes are atomic w.r.t. other controller messages (a renewal cannot
-    /// interleave). At most `TTL_REAP_MAX_PER_PASS` rows are reaped per call so a mass
-    /// expiry cannot hold the lock long enough to stall heartbeats/Raft; the remainder is
-    /// reaped on the next sweep. Returns the number reaped.
     pub(crate) async fn reap_expired_ttl(&mut self, now_secs: u64) -> usize {
-        let mut expired = self.stores.db_data.scan_expired_ttl(now_secs);
-        expired.truncate(TTL_REAP_MAX_PER_PASS);
+        let expired: Vec<(String, String)> = self
+            .stores
+            .db_data
+            .scan_expired_ttl(now_secs)
+            .into_iter()
+            .filter(|(entity, id)| {
+                self.holds_primary_role(crate::cluster::db::data_partition(entity, id))
+            })
+            .take(TTL_REAP_MAX_PER_PASS)
+            .collect();
         let mut reaped = 0usize;
         for (entity, id) in expired {
-            let partition = crate::cluster::db::data_partition(&entity, &id);
-            if !self.is_primary_for_partition(partition) {
-                continue;
-            }
             if self
                 .delete_record_replicated(&entity, &id, None, Vec::new(), EventOrigin::default())
                 .await
@@ -1294,7 +1267,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(crate) async fn execute_fk_side_effects(
         &mut self,
         effects: &[CascadeSideEffect],
@@ -1696,7 +1668,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn handle_json_create_local(
         &mut self,
         partition: PartitionId,
@@ -1910,14 +1881,14 @@ impl<T: ClusterTransport> NodeController<T> {
         (result, None)
     }
 
-    fn apply_ttl_expiry(data: &mut serde_json::Value) {
+    pub(crate) fn apply_ttl_expiry(data: &mut serde_json::Value) {
         if let serde_json::Value::Object(obj) = data
             && let Some(ttl_secs) = obj.get("ttl_secs").and_then(serde_json::Value::as_u64)
         {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs());
-            let expires_at = now + ttl_secs;
+            let expires_at = now.saturating_add(ttl_secs);
             obj.insert(
                 "_expires_at".to_string(),
                 serde_json::Value::Number(expires_at.into()),
@@ -2020,7 +1991,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(crate) async fn complete_pending_fk_work(
         &mut self,
         fk_ok: bool,
@@ -2068,9 +2038,6 @@ impl<T: ClusterTransport> NodeController<T> {
             } => {
                 let now_ms = Self::current_time_ms();
                 let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
-                // FK passed; run the unique reserve. Return the pending work so the majority-await
-                // runs OUTSIDE the controller lock (via spawn_unique_completion) — awaiting it here
-                // would deadlock, since the ack path needs the same lock this task holds.
                 let phase1 = match self
                     .start_unique_constraint_check(
                         &entity,
@@ -2128,8 +2095,6 @@ impl<T: ClusterTransport> NodeController<T> {
             } => {
                 let now_ms = Self::current_time_ms();
                 let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
-                // FK passed; run the unique reserve on the changed fields and return the pending
-                // work so the majority-await runs OUTSIDE the controller lock (see the Create arm).
                 let phase1 = match self
                     .start_unique_constraint_check(
                         &entity,
@@ -2341,18 +2306,20 @@ impl<T: ClusterTransport> NodeController<T> {
         .unwrap_or(u64::MAX)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn forward_json_db_request(
         &mut self,
         partition: PartitionId,
-        op: JsonDbOp,
-        entity: &str,
-        id: Option<&str>,
-        payload: &[u8],
-        response_topic: &str,
-        correlation_data: Option<&[u8]>,
-        origin: EventOrigin<'_>,
+        forwarded: ForwardedJsonRequest<'_>,
     ) -> bool {
+        let ForwardedJsonRequest {
+            op,
+            entity,
+            id,
+            payload,
+            response_topic,
+            correlation_data,
+            origin,
+        } = forwarded;
         let start = std::time::Instant::now();
         let node_id = self.node_id.get();
 

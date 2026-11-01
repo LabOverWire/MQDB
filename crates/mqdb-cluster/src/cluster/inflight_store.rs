@@ -399,12 +399,10 @@ impl InflightStore {
         id: &str,
         data: &[u8],
     ) -> Result<(), InflightStoreError> {
-        let parts: Vec<&str> = id.splitn(2, ':').collect();
-        if parts.len() != 2 {
-            return Err(InflightStoreError::SerializationError);
-        }
-        let client_id = parts[0];
-        let packet_id: u16 = parts[1]
+        let (client_id, packet_id) = id
+            .rsplit_once(':')
+            .ok_or(InflightStoreError::SerializationError)?;
+        let packet_id: u16 = packet_id
             .parse()
             .map_err(|_| InflightStoreError::SerializationError)?;
 
@@ -498,14 +496,11 @@ impl InflightStore {
             let msg_data = &data[offset..offset + data_len];
             offset += data_len;
 
-            let parts: Vec<&str> = id.splitn(2, ':').collect();
-            if parts.len() != 2 {
+            let Some((client_id, packet_id)) = id.rsplit_once(':') else {
                 continue;
-            }
-            let client_id = parts[0];
-            let packet_id: u16 = match parts[1].parse() {
-                Ok(p) => p,
-                Err(_) => continue,
+            };
+            let Ok(packet_id) = packet_id.parse::<u16>() else {
+                continue;
             };
 
             if let Some(msg) = Self::deserialize(msg_data) {
@@ -692,5 +687,32 @@ mod tests {
         let cleared = store.clear_client("c1");
         assert_eq!(cleared, 2);
         assert_eq!(store.count(), 1);
+    }
+
+    #[test]
+    fn snapshot_keeps_a_client_id_containing_a_colon() {
+        let src = InflightStore::new(node(1));
+        src.add("dev:1", 42, "t", b"a", 1, 0).unwrap();
+
+        let snapshot = src.export_for_partition(session_partition("dev:1"));
+        let dst = InflightStore::new(node(2));
+
+        assert_eq!(dst.import_inflight(&snapshot), Ok(1));
+        assert_eq!(dst.get("dev:1", 42).map(|m| m.packet_id), Some(42));
+    }
+
+    #[test]
+    fn replicated_writes_keep_a_client_id_containing_a_colon() {
+        let src = InflightStore::new(node(1));
+        let (_, data) = src.add_with_data("dev:1", 42, "t", b"a", 1, 0).unwrap();
+        let dst = InflightStore::new(node(2));
+
+        dst.apply_replicated(Operation::Insert, "dev:1:42", &data)
+            .unwrap();
+        assert_eq!(dst.get("dev:1", 42).map(|m| m.packet_id), Some(42));
+
+        dst.apply_replicated(Operation::Delete, "dev:1:42", &[])
+            .unwrap();
+        assert!(dst.get("dev:1", 42).is_none());
     }
 }
