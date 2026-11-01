@@ -246,7 +246,7 @@ impl StoreManager {
         pattern: &str,
         client_id: &str,
     ) -> Result<Vec<ReplicationWrite>, WildcardStoreError> {
-        let _ = self.wildcards.unsubscribe_with_data(pattern, client_id)?;
+        let data = self.wildcards.unsubscribe_with_data(pattern, client_id)?;
         let writes: Vec<ReplicationWrite> = PartitionId::all()
             .map(|partition| {
                 ReplicationWrite::new(
@@ -256,7 +256,7 @@ impl StoreManager {
                     0,
                     entity::WILDCARDS.to_string(),
                     format!("{pattern}:{client_id}"),
-                    Vec::new(),
+                    data.clone(),
                 )
             })
             .collect();

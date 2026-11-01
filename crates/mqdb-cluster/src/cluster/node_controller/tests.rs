@@ -3121,6 +3121,7 @@ async fn forwarded_delete_cascade_events_carry_the_deleters_origin() {
 mod cascade_share;
 mod change_events;
 mod forwarded_write;
+mod missing_record;
 mod partition_map;
 
 #[tokio::test]
