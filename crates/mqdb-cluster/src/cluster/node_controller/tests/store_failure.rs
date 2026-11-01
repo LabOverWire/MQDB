@@ -821,6 +821,15 @@ async fn write_with_remote_unique(
         )
         .await
         .unwrap();
+    let (commits, releases) = unique_requests_to_node2(ctrl);
+    (
+        serde_json::from_slice(&response.payload).unwrap(),
+        commits,
+        releases,
+    )
+}
+
+fn unique_requests_to_node2(ctrl: &NodeController<MockTransport>) -> (usize, usize) {
     let sent = ctrl.transport.sent_messages();
     let commits = sent
         .iter()
@@ -834,11 +843,7 @@ async fn write_with_remote_unique(
             *to == node(2) && matches!(message, ClusterMessage::UniqueReleaseRequest(_))
         })
         .count();
-    (
-        serde_json::from_slice(&response.payload).unwrap(),
-        commits,
-        releases,
-    )
+    (commits, releases)
 }
 
 #[tokio::test]
@@ -935,4 +940,198 @@ async fn a_stored_update_commits_its_remote_unique_claim_once() {
     .await;
 
     assert_eq!((&reply["status"], commits, releases), (&json!("ok"), 1, 0));
+}
+
+#[tokio::test]
+async fn a_duplicate_create_answers_409_from_a_client_and_when_forwarded() {
+    use crate::cluster::protocol::JsonDbOp;
+    let mut ctrl = controller_where(None, |_| node(1), &[]);
+    let first = request(&mut ctrl, "$DB/items/create", &json!({"id": "r1", "n": 1})).await;
+    let again = request(&mut ctrl, "$DB/items/create", &json!({"id": "r1", "n": 2})).await;
+    let partition = crate::cluster::db::data_partition("items", "r1");
+    ctrl.handle_json_db_request(
+        node(2),
+        partition,
+        &forwarded(
+            JsonDbOp::Create,
+            "items",
+            None,
+            &json!({"id": "r1", "n": 3}),
+        ),
+    )
+    .await;
+    let replies = forwarded_replies(&ctrl);
+    assert_eq!(
+        (&first["status"], &again["code"], &replies[0]["code"]),
+        (&json!("ok"), &json!(409), &json!(409))
+    );
+}
+
+#[tokio::test]
+async fn an_update_whose_record_vanished_during_its_unique_check_answers_404() {
+    let mut ctrl = controller_where(None, |_| node(1), &[]);
+    ctrl.seed_unique_voters(std::iter::once(node(1)).collect());
+    let created = request(
+        &mut ctrl,
+        "$DB/users/create",
+        &json!({"id": "u1", "email": "old@x"}),
+    )
+    .await;
+    assert_eq!(created["status"], "ok");
+    ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
+        .await
+        .unwrap();
+    let handler = DbRequestHandler::new(node(1));
+    let ctx = response_ctx(None);
+    let bytes = serde_json::to_vec(&json!({"email": "a@x"})).unwrap();
+    let DbPublishResult::PendingUniqueCheck(pending) = handler
+        .handle_publish(&mut ctrl, "$DB/users/u1/update", &bytes, &ctx)
+        .await
+    else {
+        panic!("should wait for the reserve");
+    };
+    ctrl.db_delete("users", "u1").await.unwrap();
+    let response = handler
+        .complete_pending_unique_check(
+            &mut ctrl,
+            pending.phase1.local_reserved,
+            Ok(Vec::new()),
+            pending.continuation,
+        )
+        .await
+        .unwrap();
+    let reply: Value = serde_json::from_slice(&response.payload).unwrap();
+    assert_eq!(reply["code"], json!(404), "{reply}");
+}
+
+#[tokio::test]
+async fn a_forwarded_update_the_primary_cannot_store_commits_no_remote_unique_claim() {
+    use crate::cluster::protocol::JsonDbOp;
+    let backend = FaultyBackend::shared();
+    let value = serde_json::to_vec(&json!("a@x")).unwrap();
+    let mut ctrl = remote_unique_controller(&backend, &value);
+    let created = request(
+        &mut ctrl,
+        "$DB/users/create",
+        &json!({"id": "u1", "email": "old@x"}),
+    )
+    .await;
+    assert_eq!(created["status"], "ok");
+    ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
+        .await
+        .unwrap();
+    backend.fail_writes_to_keys_containing("users/u1");
+    let partition = crate::cluster::db::data_partition("users", "u1");
+    let Some(PendingConstraintWork::Unique(pending)) = ctrl
+        .handle_json_db_request(
+            node(1),
+            partition,
+            &forwarded(
+                JsonDbOp::Update,
+                "users",
+                Some("u1"),
+                &json!({"email": "a@x"}),
+            ),
+        )
+        .await
+    else {
+        panic!("the reserve should go to node 2");
+    };
+    ctrl.complete_pending_unique_work(
+        pending.phase1.local_reserved,
+        Ok(vec![("email".to_string(), value, node(2))]),
+        pending.continuation,
+    )
+    .await;
+    let (commits, releases) = unique_requests_to_node2(&ctrl);
+    let replies = forwarded_replies(&ctrl);
+    assert_eq!(
+        (&replies[0]["code"], commits, releases),
+        (&json!(500), 0, 1)
+    );
+}
+
+#[tokio::test]
+async fn a_forwarded_update_the_primary_cannot_store_releases_its_unique_reservation() {
+    use crate::cluster::protocol::JsonDbOp;
+    let backend = FaultyBackend::shared();
+    let mut ctrl = controller_where(Some(&backend), |_| node(1), &[]);
+    ctrl.seed_unique_voters(std::iter::once(node(1)).collect());
+    let created = request(
+        &mut ctrl,
+        "$DB/users/create",
+        &json!({"id": "u1", "email": "old@x"}),
+    )
+    .await;
+    assert_eq!(created["status"], "ok");
+    ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
+        .await
+        .unwrap();
+    backend.fail_writes_to_keys_containing("users/u1");
+    let partition = crate::cluster::db::data_partition("users", "u1");
+    let work = ctrl
+        .handle_json_db_request(
+            node(2),
+            partition,
+            &forwarded(
+                JsonDbOp::Update,
+                "users",
+                Some("u1"),
+                &json!({"email": "a@x"}),
+            ),
+        )
+        .await;
+    assert!(work.is_none());
+    let second = publish_completing_unique(
+        &mut ctrl,
+        "$DB/users/create",
+        &json!({"id": "u2", "email": "a@x"}),
+    )
+    .await;
+    let replies = forwarded_replies(&ctrl);
+    assert_eq!(
+        (&replies[0]["code"], &second["status"]),
+        (&json!(500), &json!("ok"))
+    );
+}
+
+#[tokio::test]
+async fn a_regrant_whose_resolved_grant_cannot_be_removed_is_refused() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_of_every_partition(&backend);
+    let handler = sharing_handler(&mut ctrl);
+    shared_diagram(&mut ctrl, &handler).await;
+    let old_grant = ctrl.db_list("_shares")[0].id_str().to_string();
+    backend.fail_writes_to_keys_containing(&format!("_shares/{old_grant}"));
+    let regranted = request_as(
+        &mut ctrl,
+        &handler,
+        "$DB/diagrams/d1/share",
+        &json!({"grantee": "bob", "grantee_key": "hash-x", "permission": "view"}),
+        Some("alice"),
+    )
+    .await;
+    assert_eq!(
+        (&regranted["status"], ctrl.db_list("_shares").len()),
+        (&json!("error"), 1),
+        "{regranted}"
+    );
+}
+
+#[tokio::test]
+async fn an_unshare_whose_resolved_grant_cannot_be_removed_is_refused() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_of_every_partition(&backend);
+    let handler = sharing_handler(&mut ctrl);
+    shared_diagram(&mut ctrl, &handler).await;
+    backend.fail_writes_to_keys_containing("_shares/");
+    let unshared = request_as(
+        &mut ctrl,
+        &handler,
+        "$DB/diagrams/d1/unshare",
+        &json!({"grantee": "hash-x", "grantee_key": "bob"}),
+        Some("alice"),
+    )
+    .await;
+    assert_eq!(unshared["status"], json!("error"), "{unshared}");
 }
