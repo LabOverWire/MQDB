@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use mqdb_agent::Database;
+use mqdb_agent::database::{GranteeIdentity, ShareActor};
 use mqdb_agent::vault_backend::DbAccess;
 use mqdb_core::protocol::{build_request, parse_db_topic};
 use mqdb_core::types::{OwnershipConfig, ScopeConfig};
@@ -431,4 +432,104 @@ async fn cascade_share_reports_a_reference_dropped_at_the_bound() {
             (10, json!(10), json!(false)),
         ]
     );
+}
+
+fn alice_tree() -> [Value; 2] {
+    [
+        json!({"id": "kid", "userId": "alice", "title": "k"}),
+        json!({"id": "top", "userId": "alice", "title": "t", "parent_id": "kid"}),
+    ]
+}
+
+#[tokio::test]
+async fn cascade_share_raises_a_lower_grant() {
+    let (_tmp, db) = diagrams(&alice_tree()).await;
+    data(
+        publish(
+            &db,
+            "$DB/diagrams/kid/share",
+            br#"{"grantee":"carol","permission":"view","cascade":false}"#,
+            "alice",
+        )
+        .await,
+    );
+    data(publish(&db, "$DB/diagrams/top/share", CAROL_EDIT_CASCADE, "alice").await);
+    assert_eq!(carol_access(&db, "kid").await, (json!("ok"), json!("ok")));
+}
+
+#[tokio::test]
+async fn cascade_share_does_not_lower_a_higher_grant() {
+    let (_tmp, db) = diagrams(&alice_tree()).await;
+    data(
+        publish(
+            &db,
+            "$DB/diagrams/kid/share",
+            br#"{"grantee":"carol","permission":"edit","cascade":false}"#,
+            "alice",
+        )
+        .await,
+    );
+    data(
+        publish(
+            &db,
+            "$DB/diagrams/top/share",
+            br#"{"grantee":"carol","permission":"view","cascade":true}"#,
+            "alice",
+        )
+        .await,
+    );
+    assert_eq!(carol_access(&db, "kid").await, (json!("ok"), json!("ok")));
+}
+
+#[tokio::test]
+async fn cascade_share_without_a_sender_reaches_every_owner() {
+    let (_tmp, db) = diagrams(&[
+        json!({"id": "bob-d", "userId": "bob", "title": "bob-secret"}),
+        json!({"id": "alice-d", "userId": "alice", "title": "a", "parent_id": "bob-d"}),
+    ])
+    .await;
+    let op = parse_db_topic("$DB/diagrams/alice-d/share").unwrap();
+    let request = build_request(op, CAROL_EDIT_CASCADE).unwrap();
+    let shared = db
+        .execute_with_sender(
+            request,
+            None,
+            None,
+            &ownership(),
+            &ScopeConfig::default(),
+            None,
+        )
+        .await;
+    let shared = data(shared);
+    assert_eq!(
+        (&shared["resources_shared"], &shared["resources_skipped"]),
+        (&json!(2), &json!(0))
+    );
+}
+
+#[tokio::test]
+async fn cascade_unshare_clears_a_member_grant_stored_under_the_resolved_id() {
+    let (_tmp, db) = diagrams(&alice_tree()).await;
+    let owners = ownership();
+    let actor = ShareActor {
+        sender: Some("alice"),
+        ownership: &owners,
+    };
+    let legacy = GranteeIdentity {
+        key: "carol",
+        resolved: Some("carol"),
+        display: None,
+    };
+    db.share_grant("diagrams", "top", legacy, "edit", actor, true)
+        .await
+        .unwrap();
+    let current = GranteeIdentity {
+        key: "carol-email-hash",
+        resolved: Some("carol"),
+        display: None,
+    };
+    db.share_revoke("diagrams", "top", current, actor, true)
+        .await
+        .unwrap();
+    assert_eq!(carol_access(&db, "kid").await, (json!(403), json!(403)));
 }

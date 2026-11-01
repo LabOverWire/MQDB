@@ -474,3 +474,136 @@ async fn cascade_share_reports_a_reference_dropped_at_the_bound() {
         ]
     );
 }
+
+async fn share_as(
+    ctrl: &mut NodeController<MockTransport>,
+    id: &str,
+    body: Value,
+    sender: &str,
+) -> Value {
+    local(
+        ctrl,
+        &format!("$DB/diagrams/{id}/share"),
+        &bytes(&body),
+        sender,
+    )
+    .await
+}
+
+fn alice_tree() -> [(&'static str, Value); 2] {
+    [
+        ("kid", json!({"userId": "alice", "title": "k"})),
+        (
+            "top",
+            json!({"userId": "alice", "title": "t", "parent_id": "kid"}),
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn cascade_share_counts_a_remote_child_as_skipped() {
+    let mut ctrl = primary_with(&alice_tree()).await;
+    ctrl.become_replica(data_partition("diagrams", "kid"), Epoch::new(1), 0);
+    let shared = share_as(
+        &mut ctrl,
+        "top",
+        json!({"grantee": "carol", "permission": "edit", "cascade": true}),
+        "alice",
+    )
+    .await;
+    assert_eq!(counts(&shared), (json!(1), json!(1)));
+    assert_eq!(grants_on(&ctrl, "kid"), 0);
+}
+
+#[tokio::test]
+async fn cascade_share_does_not_count_a_remote_child_with_a_local_grant_as_shared() {
+    let mut ctrl = primary_with(&alice_tree()).await;
+    share_as(
+        &mut ctrl,
+        "kid",
+        json!({"grantee": "carol", "permission": "edit", "cascade": false}),
+        "alice",
+    )
+    .await;
+    ctrl.become_replica(data_partition("diagrams", "kid"), Epoch::new(1), 0);
+    let shared = share_as(
+        &mut ctrl,
+        "top",
+        json!({"grantee": "carol", "permission": "edit", "cascade": true}),
+        "alice",
+    )
+    .await;
+    assert_eq!(counts(&shared), (json!(1), json!(1)));
+}
+
+#[tokio::test]
+async fn admin_cascade_share_skips_a_dangling_reference() {
+    let mut ctrl =
+        primary_with(&[("top", json!({"userId": "alice", "parent_id": "later-d"}))]).await;
+    let shared = share_as(
+        &mut ctrl,
+        "top",
+        json!({"grantee": "carol", "permission": "edit", "cascade": true}),
+        "root",
+    )
+    .await;
+    assert_eq!(counts(&shared), (json!(1), json!(1)));
+    assert_eq!(grants_on(&ctrl, "later-d"), 0);
+}
+
+#[tokio::test]
+async fn cascade_share_raises_a_lower_grant() {
+    let mut ctrl = primary_with(&alice_tree()).await;
+    share_as(
+        &mut ctrl,
+        "kid",
+        json!({"grantee": "carol", "permission": "view", "cascade": false}),
+        "alice",
+    )
+    .await;
+    share_as(
+        &mut ctrl,
+        "top",
+        json!({"grantee": "carol", "permission": "edit", "cascade": true}),
+        "alice",
+    )
+    .await;
+    assert_eq!(
+        carol_access(&mut ctrl, "kid").await,
+        (json!("ok"), json!("ok"))
+    );
+}
+
+#[tokio::test]
+async fn cascade_share_does_not_lower_a_higher_grant() {
+    let mut ctrl = primary_with(&alice_tree()).await;
+    share_as(
+        &mut ctrl,
+        "kid",
+        json!({"grantee": "carol", "permission": "edit", "cascade": false}),
+        "alice",
+    )
+    .await;
+    share_as(
+        &mut ctrl,
+        "top",
+        json!({"grantee": "carol", "permission": "view", "cascade": true}),
+        "alice",
+    )
+    .await;
+    assert_eq!(
+        carol_access(&mut ctrl, "kid").await,
+        (json!("ok"), json!("ok"))
+    );
+}
+
+#[tokio::test]
+async fn cascade_share_without_a_sender_reaches_every_owner() {
+    let mut ctrl = primary_with(&alice_over_bob()).await;
+    let reply = ctrl
+        .handle_share_local("diagrams", "alice-d", &carol_edit_cascade(), None)
+        .await;
+    let reply: Value = serde_json::from_slice(&reply).unwrap();
+    assert_eq!(counts(&reply), (json!(2), json!(0)));
+    assert_eq!(grants_on(&ctrl, "bob-d"), 1);
+}
