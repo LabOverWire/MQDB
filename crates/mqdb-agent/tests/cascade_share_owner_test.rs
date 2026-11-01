@@ -335,3 +335,64 @@ async fn cascade_share_at_the_bound_follows_foreign_key_fields_in_a_fixed_order(
         (&json!(129), &json!(127))
     );
 }
+
+#[tokio::test]
+async fn cascade_unshare_revokes_the_grant_on_a_member_removed_by_an_fk_cascade() {
+    let (_tmp, db) = diagrams(&[]).await;
+    db.add_foreign_key(
+        "diagrams".into(),
+        "folder_id".into(),
+        "folders".into(),
+        "id".into(),
+        mqdb_core::constraint::OnDeleteAction::Cascade,
+    )
+    .await
+    .unwrap();
+    for (entity, record) in [
+        ("folders", json!({"id": "f1"})),
+        (
+            "diagrams",
+            json!({"id": "m", "userId": "alice", "folder_id": "f1"}),
+        ),
+        (
+            "diagrams",
+            json!({"id": "r", "userId": "alice", "parent_id": "m"}),
+        ),
+    ] {
+        data(
+            db.execute(Request::Create {
+                entity: entity.into(),
+                data: record,
+            })
+            .await,
+        );
+    }
+    data(publish(&db, "$DB/diagrams/r/share", CAROL_EDIT_CASCADE, "alice").await);
+    data(
+        db.execute(Request::Delete {
+            entity: "folders".into(),
+            id: "f1".into(),
+            expected_version: None,
+        })
+        .await,
+    );
+
+    data(
+        publish(
+            &db,
+            "$DB/diagrams/r/unshare",
+            br#"{"grantee":"carol","cascade":true}"#,
+            "alice",
+        )
+        .await,
+    );
+    data(
+        db.execute(Request::Create {
+            entity: "diagrams".into(),
+            data: json!({"id": "m", "userId": "bob", "title": "bob-secret"}),
+        })
+        .await,
+    );
+
+    assert_eq!(carol_access(&db, "m").await, (json!(403), json!(403)));
+}

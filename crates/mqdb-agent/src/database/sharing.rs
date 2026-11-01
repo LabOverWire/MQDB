@@ -33,9 +33,17 @@ pub struct ShareActor<'a> {
     pub ownership: &'a OwnershipConfig,
 }
 
+#[derive(Default)]
 struct ShareableClosure {
     members: Vec<String>,
+    missing: Vec<String>,
     skipped: usize,
+}
+
+enum MemberAccess {
+    Shareable,
+    Foreign,
+    Missing,
 }
 
 impl Database {
@@ -181,23 +189,29 @@ impl Database {
         fields.into_iter().collect()
     }
 
-    fn may_share(
+    fn member_access(
         &self,
         entity: &str,
         id: &str,
         owner_field: &str,
         actor: ShareActor<'_>,
-    ) -> Result<bool> {
+    ) -> Result<MemberAccess> {
         let key = keys::encode_data_key(entity, id);
-        if self.storage.get(&key)?.is_none() {
-            return Ok(false);
-        }
-        match actor.sender {
+        let Some(bytes) = self.storage.get(&key)? else {
+            return Ok(MemberAccess::Missing);
+        };
+        let shareable = match actor.sender {
             Some(uid) if !actor.ownership.is_admin(uid) => {
-                self.is_owner(entity, id, owner_field, uid)
+                let record = Entity::deserialize(entity.to_string(), id.to_string(), &bytes)?;
+                record.data.get(owner_field).and_then(Value::as_str) == Some(uid)
             }
-            _ => Ok(true),
-        }
+            _ => true,
+        };
+        Ok(if shareable {
+            MemberAccess::Shareable
+        } else {
+            MemberAccess::Foreign
+        })
     }
 
     async fn shareable_closure(
@@ -206,17 +220,13 @@ impl Database {
         root_id: &str,
         actor: ShareActor<'_>,
     ) -> Result<ShareableClosure> {
+        let mut closure = ShareableClosure::default();
         let Some(owner_field) = actor.ownership.owner_field(entity) else {
-            return Ok(ShareableClosure {
-                members: vec![],
-                skipped: 0,
-            });
+            return Ok(closure);
         };
         let ref_fields = self.self_reference_fields(entity).await;
         let mut visited: HashSet<String> = HashSet::from([root_id.to_string()]);
         let mut queue: VecDeque<String> = VecDeque::from([root_id.to_string()]);
-        let mut members = Vec::new();
-        let mut skipped = 0;
         while let Some(id) = queue.pop_front() {
             let key = keys::encode_data_key(entity, &id);
             let Some(bytes) = self.storage.get(&key)? else {
@@ -230,15 +240,20 @@ impl Database {
                 if visited.len() >= MAX_CASCADE_DIAGRAMS || !visited.insert(ref_id.to_string()) {
                     continue;
                 }
-                if self.may_share(entity, ref_id, owner_field, actor)? {
-                    members.push(ref_id.to_string());
-                    queue.push_back(ref_id.to_string());
-                } else {
-                    skipped += 1;
+                match self.member_access(entity, ref_id, owner_field, actor)? {
+                    MemberAccess::Shareable => {
+                        closure.members.push(ref_id.to_string());
+                        queue.push_back(ref_id.to_string());
+                    }
+                    MemberAccess::Missing => {
+                        closure.missing.push(ref_id.to_string());
+                        closure.skipped += 1;
+                    }
+                    MemberAccess::Foreign => closure.skipped += 1,
                 }
             }
         }
-        Ok(ShareableClosure { members, skipped })
+        Ok(closure)
     }
 
     pub async fn share_grant(
@@ -270,10 +285,7 @@ impl Database {
         let closure = if cascade {
             self.shareable_closure(entity, id, actor).await?
         } else {
-            ShareableClosure {
-                members: vec![],
-                skipped: 0,
-            }
+            ShareableClosure::default()
         };
         for ref_id in &closure.members {
             let existing = self
@@ -311,7 +323,9 @@ impl Database {
         }
         let mut revoked_ids = vec![id.to_string()];
         if cascade {
-            revoked_ids.extend(self.shareable_closure(entity, id, actor).await?.members);
+            let closure = self.shareable_closure(entity, id, actor).await?;
+            revoked_ids.extend(closure.members);
+            revoked_ids.extend(closure.missing);
         }
         for revoked_id in &revoked_ids {
             for revoke_key in &keys {

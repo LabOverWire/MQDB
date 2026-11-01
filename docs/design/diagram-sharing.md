@@ -247,7 +247,9 @@ referenced record the sender may not share is skipped (counted in
 `resources_skipped`) and not followed, so a cascade never grants on, or walks
 through, another user's diagram, and never leaves a grant on a dangling
 reference. `MAX_CASCADE_DIAGRAMS` bounds work; `visited` is the cycle guard.
-`unshare --cascade` removes grants across the same closure.
+`unshare --cascade` removes grants across the same closure, and on any reference
+whose record no longer exists, so a stale grant is not inherited by a later record
+with that id.
 
 ---
 
