@@ -6,9 +6,9 @@ use super::{StoreApplyError, StoreManager};
 use crate::cluster::{PartitionId, entity};
 
 impl StoreManager {
-    #[allow(clippy::cast_possible_truncation)]
-    #[must_use]
-    pub fn export_partition(&self, partition: PartitionId) -> Vec<u8> {
+    /// # Errors
+    /// Returns `SnapshotTooLarge` if a store's export does not fit the snapshot length fields.
+    pub fn export_partition(&self, partition: PartitionId) -> Result<Vec<u8>, StoreApplyError> {
         let mut buf = Vec::new();
 
         let store_data = [
@@ -63,17 +63,18 @@ impl StoreManager {
             (entity::CHANGE_EVENTS, self.export_change_events(partition)),
         ];
 
-        buf.extend_from_slice(&(store_data.len() as u8).to_be_bytes());
+        let too_large = |_| StoreApplyError::SnapshotTooLarge;
+        buf.push(u8::try_from(store_data.len()).map_err(too_large)?);
 
         for (entity_name, data) in store_data {
             let name_bytes = entity_name.as_bytes();
-            buf.push(name_bytes.len() as u8);
+            buf.push(u8::try_from(name_bytes.len()).map_err(too_large)?);
             buf.extend_from_slice(name_bytes);
-            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            buf.extend_from_slice(&u32::try_from(data.len()).map_err(too_large)?.to_be_bytes());
             buf.extend_from_slice(&data);
         }
 
-        buf
+        Ok(buf)
     }
 
     /// # Errors
@@ -228,6 +229,7 @@ impl StoreManager {
 mod tests {
     use super::*;
     use crate::cluster::NodeId;
+    use crate::cluster::test_support::put_record;
 
     fn node(id: u16) -> NodeId {
         NodeId::validated(id).unwrap()
@@ -238,16 +240,12 @@ mod tests {
         let src = StoreManager::new(node(1));
         let dst = StoreManager::new(node(2));
 
-        src.db_data
-            .create("notes", "n1", b"{\"title\":\"hello\"}", 1000)
-            .unwrap();
-        src.db_data
-            .create("notes", "n2", b"{\"title\":\"world\"}", 2000)
-            .unwrap();
+        put_record(&src.db_data, "notes", "n1", b"{\"title\":\"hello\"}", 1000);
+        put_record(&src.db_data, "notes", "n2", b"{\"title\":\"world\"}", 2000);
 
         let partition = src.db_data.get("notes", "n1").unwrap().partition();
 
-        let payload = src.export_partition(partition);
+        let payload = src.export_partition(partition).unwrap();
         assert!(!payload.is_empty(), "snapshot payload must not be empty");
 
         let imported = dst.import_partition(&payload).expect("import");
@@ -270,10 +268,10 @@ mod tests {
             node(2),
             Some(std::sync::Arc::new(mqdb_core::storage::MemoryBackend::new())),
         );
-        src.db_data.create("notes", "n1", b"{}", 1000).unwrap();
+        put_record(&src.db_data, "notes", "n1", b"{}", 1000);
         let partition = src.db_data.get("notes", "n1").unwrap().partition();
 
-        let payload = src.export_partition(partition);
+        let payload = src.export_partition(partition).unwrap();
 
         dst.import_partition(&payload).expect("import");
         assert!(dst.db_data.get("notes", "n1").is_some());
@@ -291,7 +289,7 @@ mod tests {
 
         let target = src.db_data.get("alpha", "rec-1").unwrap().partition();
 
-        let payload = src.export_partition(target);
+        let payload = src.export_partition(target).unwrap();
         assert!(!payload.is_empty());
         let total_imported = dst.import_partition(&payload).expect("import");
         assert!(total_imported >= 1);
@@ -307,7 +305,7 @@ mod tests {
         };
         use mqdb_core::partition::data_partition;
 
-        store.db_data.create(entity, "rec-1", b"{}", 1000).unwrap();
+        put_record(&store.db_data, entity, "rec-1", b"{}", 1000);
         store
             .db_schema
             .register(entity, b"{\"fields\":[]}")
@@ -429,17 +427,14 @@ mod tests {
         src.db_constraints.add(fk.clone()).unwrap();
         dst.db_constraints.add(fk).unwrap();
 
-        src.db_data
-            .create("posts", "p1", b"{\"title\":\"hello\"}", 1_000)
-            .unwrap();
-        src.db_data
-            .create(
-                "comments",
-                "c1",
-                b"{\"post_id\":\"p1\",\"text\":\"first\"}",
-                1_000,
-            )
-            .unwrap();
+        put_record(&src.db_data, "posts", "p1", b"{\"title\":\"hello\"}", 1_000);
+        put_record(
+            &src.db_data,
+            "comments",
+            "c1",
+            b"{\"post_id\":\"p1\",\"text\":\"first\"}",
+            1_000,
+        );
         src.update_fk_reverse_index(
             crate::cluster::protocol::Operation::Insert,
             "comments",
@@ -456,7 +451,7 @@ mod tests {
 
         let child_partition = src.db_data.get("comments", "c1").unwrap().partition();
 
-        let payload = src.export_partition(child_partition);
+        let payload = src.export_partition(child_partition).unwrap();
         assert!(!payload.is_empty(), "snapshot payload must not be empty");
         let imported = dst.import_partition(&payload).expect("import");
         assert!(imported >= 1, "child record must survive import");
@@ -502,7 +497,7 @@ mod tests {
                 .unwrap();
         }
 
-        src.db_data.create("alpha", "rec-1", b"{}", 1_000).unwrap();
+        put_record(&src.db_data, "alpha", "rec-1", b"{}", 1_000);
         let any_partition = src.db_data.get("alpha", "rec-1").unwrap().partition();
 
         let schema_partitions: std::collections::HashSet<_> = src
@@ -526,7 +521,7 @@ mod tests {
             "test prerequisite: constraints must span more than one partition"
         );
 
-        let payload = src.export_partition(any_partition);
+        let payload = src.export_partition(any_partition).unwrap();
         dst.import_partition(&payload).expect("import");
 
         for entity in &entities {

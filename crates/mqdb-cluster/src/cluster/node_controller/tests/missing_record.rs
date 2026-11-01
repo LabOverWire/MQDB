@@ -7,6 +7,7 @@ use crate::cluster::db::{
 };
 use crate::cluster::db_handler::{DbPublishResult, DbRequestHandler, MqttRequestContext};
 use crate::cluster::protocol::{JsonDbOp, JsonDbRequest};
+use crate::cluster::test_support::put_record;
 use mqdb_core::types::{OwnershipConfig, SHARES_ENTITY};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -510,10 +511,13 @@ async fn cascade_delete_reaching_a_not_yet_primary_with_a_stale_copy_is_not_ackn
 
     let mut receiver = not_yet_primary(partition);
     let copy_owned_by_bob = serde_json::to_vec(&json!({"userId": "bob", "title": "b"})).unwrap();
-    receiver
-        .stores
-        .db_create_replicated("docs", "child-1", &copy_owned_by_bob, 1000)
-        .unwrap();
+    put_record(
+        &receiver.stores.db_data,
+        "docs",
+        "child-1",
+        &copy_owned_by_bob,
+        1000,
+    );
     receiver
         .handle_json_db_request(node(2), partition, &request)
         .await;
@@ -817,9 +821,7 @@ async fn a_not_yet_primary_refuses_malformed_payloads_and_stale_copy_writes_alik
     let partition = data_partition("docs", "child-1");
     let mut ctrl = not_yet_primary(partition);
     let stale = serde_json::to_vec(&json!({"userId": "alice", "title": "a"})).unwrap();
-    ctrl.stores
-        .db_create_replicated("docs", "child-1", &stale, 1000)
-        .unwrap();
+    put_record(&ctrl.stores.db_data, "docs", "child-1", &stale, 1000);
     let update = serde_json::to_vec(&json!({"title": "x"})).unwrap();
     let cases: [(JsonDbOp, &[u8], u16); 4] = [
         (JsonDbOp::Update, b"not json", 400),

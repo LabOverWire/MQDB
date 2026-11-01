@@ -99,7 +99,7 @@ pub fn oversized_create_message(entity: &str, data: &serde_json::Value) -> Optio
 #[must_use]
 pub fn db_data_key(entity: &str, id: &str) -> String {
     let partition = data_partition(entity, id);
-    format!("_db_data/p{}/{}/{}", partition.get(), entity, id)
+    format!("_db_data/p{}/{entity}/{id}", partition.get())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +108,7 @@ pub enum DbDataStoreError {
     AlreadyExists,
     SerializationError,
     NotPrimary,
+    StoreFailed,
 }
 
 impl std::fmt::Display for DbDataStoreError {
@@ -117,6 +118,7 @@ impl std::fmt::Display for DbDataStoreError {
             Self::AlreadyExists => write!(f, "entity already exists"),
             Self::SerializationError => write!(f, "serialization error"),
             Self::NotPrimary => write!(f, "this node is not the partition primary"),
+            Self::StoreFailed => write!(f, "the write could not be stored"),
         }
     }
 }
@@ -175,42 +177,6 @@ impl DbDataStore {
 
     /// # Panics
     /// Panics if the internal lock is poisoned.
-    ///
-    /// # Errors
-    /// Returns `AlreadyExists` if the entity already exists.
-    pub fn create(
-        &self,
-        entity: &str,
-        id: &str,
-        data: &[u8],
-        timestamp_ms: u64,
-    ) -> Result<DbEntity, DbDataStoreError> {
-        let start = std::time::Instant::now();
-        let key = format!("{entity}/{id}");
-        let mut entities = self.write_entities();
-        let lock_time = start.elapsed();
-
-        if entities.contains_key(&key) {
-            return Err(DbDataStoreError::AlreadyExists);
-        }
-        let db_entity = DbEntity::create(entity, id, data, timestamp_ms)
-            .ok_or(DbDataStoreError::SerializationError)?;
-        entities.insert(key, db_entity.clone());
-
-        let total_time = start.elapsed();
-        if total_time.as_micros() > 100 {
-            tracing::warn!(
-                total_us = total_time.as_micros(),
-                lock_us = lock_time.as_micros(),
-                store_size = entities.len(),
-                "slow DbDataStore::create"
-            );
-        }
-        Ok(db_entity)
-    }
-
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
     #[must_use]
     pub fn get(&self, entity: &str, id: &str) -> Option<DbEntity> {
         let key = format!("{entity}/{id}");
@@ -219,55 +185,9 @@ impl DbDataStore {
 
     /// # Panics
     /// Panics if the internal lock is poisoned.
-    ///
-    /// # Errors
-    /// Returns `NotFound` if the entity does not exist.
-    pub fn update(
-        &self,
-        entity: &str,
-        id: &str,
-        data: &[u8],
-        timestamp_ms: u64,
-    ) -> Result<DbEntity, DbDataStoreError> {
-        let key = format!("{entity}/{id}");
-        let mut entities = self.write_entities();
-        if !entities.contains_key(&key) {
-            return Err(DbDataStoreError::NotFound);
-        }
-        let db_entity = DbEntity::create(entity, id, data, timestamp_ms)
-            .ok_or(DbDataStoreError::SerializationError)?;
-        entities.insert(key, db_entity.clone());
-        Ok(db_entity)
-    }
-
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
-    ///
-    /// # Errors
-    /// Returns `NotFound` if the entity does not exist.
-    pub fn delete(&self, entity: &str, id: &str) -> Result<DbEntity, DbDataStoreError> {
-        let key = format!("{entity}/{id}");
-        let mut entities = self.write_entities();
-        entities.remove(&key).ok_or(DbDataStoreError::NotFound)
-    }
-
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
-    ///
-    /// # Errors
-    /// Returns `SerializationError` if a length does not fit the record format.
-    pub fn upsert(
-        &self,
-        entity: &str,
-        id: &str,
-        data: &[u8],
-        timestamp_ms: u64,
-    ) -> Result<DbEntity, DbDataStoreError> {
-        let db_entity = DbEntity::create(entity, id, data, timestamp_ms)
-            .ok_or(DbDataStoreError::SerializationError)?;
-        self.write_entities()
-            .insert(format!("{entity}/{id}"), db_entity.clone());
-        Ok(db_entity)
+    #[must_use]
+    pub fn contains(&self, entity: &str, id: &str) -> bool {
+        self.read_entities().contains_key(&format!("{entity}/{id}"))
     }
 
     #[must_use]
@@ -292,9 +212,6 @@ impl DbDataStore {
             .collect()
     }
 
-    /// Runs `f` over every record of `entity_type` under the read guard, without cloning the
-    /// records. Use for read-only scans (e.g. reconciliation) that only need a projection.
-    ///
     /// # Panics
     /// Panics if the internal lock is poisoned.
     pub fn for_each_record(&self, entity_type: &str, mut f: impl FnMut(&DbEntity)) {
@@ -522,9 +439,6 @@ impl DbDataStore {
     /// # Panics
     /// Panics if the internal lock is poisoned.
     #[must_use]
-    /// Return `(entity, id)` for every row whose `_expires_at` has passed. Read-only:
-    /// the actual delete is routed through the replicated delete path (so it releases
-    /// unique guards, emits a change event, and replicates) by the caller.
     pub fn scan_expired_ttl(&self, now_secs: u64) -> Vec<(String, String)> {
         let entities = self.read_entities();
         entities
@@ -654,6 +568,7 @@ impl std::fmt::Debug for FkReverseIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cluster::test_support::{put_record, remove_record};
 
     fn node(id: u16) -> NodeId {
         NodeId::validated(id).unwrap()
@@ -679,12 +594,10 @@ mod tests {
     }
 
     #[test]
-    fn create_and_get() {
+    fn applied_insert_is_readable() {
         let store = DbDataStore::new(node(1));
 
-        store
-            .create("users", "123", b"{\"name\":\"Alice\"}", 1000)
-            .unwrap();
+        put_record(&store, "users", "123", b"{\"name\":\"Alice\"}", 1000);
         let entity = store.get("users", "123").unwrap();
 
         assert_eq!(entity.entity_str(), "users");
@@ -693,25 +606,11 @@ mod tests {
     }
 
     #[test]
-    fn create_duplicate_fails() {
+    fn applied_insert_over_a_record_replaces_it() {
         let store = DbDataStore::new(node(1));
 
-        store.create("users", "123", b"{}", 1000).unwrap();
-        let result = store.create("users", "123", b"{}", 2000);
-
-        assert_eq!(result, Err(DbDataStoreError::AlreadyExists));
-    }
-
-    #[test]
-    fn update_existing() {
-        let store = DbDataStore::new(node(1));
-
-        store
-            .create("users", "123", b"{\"name\":\"Alice\"}", 1000)
-            .unwrap();
-        store
-            .update("users", "123", b"{\"name\":\"Bob\"}", 2000)
-            .unwrap();
+        put_record(&store, "users", "123", b"{\"name\":\"Alice\"}", 1000);
+        put_record(&store, "users", "123", b"{\"name\":\"Bob\"}", 2000);
 
         let entity = store.get("users", "123").unwrap();
         assert_eq!(entity.data, b"{\"name\":\"Bob\"}");
@@ -719,38 +618,22 @@ mod tests {
     }
 
     #[test]
-    fn update_missing_fails() {
+    fn applied_delete_removes_the_record() {
         let store = DbDataStore::new(node(1));
 
-        let result = store.update("users", "123", b"{}", 1000);
-        assert_eq!(result, Err(DbDataStoreError::NotFound));
-    }
-
-    #[test]
-    fn delete_existing() {
-        let store = DbDataStore::new(node(1));
-
-        store.create("users", "123", b"{}", 1000).unwrap();
-        store.delete("users", "123").unwrap();
+        put_record(&store, "users", "123", b"{}", 1000);
+        remove_record(&store, "users", "123");
 
         assert!(store.get("users", "123").is_none());
-    }
-
-    #[test]
-    fn delete_missing_fails() {
-        let store = DbDataStore::new(node(1));
-
-        let result = store.delete("users", "123");
-        assert_eq!(result, Err(DbDataStoreError::NotFound));
     }
 
     #[test]
     fn list_by_entity_type() {
         let store = DbDataStore::new(node(1));
 
-        store.create("users", "1", b"{}", 1000).unwrap();
-        store.create("users", "2", b"{}", 1000).unwrap();
-        store.create("orders", "1", b"{}", 1000).unwrap();
+        put_record(&store, "users", "1", b"{}", 1000);
+        put_record(&store, "users", "2", b"{}", 1000);
+        put_record(&store, "orders", "1", b"{}", 1000);
 
         let users = store.list("users");
         assert_eq!(users.len(), 2);
@@ -764,12 +647,8 @@ mod tests {
         let store1 = DbDataStore::new(node(1));
         let store2 = DbDataStore::new(node(2));
 
-        store1
-            .create("users", "1", b"{\"name\":\"Alice\"}", 1000)
-            .unwrap();
-        store1
-            .create("users", "2", b"{\"name\":\"Bob\"}", 2000)
-            .unwrap();
+        put_record(&store1, "users", "1", b"{\"name\":\"Alice\"}", 1000);
+        put_record(&store1, "users", "2", b"{\"name\":\"Bob\"}", 2000);
 
         let entity1 = store1.get("users", "1").unwrap();
         let partition = entity1.partition();
@@ -784,9 +663,9 @@ mod tests {
     fn query_returns_all_entities() {
         let store = DbDataStore::new(node(1));
 
-        store.create("users", "1", b"{}", 1000).unwrap();
-        store.create("users", "2", b"{}", 1000).unwrap();
-        store.create("orders", "1", b"{}", 1000).unwrap();
+        put_record(&store, "users", "1", b"{}", 1000);
+        put_record(&store, "users", "2", b"{}", 1000);
+        put_record(&store, "orders", "1", b"{}", 1000);
 
         let (results, has_more, cursor) = store.query(None, None, 100, None);
         assert_eq!(results.len(), 3);
@@ -798,9 +677,9 @@ mod tests {
     fn query_filters_by_entity_type() {
         let store = DbDataStore::new(node(1));
 
-        store.create("users", "1", b"{}", 1000).unwrap();
-        store.create("users", "2", b"{}", 1000).unwrap();
-        store.create("orders", "1", b"{}", 1000).unwrap();
+        put_record(&store, "users", "1", b"{}", 1000);
+        put_record(&store, "users", "2", b"{}", 1000);
+        put_record(&store, "orders", "1", b"{}", 1000);
 
         let (results, _, _) = store.query(Some("users"), None, 100, None);
         assert_eq!(results.len(), 2);
@@ -812,9 +691,7 @@ mod tests {
         let store = DbDataStore::new(node(1));
 
         for i in 0..5 {
-            store
-                .create("items", &format!("item{i}"), b"{}", 1000)
-                .unwrap();
+            put_record(&store, "items", &format!("item{i}"), b"{}", 1000);
         }
 
         let (page1, has_more1, cursor1) = store.query(None, None, 2, None);
@@ -836,8 +713,8 @@ mod tests {
     fn query_with_id_filter() {
         let store = DbDataStore::new(node(1));
 
-        store.create("users", "alice", b"{}", 1000).unwrap();
-        store.create("users", "bob", b"{}", 1000).unwrap();
+        put_record(&store, "users", "alice", b"{}", 1000);
+        put_record(&store, "users", "bob", b"{}", 1000);
 
         let (results, _, _) = store.query(None, Some("id=alice"), 100, None);
         assert_eq!(results.len(), 1);

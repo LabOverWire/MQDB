@@ -63,6 +63,22 @@ pub(crate) fn json_write_failure(error: DbDataStoreError) -> Vec<u8> {
     }
 }
 
+pub(crate) fn json_record_write_failure(
+    entity: &str,
+    id: &str,
+    error: DbDataStoreError,
+) -> Vec<u8> {
+    match error {
+        DbDataStoreError::AlreadyExists => {
+            DbRequestHandler::json_error(409, "entity already exists")
+        }
+        DbDataStoreError::NotFound => {
+            DbRequestHandler::json_error(404, &format!("entity not found: {entity} id={id}"))
+        }
+        error => json_write_failure(error),
+    }
+}
+
 pub(crate) fn json_ok_with_id(id: &str, data: &Value) -> Vec<u8> {
     let mut merged = data.clone();
     if let Value::Object(ref mut obj) = merged {
