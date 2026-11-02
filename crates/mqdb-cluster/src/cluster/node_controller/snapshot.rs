@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 pub(super) const SNAPSHOT_RETRY_AFTER: Duration = Duration::from_secs(10);
 pub(super) const DEFERRED_SNAPSHOT_CAPACITY: usize = 1024;
-const SILENT_SOURCE_GRACE: Duration = Duration::from_secs(30);
+const SILENT_SOURCE_GRACE: Duration = Duration::from_secs(90);
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SnapshotRequestState {
@@ -23,6 +23,7 @@ pub(crate) struct SnapshotRequestState {
     pub(crate) first_asked: Instant,
     pub(crate) last_activity: Instant,
     pub(crate) taking_primary: bool,
+    pub(crate) replaced_replica: Option<NodeId>,
 }
 
 #[derive(Debug)]
@@ -299,7 +300,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    fn source_is_alive(&self, source: NodeId) -> bool {
+    pub(super) fn source_is_alive(&self, source: NodeId) -> bool {
         self.node_status(source) != NodeStatus::Dead
     }
 
@@ -330,6 +331,10 @@ impl<T: ClusterTransport> NodeController<T> {
             .filter(|request| request.taking_primary && self.source_is_alive(request.source))
             .map(|request| request.source);
         let source = kept_source.unwrap_or(source);
+        let replaced_replica = self
+            .requested_snapshots
+            .get(partition)
+            .and_then(|request| request.replaced_replica);
         if taking_primary
             && let Some(request) = self.requested_snapshots.get_mut(partition)
             && request.source == source
@@ -359,6 +364,9 @@ impl<T: ClusterTransport> NodeController<T> {
         );
         self.send_snapshot_request(partition, source, taking_primary || kept_source.is_some())
             .await;
+        if let Some(request) = self.requested_snapshots.get_mut(partition) {
+            request.replaced_replica = replaced_replica;
+        }
     }
 
     pub(super) async fn refuse_unready_read(&self, from: NodeId, request: &JsonDbRequest) {
@@ -426,7 +434,16 @@ impl<T: ClusterTransport> NodeController<T> {
                     .await;
                 if let Some(request) = self.requested_snapshots.get_mut(partition) {
                     request.first_asked = stalled.first_asked;
+                    request.replaced_replica = stalled.replaced_replica;
                 }
+            } else if waiting_to_take {
+                tracing::warn!(
+                    ?partition,
+                    source = stalled.source.get(),
+                    "taking the primary role: no node is left to ask for the data"
+                );
+                self.become_primary(partition, self.partition_map.epoch(partition));
+                self.primary_taken_after_wait = true;
             }
         }
     }
@@ -458,6 +475,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 first_asked: Instant::now(),
                 last_activity: Instant::now(),
                 taking_primary,
+                replaced_replica: None,
             },
         );
 

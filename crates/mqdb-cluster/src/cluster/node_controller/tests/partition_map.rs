@@ -1046,6 +1046,12 @@ async fn a_repeated_request_is_deferred_once() {
 #[tokio::test]
 async fn a_waiting_node_given_the_primary_role_by_the_map_serves_its_deferred_requests() {
     let (mut waiting, partition) = waiting_with_a_deferred_request().await;
+    waiting.heartbeat.receive_heartbeat(
+        node(2),
+        &crate::cluster::protocol::Heartbeat::create(node(2), 0),
+        0,
+    );
+    waiting.apply_dead_nodes(&[node(2)]);
 
     waiting
         .apply_raft_partition_map(map_with(partition, node(1), &[], 2))
@@ -1362,7 +1368,7 @@ async fn a_replica_still_waiting_for_its_data_does_not_block_readiness() {
 
 fn waited_since_long_ago(ctrl: &mut NodeController<MockTransport>, partition: PartitionId) {
     let long_ago = std::time::Instant::now()
-        .checked_sub(std::time::Duration::from_secs(31))
+        .checked_sub(std::time::Duration::from_secs(91))
         .unwrap();
     if let Some(request) = ctrl.requested_snapshots.get_mut(partition) {
         request.first_asked = long_ago;

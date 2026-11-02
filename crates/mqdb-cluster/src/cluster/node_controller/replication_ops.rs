@@ -435,9 +435,12 @@ impl<T: ClusterTransport> NodeController<T> {
                 continue;
             }
             if new_assignment.primary == Some(self.node_id) {
-                if let Some(source) =
-                    self.source_needed_before_primary(partition, new_assignment, &held)
-                {
+                if let Some(source) = self.source_needed_before_primary(
+                    partition,
+                    new_assignment,
+                    old_assignment,
+                    &held,
+                ) {
                     self.await_snapshot(partition, new_assignment.epoch, source, true)
                         .await;
                 } else {
@@ -454,6 +457,10 @@ impl<T: ClusterTransport> NodeController<T> {
                 } else if let Some(primary) = new_assignment.primary {
                     self.become_replica_with_snapshot(partition, new_assignment.epoch, primary)
                         .await;
+                    let replaced = self.other_replica(old_assignment);
+                    if let Some(request) = self.requested_snapshots.get_mut(partition) {
+                        request.replaced_replica = request.replaced_replica.or(replaced);
+                    }
                 }
             } else {
                 self.step_down(partition);
@@ -481,6 +488,7 @@ impl<T: ClusterTransport> NodeController<T> {
         &self,
         partition: PartitionId,
         assignment: &PartitionAssignment,
+        old_assignment: &PartitionAssignment,
         held: &HeldPrimaries,
     ) -> Option<NodeId> {
         let holds_data = matches!(
@@ -490,6 +498,16 @@ impl<T: ClusterTransport> NodeController<T> {
         if holds_data {
             return None;
         }
+        self.other_replica(assignment).or_else(|| {
+            self.requested_snapshots
+                .get(partition)
+                .and_then(|request| request.replaced_replica)
+                .or_else(|| self.other_replica(old_assignment))
+                .filter(|node| self.source_is_alive(*node))
+        })
+    }
+
+    fn other_replica(&self, assignment: &PartitionAssignment) -> Option<NodeId> {
         assignment
             .replicas
             .iter()
