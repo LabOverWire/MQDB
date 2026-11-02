@@ -1359,3 +1359,79 @@ async fn a_replica_still_waiting_for_its_data_does_not_block_readiness() {
     assert_eq!(ctrl.role(partition), ReplicaRole::AwaitingSnapshot);
     assert_eq!(ctrl.partitions_ready(), 1);
 }
+
+fn waited_since_long_ago(ctrl: &mut NodeController<MockTransport>, partition: PartitionId) {
+    let long_ago = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(31))
+        .unwrap();
+    if let Some(request) = ctrl.requested_snapshots.get_mut(partition) {
+        request.first_asked = long_ago;
+        request.last_activity = long_ago;
+    }
+}
+
+#[tokio::test]
+async fn a_primary_waiting_on_a_node_never_heard_from_takes_the_role_after_the_grace() {
+    let partition = session_partition("c1");
+    let map = map_with(partition, node(2), &[node(3)], 1);
+    let mut ctrl = controller(2);
+    ctrl.apply_raft_partition_map(map.clone()).await;
+    assert_eq!(ctrl.role(partition), ReplicaRole::AwaitingSnapshot);
+    ctrl.apply_raft_partition_map(map.clone()).await;
+    assert_eq!(ctrl.role(partition), ReplicaRole::AwaitingSnapshot);
+
+    waited_since_long_ago(&mut ctrl, partition);
+
+    assert!(ctrl.apply_raft_partition_map(map).await);
+    assert_eq!(ctrl.role(partition), ReplicaRole::Primary);
+}
+
+#[tokio::test]
+async fn a_primary_waiting_on_a_node_it_has_heard_from_keeps_waiting_past_the_grace() {
+    let partition = session_partition("c1");
+    let map = map_with(partition, node(2), &[node(3)], 1);
+    let mut ctrl = controller(2);
+    ctrl.heartbeat.receive_heartbeat(
+        node(3),
+        &crate::cluster::protocol::Heartbeat::create(node(3), 0),
+        0,
+    );
+    ctrl.apply_raft_partition_map(map.clone()).await;
+
+    waited_since_long_ago(&mut ctrl, partition);
+    ctrl.apply_raft_partition_map(map).await;
+
+    assert_eq!(ctrl.role(partition), ReplicaRole::AwaitingSnapshot);
+    assert_eq!(snapshot_requests_to(&ctrl, node(3)), 2);
+}
+
+#[tokio::test]
+async fn a_replica_waiting_on_a_node_never_heard_from_stays_waiting() {
+    let partition = session_partition("c1");
+    let map = map_with(partition, node(1), &[node(2)], 1);
+    let mut ctrl = controller(2);
+    ctrl.apply_raft_partition_map(map.clone()).await;
+
+    waited_since_long_ago(&mut ctrl, partition);
+    ctrl.apply_raft_partition_map(map).await;
+
+    assert_eq!(ctrl.role(partition), ReplicaRole::AwaitingSnapshot);
+}
+
+#[tokio::test]
+async fn the_grace_survives_a_retry_of_the_request() {
+    let partition = session_partition("c1");
+    let map = map_with(partition, node(2), &[node(3)], 1);
+    let mut ctrl = controller(2);
+    ctrl.apply_raft_partition_map(map.clone()).await;
+    let first_asked = ctrl.requested_snapshots.get(partition).unwrap().first_asked;
+
+    stall_request(&mut ctrl, partition);
+    ctrl.apply_raft_partition_map(map).await;
+
+    assert_eq!(snapshot_requests_to(&ctrl, node(3)), 2);
+    assert_eq!(
+        ctrl.requested_snapshots.get(partition).unwrap().first_asked,
+        first_asked
+    );
+}

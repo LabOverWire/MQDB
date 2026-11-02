@@ -15,10 +15,12 @@ use std::time::{Duration, Instant};
 
 pub(super) const SNAPSHOT_RETRY_AFTER: Duration = Duration::from_secs(10);
 pub(super) const DEFERRED_SNAPSHOT_CAPACITY: usize = 1024;
+const SILENT_SOURCE_GRACE: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SnapshotRequestState {
     pub(crate) source: NodeId,
+    pub(crate) first_asked: Instant,
     pub(crate) last_activity: Instant,
     pub(crate) taking_primary: bool,
 }
@@ -278,7 +280,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
         if self.partition_map.primary(partition) == Some(self.node_id) {
             self.become_primary(partition, epoch);
-            self.primary_taken_by_import = true;
+            self.primary_taken_after_wait = true;
             if let Some(state) = self.replicas.get_mut(&partition.get()) {
                 state.set_sequence(sequence);
             }
@@ -379,11 +381,11 @@ impl<T: ClusterTransport> NodeController<T> {
 
     pub(super) async fn retry_stalled_snapshots(&mut self) {
         for partition in PartitionId::all() {
-            let Some((stalled_source, stalled_taking_primary)) = self
+            let Some(stalled) = self
                 .requested_snapshots
                 .get(partition)
                 .filter(|request| request.last_activity.elapsed() >= SNAPSHOT_RETRY_AFTER)
-                .map(|request| (request.source, request.taking_primary))
+                .copied()
             else {
                 continue;
             };
@@ -393,10 +395,23 @@ impl<T: ClusterTransport> NodeController<T> {
                 continue;
             }
             let waiting_to_take = self.partition_map.primary(partition) == Some(self.node_id);
+            if waiting_to_take
+                && self.node_status(stalled.source) == NodeStatus::Unknown
+                && stalled.first_asked.elapsed() >= SILENT_SOURCE_GRACE
+            {
+                tracing::warn!(
+                    ?partition,
+                    source = stalled.source.get(),
+                    "taking the primary role: the snapshot source was never heard from"
+                );
+                self.become_primary(partition, self.partition_map.epoch(partition));
+                self.primary_taken_after_wait = true;
+                continue;
+            }
             let keep_stalled_source =
-                stalled_taking_primary && self.source_is_alive(stalled_source);
+                stalled.taking_primary && self.source_is_alive(stalled.source);
             let source = if keep_stalled_source {
-                Some(stalled_source)
+                Some(stalled.source)
             } else {
                 self.snapshot_source(partition)
             };
@@ -409,6 +424,9 @@ impl<T: ClusterTransport> NodeController<T> {
                 let taking_primary = waiting_to_take || keep_stalled_source;
                 self.send_snapshot_request(partition, source, taking_primary)
                     .await;
+                if let Some(request) = self.requested_snapshots.get_mut(partition) {
+                    request.first_asked = stalled.first_asked;
+                }
             }
         }
     }
@@ -437,6 +455,7 @@ impl<T: ClusterTransport> NodeController<T> {
             partition,
             SnapshotRequestState {
                 source: from,
+                first_asked: Instant::now(),
                 last_activity: Instant::now(),
                 taking_primary,
             },

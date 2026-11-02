@@ -420,7 +420,7 @@ impl<T: ClusterTransport> NodeController<T> {
             self.retry_stalled_snapshots().await;
             self.release_held_writes().await;
             self.serve_deferred_snapshots().await;
-            return std::mem::take(&mut self.primary_taken_by_import);
+            return std::mem::take(&mut self.primary_taken_after_wait);
         }
         let held = *self
             .held_primaries
@@ -469,7 +469,7 @@ impl<T: ClusterTransport> NodeController<T> {
         self.retry_stalled_snapshots().await;
         self.release_held_writes().await;
         self.serve_deferred_snapshots().await;
-        became_primary | std::mem::take(&mut self.primary_taken_by_import)
+        became_primary | std::mem::take(&mut self.primary_taken_after_wait)
     }
 
     fn waiting_to_take(&self, partition: PartitionId) -> bool {
