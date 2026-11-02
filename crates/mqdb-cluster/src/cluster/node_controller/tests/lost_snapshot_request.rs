@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::cluster::db::data_partition;
+use crate::cluster::snapshot::SnapshotRequest;
 use crate::cluster::{PartitionAssignment, PartitionMap};
 use std::sync::atomic::Ordering;
 
@@ -130,21 +131,13 @@ async fn control_the_record_survives_promotion_when_the_snapshot_request_is_deli
 }
 
 #[tokio::test]
-async fn control_tick_resends_once_the_lost_request_is_no_longer_marked_as_requested() {
+async fn control_a_drive_asks_once_the_lost_request_is_no_longer_recorded() {
     let partition = data_partition(ENTITY, ID);
     let mut restarted = restarted_node_without_a_link_to_the_primary(partition).await;
-    restarted.requested_snapshots.remove(partition);
+    restarted.incoming_snapshots.remove(&partition);
+    restarted.drive_snapshots(60_000).await;
 
-    let output = restarted.tick(60_000);
-
-    let resent = output
-        .catchup_requests
-        .iter()
-        .filter(|(to, message)| {
-            *to == node(4) && matches!(message, ClusterMessage::SnapshotRequest(_))
-        })
-        .count();
-    assert_eq!(resent, 1);
+    assert_eq!(snapshot_requests(&restarted), 1);
 }
 
 #[tokio::test]
@@ -152,12 +145,10 @@ async fn a_lost_snapshot_request_is_sent_again_after_the_retry_interval() {
     let partition = data_partition(ENTITY, ID);
     let mut restarted = restarted_node_without_a_link_to_the_primary(partition).await;
     assert_eq!(snapshot_requests(&restarted), 0);
-    let stalled_since = std::time::Instant::now()
-        .checked_sub(std::time::Duration::from_secs(11))
-        .unwrap();
-    if let Some(request) = restarted.requested_snapshots.get_mut(partition) {
-        request.last_activity = stalled_since;
-    }
+    restarted.snapshot_request_stalled(partition);
+    restarted
+        .drive_snapshots(crate::cluster::node_controller::snapshot::SNAPSHOT_STALL_TIMEOUT_MS + 1)
+        .await;
 
     restarted
         .apply_raft_partition_map(map_with(partition, node(4), &[node(1)], 3))
@@ -339,12 +330,10 @@ async fn a_primary_waiting_on_a_prior_holder_that_died_takes_the_role() {
     assert_eq!(moved_in.role(partition), ReplicaRole::AwaitingSnapshot);
 
     moved_in.apply_dead_nodes(&[node(3)]);
-    let stalled_since = std::time::Instant::now()
-        .checked_sub(std::time::Duration::from_secs(11))
-        .unwrap();
-    if let Some(request) = moved_in.requested_snapshots.get_mut(partition) {
-        request.last_activity = stalled_since;
-    }
+    moved_in.snapshot_request_stalled(partition);
+    moved_in
+        .drive_snapshots(crate::cluster::node_controller::snapshot::SNAPSHOT_STALL_TIMEOUT_MS + 1)
+        .await;
     assert!(moved_in.apply_raft_partition_map(alone).await);
 
     assert_eq!(moved_in.role(partition), ReplicaRole::Primary);
@@ -373,12 +362,10 @@ async fn a_primary_alone_whose_kept_source_died_asks_the_replica_it_replaced() {
     assert_eq!(requests_to(&moved_in, node(3)), 0);
 
     moved_in.apply_dead_nodes(&[node(1)]);
-    let stalled_since = std::time::Instant::now()
-        .checked_sub(std::time::Duration::from_secs(11))
-        .unwrap();
-    if let Some(request) = moved_in.requested_snapshots.get_mut(partition) {
-        request.last_activity = stalled_since;
-    }
+    moved_in.snapshot_request_stalled(partition);
+    moved_in
+        .drive_snapshots(crate::cluster::node_controller::snapshot::SNAPSHOT_STALL_TIMEOUT_MS + 1)
+        .await;
     moved_in.apply_raft_partition_map(alone).await;
 
     assert_eq!(moved_in.role(partition), ReplicaRole::AwaitingSnapshot);
@@ -410,22 +397,17 @@ async fn a_replica_swapped_to_primary_asks_the_old_primary_not_the_replica_it_re
         .await;
 
     assert_eq!(requests_to(&moved_in, node(3)), 0);
-    assert_eq!(
-        moved_in.requested_snapshots.get(partition).unwrap().source,
-        node(1)
-    );
+    assert_eq!(moved_in.snapshot_asked_from(partition).unwrap(), node(1));
 }
 
 #[tokio::test]
 async fn a_waiting_replica_retries_its_primary_not_the_replica_it_replaced() {
     let partition = data_partition(ENTITY, ID);
     let mut moved_in = replica_moved_in_while_the_primary_is_dead(partition).await;
-    let stalled_since = std::time::Instant::now()
-        .checked_sub(std::time::Duration::from_secs(11))
-        .unwrap();
-    if let Some(request) = moved_in.requested_snapshots.get_mut(partition) {
-        request.last_activity = stalled_since;
-    }
+    moved_in.snapshot_request_stalled(partition);
+    moved_in
+        .drive_snapshots(crate::cluster::node_controller::snapshot::SNAPSHOT_STALL_TIMEOUT_MS + 1)
+        .await;
 
     moved_in
         .apply_raft_partition_map(map_with(partition, node(1), &[node(2)], 2))

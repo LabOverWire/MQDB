@@ -64,6 +64,8 @@ struct MockTransport {
     queued_publishes: Arc<Mutex<Vec<QueuedPublish>>>,
     refuse_local_delivery: Arc<std::sync::atomic::AtomicBool>,
     refuse_sends: Arc<std::sync::atomic::AtomicBool>,
+    queue_full: Arc<std::sync::atomic::AtomicBool>,
+    full_peers: Arc<Mutex<std::collections::HashSet<NodeId>>>,
 }
 
 impl MockTransport {
@@ -76,7 +78,13 @@ impl MockTransport {
             queued_publishes: Arc::new(Mutex::new(Vec::new())),
             refuse_local_delivery: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             refuse_sends: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            queue_full: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            full_peers: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
+    }
+
+    fn take_sent(&self) -> Vec<(NodeId, ClusterMessage)> {
+        std::mem::take(&mut *self.outbox.lock().unwrap())
     }
 
     fn inject_message(&self, from: NodeId, message: ClusterMessage) {
@@ -108,6 +116,11 @@ impl ClusterTransport for MockTransport {
     ) -> Result<(), super::super::transport::TransportError> {
         if self.refuse_sends.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(super::super::transport::TransportError::NotConnected);
+        }
+        if self.queue_full.load(std::sync::atomic::Ordering::SeqCst)
+            || self.full_peers.lock().unwrap().contains(&to)
+        {
+            return Err(super::super::transport::TransportError::SendQueueFull(to));
         }
         self.outbox.lock().unwrap().push((to, message));
         Ok(())
@@ -3158,6 +3171,7 @@ mod lost_snapshot_request;
 mod missing_record;
 mod partition_map;
 mod remote_fk_unique;
+mod snapshot;
 mod store_failure;
 
 #[tokio::test]

@@ -2,9 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::super::entity;
-use super::super::protocol::{
-    self, CatchupResponse, ChangeEventRecord, ReplicationAck, ReplicationWrite,
-};
+use super::super::protocol::{self, ChangeEventRecord, ReplicationAck, ReplicationWrite};
 use super::super::quorum::{QuorumResult, QuorumTracker};
 use super::super::replication::{ReplicaRole, ReplicaState};
 use super::super::store_manager::{HeldPrimaries, StoreManager};
@@ -297,10 +295,7 @@ impl<T: ClusterTransport> NodeController<T> {
             return;
         };
 
-        let resp = CatchupResponse::create(partition, self.node_id, writes);
-        let _ = self
-            .transport
-            .send(replica_node, ClusterMessage::CatchupResponse(resp))
+        self.send_catchup_writes(replica_node, partition, writes)
             .await;
     }
 
@@ -417,7 +412,6 @@ impl<T: ClusterTransport> NodeController<T> {
 
     pub async fn apply_raft_partition_map(&mut self, raft_map: PartitionMap) -> bool {
         if self.partition_map == raft_map {
-            self.retry_stalled_snapshots().await;
             self.release_held_writes().await;
             self.serve_deferred_snapshots().await;
             return std::mem::take(&mut self.primary_taken_after_wait);
@@ -457,10 +451,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 } else if let Some(primary) = new_assignment.primary {
                     self.become_replica_with_snapshot(partition, new_assignment.epoch, primary)
                         .await;
-                    let replaced = self.other_replica(old_assignment);
-                    if let Some(request) = self.requested_snapshots.get_mut(partition) {
-                        request.replaced_replica = request.replaced_replica.or(replaced);
-                    }
+                    self.remember_replaced_replica(partition, self.other_replica(old_assignment));
                 }
             } else {
                 self.step_down(partition);
@@ -473,7 +464,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
         self.held_primaries = Some(held.without_legacy());
         self.update_partition_map(raft_map);
-        self.retry_stalled_snapshots().await;
         self.release_held_writes().await;
         self.serve_deferred_snapshots().await;
         became_primary | std::mem::take(&mut self.primary_taken_after_wait)
@@ -502,9 +492,7 @@ impl<T: ClusterTransport> NodeController<T> {
         if current.is_some_and(|node| old_assignment.all_nodes().contains(&node)) {
             return current;
         }
-        self.requested_snapshots
-            .get(partition)
-            .and_then(|request| request.replaced_replica)
+        self.replaced_replica(partition)
             .or_else(|| self.other_replica(old_assignment))
             .filter(|node| self.source_is_alive(*node))
             .or(current)

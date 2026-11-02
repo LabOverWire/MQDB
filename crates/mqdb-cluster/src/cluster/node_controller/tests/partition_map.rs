@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::cluster::raft::PartitionUpdate;
+use crate::cluster::snapshot::SnapshotRequest;
 use crate::cluster::{PartitionAssignment, PartitionMap, PartitionMapExt};
 
 fn node(id: u16) -> NodeId {
@@ -241,12 +242,9 @@ async fn a_stalled_snapshot_request_is_sent_again() {
     ctrl.apply_raft_partition_map(map.clone()).await;
     assert_eq!(snapshot_requests_to(&ctrl, node(3)), 1);
 
-    let stalled_since = std::time::Instant::now()
-        .checked_sub(std::time::Duration::from_secs(11))
-        .unwrap();
-    if let Some(request) = ctrl.requested_snapshots.get_mut(partition) {
-        request.last_activity = stalled_since;
-    }
+    ctrl.snapshot_request_stalled(partition);
+    ctrl.drive_snapshots(crate::cluster::node_controller::snapshot::SNAPSHOT_STALL_TIMEOUT_MS + 1)
+        .await;
     ctrl.apply_raft_partition_map(map).await;
 
     assert_eq!(snapshot_requests_to(&ctrl, node(3)), 2);
@@ -424,12 +422,9 @@ async fn a_failed_snapshot_transfer_is_requested_again() {
     ctrl.process_messages().await;
     assert_eq!(ctrl.role(partition), ReplicaRole::AwaitingSnapshot);
 
-    let stalled_since = std::time::Instant::now()
-        .checked_sub(std::time::Duration::from_secs(11))
-        .unwrap();
-    if let Some(request) = ctrl.requested_snapshots.get_mut(partition) {
-        request.last_activity = stalled_since;
-    }
+    ctrl.snapshot_request_stalled(partition);
+    ctrl.drive_snapshots(crate::cluster::node_controller::snapshot::SNAPSHOT_STALL_TIMEOUT_MS + 1)
+        .await;
     ctrl.apply_raft_partition_map(map).await;
 
     assert_eq!(snapshot_requests_to(&ctrl, node(3)), 2);
@@ -765,12 +760,9 @@ async fn a_stalled_request_keeps_a_live_source_that_left_the_assignment() {
     ctrl.apply_raft_partition_map(moved.clone()).await;
     assert_eq!(snapshot_requests_to(&ctrl, node(3)), 0);
 
-    let stalled_since = std::time::Instant::now()
-        .checked_sub(std::time::Duration::from_secs(11))
-        .unwrap();
-    if let Some(request) = ctrl.requested_snapshots.get_mut(partition) {
-        request.last_activity = stalled_since;
-    }
+    ctrl.snapshot_request_stalled(partition);
+    ctrl.drive_snapshots(crate::cluster::node_controller::snapshot::SNAPSHOT_STALL_TIMEOUT_MS + 1)
+        .await;
     ctrl.apply_raft_partition_map(moved).await;
 
     assert_eq!(snapshot_requests_to(&ctrl, node(2)), 2);
@@ -903,12 +895,10 @@ async fn a_waiting_primary_swapped_to_replica_keeps_its_live_source() {
 #[tokio::test]
 async fn a_stalled_request_of_a_waiting_primary_swapped_to_replica_keeps_its_source() {
     let (_, mut wiped, _, partition) = swap_a_waiting_primary_after_a_replica_move().await;
-    let stalled_since = std::time::Instant::now()
-        .checked_sub(std::time::Duration::from_secs(11))
-        .unwrap();
-    if let Some(request) = wiped.requested_snapshots.get_mut(partition) {
-        request.last_activity = stalled_since;
-    }
+    wiped.snapshot_request_stalled(partition);
+    wiped
+        .drive_snapshots(crate::cluster::node_controller::snapshot::SNAPSHOT_STALL_TIMEOUT_MS + 1)
+        .await;
 
     wiped
         .apply_raft_partition_map(map_with(partition, node(3), &[node(1)], 3))
@@ -996,13 +986,10 @@ fn chunks_to(ctrl: &NodeController<MockTransport>, to: NodeId) -> usize {
         .count()
 }
 
-fn stall_request(ctrl: &mut NodeController<MockTransport>, partition: PartitionId) {
-    let stalled_since = std::time::Instant::now()
-        .checked_sub(std::time::Duration::from_secs(11))
-        .unwrap();
-    if let Some(request) = ctrl.requested_snapshots.get_mut(partition) {
-        request.last_activity = stalled_since;
-    }
+async fn retry_after_stall(ctrl: &mut NodeController<MockTransport>, partition: PartitionId) {
+    ctrl.snapshot_request_stalled(partition);
+    ctrl.drive_snapshots(crate::cluster::node_controller::snapshot::SNAPSHOT_STALL_TIMEOUT_MS + 1)
+        .await;
 }
 
 async fn waiting_with_a_deferred_request() -> (NodeController<MockTransport>, PartitionId) {
@@ -1062,50 +1049,6 @@ async fn a_waiting_node_given_the_primary_role_by_the_map_serves_its_deferred_re
 }
 
 #[tokio::test]
-async fn a_chunk_from_the_source_keeps_the_request_from_stalling() {
-    let partition = session_partition("c1");
-    let mut ctrl = controller(2);
-    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
-        .await;
-    stall_request(&mut ctrl, partition);
-    ctrl.transport.inject_message(
-        node(3),
-        ClusterMessage::SnapshotChunk(crate::cluster::snapshot::SnapshotChunk::new(
-            partition,
-            0,
-            2,
-            0,
-            Vec::new(),
-        )),
-    );
-    ctrl.process_messages().await;
-
-    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
-        .await;
-
-    assert_eq!(snapshot_requests_to(&ctrl, node(3)), 1);
-}
-
-#[tokio::test]
-async fn a_stalled_request_is_sent_again_when_another_partition_changes() {
-    let partition = session_partition("c1");
-    let other = PartitionId::new((partition.get() + 1) % 256).unwrap();
-    let mut ctrl = controller(2);
-    let map = map_with(partition, node(2), &[node(3)], 1);
-    ctrl.apply_raft_partition_map(map.clone()).await;
-    stall_request(&mut ctrl, partition);
-
-    let mut changed = map;
-    changed.set(
-        other,
-        PartitionAssignment::new(node(3), vec![node(1)], Epoch::new(1)),
-    );
-    ctrl.apply_raft_partition_map(changed).await;
-
-    assert_eq!(snapshot_requests_to(&ctrl, node(3)), 2);
-}
-
-#[tokio::test]
 async fn a_stalled_request_to_a_dead_source_asks_the_current_replica() {
     let partition = session_partition("c1");
     let mut ctrl = controller(1);
@@ -1120,7 +1063,7 @@ async fn a_stalled_request_to_a_dead_source_asks_the_current_replica() {
     ctrl.apply_raft_partition_map(moved.clone()).await;
     assert_eq!(snapshot_requests_to(&ctrl, node(3)), 0);
     ctrl.apply_dead_nodes(&[node(2)]);
-    stall_request(&mut ctrl, partition);
+    retry_after_stall(&mut ctrl, partition).await;
 
     ctrl.apply_raft_partition_map(moved).await;
 
@@ -1143,7 +1086,7 @@ async fn waiting_with_a_partial_snapshot() -> (NodeController<MockTransport>, Pa
         )),
     );
     ctrl.process_messages().await;
-    assert!(ctrl.pending_snapshots.contains_key(&partition));
+    assert!(ctrl.snapshot_in_progress(partition));
     (ctrl, partition)
 }
 
@@ -1157,8 +1100,8 @@ async fn taking_a_role_directly_drops_the_snapshot_in_progress() {
     stepped_down.step_down(partition);
 
     for ctrl in [&primary, &replica, &stepped_down] {
-        assert!(!ctrl.pending_snapshots.contains_key(&partition));
-        assert!(!ctrl.requested_snapshots.contains_key(partition));
+        assert!(!ctrl.snapshot_in_progress(partition));
+        assert_eq!(ctrl.snapshot_asked_from(partition), None);
     }
 }
 
@@ -1196,8 +1139,8 @@ async fn a_stalled_partial_transfer_is_requested_again() {
         )),
     );
     ctrl.process_messages().await;
-    assert!(ctrl.pending_snapshots.contains_key(&partition));
-    stall_request(&mut ctrl, partition);
+    assert!(ctrl.snapshot_in_progress(partition));
+    retry_after_stall(&mut ctrl, partition).await;
 
     ctrl.apply_raft_partition_map(map).await;
 
@@ -1222,7 +1165,7 @@ async fn a_failed_import_is_requested_again() {
     );
     ctrl.process_messages().await;
     assert_eq!(ctrl.role(partition), ReplicaRole::AwaitingSnapshot);
-    stall_request(&mut ctrl, partition);
+    retry_after_stall(&mut ctrl, partition).await;
 
     ctrl.apply_raft_partition_map(map).await;
 
@@ -1366,14 +1309,13 @@ async fn a_replica_still_waiting_for_its_data_does_not_block_readiness() {
     assert_eq!(ctrl.partitions_ready(), 1);
 }
 
-fn waited_since_long_ago(ctrl: &mut NodeController<MockTransport>, partition: PartitionId) {
-    let long_ago = std::time::Instant::now()
-        .checked_sub(std::time::Duration::from_secs(91))
-        .unwrap();
-    if let Some(request) = ctrl.requested_snapshots.get_mut(partition) {
-        request.first_asked = long_ago;
-        request.last_activity = long_ago;
-    }
+async fn retry_after_the_silent_source_grace(
+    ctrl: &mut NodeController<MockTransport>,
+    partition: PartitionId,
+) {
+    ctrl.snapshot_request_stalled(partition);
+    ctrl.snapshot_waited_since(partition, 1);
+    ctrl.drive_snapshots(90_002).await;
 }
 
 #[tokio::test]
@@ -1386,7 +1328,7 @@ async fn a_primary_waiting_on_a_node_never_heard_from_takes_the_role_after_the_g
     ctrl.apply_raft_partition_map(map.clone()).await;
     assert_eq!(ctrl.role(partition), ReplicaRole::AwaitingSnapshot);
 
-    waited_since_long_ago(&mut ctrl, partition);
+    retry_after_the_silent_source_grace(&mut ctrl, partition).await;
 
     assert!(ctrl.apply_raft_partition_map(map).await);
     assert_eq!(ctrl.role(partition), ReplicaRole::Primary);
@@ -1404,7 +1346,7 @@ async fn a_primary_waiting_on_a_node_it_has_heard_from_keeps_waiting_past_the_gr
     );
     ctrl.apply_raft_partition_map(map.clone()).await;
 
-    waited_since_long_ago(&mut ctrl, partition);
+    retry_after_the_silent_source_grace(&mut ctrl, partition).await;
     ctrl.apply_raft_partition_map(map).await;
 
     assert_eq!(ctrl.role(partition), ReplicaRole::AwaitingSnapshot);
@@ -1418,7 +1360,7 @@ async fn a_replica_waiting_on_a_node_never_heard_from_stays_waiting() {
     let mut ctrl = controller(2);
     ctrl.apply_raft_partition_map(map.clone()).await;
 
-    waited_since_long_ago(&mut ctrl, partition);
+    retry_after_the_silent_source_grace(&mut ctrl, partition).await;
     ctrl.apply_raft_partition_map(map).await;
 
     assert_eq!(ctrl.role(partition), ReplicaRole::AwaitingSnapshot);
@@ -1430,14 +1372,13 @@ async fn the_grace_survives_a_retry_of_the_request() {
     let map = map_with(partition, node(2), &[node(3)], 1);
     let mut ctrl = controller(2);
     ctrl.apply_raft_partition_map(map.clone()).await;
-    let first_asked = ctrl.requested_snapshots.get(partition).unwrap().first_asked;
+    ctrl.drive_snapshots(1).await;
+    let first_asked = ctrl.snapshot_first_asked(partition);
+    assert_eq!(first_asked, Some(1));
 
-    stall_request(&mut ctrl, partition);
+    retry_after_stall(&mut ctrl, partition).await;
     ctrl.apply_raft_partition_map(map).await;
 
     assert_eq!(snapshot_requests_to(&ctrl, node(3)), 2);
-    assert_eq!(
-        ctrl.requested_snapshots.get(partition).unwrap().first_asked,
-        first_asked
-    );
+    assert_eq!(ctrl.snapshot_first_asked(partition), first_asked);
 }

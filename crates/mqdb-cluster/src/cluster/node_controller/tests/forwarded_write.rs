@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::*;
-use crate::cluster::protocol::CatchupResponse;
 use crate::cluster::test_support::FaultyBackend;
 use crate::cluster::{PartitionAssignment, PartitionMap};
 use mqdb_core::storage::StorageBackend;
@@ -193,17 +192,10 @@ async fn a_forwarded_write_is_held_by_a_primary_that_lost_the_primary_role() {
     ctrl.become_primary(partition, Epoch::new(1));
     ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
         .await;
-    let mut far_ahead = session_write("c1", 1);
-    far_ahead.sequence = 5000;
-    ctrl.transport.inject_message(
-        node(3),
-        ClusterMessage::CatchupResponse(CatchupResponse::create(
-            partition,
-            node(3),
-            vec![far_ahead],
-        )),
-    );
-    ctrl.process_messages().await;
+    ctrl.replicas
+        .get_mut(&partition.get())
+        .unwrap()
+        .become_awaiting_snapshot(Epoch::new(1));
     assert_eq!(ctrl.role(partition), ReplicaRole::AwaitingSnapshot);
     assert!(ctrl.is_primary_for_partition(partition));
 

@@ -37,7 +37,6 @@ use super::raft::{
 use super::raft_task::RaftEvent;
 use super::replication::{ReplicaRole, ReplicaState};
 use super::retained_store::RetainedMessage;
-use super::snapshot::{SnapshotBuilder, SnapshotRequest, SnapshotSender};
 use super::store_manager::StoreManager;
 use super::transport::{
     ClusterMessage, ClusterTransport, InboundMessage, RoutedPublish, TransportConfig,
@@ -453,13 +452,13 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) tx_raft_events: flume::Sender<RaftEvent>,
     pub(super) dead_nodes_for_session_update: VecDeque<NodeId>,
     pub(super) migration_manager: MigrationManager,
-    pub(super) pending_snapshots: HashMap<PartitionId, SnapshotBuilder>,
-    pub(super) requested_snapshots: snapshot::SnapshotRequests,
+    pub(super) incoming_snapshots: HashMap<PartitionId, snapshot::IncomingSnapshot>,
     pub(super) imported_partitions: [bool; super::NUM_PARTITIONS as usize],
     pub(super) deferred_snapshot_requests: VecDeque<(NodeId, PartitionId)>,
     pub(super) primary_taken_after_wait: bool,
     pub(super) held_primaries: Option<super::store_manager::HeldPrimaries>,
-    pub(super) outgoing_snapshots: HashMap<(NodeId, PartitionId), SnapshotSender>,
+    pub(super) outgoing_snapshots: VecDeque<snapshot::OutgoingSnapshot>,
+    pub(super) snapshot_clock_ms: u64,
     pub(super) draining: bool,
     pub(super) query_coordinator: QueryCoordinator,
     pub(super) pending_retained_queries: HashMap<u64, oneshot::Sender<Vec<RetainedMessage>>>,
@@ -535,13 +534,13 @@ impl<T: ClusterTransport> NodeController<T> {
             tx_raft_events,
             dead_nodes_for_session_update: VecDeque::new(),
             migration_manager: MigrationManager::new(node_id),
-            pending_snapshots: HashMap::new(),
-            requested_snapshots: snapshot::SnapshotRequests::new(),
+            incoming_snapshots: HashMap::new(),
             imported_partitions: [false; super::NUM_PARTITIONS as usize],
             deferred_snapshot_requests: VecDeque::new(),
             primary_taken_after_wait: false,
             held_primaries: None,
-            outgoing_snapshots: HashMap::new(),
+            outgoing_snapshots: VecDeque::new(),
+            snapshot_clock_ms: 0,
             draining: false,
             query_coordinator: QueryCoordinator::new(node_id),
             pending_retained_queries: HashMap::new(),
@@ -640,8 +639,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    /// # Panics
-    /// Panics if no valid partition can be created.
+    /// Pick a local partition for creating new entities (round-robin).
     #[must_use]
     pub fn pick_partition_for_create(&self) -> PartitionId {
         use std::sync::atomic::{AtomicU16, Ordering};
@@ -699,8 +697,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .entry(partition.get())
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
         state.become_primary(epoch);
-        self.requested_snapshots.remove(partition);
-        self.pending_snapshots.remove(&partition);
+        self.incoming_snapshots.remove(&partition);
         if !self.imported_partitions[usize::from(partition.get())]
             && let Err(e) = self.stores.record_held_primary(partition, epoch)
         {
@@ -716,8 +713,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .entry(partition.get())
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
         state.become_replica(epoch, sequence);
-        self.requested_snapshots.remove(partition);
-        self.pending_snapshots.remove(&partition);
+        self.abandon_snapshot_request(partition);
         self.stop_sending_change_events(partition);
     }
 
@@ -734,8 +730,7 @@ impl<T: ClusterTransport> NodeController<T> {
         if let Some(state) = self.replicas.get_mut(&partition.get()) {
             state.step_down();
         }
-        self.requested_snapshots.remove(partition);
-        self.pending_snapshots.remove(&partition);
+        self.incoming_snapshots.remove(&partition);
         self.stop_sending_change_events(partition);
     }
 
@@ -935,47 +930,6 @@ impl<T: ClusterTransport> NodeController<T> {
 
             state.mark_catchup_requested(now);
         }
-
-        self.collect_awaiting_snapshot_requests(output);
-    }
-
-    fn collect_awaiting_snapshot_requests(&mut self, output: &mut TickOutput) {
-        for (&partition_id, state) in &self.replicas {
-            if state.role() != ReplicaRole::AwaitingSnapshot {
-                continue;
-            }
-
-            let Some(partition) = PartitionId::new(partition_id) else {
-                continue;
-            };
-
-            if self.requested_snapshots.contains_key(partition)
-                || self.pending_snapshots.contains_key(&partition)
-            {
-                continue;
-            }
-
-            let Some(source) = self.snapshot_source(partition) else {
-                continue;
-            };
-
-            tracing::info!(?partition, ?source, "retrying snapshot request");
-
-            self.requested_snapshots.insert(
-                partition,
-                snapshot::SnapshotRequestState {
-                    source,
-                    first_asked: std::time::Instant::now(),
-                    last_activity: std::time::Instant::now(),
-                    taking_primary: self.partition_map.primary(partition) == Some(self.node_id),
-                    replaced_replica: None,
-                },
-            );
-            let req = SnapshotRequest::create(partition, self.node_id);
-            output
-                .catchup_requests
-                .push((source, ClusterMessage::SnapshotRequest(req)));
-        }
     }
 
     fn handle_node_death(&mut self, dead_node: NodeId) {
@@ -985,6 +939,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let _ = self.tx_raft_events.try_send(RaftEvent::NodeDead(dead_node));
         self.dead_nodes_for_session_update.push_back(dead_node);
         self.change_events_node_gone(dead_node);
+        self.snapshots_node_gone(dead_node);
 
         for partition in super::PartitionId::all() {
             let assignment = self.partition_map.get(partition);
