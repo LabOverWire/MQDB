@@ -233,6 +233,18 @@ async fn a_replica_promoted_alone_asks_the_replica_it_replaced_before_taking_the
         }
     }
     moved_in.process_messages().await;
+    for (to, message) in moved_in.transport.sent_messages() {
+        if to == node(3) && matches!(message, ClusterMessage::CatchupRequest(_)) {
+            holder.transport.inject_message(node(2), message);
+        }
+    }
+    holder.process_messages().await;
+    for (to, message) in holder.transport.sent_messages() {
+        if to == node(2) && matches!(message, ClusterMessage::CatchupResponse(_)) {
+            moved_in.transport.inject_message(node(3), message);
+        }
+    }
+    moved_in.process_messages().await;
 
     assert_eq!(moved_in.role(partition), ReplicaRole::Primary);
     assert!(moved_in.stores().db_get(ENTITY, ID).is_some());
@@ -431,4 +443,116 @@ async fn a_replica_whose_first_map_is_the_move_has_nobody_else_to_ask_when_promo
         .await;
 
     assert_eq!(joined.role(partition), ReplicaRole::Primary);
+}
+
+#[tokio::test]
+async fn a_request_abandoned_because_the_primary_moved_remembers_the_replaced_replica() {
+    let partition = data_partition(ENTITY, ID);
+    let mut moved_in = replica_moved_in_while_the_primary_is_dead(partition).await;
+    moved_in.update_partition_map(map_with(partition, node(4), &[node(2)], 3));
+    moved_in.drive_snapshots(1).await;
+    assert_eq!(moved_in.snapshot_asked_from(partition), Some(node(4)));
+    moved_in.update_partition_map(map_with(partition, node(4), &[node(2)], 3));
+
+    moved_in
+        .apply_raft_partition_map(map_with(partition, node(2), &[], 4))
+        .await;
+
+    assert_eq!(moved_in.snapshot_asked_from(partition), Some(node(3)));
+}
+
+#[tokio::test]
+async fn a_repeated_request_to_the_same_source_remembers_the_replaced_replica() {
+    let partition = data_partition(ENTITY, ID);
+    let mut moved_in = replica_moved_in_while_the_primary_is_dead(partition).await;
+
+    moved_in.request_snapshot(partition, node(1)).await;
+    moved_in
+        .apply_raft_partition_map(map_with(partition, node(2), &[], 3))
+        .await;
+
+    assert_eq!(moved_in.snapshot_asked_from(partition), Some(node(3)));
+}
+
+#[tokio::test]
+async fn the_first_replaced_replica_stays_remembered_across_later_moves() {
+    let partition = data_partition(ENTITY, ID);
+    let mut moved_in = replica_moved_in_while_the_primary_is_dead(partition).await;
+    moved_in
+        .apply_raft_partition_map(map_with(partition, node(1), &[node(2), node(5)], 3))
+        .await;
+    moved_in
+        .apply_raft_partition_map(map_with(partition, node(1), &[node(2), node(6)], 4))
+        .await;
+
+    moved_in
+        .apply_raft_partition_map(map_with(partition, node(2), &[], 5))
+        .await;
+
+    assert_eq!(moved_in.snapshot_asked_from(partition), Some(node(3)));
+}
+
+#[tokio::test]
+async fn a_repeated_request_keeps_a_waiting_primary_on_its_source_through_two_moves() {
+    let partition = data_partition(ENTITY, ID);
+    let mut ctrl = controller(2);
+    heard_from(&mut ctrl, node(1));
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(1)], 1))
+        .await;
+    ctrl.request_snapshot(partition, node(1)).await;
+
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(4)], 2))
+        .await;
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(5)], 3))
+        .await;
+
+    assert_eq!(ctrl.snapshot_asked_from(partition), Some(node(1)));
+}
+
+#[tokio::test]
+async fn a_wait_switched_to_a_new_source_by_the_map_starts_a_new_grace() {
+    let partition = data_partition(ENTITY, ID);
+    let mut moved_in = replica_moved_in_while_the_primary_is_dead(partition).await;
+    moved_in.drive_snapshots(1).await;
+    assert_eq!(moved_in.snapshot_first_asked(partition), Some(1));
+    moved_in.drive_snapshots(50).await;
+
+    moved_in
+        .apply_raft_partition_map(map_with(partition, node(4), &[node(2)], 3))
+        .await;
+
+    assert_eq!(moved_in.snapshot_asked_from(partition), Some(node(4)));
+    assert_eq!(moved_in.snapshot_first_asked(partition), Some(50));
+}
+
+#[tokio::test]
+async fn a_dead_source_is_replaced_on_the_next_drive() {
+    let partition = data_partition(ENTITY, ID);
+    let mut ctrl = controller(2);
+    heard_from(&mut ctrl, node(1));
+    ctrl.apply_raft_partition_map(map_with(partition, node(1), &[node(2)], 1))
+        .await;
+    ctrl.drive_snapshots(1_000_000).await;
+    ctrl.update_partition_map(map_with(partition, node(4), &[node(2)], 2));
+    assert_eq!(requests_to(&ctrl, node(4)), 0);
+
+    ctrl.apply_dead_nodes(&[node(1)]);
+    ctrl.drive_snapshots(1_000_001).await;
+
+    assert_eq!(requests_to(&ctrl, node(4)), 1);
+}
+
+#[tokio::test]
+async fn a_repeated_request_by_a_waiting_primary_is_not_abandoned_as_moved() {
+    let partition = data_partition(ENTITY, ID);
+    let mut ctrl = controller(2);
+    heard_from(&mut ctrl, node(1));
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(1)], 1))
+        .await;
+    ctrl.request_snapshot(partition, node(1)).await;
+    ctrl.update_partition_map(map_with(partition, node(2), &[node(1)], 1));
+
+    ctrl.drive_snapshots(1).await;
+
+    assert_eq!(requests_to(&ctrl, node(1)), 1);
 }

@@ -502,6 +502,7 @@ async fn a_replica_promoted_during_a_multi_chunk_transfer_keeps_it_and_takes_the
     for now in 1..40 {
         primary.drive_snapshots(now).await;
         deliver(&primary, &mut replica).await;
+        deliver(&replica, &mut primary).await;
     }
 
     assert!(imported(&replica));

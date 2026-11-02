@@ -3170,6 +3170,7 @@ mod forwarded_write;
 mod lost_snapshot_request;
 mod missing_record;
 mod partition_map;
+mod promoted_transfer;
 mod remote_fk_unique;
 mod snapshot;
 mod store_failure;

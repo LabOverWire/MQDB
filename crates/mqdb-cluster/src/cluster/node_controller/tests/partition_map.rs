@@ -121,6 +121,25 @@ async fn serve_snapshot(
         }
     }
     target.process_messages().await;
+    exchange_catchup(source, target).await;
+}
+
+async fn exchange_catchup(
+    source: &mut NodeController<MockTransport>,
+    target: &mut NodeController<MockTransport>,
+) {
+    for (to, message) in target.transport.sent_messages() {
+        if to == source.node_id() && matches!(message, ClusterMessage::CatchupRequest(_)) {
+            source.transport.inject_message(target.node_id(), message);
+        }
+    }
+    source.process_messages().await;
+    for (to, message) in source.transport.sent_messages() {
+        if to == target.node_id() && matches!(message, ClusterMessage::CatchupResponse(_)) {
+            target.transport.inject_message(source.node_id(), message);
+        }
+    }
+    target.process_messages().await;
 }
 
 fn controller_on(
@@ -887,6 +906,7 @@ async fn a_waiting_primary_swapped_to_replica_keeps_its_live_source() {
         }
     }
     joiner.process_messages().await;
+    exchange_catchup(&mut wiped, &mut joiner).await;
 
     assert_eq!(joiner.role(partition), ReplicaRole::Primary);
     assert!(joiner.stores().sessions.get("c1").is_some());
@@ -1444,4 +1464,144 @@ async fn the_grace_survives_a_new_epoch_with_the_same_source() {
         .await;
 
     assert_eq!(ctrl.snapshot_first_asked(partition), Some(1));
+}
+
+#[tokio::test]
+async fn a_swapped_primary_keeps_its_source_across_repeated_stalls() {
+    let (_, mut wiped, _, partition) = swap_a_waiting_primary_after_a_replica_move().await;
+
+    retry_after_stall(&mut wiped, partition).await;
+    retry_after_stall(&mut wiped, partition).await;
+
+    assert_eq!(snapshot_requests_to(&wiped, node(2)), 3);
+    assert_eq!(snapshot_requests_to(&wiped, node(3)), 0);
+}
+
+#[tokio::test]
+async fn a_role_taken_while_driving_serves_deferred_requests_on_the_next_apply() {
+    let (mut waiting, partition) = waiting_with_a_deferred_request().await;
+    retry_after_the_silent_source_grace(&mut waiting, partition).await;
+    assert_eq!(waiting.role(partition), ReplicaRole::Primary);
+    assert_eq!(chunks_to(&waiting, node(3)), 0);
+
+    waiting
+        .apply_raft_partition_map(map_with(partition, node(1), &[node(2)], 1))
+        .await;
+
+    assert_eq!(chunks_to(&waiting, node(3)), 1);
+}
+
+#[tokio::test]
+async fn a_local_write_with_an_outbox_is_refused_not_held_while_waiting() {
+    let partition = crate::cluster::db::data_partition("bigdocs", "r1");
+    let mut ctrl = controller(2);
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
+        .await;
+    let (_, write) = ctrl
+        .stores()
+        .db_create_write("bigdocs", "r1", b"{\"v\":1}", 1)
+        .unwrap();
+
+    let outbox = [(b"k".to_vec(), b"v".to_vec())];
+    let result = ctrl.write_or_forward_with_event(write, None, &outbox).await;
+
+    assert!(result.is_err());
+    assert!(ctrl.held_writes.is_empty());
+}
+
+#[tokio::test]
+async fn a_held_local_write_keeps_its_change_event() {
+    let partition = crate::cluster::db::data_partition("bigdocs", "r1");
+    let mut ctrl = controller(2);
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
+        .await;
+    let (_, write) = ctrl
+        .stores()
+        .db_create_write("bigdocs", "r1", b"{\"v\":1}", 1)
+        .unwrap();
+    let record = crate::cluster::protocol::ChangeEventRecord {
+        topic: "t".to_string(),
+        payload: Vec::new(),
+        user_properties: Vec::new(),
+        order_key: "r1".to_string(),
+    };
+
+    ctrl.write_or_forward_with_event(write, Some(record), &[])
+        .await
+        .unwrap();
+
+    assert!(ctrl.held_writes[0].write.event.is_some());
+}
+
+#[tokio::test]
+async fn a_deferred_requester_gets_the_writes_held_during_the_wait() {
+    let partition = crate::cluster::db::data_partition("bigdocs", "r1");
+    let mut holder = controller(3);
+    holder.become_replica(partition, Epoch::new(1), 0);
+    let mut ctrl = controller(2);
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
+        .await;
+    let (_, write) = ctrl
+        .stores()
+        .db_create_write("bigdocs", "r1", b"{\"v\":1}", 1)
+        .unwrap();
+    ctrl.write_or_forward(write).await;
+    ctrl.transport.inject_message(
+        node(4),
+        ClusterMessage::SnapshotRequest(SnapshotRequest::create(partition, node(4))),
+    );
+    ctrl.process_messages().await;
+
+    serve_snapshot(&mut holder, &mut ctrl, partition).await;
+    assert_eq!(ctrl.role(partition), ReplicaRole::Primary);
+
+    let mut requester = controller(4);
+    requester
+        .apply_raft_partition_map(map_with(partition, node(2), &[node(4)], 2))
+        .await;
+    for (to, message) in ctrl.transport.sent_messages() {
+        if to == node(4) && matches!(message, ClusterMessage::SnapshotChunk(_)) {
+            requester.transport.inject_message(node(2), message);
+        }
+    }
+    requester.process_messages().await;
+
+    assert!(requester.stores().db_get("bigdocs", "r1").is_some());
+}
+
+#[tokio::test]
+async fn a_primary_built_from_a_snapshot_with_only_change_events_trusts_its_disk_after_a_restart() {
+    let partition = session_partition("c1");
+    let source_backend = crate::cluster::test_support::FaultyBackend::shared();
+    let mut replica = controller_on(3, &source_backend);
+    replica.become_replica(partition, Epoch::new(1), 0);
+    replica
+        .stores()
+        .cluster_outbox()
+        .unwrap()
+        .store_change_events(&[crate::cluster::store_manager::outbox::StoredChangeEvent {
+            partition,
+            id: crate::cluster::protocol::EventId::new(1, 1),
+            record: crate::cluster::protocol::ChangeEventRecord {
+                topic: "t".to_string(),
+                payload: Vec::new(),
+                user_properties: Vec::new(),
+                order_key: "c1".to_string(),
+            },
+        }])
+        .unwrap();
+    let backend = crate::cluster::test_support::FaultyBackend::shared();
+    let map = map_with(partition, node(2), &[node(3)], 1);
+
+    let mut fresh = controller_on(2, &backend);
+    fresh.apply_raft_partition_map(map.clone()).await;
+    serve_snapshot(&mut replica, &mut fresh, partition).await;
+    assert_eq!(fresh.role(partition), ReplicaRole::Primary);
+    drop(fresh);
+
+    let mut restarted = controller_on(2, &backend);
+    restarted.stores().recover().unwrap();
+    restarted.apply_raft_partition_map(map).await;
+
+    assert_eq!(restarted.role(partition), ReplicaRole::Primary);
 }

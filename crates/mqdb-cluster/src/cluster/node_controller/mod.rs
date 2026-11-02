@@ -1292,7 +1292,12 @@ impl<T: ClusterTransport> NodeController<T> {
                 );
             }
             ClusterMessage::JsonDbRequest { partition, request } => {
-                if request.op == JsonDbOp::Read && !self.can_serve_reads(*partition) {
+                let unready = match request.op {
+                    JsonDbOp::Read => !self.can_serve_reads(*partition),
+                    JsonDbOp::List => self.waits_for_any_primary_data(),
+                    _ => false,
+                };
+                if unready {
                     self.refuse_unready_read(from, request).await;
                     return None;
                 }

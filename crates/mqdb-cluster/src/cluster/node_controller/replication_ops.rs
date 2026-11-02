@@ -492,7 +492,16 @@ impl<T: ClusterTransport> NodeController<T> {
         if current.is_some_and(|node| old_assignment.all_nodes().contains(&node)) {
             return current;
         }
-        self.replaced_replica(partition)
+        old_assignment
+            .primary
+            .filter(|node| {
+                *node != self.node_id
+                    && matches!(
+                        self.node_status(*node),
+                        NodeStatus::Alive | NodeStatus::Suspected
+                    )
+            })
+            .or_else(|| self.replaced_replica(partition))
             .or_else(|| self.other_replica(old_assignment))
             .filter(|node| self.source_is_alive(*node))
             .or(current)

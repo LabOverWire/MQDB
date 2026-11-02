@@ -305,6 +305,9 @@ impl<T: ClusterTransport> NodeController<T> {
         let replicas = &self.replicas;
         let partition_map = &self.partition_map;
         self.incoming_snapshots.retain(|partition, incoming| {
+            if incoming.catching_up() {
+                return true;
+            }
             if incoming.expired(now) {
                 if incoming.requested_from().is_some() {
                     tracing::warn!(?partition, "snapshot transfer stalled, asking again");
@@ -381,8 +384,9 @@ impl<T: ClusterTransport> NodeController<T> {
             );
             let next = SnapshotWait {
                 source: Some(source),
+                first_asked_ms: wait.first_asked_ms.filter(|_| wait.source == Some(source)),
                 taking_primary: waiting_to_take || kept_source.is_some(),
-                ..wait
+                replaced_replica: wait.replaced_replica,
             };
             self.send_snapshot_request(partition, next).await;
         } else if waiting_to_take {
@@ -445,6 +449,8 @@ impl<T: ClusterTransport> NodeController<T> {
         for incoming in self.incoming_snapshots.values_mut() {
             if incoming.requested_from() == Some(node) {
                 incoming.state = IncomingState::BackingOff;
+                incoming.since_ms = Some(0);
+            } else if incoming.catching_up() && incoming.wait.source == Some(node) {
                 incoming.since_ms = Some(0);
             }
         }
@@ -553,7 +559,8 @@ impl<T: ClusterTransport> NodeController<T> {
 
                 self.reload_change_events(partition);
                 if let Some(epoch) = self.epoch(partition) {
-                    self.take_role_after_import(partition, epoch, sequence);
+                    self.take_role_after_import(partition, epoch, sequence, from, wait)
+                        .await;
                 }
                 self.release_held_writes().await;
                 self.serve_deferred_snapshots().await;
@@ -580,21 +587,38 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    fn take_role_after_import(&mut self, partition: PartitionId, epoch: Epoch, sequence: u64) {
+    async fn take_role_after_import(
+        &mut self,
+        partition: PartitionId,
+        epoch: Epoch,
+        sequence: u64,
+        source: NodeId,
+        wait: SnapshotWait,
+    ) {
         if self.role(partition) != ReplicaRole::AwaitingSnapshot {
             return;
         }
         if self.partition_map.primary(partition) == Some(self.node_id) {
-            self.become_primary(partition, epoch);
-            self.primary_taken_after_wait = true;
             if let Some(state) = self.replicas.get_mut(&partition.get()) {
                 state.set_sequence(sequence);
             }
-            tracing::info!(
-                ?partition,
-                sequence,
-                "primary now active after snapshot import"
+            let since_ms = self.snapshot_stamp();
+            self.incoming_snapshots.insert(
+                partition,
+                IncomingSnapshot {
+                    state: IncomingState::CatchingUp {
+                        asked_from: sequence + 1,
+                    },
+                    since_ms,
+                    wait: SnapshotWait {
+                        source: Some(source),
+                        first_asked_ms: since_ms,
+                        taking_primary: true,
+                        replaced_replica: wait.replaced_replica,
+                    },
+                },
             );
+            self.request_catchup(partition).await;
         } else {
             self.become_replica(partition, epoch, sequence);
             tracing::info!(
@@ -699,6 +723,33 @@ impl<T: ClusterTransport> NodeController<T> {
             .await;
     }
 
+    pub(super) async fn take_role_after_catchup(&mut self, partition: PartitionId) {
+        let Some(epoch) = self.epoch(partition) else {
+            return;
+        };
+        let sequence = self.sequence(partition).unwrap_or(0);
+        self.become_primary(partition, epoch);
+        self.primary_taken_after_wait = true;
+        if let Some(state) = self.replicas.get_mut(&partition.get()) {
+            state.set_sequence(sequence);
+        }
+        tracing::info!(
+            ?partition,
+            sequence,
+            "primary now active after snapshot import"
+        );
+        self.release_held_writes().await;
+        self.serve_deferred_snapshots().await;
+    }
+
+    pub(super) fn catching_up_to_take_from(&self, partition: PartitionId) -> Option<NodeId> {
+        if !self.waits_for_primary_data(partition) {
+            return None;
+        }
+        let incoming = self.incoming_snapshots.get(&partition)?;
+        incoming.wait.source.filter(|_| incoming.catching_up())
+    }
+
     pub(crate) fn handle_snapshot_complete(&mut self, from: NodeId, complete: &SnapshotComplete) {
         let Some(partition) = complete.partition() else {
             tracing::warn!(?from, "received snapshot complete with invalid partition");
@@ -730,9 +781,34 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     pub(super) async fn request_catchup(&mut self, partition: PartitionId) {
-        let primary = self.partition_map.primary(partition);
-        let Some(primary) = primary.filter(|primary| *primary != self.node_id) else {
-            self.incoming_snapshots.remove(&partition);
+        let taking_from = self.catching_up_to_take_from(partition);
+        let target = if self.waits_for_primary_data(partition) {
+            taking_from.filter(|source| self.source_is_alive(*source))
+        } else {
+            self.partition_map
+                .primary(partition)
+                .filter(|primary| *primary != self.node_id)
+        };
+        let wait = self
+            .incoming_snapshots
+            .get(&partition)
+            .map(|incoming| incoming.wait)
+            .filter(|_| taking_from.is_some())
+            .unwrap_or_default();
+        let overdue = wait.first_asked_ms.is_some_and(|since| {
+            self.snapshot_clock_ms.saturating_sub(since) >= SNAPSHOT_STALL_TIMEOUT_MS
+        });
+        let Some(primary) = target.filter(|_| !overdue) else {
+            if taking_from.is_some() {
+                tracing::warn!(
+                    ?partition,
+                    source = ?taking_from,
+                    "taking the primary role: the source did not finish catching this node up"
+                );
+                self.take_role_after_catchup(partition).await;
+            } else {
+                self.incoming_snapshots.remove(&partition);
+            }
             return;
         };
         let since_ms = self.snapshot_stamp();
@@ -744,7 +820,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     asked_from: from_seq,
                 },
                 since_ms,
-                wait: SnapshotWait::default(),
+                wait,
             },
         );
         let request = CatchupRequest::create(partition, from_seq, u64::MAX, self.node_id);

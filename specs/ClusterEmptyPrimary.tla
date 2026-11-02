@@ -71,7 +71,7 @@
 (* That is covered by a_primary_restarted_after_only_its_replica_changed. *)
 (*                                                                          *)
 (* ABSTRACTIONS: a snapshot transfer is one step (export and import), so  *)
-(* writes cannot fall between them; a write reaches the replica named by  *)
+(* writes cannot fall between them (ClusterPromotedTransfer covers that); a write reaches the replica named by  *)
 (* the newest assignment if that replica has the Replica role, standing in *)
 (* for sequence-gap catch-up. One failure at a time (RF=2): a node crashes *)
 (* only while every other node is up and every assigned node holds every  *)
