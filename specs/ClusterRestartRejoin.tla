@@ -71,7 +71,7 @@ CONSTANTS
     RedialPeriod, RedialUnlinked, Redial, PersistBook,
     RestoreSnapshot, HoldMap,
     Grace, Detect,
-    KillSet, KillOrder, Writes, Isolations, MaxKills, MaxTerm, MaxLog
+    KillSet, KillOrder, StayDown, Writes, FailedElections, Isolations, MaxKills, MaxTerm, MaxLog
 
 VARIABLES
     up, term, log, commit, role, voters, links, heard,
@@ -197,6 +197,7 @@ Kill(n) ==
 
 Restart(n) ==
     /\ n \notin up
+    /\ n \notin StayDown
     /\ up' = up \cup {n}
     /\ role' = [role EXCEPT ![n] = "follower"]
     /\ commit' = [commit EXCEPT ![n] = IF RestoreSnapshot THEN @ ELSE 0]
@@ -312,6 +313,7 @@ Bump(n) ==
 \* has no pre-vote (gh #314), so the link gate cannot stop this. Bounded to one per
 \* behaviour so that MaxTerm limits the state space rather than leadership.
 FailedElect(n) ==
+    /\ FailedElections
     /\ ~failedElection
     /\ n \in up
     /\ ~heard[n]
