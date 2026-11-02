@@ -122,6 +122,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
 
     pub async fn handle_node_death(&mut self, dead_node: NodeId) -> Vec<u64> {
         self.cluster_members.retain(|&n| n != dead_node);
+        self.death_since_last_tick = true;
 
         if !self.leader_ready() {
             tracing::info!(

@@ -1081,6 +1081,33 @@ async fn the_periodic_check_repairs_a_partition_on_a_departed_primary() {
     );
 }
 
+#[tokio::test]
+async fn the_periodic_check_adds_no_replica_soon_after_a_death() {
+    let node4 = NodeId::validated(4).unwrap();
+    let node5 = NodeId::validated(5).unwrap();
+    let id = PartitionId::new(0).unwrap();
+    let mut coord =
+        restarted_leader_of_five(&[assign(0, 4, 5, 1), assign(1, 2, 3, 1), assign(2, 3, 2, 1)])
+            .await;
+    let start = 1_790_000_000_000u64;
+
+    coord.tick(start + 40_000).await;
+    coord.handle_node_death(node5).await;
+    commit_tail(&mut coord).await;
+    coord.tick(start + 40_200).await;
+    commit_tail(&mut coord).await;
+    assert!(
+        coord.partition_map().replicas(id).is_empty(),
+        "another death may be seconds away, and a new replica has no copy yet"
+    );
+    assert_eq!(coord.partition_map().primary(id), Some(node4));
+
+    coord.tick(start + 71_000).await;
+    coord.force_rebalance().await;
+    commit_tail(&mut coord).await;
+    assert!(!coord.partition_map().replicas(id).is_empty());
+}
+
 fn same_assignments(a: &PartitionMap, b: &PartitionMap) -> bool {
     PartitionId::all().all(|p| a.get(p) == b.get(p))
 }

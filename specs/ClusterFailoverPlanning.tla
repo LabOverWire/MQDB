@@ -25,6 +25,8 @@
 (*   LiveTargetsOnly    TRUE: rebalance only targets a live replica.        *)
 (*   RepairScan         FALSE: Scan never runs.                             *)
 (*   ScanReplicas       FALSE: Scan looks at primaries only.                *)
+(*   AddReplicas        TRUE: a replica with no copy can be added and then  *)
+(*                      promoted, since the map does not record who synced. *)
 (*                                                                         *)
 (* Abstractions: one leader identity; proposals applied in order; A and B   *)
 (* are the only nodes holding either partition, so InvPrimaryWasAHolder     *)
@@ -39,13 +41,15 @@
 (*       none of these invariants. The planning matters for epochs, which   *)
 (*       this model lacks, and is covered by unit tests                     *)
 (*   _departed: fails InvRebalanceTargetLive, the gh #280 panic             *)
+(*   _new_replica: fails InvPrimaryWasAHolder, known limit: a node promoted  *)
+(*       before its snapshot arrives; gh #273 holds its role until then     *)
 (*   _no_scan: fails Repaired, a lost failover is never redone              *)
 (*   _scan_primaries_only: fails Repaired, a lost replica entry stays       *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS L, A, B,
-          PlanFromProposals, HolderOnly, LiveTargetsOnly, RepairScan, ScanReplicas,
+          PlanFromProposals, HolderOnly, LiveTargetsOnly, RepairScan, ScanReplicas, AddReplicas,
           MaxFails, MaxProposals, MaxLost
 
 VARIABLES applied, proposals, members, failsLeft, proposalsLeft, lostLeft, deadTarget
@@ -161,7 +165,21 @@ Rebalance(p) ==
           /\ proposals' = Append(proposals, [p |-> p, primary |-> a.replica, replica |-> a.primary])
     /\ UNCHANGED <<applied, members, failsLeft, lostLeft>>
 
+\* add_missing_replicas gives a partition a new replica with no copy yet. L plays
+\* that node. The code waits 30 s after a death before doing this from the periodic
+\* check, which this untimed model cannot show, so _new_replica fails.
+AddReplica(p) ==
+    /\ AddReplicas
+    /\ proposalsLeft > 0
+    /\ proposalsLeft' = proposalsLeft - 1
+    /\ Base[p].replica = None
+    /\ Base[p].primary \in members
+    /\ Base[p].primary # L
+    /\ proposals' = Append(proposals, [p |-> p, primary |-> Base[p].primary, replica |-> L])
+    /\ UNCHANGED <<applied, members, failsLeft, lostLeft, deadTarget>>
+
 Next ==
+    \/ \E p \in Partitions : AddReplica(p)
     \/ \E d \in Nodes : Fail(d)
     \/ Commit
     \/ LoseTail

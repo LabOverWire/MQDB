@@ -29,6 +29,7 @@ pub struct RaftCoordinator<T: ClusterTransport> {
     pub(super) pending_partition_proposals: usize,
     pub(super) last_balance_check: u64,
     pub(super) restored_map_held: bool,
+    pub(super) death_since_last_tick: bool,
 }
 
 impl<T: ClusterTransport> RaftCoordinator<T> {
@@ -48,6 +49,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             pending_partition_proposals: 0,
             last_balance_check: 0,
             restored_map_held: false,
+            death_since_last_tick: false,
         }
     }
 
@@ -76,6 +78,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             pending_partition_proposals: 0,
             last_balance_check: 0,
             restored_map_held: false,
+            death_since_last_tick: false,
         };
 
         coordinator.rebuild_partition_map();
