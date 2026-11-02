@@ -1382,3 +1382,66 @@ async fn the_grace_survives_a_retry_of_the_request() {
     assert_eq!(snapshot_requests_to(&ctrl, node(3)), 2);
     assert_eq!(ctrl.snapshot_first_asked(partition), first_asked);
 }
+
+#[tokio::test]
+async fn a_deferred_request_from_a_node_that_died_is_forgotten() {
+    let (mut waiting, _) = waiting_with_a_deferred_request().await;
+    assert_eq!(waiting.deferred_snapshot_requests.len(), 1);
+    waiting.heartbeat.receive_heartbeat(
+        node(3),
+        &crate::cluster::protocol::Heartbeat::create(node(3), 0),
+        0,
+    );
+
+    waiting.apply_dead_nodes(&[node(3)]);
+
+    assert!(waiting.deferred_snapshot_requests.is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_import_keeps_the_live_source_of_a_waiting_primary() {
+    let partition = session_partition("c1");
+    let mut ctrl = controller(2);
+    ctrl.heartbeat.receive_heartbeat(
+        node(3),
+        &crate::cluster::protocol::Heartbeat::create(node(3), 0),
+        0,
+    );
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
+        .await;
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(4)], 2))
+        .await;
+    assert_eq!(ctrl.snapshot_asked_from(partition), Some(node(3)));
+    ctrl.transport.inject_message(
+        node(3),
+        ClusterMessage::SnapshotChunk(crate::cluster::snapshot::SnapshotChunk::new(
+            partition,
+            0,
+            1,
+            0,
+            vec![1, 2, 0xff, 0xfe, 0, 0, 0, 0],
+        )),
+    );
+    ctrl.process_messages().await;
+    assert_eq!(ctrl.role(partition), ReplicaRole::AwaitingSnapshot);
+
+    retry_after_stall(&mut ctrl, partition).await;
+
+    assert_eq!(snapshot_requests_to(&ctrl, node(3)), 2);
+    assert_eq!(snapshot_requests_to(&ctrl, node(4)), 0);
+}
+
+#[tokio::test]
+async fn the_grace_survives_a_new_epoch_with_the_same_source() {
+    let partition = session_partition("c1");
+    let mut ctrl = controller(2);
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
+        .await;
+    ctrl.drive_snapshots(1).await;
+    assert_eq!(ctrl.snapshot_first_asked(partition), Some(1));
+
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 2))
+        .await;
+
+    assert_eq!(ctrl.snapshot_first_asked(partition), Some(1));
+}
