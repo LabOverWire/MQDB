@@ -569,7 +569,7 @@ async fn a_snapshot_chunk_is_not_held_behind_a_full_bulk_lane() {
     }
     assert!(bulk_full, "bulk messages should eventually fill their lane");
     transport
-        .send(peer, snapshot_chunk(0))
+        .send(peer, snapshot_chunk(1))
         .await
         .expect("snapshot chunk refused while only the bulk lane was full");
 
@@ -660,6 +660,50 @@ async fn a_frame_over_the_receive_limit_is_refused_at_send() {
     assert!(
         matches!(result, Err(TransportError::SendFailed(_))),
         "a frame the receiver would reject was accepted: {result:?}"
+    );
+
+    far_handle.abort();
+}
+
+#[tokio::test]
+async fn a_first_chunk_is_written_after_the_bulk_frames_queued_before_it() {
+    let StalledPeer {
+        transport,
+        local,
+        peer,
+        frame_rx,
+        release_tx,
+        far_handle,
+    } = setup_stalled_peer().await;
+
+    let queued_before = 300;
+    for _ in 0..queued_before {
+        transport.send(peer, bulk_message(local)).await.unwrap();
+    }
+    transport.send(peer, snapshot_chunk(0)).await.unwrap();
+    transport.send(peer, snapshot_chunk(1)).await.unwrap();
+    for _ in 0..50 {
+        transport.send(peer, bulk_message(local)).await.unwrap();
+    }
+    release_tx.send(()).ok();
+
+    let snapshot_type = snapshot_chunk(0).message_type();
+    let mut bulk_before_first_chunk = 0;
+    while collect_frame(&frame_rx).await[2] != snapshot_type {
+        bulk_before_first_chunk += 1;
+    }
+    assert!(
+        bulk_before_first_chunk >= queued_before,
+        "the first chunk overtook bulk frames: only {bulk_before_first_chunk} of {queued_before} went first"
+    );
+
+    let mut bulk_before_second_chunk = 0;
+    while collect_frame(&frame_rx).await[2] != snapshot_type {
+        bulk_before_second_chunk += 1;
+    }
+    assert!(
+        bulk_before_first_chunk + bulk_before_second_chunk < queued_before + 50,
+        "the second chunk waited behind every later bulk frame"
     );
 
     far_handle.abort();

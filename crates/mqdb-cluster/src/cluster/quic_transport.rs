@@ -27,8 +27,26 @@ struct PeerConnection {
     connection: Connection,
     control_tx: flume::Sender<Vec<u8>>,
     bulk_tx: flume::Sender<Vec<u8>>,
-    snapshot_tx: flume::Sender<Vec<u8>>,
+    bulk_queued: AtomicU64,
+    snapshot_tx: flume::Sender<SnapshotFrame>,
     generation: u64,
+}
+
+struct SnapshotFrame {
+    after_bulk_frames: u64,
+    bytes: Vec<u8>,
+}
+
+enum QueueRefused {
+    Full,
+    Disconnected,
+}
+
+fn queue_frame<T>(lane: &flume::Sender<T>, item: T) -> Result<(), QueueRefused> {
+    lane.try_send(item).map_err(|error| match error {
+        flume::TrySendError::Full(_) => QueueRefused::Full,
+        flume::TrySendError::Disconnected(_) => QueueRefused::Disconnected,
+    })
 }
 
 const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
@@ -282,6 +300,7 @@ impl QuicDirectTransport {
             connection: connection.clone(),
             control_tx,
             bulk_tx,
+            bulk_queued: AtomicU64::new(0),
             snapshot_tx,
             generation,
         };
@@ -289,11 +308,7 @@ impl QuicDirectTransport {
 
         tokio::spawn(peer_writer_task(
             send_stream,
-            PeerLanes {
-                control: control_rx,
-                bulk: bulk_rx,
-                snapshot: snapshot_rx,
-            },
+            PeerLanes::new(control_rx, bulk_rx, snapshot_rx),
             peer_id,
             self.peers.clone(),
             generation,
@@ -391,15 +406,28 @@ impl QuicDirectTransport {
             .get(&peer_id)
             .ok_or(TransportError::NodeNotFound(peer_id))?;
 
-        let lane = if message.is_control_plane() {
-            &peer.control_tx
+        let queued = if message.is_control_plane() {
+            queue_frame(&peer.control_tx, frame)
         } else if message.is_snapshot_transfer() {
-            &peer.snapshot_tx
+            let after_bulk_frames = if message.starts_snapshot_transfer() {
+                peer.bulk_queued.load(Ordering::SeqCst)
+            } else {
+                0
+            };
+            let snapshot_frame = SnapshotFrame {
+                after_bulk_frames,
+                bytes: frame,
+            };
+            queue_frame(&peer.snapshot_tx, snapshot_frame)
         } else {
-            &peer.bulk_tx
+            let queued = queue_frame(&peer.bulk_tx, frame);
+            if queued.is_ok() {
+                peer.bulk_queued.fetch_add(1, Ordering::SeqCst);
+            }
+            queued
         };
 
-        match lane.try_send(frame) {
+        match queued {
             Ok(()) => {
                 trace!(
                     from = self.node_id.get(),
@@ -409,8 +437,8 @@ impl QuicDirectTransport {
                 );
                 Ok(())
             }
-            Err(flume::TrySendError::Full(_)) => Err(TransportError::SendQueueFull(peer_id)),
-            Err(flume::TrySendError::Disconnected(_)) => Err(TransportError::SendFailed(format!(
+            Err(QueueRefused::Full) => Err(TransportError::SendQueueFull(peer_id)),
+            Err(QueueRefused::Disconnected) => Err(TransportError::SendFailed(format!(
                 "peer {} writer task ended",
                 peer_id.get()
             ))),
@@ -661,6 +689,7 @@ async fn handle_incoming_connection(
             connection: connection.clone(),
             control_tx,
             bulk_tx,
+            bulk_queued: AtomicU64::new(0),
             snapshot_tx,
             generation: peer_generation,
         };
@@ -669,11 +698,7 @@ async fn handle_incoming_connection(
 
     tokio::spawn(peer_writer_task(
         send_stream,
-        PeerLanes {
-            control: control_rx,
-            bulk: bulk_rx,
-            snapshot: snapshot_rx,
-        },
+        PeerLanes::new(control_rx, bulk_rx, snapshot_rx),
         peer_node,
         peers.clone(),
         peer_generation,
@@ -686,7 +711,9 @@ async fn handle_incoming_connection(
 struct PeerLanes {
     control: flume::Receiver<Vec<u8>>,
     bulk: flume::Receiver<Vec<u8>>,
-    snapshot: flume::Receiver<Vec<u8>>,
+    snapshot: flume::Receiver<SnapshotFrame>,
+    held_snapshot: Option<SnapshotFrame>,
+    bulk_written: u64,
 }
 
 enum Lane {
@@ -695,25 +722,66 @@ enum Lane {
     Snapshot,
 }
 
+async fn next_snapshot_bytes(
+    lane: &flume::Receiver<SnapshotFrame>,
+    held: &mut Option<SnapshotFrame>,
+    bulk_written: u64,
+) -> Option<Vec<u8>> {
+    if held.is_none() {
+        *held = Some(lane.recv_async().await.ok()?);
+    }
+    if held
+        .as_ref()
+        .is_some_and(|frame| frame.after_bulk_frames <= bulk_written)
+    {
+        return held.take().map(|frame| frame.bytes);
+    }
+    std::future::pending().await
+}
+
 impl PeerLanes {
-    async fn next_frame(&self, snapshot_first: bool) -> Option<(Lane, Vec<u8>)> {
-        let (first, first_lane, second, second_lane) = if snapshot_first {
-            (&self.snapshot, Lane::Snapshot, &self.bulk, Lane::Bulk)
-        } else {
-            (&self.bulk, Lane::Bulk, &self.snapshot, Lane::Snapshot)
-        };
-        tokio::select! {
-            biased;
-            control = self.control.recv_async() => control.ok().map(|frame| (Lane::Control, frame)),
-            data = first.recv_async() => data.ok().map(|frame| (first_lane, frame)),
-            data = second.recv_async() => data.ok().map(|frame| (second_lane, frame)),
+    fn new(
+        control: flume::Receiver<Vec<u8>>,
+        bulk: flume::Receiver<Vec<u8>>,
+        snapshot: flume::Receiver<SnapshotFrame>,
+    ) -> Self {
+        Self {
+            control,
+            bulk,
+            snapshot,
+            held_snapshot: None,
+            bulk_written: 0,
         }
+    }
+
+    async fn next_frame(&mut self, snapshot_first: bool) -> Option<(Lane, Vec<u8>)> {
+        let bulk_written = self.bulk_written;
+        let snapshot = next_snapshot_bytes(&self.snapshot, &mut self.held_snapshot, bulk_written);
+        let next = if snapshot_first {
+            tokio::select! {
+                biased;
+                control = self.control.recv_async() => control.ok().map(|frame| (Lane::Control, frame)),
+                data = snapshot => data.map(|frame| (Lane::Snapshot, frame)),
+                data = self.bulk.recv_async() => data.ok().map(|frame| (Lane::Bulk, frame)),
+            }
+        } else {
+            tokio::select! {
+                biased;
+                control = self.control.recv_async() => control.ok().map(|frame| (Lane::Control, frame)),
+                data = self.bulk.recv_async() => data.ok().map(|frame| (Lane::Bulk, frame)),
+                data = snapshot => data.map(|frame| (Lane::Snapshot, frame)),
+            }
+        };
+        if matches!(next, Some((Lane::Bulk, _))) {
+            self.bulk_written += 1;
+        }
+        next
     }
 }
 
 async fn peer_writer_task(
     mut send_stream: SendStream,
-    lanes: PeerLanes,
+    mut lanes: PeerLanes,
     peer_node: NodeId,
     peers: Arc<RwLock<HashMap<NodeId, PeerConnection>>>,
     generation: u64,

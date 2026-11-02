@@ -1572,34 +1572,6 @@ async fn a_replica_ahead_of_its_primary_still_finishes_catching_up() {
 }
 
 #[tokio::test]
-async fn a_queued_write_overtaken_by_a_chunk_does_not_roll_the_import_back() {
-    let (mut primary, partition) = primary_holding(1, 1024);
-    let (mut replica, _) = awaiting_replica(node(1)).await;
-    write_counter(&mut primary, 1).await;
-    write_counter(&mut primary, 2).await;
-    let queued = primary
-        .transport
-        .take_sent()
-        .into_iter()
-        .find(|(to, message)| *to == node(2) && matches!(message, ClusterMessage::Write(_)))
-        .unwrap();
-    let chunks = start_transfer(&mut primary, &mut replica).await;
-    finish_transfer(&mut replica, &chunks).await;
-    assert_eq!(replica.sequence(partition), Some(2));
-    assert_eq!(counter(&replica), Some(2));
-
-    replica.transport.inject_message(node(1), queued.1);
-    replica.process_messages().await;
-    exchange(&mut primary, &mut replica).await;
-    assert_eq!(counter(&replica), Some(2));
-
-    write_counter(&mut primary, 3).await;
-    deliver(&primary, &mut replica).await;
-    assert_eq!(counter(&replica), Some(3));
-    assert_eq!(replica.write_log.entry_count(partition), 1);
-}
-
-#[tokio::test]
 async fn a_wildcard_write_with_no_sequence_is_still_stored_by_a_replica() {
     let partition = data_partition(ENTITY, ID);
     let mut sender = controller(1);
@@ -1646,4 +1618,24 @@ async fn a_write_from_a_primary_restarted_at_a_lower_sequence_is_still_stored() 
     deliver(&restarted, &mut replica).await;
 
     assert_eq!(counter(&replica), Some(9));
+}
+
+#[tokio::test]
+async fn a_primary_restarted_while_a_replica_catches_up_does_not_lose_acked_writes() {
+    let (mut primary, partition) = primary_holding(1, 1024);
+    let (mut replica, _) = awaiting_replica(node(1)).await;
+    write_counter(&mut primary, 1).await;
+    write_counter(&mut primary, 2).await;
+    primary.transport.take_sent();
+    let chunks = start_transfer(&mut primary, &mut replica).await;
+    finish_transfer(&mut replica, &chunks).await;
+    assert_eq!(replica.sequence(partition), Some(2));
+    assert!(replica.catchup_asked_from(partition).is_some());
+
+    let (mut restarted, _) = primary_holding(1, 1024);
+    write_counter(&mut restarted, 77).await;
+    assert_eq!(restarted.sequence(partition), Some(1));
+    deliver(&restarted, &mut replica).await;
+
+    assert_eq!(counter(&replica), Some(77));
 }

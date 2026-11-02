@@ -83,6 +83,11 @@ pub enum ClusterMessage {
 
 impl ClusterMessage {
     #[must_use]
+    pub fn starts_snapshot_transfer(&self) -> bool {
+        matches!(self, Self::SnapshotChunk(chunk) if chunk.chunk_index == 0)
+    }
+
+    #[must_use]
     pub fn is_snapshot_transfer(&self) -> bool {
         matches!(self, Self::SnapshotChunk(_))
     }
