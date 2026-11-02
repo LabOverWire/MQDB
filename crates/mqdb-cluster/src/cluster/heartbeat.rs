@@ -20,6 +20,7 @@ struct NodeState {
     status: NodeStatus,
     missed_count: u32,
     delivers_acked_events: bool,
+    expected: bool,
 }
 
 #[derive(Debug)]
@@ -90,6 +91,22 @@ impl HeartbeatManager {
                     status: NodeStatus::Unknown,
                     missed_count: 0,
                     delivers_acked_events: false,
+                    expected: false,
+                },
+            );
+        }
+    }
+
+    pub fn expect_node(&mut self, node_id: NodeId) {
+        if node_id != self.local_node {
+            self.nodes.insert(
+                node_id.get(),
+                NodeState {
+                    last_heartbeat: 0,
+                    status: NodeStatus::Unknown,
+                    missed_count: 0,
+                    delivers_acked_events: false,
+                    expected: true,
                 },
             );
         }
@@ -169,6 +186,7 @@ impl HeartbeatManager {
                     status: NodeStatus::Alive,
                     missed_count: 0,
                     delivers_acked_events: heartbeat.delivers_acked_events(),
+                    expected: false,
                 },
             );
         }
@@ -232,8 +250,13 @@ impl HeartbeatManager {
         let suspect_threshold = timeout / 2;
 
         for (&node_id, state) in &mut self.nodes {
-            if state.status == NodeStatus::Dead || state.status == NodeStatus::Unknown {
+            if state.status == NodeStatus::Dead
+                || (state.status == NodeStatus::Unknown && !state.expected)
+            {
                 continue;
+            }
+            if state.last_heartbeat == 0 {
+                state.last_heartbeat = now;
             }
 
             let elapsed = now.saturating_sub(state.last_heartbeat);
@@ -446,5 +469,54 @@ mod tests {
 
         mgr.handle_death_notice(node2);
         assert_eq!(mgr.node_status(node2), NodeStatus::Dead);
+    }
+
+    #[test]
+    fn an_expected_node_with_no_heartbeat_dies_after_the_timeout_from_the_first_check() {
+        let local = NodeId::validated(1).unwrap();
+        let expected = NodeId::validated(2).unwrap();
+        let mut manager = HeartbeatManager::new(local, config());
+        manager.expect_node(expected);
+
+        assert!(manager.check_timeouts(1_000_000).is_empty());
+        assert_eq!(manager.node_status(expected), NodeStatus::Unknown);
+        assert!(manager.check_timeouts(1_000_400).is_empty());
+        assert_eq!(manager.check_timeouts(1_000_600), vec![expected]);
+        assert!(manager.check_timeouts(1_000_700).is_empty());
+    }
+
+    #[test]
+    fn an_expected_node_that_sends_a_heartbeat_is_not_failed_over() {
+        let local = NodeId::validated(1).unwrap();
+        let expected = NodeId::validated(2).unwrap();
+        let mut manager = HeartbeatManager::new(local, config());
+        manager.expect_node(expected);
+        manager.check_timeouts(1_000_000);
+
+        let heartbeat = Heartbeat::create(expected, 1_000_300);
+        manager.receive_heartbeat(expected, &heartbeat, 1_000_300);
+
+        assert_eq!(manager.node_status(expected), NodeStatus::Alive);
+        assert!(manager.check_timeouts(1_000_600).is_empty());
+    }
+
+    #[test]
+    fn a_registered_peer_with_no_heartbeat_never_times_out() {
+        let local = NodeId::validated(1).unwrap();
+        let peer = NodeId::validated(2).unwrap();
+        let mut manager = HeartbeatManager::new(local, config());
+        manager.register_node(peer);
+
+        assert!(manager.check_timeouts(1_000_000).is_empty());
+        assert!(manager.check_timeouts(9_000_000).is_empty());
+    }
+
+    #[test]
+    fn a_node_with_only_expected_peers_sends_heartbeats() {
+        let local = NodeId::validated(1).unwrap();
+        let mut manager = HeartbeatManager::new(local, config());
+        assert!(!manager.should_send(1_000));
+        manager.expect_node(NodeId::validated(2).unwrap());
+        assert!(manager.should_send(1_000));
     }
 }

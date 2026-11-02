@@ -68,6 +68,10 @@ impl MessageProcessor {
         self.heartbeat_manager.register_node(peer);
     }
 
+    pub fn expect_peer(&mut self, peer: NodeId) {
+        self.heartbeat_manager.expect_node(peer);
+    }
+
     pub fn update_partition_map(&mut self, map: PartitionMap) {
         self.heartbeat_manager.update_partition_map(map);
     }

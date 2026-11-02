@@ -29,8 +29,6 @@ pub struct RaftCoordinator<T: ClusterTransport> {
     pub(super) pending_partition_proposals: usize,
     pub(super) last_balance_check: u64,
     pub(super) restored_map_held: bool,
-    pub(super) unseen_restored_members: HashSet<NodeId>,
-    pub(super) unseen_members_deadline: Option<u64>,
 }
 
 impl<T: ClusterTransport> RaftCoordinator<T> {
@@ -50,8 +48,6 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             pending_partition_proposals: 0,
             last_balance_check: 0,
             restored_map_held: false,
-            unseen_restored_members: HashSet::new(),
-            unseen_members_deadline: None,
         }
     }
 
@@ -80,8 +76,6 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             pending_partition_proposals: 0,
             last_balance_check: 0,
             restored_map_held: false,
-            unseen_restored_members: HashSet::new(),
-            unseen_members_deadline: None,
         };
 
         coordinator.rebuild_partition_map();
@@ -104,8 +98,21 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         self.restored_map_held = !named.is_empty();
         for node in named {
             self.add_peer(node);
-            self.unseen_restored_members.insert(node);
         }
+    }
+
+    pub fn voters(&self) -> &[NodeId] {
+        self.node.peers()
+    }
+
+    pub(super) fn planned_map(&self) -> PartitionMap {
+        let mut planned = self.partition_map.clone();
+        for command in self.node.unapplied_commands() {
+            if let RaftCommand::UpdatePartition(update) = command {
+                planned.apply_update(&update);
+            }
+        }
+        planned
     }
 
     pub fn holds_restored_map(&self) -> bool {

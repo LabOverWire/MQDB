@@ -10,8 +10,7 @@ use super::CoordinatorError;
 use super::RaftCoordinator;
 use crate::cluster::transport::ClusterTransport;
 use crate::cluster::{NodeId, PartitionId};
-
-const UNSEEN_MEMBER_TIMEOUT_MS: u64 = 15_000;
+use std::collections::BTreeSet;
 
 impl<T: ClusterTransport> RaftCoordinator<T> {
     pub async fn tick(&mut self, now_ms: u64) -> Vec<u64> {
@@ -25,12 +24,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         let just_became_ready = ready && !self.was_ready;
         self.was_ready = ready;
 
-        if !ready {
-            self.unseen_members_deadline = None;
-        }
-
         if just_became_ready {
-            self.unseen_members_deadline = Some(now_ms + UNSEEN_MEMBER_TIMEOUT_MS);
             self.last_balance_check = now_ms;
             self.pending_partition_proposals = 0;
             tracing::info!("Raft leader caught up, processing pending nodes");
@@ -44,20 +38,6 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
 
         if self.ready_to_initialize() {
             return self.initialize_partitions().await;
-        }
-
-        if self
-            .unseen_members_deadline
-            .is_some_and(|deadline| now_ms >= deadline)
-        {
-            self.unseen_members_deadline = None;
-            let unseen: Vec<NodeId> = self.unseen_restored_members.drain().collect();
-            let mut indices = Vec::new();
-            for node in unseen {
-                tracing::warn!(?node, "restored member never appeared, treating it as dead");
-                indices.extend(self.handle_node_death(node).await);
-            }
-            return indices;
         }
 
         if ready
@@ -76,11 +56,20 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             && self.pending_partition_proposals == 0
             && now_ms.saturating_sub(self.last_balance_check) > 30_000
             && self.partitions_initialized()
-            && self.primaries_imbalanced()
         {
             self.last_balance_check = now_ms;
-            tracing::info!("periodic balance check: primaries imbalanced, triggering rebalance");
-            return self.trigger_rebalance_internal().await;
+            let mut repairs = Vec::new();
+            self.scan_partition_map_for_dead_primaries(&mut repairs)
+                .await;
+            if !repairs.is_empty() {
+                return repairs;
+            }
+            if self.primaries_imbalanced() {
+                tracing::info!(
+                    "periodic balance check: primaries imbalanced, triggering rebalance"
+                );
+                return self.trigger_rebalance_internal().await;
+            }
         }
 
         Vec::new()
@@ -136,19 +125,19 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         &mut self,
         proposed_indices: &mut Vec<u64>,
     ) {
-        let alive_nodes: Vec<NodeId> = self.cluster_members.clone();
-
-        for partition in PartitionId::all() {
-            if let Some(primary) = self.partition_map.primary(partition)
-                && !alive_nodes.contains(&primary)
-                && !self.pending_dead_nodes.contains(&primary)
-                && !self.processed_dead_nodes.contains(&primary)
-            {
-                tracing::warn!(?partition, ?primary, "found stale primary in partition map");
-                self.processed_dead_nodes.insert(primary);
-                let indices = self.reassign_partitions_for_dead_node(primary).await;
-                proposed_indices.extend(indices);
-            }
+        let planned = self.planned_map();
+        let departed: BTreeSet<NodeId> = PartitionId::all()
+            .filter_map(|partition| planned.primary(partition))
+            .filter(|primary| {
+                !self.cluster_members.contains(primary)
+                    && !self.pending_dead_nodes.contains(primary)
+            })
+            .collect();
+        for primary in departed {
+            tracing::warn!(?primary, "found partitions on a departed primary");
+            self.processed_dead_nodes.insert(primary);
+            let indices = self.reassign_partitions_for_dead_node(primary).await;
+            proposed_indices.extend(indices);
         }
     }
 

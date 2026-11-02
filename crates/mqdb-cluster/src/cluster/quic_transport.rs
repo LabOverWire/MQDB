@@ -388,20 +388,8 @@ impl QuicDirectTransport {
             .collect()
     }
 
-    pub async fn forget_unlinked_peers_outside(&self, members: &[NodeId]) {
-        let linked = self.peers.read().await;
-        let keep: Vec<NodeId> = members
-            .iter()
-            .copied()
-            .chain(linked.keys().copied())
-            .collect();
-        drop(linked);
-        for node in self.address_book.forget_learned_except(&keep).await {
-            info!(
-                peer = node.get(),
-                "forgot the address of a peer no longer in the partition map"
-            );
-        }
+    pub async fn configure_peer(&self, peer_id: NodeId, peer_addr: SocketAddr) {
+        self.address_book.configure(peer_id, peer_addr).await;
     }
 
     pub async fn redial(&self, targets: &[NodeId]) {

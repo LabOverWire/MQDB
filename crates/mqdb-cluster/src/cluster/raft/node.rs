@@ -265,6 +265,20 @@ impl RaftNode {
             .collect()
     }
 
+    #[cfg(test)]
+    pub(crate) fn log_term_at_for_tests(&self, index: u64) -> u64 {
+        self.state.log_term_at(index).unwrap_or(0)
+    }
+
+    #[must_use]
+    pub fn unapplied_commands(&self) -> Vec<RaftCommand> {
+        self.state
+            .entries_from(self.state.last_applied() + 1)
+            .iter()
+            .filter_map(LogEntry::command)
+            .collect()
+    }
+
     #[must_use]
     pub fn map_is_current(&self) -> bool {
         self.leader_synced || (self.is_leader() && self.applied_own_term())
@@ -1469,5 +1483,51 @@ mod tests {
         node.tick(1_000);
         node.tick(1_000 + node.config.election_timeout_max_ms);
         assert_eq!(node.current_term(), 1);
+    }
+
+    #[test]
+    fn a_candidate_that_loses_its_links_stops_raising_its_term() {
+        let peer = NodeId::validated(2).unwrap();
+        let mut node = make_node(1);
+        node.add_peer(peer);
+        node.add_peer(NodeId::validated(3).unwrap());
+        node.observe_links(&[peer]);
+        node.tick(1_000);
+        node.tick(1_000 + node.config.election_timeout_max_ms);
+        assert_eq!(node.role(), RaftRole::Candidate);
+        let term = node.current_term();
+
+        node.observe_links(&[]);
+        for now in (2_000..=12_000).step_by(100) {
+            node.tick(now);
+        }
+
+        assert_eq!(node.current_term(), term);
+    }
+
+    #[test]
+    fn an_append_behind_the_local_commit_does_not_release_the_map() {
+        let mut node = make_node(1);
+        node.add_peer(NodeId::validated(2).unwrap());
+        for index in 1..=3 {
+            let entry = LogEntry::create(index, 1, RaftCommand::Noop);
+            let request = AppendEntriesRequest::create(
+                1,
+                2,
+                index - 1,
+                u64::from(index > 1),
+                vec![entry],
+                index,
+            );
+            let peer = NodeId::validated(2).unwrap();
+            node.handle_append_entries(peer, request, 100);
+        }
+        node.leader_synced = false;
+        assert_eq!(node.commit_index(), 3);
+
+        let behind = AppendEntriesRequest::create(1, 2, 1, 1, Vec::new(), 1);
+        node.handle_append_entries(NodeId::validated(2).unwrap(), behind, 200);
+
+        assert!(!node.map_is_current());
     }
 }

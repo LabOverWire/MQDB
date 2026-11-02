@@ -108,6 +108,7 @@ impl ClusteredAgent {
         node_id: NodeId,
         transport_config: TransportConfig,
         peers: &[PeerConfig],
+        restored_voters: &[NodeId],
         channels: MessageProcessorChannels,
     ) -> DedicatedExecutor {
         let mut processor = MessageProcessor::new(
@@ -123,6 +124,9 @@ impl ClusteredAgent {
             if let Some(peer_node_id) = NodeId::validated(peer.node_id) {
                 processor.register_peer(peer_node_id);
             }
+        }
+        for voter in restored_voters {
+            processor.expect_peer(*voter);
         }
         let executor = DedicatedExecutor::new("msg-processor", 2);
         executor.handle().spawn(async move {
@@ -211,6 +215,7 @@ impl ClusteredAgent {
             node_id,
             transport_config,
             &config.peers,
+            raft.voters(),
             processor_channels,
         );
 

@@ -6,8 +6,11 @@ use std::collections::HashMap;
 
 const FIRST_DELAY_MS: u64 = 1_000;
 const MAX_DELAY_MS: u64 = 5_000;
+const LONG_ABSENCE_MS: u64 = 300_000;
+const LONG_ABSENCE_DELAY_MS: u64 = 60_000;
 
 struct NextDial {
+    unlinked_since_ms: u64,
     at_ms: u64,
     delay_ms: u64,
 }
@@ -26,6 +29,7 @@ impl RedialBackoff {
                 self.waiting.insert(
                     *node,
                     NextDial {
+                        unlinked_since_ms: now_ms,
                         at_ms: now_ms + FIRST_DELAY_MS,
                         delay_ms: FIRST_DELAY_MS,
                     },
@@ -34,7 +38,12 @@ impl RedialBackoff {
                 continue;
             };
             if now_ms >= next.at_ms {
-                next.delay_ms = (next.delay_ms * 2).min(MAX_DELAY_MS);
+                next.delay_ms = if now_ms.saturating_sub(next.unlinked_since_ms) >= LONG_ABSENCE_MS
+                {
+                    LONG_ABSENCE_DELAY_MS
+                } else {
+                    (next.delay_ms * 2).min(MAX_DELAY_MS)
+                };
                 next.at_ms = now_ms + next.delay_ms;
                 due.push(*node);
             }
@@ -64,6 +73,24 @@ mod tests {
             vec![0, 1_000, 3_000, 7_000, 12_000, 17_000],
             "dials start at once and settle at the five second cap"
         );
+    }
+
+    #[test]
+    fn a_peer_absent_for_minutes_is_dialled_once_a_minute() {
+        let mut backoff = RedialBackoff::default();
+        let peer = [node(2)];
+        let attempts: Vec<u64> = (0..=500_000)
+            .step_by(1_000)
+            .filter(|now| !backoff.due(&peer, *now).is_empty())
+            .filter(|now| *now >= 290_000)
+            .collect();
+        let gaps: Vec<u64> = attempts.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        assert_eq!(
+            gaps.first(),
+            Some(&5_000),
+            "still fast just before the five minutes"
+        );
+        assert_eq!(gaps.last(), Some(&60_000));
     }
 
     #[test]

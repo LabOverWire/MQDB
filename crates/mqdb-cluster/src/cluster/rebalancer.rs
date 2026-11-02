@@ -101,18 +101,15 @@ fn redistribute_primaries(
         let target_node = assignment
             .replicas
             .iter()
-            .filter(|&&r| {
-                let count = *primary_counts.get(&r).unwrap_or(&0);
-                count < ideal_per_node || (current_count > max_per_node && count < current_count)
+            .filter_map(|replica| primary_counts.get(replica).map(|count| (*replica, *count)))
+            .filter(|(_, count)| {
+                *count < ideal_per_node || (current_count > max_per_node && *count < current_count)
             })
-            .min_by_key(|r| primary_counts.get(r).unwrap_or(&0))
-            .copied();
+            .min_by_key(|(_, count)| *count);
 
-        let Some(target) = target_node else {
+        let Some((target, target_count)) = target_node else {
             continue;
         };
-
-        let target_count = *primary_counts.get(&target).unwrap_or(&0);
 
         let should_move = current_count > max_per_node
             || (current_count > ideal_per_node && target_count < ideal_per_node);
@@ -145,8 +142,8 @@ fn redistribute_primaries(
             new_epoch,
         });
 
-        *primary_counts.get_mut(&current_primary).unwrap() -= 1;
-        *primary_counts.get_mut(&target).unwrap() += 1;
+        primary_counts.insert(current_primary, current_count.saturating_sub(1));
+        primary_counts.insert(target, target_count + 1);
     }
 
     reassignments
@@ -167,7 +164,7 @@ fn add_missing_replicas(
         }
 
         let assignment = current.get(partition);
-        let Some(primary) = assignment.primary else {
+        let Some(primary) = assignment.primary.filter(|p| all_nodes.contains(p)) else {
             continue;
         };
 
@@ -262,7 +259,7 @@ fn redistribute_replicas(
             }
 
             let assignment = current.get(partition);
-            let Some(primary) = assignment.primary else {
+            let Some(primary) = assignment.primary.filter(|p| all_nodes.contains(p)) else {
                 continue;
             };
 
@@ -625,5 +622,28 @@ mod tests {
             "expected ~{expected_per_node} replicas after 3 steps, got {}",
             map4.replica_count(node(3))
         );
+    }
+
+    #[test]
+    fn a_departed_primary_with_no_replica_gets_no_replica_added() {
+        let config = RebalanceConfig::default();
+        let mut map = PartitionMap::default();
+        for partition in PartitionId::all() {
+            map.set(
+                partition,
+                crate::cluster::PartitionAssignment::new(node(1), Vec::new(), Epoch::new(1)),
+            );
+        }
+        let reassignments = compute_incremental_assignments(&map, &[node(2), node(3)], &config);
+        assert!(reassignments.iter().all(|r| r.new_primary != node(1)));
+    }
+
+    #[test]
+    fn incremental_rebalance_with_a_departed_replica_does_not_panic() {
+        let config = RebalanceConfig::default();
+        let map = compute_balanced_assignments(&[node(1), node(2)], &config, Epoch::ZERO);
+        let reassignments =
+            compute_incremental_assignments(&map, &[node(2), node(3), node(4)], &config);
+        assert!(reassignments.iter().all(|r| r.new_primary != node(1)));
     }
 }

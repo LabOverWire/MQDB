@@ -734,9 +734,9 @@ MQDB supports distributed clustering with automatic failover and partition rebal
 > keeps in `peer_addrs` in its `--db` directory. It never dials a node it has only heard about, so
 > list the nodes started before it, as above; the links to nodes started afterwards are created when
 > *those* nodes dial in. A node keeps redialling a known peer that has no link, or that heartbeats
-> report dead, starting at once and backing off to every 5 seconds, so a restarted node re-links
-> without a change to its `--peers`. It forgets a remembered address once the peer is unlinked and
-> out of the partition map, but keeps dialling everything in `--peers`.
+> report dead, starting at once and backing off to every 5 seconds, then every minute once the peer
+> has been gone for 5 minutes, so a restarted node re-links without a change to its `--peers`. A
+> remembered address is kept until the peer dials in from a new one.
 >
 > A node restarted with its data counts every node named in its stored partition map or Raft log
 > as a voter, whether or not that entry committed. It does not lead alone if any other node is
@@ -744,7 +744,9 @@ MQDB supports distributed clustering with automatic failover and partition rebal
 > requests with a 503 until it has heard from a leader. If a majority of those nodes never returns
 > it stays that way, and there is no option to force it to lead. Only a node whose stored state
 > names no other node leads alone, after 10 seconds: a single-node cluster, or an empty data
-> directory with no `--peers`. So point a node replacing a lost one at its peers.
+> directory with no `--peers`. So point a node replacing a lost one at its peers. A restarted node
+> treats a named node it has not heard from within 15 seconds of starting as dead, the same as one
+> that stopped sending heartbeats, and the leader moves its partitions.
 >
 > This does not stop every disruption. A returning node with links to a majority that excludes the
 > leader can still raise the term and depose it (#314). Voter sets are not committed membership
