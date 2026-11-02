@@ -44,9 +44,7 @@ use super::transport::{
 };
 use super::write_log::PartitionWriteLog;
 use super::{Epoch, NodeId, PartitionId, PartitionMap};
-use crate::cluster::db_handler::helpers::json_write_failure;
 use db_ops::EventOrigin;
-use mqdb_core::events::ChangeEvent;
 use mqdb_core::storage::StorageBackend;
 use mqdb_core::types::{MAX_LIST_RESULTS, OwnershipConfig, ScopeConfig};
 use mqdb_vault::VaultKeyStore;
@@ -300,7 +298,6 @@ pub enum FkCheckContinuation {
         data: serde_json::Value,
         partition: PartitionId,
         request_id: String,
-        now_ms: u64,
         sender: Option<String>,
         client_id: Option<String>,
         response_topic: String,
@@ -312,7 +309,6 @@ pub enum FkCheckContinuation {
         merged_data: serde_json::Value,
         partition: PartitionId,
         request_id: String,
-        now_ms: u64,
         new_diff: serde_json::Value,
         old_diff: serde_json::Value,
         sender: Option<String>,
@@ -348,16 +344,12 @@ pub enum FkCheckContinuation {
     },
 }
 
-pub type RemoteReserveOutcome =
-    Result<Vec<(String, Vec<u8>, NodeId)>, (ReserveFailure, Vec<(String, Vec<u8>, NodeId)>)>;
-
 pub enum UniqueCheckContinuation {
     CreateFromDbHandler {
         entity: String,
         id: String,
         data: serde_json::Value,
         constraint_data: serde_json::Value,
-        data_bytes: Vec<u8>,
         partition: PartitionId,
         request_id: String,
         now_ms: u64,
@@ -370,7 +362,6 @@ pub enum UniqueCheckContinuation {
         entity: String,
         id: String,
         merged_data: serde_json::Value,
-        data_bytes: Vec<u8>,
         partition: PartitionId,
         request_id: String,
         now_ms: u64,
@@ -649,6 +640,8 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
+    /// # Panics
+    /// Panics if no valid partition can be created.
     #[must_use]
     pub fn pick_partition_for_create(&self) -> PartitionId {
         use std::sync::atomic::{AtomicU16, Ordering};
@@ -1051,7 +1044,7 @@ impl<T: ClusterTransport> NodeController<T> {
             }
         }
         if count > 0 {
-            let elapsed_us = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+            let elapsed_us = elapsed_micros(start);
             tracing::info!(
                 node = self.node_id.get(),
                 msg_count = count,
@@ -1562,207 +1555,188 @@ impl<T: ClusterTransport> NodeController<T> {
     pub async fn complete_pending_unique_work(
         &mut self,
         local_reserved: Vec<(String, Vec<u8>)>,
-        remote_results: RemoteReserveOutcome,
+        remote_results: RemoteReserveResult,
         continuation: UniqueCheckContinuation,
     ) {
         match continuation {
-            UniqueCheckContinuation::CreateFromNodeController { .. } => {
-                self.complete_unique_create(local_reserved, remote_results, continuation)
+            UniqueCheckContinuation::CreateFromNodeController {
+                from,
+                entity,
+                id,
+                data,
+                data_bytes,
+                partition,
+                request_id,
+                now_ms,
+                sender,
+                client_id,
+                response_topic,
+                correlation_data,
+            } => {
+                let origin = EventOrigin::new(sender.as_deref(), client_id.as_deref());
+                let response_payload = match remote_results {
+                    Err((failure, confirmed)) => {
+                        self.release_unique_check_reservations(
+                            &entity,
+                            &request_id,
+                            &local_reserved,
+                            &confirmed,
+                        )
+                        .await;
+                        Self::json_error(failure.http_code(), &failure.message())
+                    }
+                    Ok(confirmed_remotes) => {
+                        match self
+                            .db_create_with_event(
+                                &entity,
+                                &id,
+                                &data_bytes,
+                                data.clone(),
+                                now_ms,
+                                origin,
+                            )
+                            .await
+                        {
+                            Ok(db_entity) => {
+                                self.commit_unique_constraints(
+                                    &entity,
+                                    &id,
+                                    &data,
+                                    partition,
+                                    &request_id,
+                                    now_ms,
+                                )
+                                .await;
+                                crate::cluster::db_handler::helpers::json_ok_with_id(
+                                    db_entity.id_str(),
+                                    &data,
+                                )
+                            }
+                            Err(error) => {
+                                self.release_unique_check_reservations(
+                                    &entity,
+                                    &request_id,
+                                    &local_reserved,
+                                    &confirmed_remotes,
+                                )
+                                .await;
+                                crate::cluster::db_handler::helpers::json_record_write_failure(
+                                    &entity, &id, error,
+                                )
+                            }
+                        }
+                    }
+                };
+
+                let response =
+                    JsonDbResponse::new(0, response_payload, response_topic, correlation_data);
+                let _ = self
+                    .transport
+                    .send(from, ClusterMessage::JsonDbResponse(response))
                     .await;
             }
-            UniqueCheckContinuation::UpdateFromNodeController { .. } => {
-                self.complete_unique_update(local_reserved, remote_results, continuation)
+            UniqueCheckContinuation::UpdateFromNodeController {
+                from,
+                entity,
+                id,
+                merged_data,
+                data_bytes,
+                partition,
+                request_id,
+                now_ms,
+                new_diff,
+                old_diff,
+                sender,
+                client_id,
+                response_topic,
+                correlation_data,
+            } => {
+                let origin = EventOrigin::new(sender.as_deref(), client_id.as_deref());
+                let response_payload = match remote_results {
+                    Err((failure, confirmed)) => {
+                        self.release_unique_check_reservations(
+                            &entity,
+                            &request_id,
+                            &local_reserved,
+                            &confirmed,
+                        )
+                        .await;
+                        Self::json_error(failure.http_code(), &failure.message())
+                    }
+                    Ok(confirmed_remotes) => {
+                        match self
+                            .db_update_with_event(
+                                &entity,
+                                &id,
+                                &data_bytes,
+                                merged_data.clone(),
+                                now_ms,
+                                origin,
+                            )
+                            .await
+                        {
+                            Ok(db_entity) => {
+                                self.commit_unique_constraints(
+                                    &entity,
+                                    &id,
+                                    &new_diff,
+                                    partition,
+                                    &request_id,
+                                    now_ms,
+                                )
+                                .await;
+                                self.release_unique_constraints(
+                                    &entity, &id, &old_diff, partition, &id, now_ms,
+                                )
+                                .await;
+                                crate::cluster::db_handler::helpers::json_ok_with_id(
+                                    db_entity.id_str(),
+                                    &merged_data,
+                                )
+                            }
+                            Err(error) => {
+                                self.release_unique_check_reservations(
+                                    &entity,
+                                    &request_id,
+                                    &local_reserved,
+                                    &confirmed_remotes,
+                                )
+                                .await;
+                                crate::cluster::db_handler::helpers::json_record_write_failure(
+                                    &entity, &id, error,
+                                )
+                            }
+                        }
+                    }
+                };
+
+                let response =
+                    JsonDbResponse::new(0, response_payload, response_topic, correlation_data);
+                let _ = self
+                    .transport
+                    .send(from, ClusterMessage::JsonDbResponse(response))
                     .await;
             }
             UniqueCheckContinuation::CreateFromDbHandler { .. }
             | UniqueCheckContinuation::UpdateFromDbHandler { .. } => {}
         }
     }
-
-    async fn complete_unique_create(
-        &mut self,
-        local_reserved: Vec<(String, Vec<u8>)>,
-        remote_results: RemoteReserveOutcome,
-        continuation: UniqueCheckContinuation,
-    ) {
-        let UniqueCheckContinuation::CreateFromNodeController {
-            from,
-            entity,
-            id,
-            data,
-            data_bytes,
-            partition,
-            request_id,
-            now_ms,
-            sender,
-            client_id,
-            response_topic,
-            correlation_data,
-        } = continuation
-        else {
-            return;
-        };
-        let origin = EventOrigin::new(sender.as_deref(), client_id.as_deref());
-        let response_payload = match remote_results {
-            Err((failure, confirmed)) => {
-                self.release_unique_check_reservations(
-                    &entity,
-                    &request_id,
-                    &local_reserved,
-                    &confirmed,
-                )
-                .await;
-                Self::json_error(failure.http_code(), &failure.message())
-            }
-            Ok(confirmed_remotes) => {
-                match self.db_create_prepare(&entity, &id, &data_bytes, now_ms) {
-                    Ok((db_entity, write)) => {
-                        let event = self.change_event(
-                            ChangeEvent::create(entity.clone(), id.clone(), data.clone()),
-                            origin,
-                        );
-                        self.commit_with_change_event(write, event).await;
-                        self.commit_unique_constraints(
-                            &entity,
-                            &id,
-                            &data,
-                            partition,
-                            &request_id,
-                            now_ms,
-                        )
-                        .await;
-                        crate::cluster::db_handler::helpers::json_ok_with_id(
-                            db_entity.id_str(),
-                            &data,
-                        )
-                    }
-                    Err(super::db::DbDataStoreError::AlreadyExists) => {
-                        self.release_unique_check_reservations(
-                            &entity,
-                            &request_id,
-                            &local_reserved,
-                            &confirmed_remotes,
-                        )
-                        .await;
-                        Self::json_error(409, "entity already exists")
-                    }
-                    Err(error) => {
-                        self.release_unique_check_reservations(
-                            &entity,
-                            &request_id,
-                            &local_reserved,
-                            &confirmed_remotes,
-                        )
-                        .await;
-                        json_write_failure(error)
-                    }
-                }
-            }
-        };
-
-        let response = JsonDbResponse::new(0, response_payload, response_topic, correlation_data);
-        let _ = self
-            .transport
-            .send(from, ClusterMessage::JsonDbResponse(response))
-            .await;
-    }
-
-    async fn complete_unique_update(
-        &mut self,
-        local_reserved: Vec<(String, Vec<u8>)>,
-        remote_results: RemoteReserveOutcome,
-        continuation: UniqueCheckContinuation,
-    ) {
-        let UniqueCheckContinuation::UpdateFromNodeController {
-            from,
-            entity,
-            id,
-            merged_data,
-            data_bytes,
-            partition,
-            request_id,
-            now_ms,
-            new_diff,
-            old_diff,
-            sender,
-            client_id,
-            response_topic,
-            correlation_data,
-        } = continuation
-        else {
-            return;
-        };
-        let origin = EventOrigin::new(sender.as_deref(), client_id.as_deref());
-        let response_payload = match remote_results {
-            Err((failure, confirmed)) => {
-                self.release_unique_check_reservations(
-                    &entity,
-                    &request_id,
-                    &local_reserved,
-                    &confirmed,
-                )
-                .await;
-                Self::json_error(failure.http_code(), &failure.message())
-            }
-            Ok(confirmed_remotes) => {
-                match self.db_update_prepare(&entity, &id, &data_bytes, now_ms) {
-                    Ok((db_entity, write)) => {
-                        let event = self.change_event(
-                            ChangeEvent::update(entity.clone(), id.clone(), merged_data.clone()),
-                            origin,
-                        );
-                        self.commit_with_change_event(write, event).await;
-                        self.commit_unique_constraints(
-                            &entity,
-                            &id,
-                            &new_diff,
-                            partition,
-                            &request_id,
-                            now_ms,
-                        )
-                        .await;
-                        self.release_unique_constraints(
-                            &entity, &id, &old_diff, partition, &id, now_ms,
-                        )
-                        .await;
-                        crate::cluster::db_handler::helpers::json_ok_with_id(
-                            db_entity.id_str(),
-                            &merged_data,
-                        )
-                    }
-                    Err(super::db::DbDataStoreError::NotFound) => {
-                        self.release_unique_check_reservations(
-                            &entity,
-                            &request_id,
-                            &local_reserved,
-                            &confirmed_remotes,
-                        )
-                        .await;
-                        Self::json_error(404, &format!("entity not found: {entity} id={id}"))
-                    }
-                    Err(error) => {
-                        self.release_unique_check_reservations(
-                            &entity,
-                            &request_id,
-                            &local_reserved,
-                            &confirmed_remotes,
-                        )
-                        .await;
-                        json_write_failure(error)
-                    }
-                }
-            }
-        };
-
-        let response = JsonDbResponse::new(0, response_payload, response_topic, correlation_data);
-        let _ = self
-            .transport
-            .send(from, ClusterMessage::JsonDbResponse(response))
-            .await;
-    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) fn elapsed_micros(start: std::time::Instant) -> u64 {
+    u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+pub(crate) type RemoteReservations = Vec<(String, Vec<u8>, NodeId)>;
+pub(crate) type RemoteReserveResult =
+    Result<RemoteReservations, (ReserveFailure, RemoteReservations)>;
+
+pub(crate) struct RefusedWrite {
+    pub(crate) error: ReplicationError,
+    pub(crate) event: Option<crate::cluster::protocol::ChangeEventRecord>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplicationError {
     NotPrimary,
     TooManyPending,

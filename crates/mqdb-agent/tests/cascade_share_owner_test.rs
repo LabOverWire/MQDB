@@ -1,0 +1,579 @@
+// Copyright 2025-2026 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+use mqdb_agent::Database;
+use mqdb_agent::database::{GranteeIdentity, ShareActor};
+use mqdb_agent::vault_backend::DbAccess;
+use mqdb_core::config::DatabaseConfig;
+use mqdb_core::keys::encode_data_key;
+use mqdb_core::protocol::{build_request, parse_db_topic};
+use mqdb_core::storage::{MemoryBackend, StorageBackend};
+use mqdb_core::types::{OwnershipConfig, ScopeConfig};
+use mqdb_core::{Request, Response};
+use serde_json::{Value, json};
+use std::collections::HashSet;
+use std::sync::Arc;
+use tempfile::TempDir;
+
+fn ownership() -> OwnershipConfig {
+    OwnershipConfig::parse("diagrams=userId")
+        .unwrap()
+        .with_admin_users(HashSet::from(["root".to_string()]))
+}
+
+async fn diagrams(records: &[Value]) -> (TempDir, Database) {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    db.add_relationship("diagrams".into(), "parent".into(), "diagrams".into())
+        .await;
+    for record in records {
+        db.execute(Request::Create {
+            entity: "diagrams".into(),
+            data: record.clone(),
+        })
+        .await;
+    }
+    (tmp, db)
+}
+
+async fn publish(db: &Database, topic: &str, payload: &[u8], sender: &str) -> Response {
+    let op = parse_db_topic(topic).unwrap();
+    let request = build_request(op, payload).unwrap();
+    db.execute_with_sender(
+        request,
+        Some(sender),
+        None,
+        &ownership(),
+        &ScopeConfig::default(),
+        None,
+    )
+    .await
+}
+
+fn answer(response: &Response) -> Value {
+    match response {
+        Response::Ok { .. } => json!("ok"),
+        Response::Error { code, .. } => json!(code),
+    }
+}
+
+fn data(response: Response) -> Value {
+    match response {
+        Response::Ok { data } => data,
+        Response::Error { code, message } => panic!("{code}: {message}"),
+    }
+}
+
+async fn carol_access(db: &Database, id: &str) -> (Value, Value) {
+    let read = publish(db, &format!("$DB/diagrams/{id}"), b"{}", "carol").await;
+    let update = publish(
+        db,
+        &format!("$DB/diagrams/{id}/update"),
+        br#"{"title":"carol-was-here"}"#,
+        "carol",
+    )
+    .await;
+    (answer(&read), answer(&update))
+}
+
+const CAROL_EDIT_CASCADE: &[u8] = br#"{"grantee":"carol","permission":"edit","cascade":true}"#;
+
+#[tokio::test]
+async fn cascade_share_does_not_grant_on_a_referenced_record_owned_by_someone_else() {
+    let (_tmp, db) = diagrams(&[
+        json!({"id": "bob-d", "userId": "bob", "title": "bob-secret"}),
+        json!({"id": "alice-d", "userId": "alice", "title": "a", "parent_id": "bob-d"}),
+    ])
+    .await;
+
+    let shared = data(
+        publish(
+            &db,
+            "$DB/diagrams/alice-d/share",
+            CAROL_EDIT_CASCADE,
+            "alice",
+        )
+        .await,
+    );
+
+    assert_eq!(
+        carol_access(&db, "alice-d").await,
+        (json!("ok"), json!("ok"))
+    );
+    assert_eq!(carol_access(&db, "bob-d").await, (json!(403), json!(403)));
+    assert_eq!(
+        (&shared["resources_shared"], &shared["resources_skipped"]),
+        (&json!(1), &json!(1))
+    );
+}
+
+#[tokio::test]
+async fn cascade_share_grants_the_sharers_own_closure_and_stops_at_a_foreign_record() {
+    let (_tmp, db) = diagrams(&[
+        json!({"id": "alice-far", "userId": "alice", "title": "far"}),
+        json!({"id": "bob-mid", "userId": "bob", "title": "mid", "parent_id": "alice-far"}),
+        json!({"id": "alice-near", "userId": "alice", "title": "near", "parent_id": "bob-mid"}),
+        json!({"id": "alice-root", "userId": "alice", "title": "root", "parent_id": "alice-near"}),
+    ])
+    .await;
+
+    let shared = data(
+        publish(
+            &db,
+            "$DB/diagrams/alice-root/share",
+            CAROL_EDIT_CASCADE,
+            "alice",
+        )
+        .await,
+    );
+
+    let mut access = Vec::new();
+    for id in ["alice-root", "alice-near", "bob-mid", "alice-far"] {
+        access.push((id, carol_access(&db, id).await));
+    }
+    assert_eq!(
+        access,
+        [
+            ("alice-root", (json!("ok"), json!("ok"))),
+            ("alice-near", (json!("ok"), json!("ok"))),
+            ("bob-mid", (json!(403), json!(403))),
+            ("alice-far", (json!(403), json!(403))),
+        ]
+    );
+    assert_eq!(
+        (&shared["resources_shared"], &shared["resources_skipped"]),
+        (&json!(2), &json!(1))
+    );
+}
+
+#[tokio::test]
+async fn admin_cascade_share_grants_every_owner_in_the_closure() {
+    let (_tmp, db) = diagrams(&[
+        json!({"id": "bob-d", "userId": "bob", "title": "bob-secret"}),
+        json!({"id": "alice-d", "userId": "alice", "title": "a", "parent_id": "bob-d"}),
+    ])
+    .await;
+
+    let shared = data(
+        publish(
+            &db,
+            "$DB/diagrams/alice-d/share",
+            CAROL_EDIT_CASCADE,
+            "root",
+        )
+        .await,
+    );
+
+    assert_eq!(carol_access(&db, "bob-d").await, (json!("ok"), json!("ok")));
+    assert_eq!(
+        (&shared["resources_shared"], &shared["resources_skipped"]),
+        (&json!(2), &json!(0))
+    );
+}
+
+#[tokio::test]
+async fn cascade_share_does_not_grant_on_a_dangling_reference_created_later() {
+    let (_tmp, db) = diagrams(&[
+        json!({"id": "alice-d", "userId": "alice", "title": "a", "parent_id": "later-d"}),
+    ])
+    .await;
+
+    let shared = data(
+        publish(
+            &db,
+            "$DB/diagrams/alice-d/share",
+            CAROL_EDIT_CASCADE,
+            "alice",
+        )
+        .await,
+    );
+    db.execute(Request::Create {
+        entity: "diagrams".into(),
+        data: json!({"id": "later-d", "userId": "bob", "title": "bob-secret"}),
+    })
+    .await;
+
+    assert_eq!(carol_access(&db, "later-d").await, (json!(403), json!(403)));
+    assert_eq!(
+        (&shared["resources_shared"], &shared["resources_skipped"]),
+        (&json!(1), &json!(1))
+    );
+}
+
+#[tokio::test]
+async fn cascade_unshare_keeps_a_grant_on_a_referenced_record_owned_by_someone_else() {
+    let (_tmp, db) = diagrams(&[
+        json!({"id": "bob-d", "userId": "bob", "title": "bob-secret"}),
+        json!({"id": "alice-d", "userId": "alice", "title": "a", "parent_id": "bob-d"}),
+    ])
+    .await;
+    data(
+        publish(
+            &db,
+            "$DB/diagrams/bob-d/share",
+            br#"{"grantee":"carol","permission":"edit","cascade":false}"#,
+            "bob",
+        )
+        .await,
+    );
+    data(
+        publish(
+            &db,
+            "$DB/diagrams/alice-d/share",
+            br#"{"grantee":"carol","permission":"edit","cascade":false}"#,
+            "alice",
+        )
+        .await,
+    );
+
+    data(
+        publish(
+            &db,
+            "$DB/diagrams/alice-d/unshare",
+            br#"{"grantee":"carol","cascade":true}"#,
+            "alice",
+        )
+        .await,
+    );
+
+    assert_eq!(carol_access(&db, "alice-d").await, (json!(403), json!(403)));
+    assert_eq!(carol_access(&db, "bob-d").await, (json!("ok"), json!("ok")));
+}
+
+#[tokio::test]
+async fn pending_cascade_share_does_not_reach_a_foreign_record_after_the_sweep() {
+    let (_tmp, db) = diagrams(&[
+        json!({"id": "bob-d", "userId": "bob", "title": "bob-secret"}),
+        json!({"id": "alice-d", "userId": "alice", "title": "a", "parent_id": "bob-d"}),
+    ])
+    .await;
+    let shared = db
+        .execute_with_sender(
+            Request::Share {
+                entity: "diagrams".into(),
+                id: "alice-d".into(),
+                grantee: String::new(),
+                grantee_key: Some("carol@example.com".into()),
+                grantee_email: None,
+                permission: "edit".into(),
+                cascade: true,
+            },
+            Some("alice"),
+            None,
+            &ownership(),
+            &ScopeConfig::default(),
+            None,
+        )
+        .await;
+    assert_eq!(data(shared)["status"], "pending");
+    let filled = DbAccess::resolve_pending_grants(&db, "carol@example.com", "carol")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        carol_access(&db, "alice-d").await,
+        (json!("ok"), json!("ok"))
+    );
+    assert_eq!(carol_access(&db, "bob-d").await, (json!(403), json!(403)));
+    assert_eq!(filled, 1);
+}
+
+#[tokio::test]
+async fn cascade_share_stops_at_the_same_bound_as_cluster_mode() {
+    let chain: Vec<Value> = (0..300)
+        .map(|i| json!({"id": format!("c{i}"), "userId": "alice", "title": "c", "parent_id": format!("c{}", i + 1)}))
+        .collect();
+    let (_tmp, db) = diagrams(&chain).await;
+
+    let shared = data(publish(&db, "$DB/diagrams/c0/share", CAROL_EDIT_CASCADE, "alice").await);
+
+    assert_eq!(
+        (&shared["resources_shared"], &shared["resources_skipped"]),
+        (&json!(256), &json!(0))
+    );
+}
+
+#[tokio::test]
+async fn cascade_share_at_the_bound_follows_foreign_key_fields_in_a_fixed_order() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path())
+        .await
+        .unwrap();
+    for field in ["parent_id", "ref2"] {
+        db.add_foreign_key(
+            "diagrams".into(),
+            field.into(),
+            "diagrams".into(),
+            "id".into(),
+            mqdb_core::constraint::OnDeleteAction::Restrict,
+        )
+        .await
+        .unwrap();
+    }
+    for i in (0..200).rev() {
+        data(
+            db.execute(Request::Create {
+                entity: "diagrams".into(),
+                data: json!({"id": format!("b{i}"), "userId": "bob", "title": "b"}),
+            })
+            .await,
+        );
+        let mut rung = json!({"id": format!("c{i}"), "userId": "alice", "title": "c", "ref2": format!("b{i}")});
+        if i + 1 < 200 {
+            rung["parent_id"] = json!(format!("c{}", i + 1));
+        }
+        data(
+            db.execute(Request::Create {
+                entity: "diagrams".into(),
+                data: rung,
+            })
+            .await,
+        );
+    }
+
+    let shared = data(publish(&db, "$DB/diagrams/c0/share", CAROL_EDIT_CASCADE, "alice").await);
+
+    assert_eq!(
+        (&shared["resources_shared"], &shared["resources_skipped"]),
+        (&json!(129), &json!(127))
+    );
+}
+
+#[tokio::test]
+async fn cascade_unshare_revokes_the_grant_on_a_member_removed_by_an_fk_cascade() {
+    let (_tmp, db) = diagrams(&[]).await;
+    db.add_foreign_key(
+        "diagrams".into(),
+        "folder_id".into(),
+        "folders".into(),
+        "id".into(),
+        mqdb_core::constraint::OnDeleteAction::Cascade,
+    )
+    .await
+    .unwrap();
+    for (entity, record) in [
+        ("folders", json!({"id": "f1"})),
+        (
+            "diagrams",
+            json!({"id": "m", "userId": "alice", "folder_id": "f1"}),
+        ),
+        (
+            "diagrams",
+            json!({"id": "r", "userId": "alice", "parent_id": "m"}),
+        ),
+    ] {
+        data(
+            db.execute(Request::Create {
+                entity: entity.into(),
+                data: record,
+            })
+            .await,
+        );
+    }
+    data(publish(&db, "$DB/diagrams/r/share", CAROL_EDIT_CASCADE, "alice").await);
+    data(
+        db.execute(Request::Delete {
+            entity: "folders".into(),
+            id: "f1".into(),
+            expected_version: None,
+        })
+        .await,
+    );
+
+    data(
+        publish(
+            &db,
+            "$DB/diagrams/r/unshare",
+            br#"{"grantee":"carol","cascade":true}"#,
+            "alice",
+        )
+        .await,
+    );
+    data(
+        db.execute(Request::Create {
+            entity: "diagrams".into(),
+            data: json!({"id": "m", "userId": "bob", "title": "bob-secret"}),
+        })
+        .await,
+    );
+
+    assert_eq!(carol_access(&db, "m").await, (json!(403), json!(403)));
+}
+
+fn chain(length: usize, last_points_at: &str) -> Vec<Value> {
+    (0..length)
+        .map(|i| {
+            let next = if i + 1 < length {
+                format!("c{}", i + 1)
+            } else {
+                last_points_at.to_string()
+            };
+            json!({"id": format!("c{i}"), "userId": "alice", "title": "c", "parent_id": next})
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn cascade_share_reports_a_reference_dropped_at_the_bound() {
+    let mut answers = Vec::new();
+    for (length, last_points_at) in [(300, "c300"), (256, "c0"), (10, "c0")] {
+        let (_tmp, db) = diagrams(&chain(length, last_points_at)).await;
+        let shared = data(publish(&db, "$DB/diagrams/c0/share", CAROL_EDIT_CASCADE, "alice").await);
+        answers.push((
+            length,
+            shared["resources_shared"].clone(),
+            shared["cascade_truncated"].clone(),
+        ));
+    }
+
+    assert_eq!(
+        answers,
+        [
+            (300, json!(256), json!(true)),
+            (256, json!(256), json!(false)),
+            (10, json!(10), json!(false)),
+        ]
+    );
+}
+
+fn alice_tree() -> [Value; 2] {
+    [
+        json!({"id": "kid", "userId": "alice", "title": "k"}),
+        json!({"id": "top", "userId": "alice", "title": "t", "parent_id": "kid"}),
+    ]
+}
+
+#[tokio::test]
+async fn cascade_share_raises_a_lower_grant() {
+    let (_tmp, db) = diagrams(&alice_tree()).await;
+    data(
+        publish(
+            &db,
+            "$DB/diagrams/kid/share",
+            br#"{"grantee":"carol","permission":"view","cascade":false}"#,
+            "alice",
+        )
+        .await,
+    );
+    data(publish(&db, "$DB/diagrams/top/share", CAROL_EDIT_CASCADE, "alice").await);
+    assert_eq!(carol_access(&db, "kid").await, (json!("ok"), json!("ok")));
+}
+
+#[tokio::test]
+async fn cascade_share_does_not_lower_a_higher_grant() {
+    let (_tmp, db) = diagrams(&alice_tree()).await;
+    data(
+        publish(
+            &db,
+            "$DB/diagrams/kid/share",
+            br#"{"grantee":"carol","permission":"edit","cascade":false}"#,
+            "alice",
+        )
+        .await,
+    );
+    data(
+        publish(
+            &db,
+            "$DB/diagrams/top/share",
+            br#"{"grantee":"carol","permission":"view","cascade":true}"#,
+            "alice",
+        )
+        .await,
+    );
+    assert_eq!(carol_access(&db, "kid").await, (json!("ok"), json!("ok")));
+}
+
+#[tokio::test]
+async fn cascade_share_without_a_sender_reaches_every_owner() {
+    let (_tmp, db) = diagrams(&[
+        json!({"id": "bob-d", "userId": "bob", "title": "bob-secret"}),
+        json!({"id": "alice-d", "userId": "alice", "title": "a", "parent_id": "bob-d"}),
+    ])
+    .await;
+    let op = parse_db_topic("$DB/diagrams/alice-d/share").unwrap();
+    let request = build_request(op, CAROL_EDIT_CASCADE).unwrap();
+    let shared = db
+        .execute_with_sender(
+            request,
+            None,
+            None,
+            &ownership(),
+            &ScopeConfig::default(),
+            None,
+        )
+        .await;
+    let shared = data(shared);
+    assert_eq!(
+        (&shared["resources_shared"], &shared["resources_skipped"]),
+        (&json!(2), &json!(0))
+    );
+}
+
+#[tokio::test]
+async fn cascade_unshare_clears_a_member_grant_stored_under_the_resolved_id() {
+    let (_tmp, db) = diagrams(&alice_tree()).await;
+    let owners = ownership();
+    let actor = ShareActor {
+        sender: Some("alice"),
+        ownership: &owners,
+    };
+    let legacy = GranteeIdentity {
+        key: "carol",
+        resolved: Some("carol"),
+        display: None,
+    };
+    db.share_grant("diagrams", "top", legacy, "edit", actor, true)
+        .await
+        .unwrap();
+    let current = GranteeIdentity {
+        key: "carol-email-hash",
+        resolved: Some("carol"),
+        display: None,
+    };
+    db.share_revoke("diagrams", "top", current, actor, true)
+        .await
+        .unwrap();
+    assert_eq!(carol_access(&db, "kid").await, (json!(403), json!(403)));
+}
+
+#[tokio::test]
+async fn cascade_unshare_revokes_the_root_when_a_member_cannot_be_decoded() {
+    let tmp = TempDir::new().unwrap();
+    let backend = Arc::new(MemoryBackend::new());
+    let db = Database::open_with_backend(
+        backend.clone(),
+        DatabaseConfig::new(tmp.path()).without_background_tasks(),
+    )
+    .await
+    .unwrap();
+    db.add_relationship("diagrams".into(), "parent".into(), "diagrams".into())
+        .await;
+    for record in [
+        json!({"id": "kid", "userId": "alice", "title": "k"}),
+        json!({"id": "top", "userId": "alice", "title": "t", "parent_id": "kid"}),
+    ] {
+        db.execute(Request::Create {
+            entity: "diagrams".into(),
+            data: record,
+        })
+        .await;
+    }
+    data(publish(&db, "$DB/diagrams/top/share", CAROL_EDIT_CASCADE, "alice").await);
+    assert_eq!(carol_access(&db, "top").await, (json!("ok"), json!("ok")));
+
+    backend
+        .insert(&encode_data_key("diagrams", "kid"), b"undecodable")
+        .unwrap();
+    let unshared = publish(
+        &db,
+        "$DB/diagrams/top/unshare",
+        br#"{"grantee":"carol","cascade":true}"#,
+        "alice",
+    )
+    .await;
+
+    assert!(matches!(unshared, Response::Error { .. }));
+    assert_eq!(carol_access(&db, "top").await, (json!(403), json!(403)));
+}

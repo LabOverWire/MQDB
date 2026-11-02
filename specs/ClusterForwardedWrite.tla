@@ -10,7 +10,7 @@
 (* has one ordered channel (one QUIC stream per peer).                     *)
 (*                                                                          *)
 (* VERIFIED FACTS MODELLED (Design = "current"):                            *)
-(*  - write_or_forward_impl forwards to partition_map.primary with no ack  *)
+(*  - write_or_forward_with_event forwards to the map primary, no ack      *)
 (*  - handle_write_request drops a write when the receiver is not primary  *)
 (*  - the event loop applies the Raft map only on its tick                 *)
 (*                                                                          *)

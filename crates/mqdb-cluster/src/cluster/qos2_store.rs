@@ -472,12 +472,10 @@ impl Qos2Store {
         id: &str,
         data: &[u8],
     ) -> Result<(), Qos2StoreError> {
-        let parts: Vec<&str> = id.splitn(2, ':').collect();
-        if parts.len() != 2 {
-            return Err(Qos2StoreError::InvalidState);
-        }
-        let client_id = parts[0];
-        let packet_id: u16 = parts[1].parse().map_err(|_| Qos2StoreError::InvalidState)?;
+        let (client_id, packet_id) = id.rsplit_once(':').ok_or(Qos2StoreError::InvalidState)?;
+        let packet_id: u16 = packet_id
+            .parse()
+            .map_err(|_| Qos2StoreError::InvalidState)?;
 
         match operation {
             Operation::Insert | Operation::Update => {
@@ -569,14 +567,11 @@ impl Qos2Store {
             let state_data = &data[offset..offset + data_len];
             offset += data_len;
 
-            let parts: Vec<&str> = id.splitn(2, ':').collect();
-            if parts.len() != 2 {
+            let Some((client_id, packet_id)) = id.rsplit_once(':') else {
                 continue;
-            }
-            let client_id = parts[0];
-            let packet_id: u16 = match parts[1].parse() {
-                Ok(p) => p,
-                Err(_) => continue,
+            };
+            let Ok(packet_id) = packet_id.parse::<u16>() else {
+                continue;
             };
 
             if let Some(state) = Self::deserialize(state_data) {
@@ -731,5 +726,34 @@ mod tests {
         let cleared = store.clear_client("client1");
         assert_eq!(cleared, 2);
         assert_eq!(store.count(), 1);
+    }
+
+    #[test]
+    fn snapshot_keeps_a_client_id_containing_a_colon() {
+        let src = Qos2Store::new(node(1));
+        src.start_inbound("dev:1", 42, "t", b"a", 1000).unwrap();
+
+        let snapshot = src.export_for_partition(session_partition("dev:1"));
+        let dst = Qos2Store::new(node(2));
+
+        assert_eq!(dst.import_states(&snapshot), Ok(1));
+        assert_eq!(dst.get("dev:1", 42).map(|s| s.packet_id), Some(42));
+    }
+
+    #[test]
+    fn replicated_writes_keep_a_client_id_containing_a_colon() {
+        let src = Qos2Store::new(node(1));
+        let (_, data) = src
+            .start_inbound_with_data("dev:1", 42, "t", b"a", 1000)
+            .unwrap();
+        let dst = Qos2Store::new(node(2));
+
+        dst.apply_replicated(Operation::Insert, "dev:1:42", &data)
+            .unwrap();
+        assert_eq!(dst.get("dev:1", 42).map(|s| s.packet_id), Some(42));
+
+        dst.apply_replicated(Operation::Delete, "dev:1:42", &[])
+            .unwrap();
+        assert!(dst.get("dev:1", 42).is_none());
     }
 }

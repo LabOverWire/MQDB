@@ -362,7 +362,7 @@ async fn a_wiped_node_that_persisted_replica_writes_is_not_treated_as_a_legacy_s
     assert_eq!(first_boot.role(held), ReplicaRole::AwaitingSnapshot);
     let (_, write) = first_boot
         .stores()
-        .db_create_replicated("bigdocs", "r1", b"{\"v\":1}", 1)
+        .db_create_write("bigdocs", "r1", b"{\"v\":1}", 1)
         .unwrap();
     first_boot.stores().apply_write(&write).unwrap();
     drop(first_boot);
@@ -475,7 +475,7 @@ async fn a_store_from_before_the_marker_is_trusted_only_for_its_first_map() {
     let seed = controller_on(2, &backend);
     let (_, write) = seed
         .stores()
-        .db_create_replicated("bigdocs", "r1", b"{\"v\":1}", 1)
+        .db_create_write("bigdocs", "r1", b"{\"v\":1}", 1)
         .unwrap();
     seed.stores().apply_write(&write).unwrap();
     drop(seed);
@@ -528,18 +528,21 @@ async fn a_snapshot_arriving_after_the_partition_is_held_is_ignored() {
     let partition = crate::cluster::db::data_partition("bigdocs", "r1");
     let mut replica = controller(3);
     replica.become_replica(partition, Epoch::new(1), 0);
-    replica
+    let (_, created) = replica
         .stores()
-        .db_create_replicated("bigdocs", "r1", b"{\"v\":1}", 1)
+        .db_create_write("bigdocs", "r1", b"{\"v\":1}", 1)
         .unwrap();
+    replica.stores().apply_write(&created).unwrap();
     let mut ctrl = controller(2);
     ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
         .await;
     serve_snapshot(&mut replica, &mut ctrl, partition).await;
     assert_eq!(ctrl.role(partition), ReplicaRole::Primary);
-    ctrl.stores()
-        .db_update_replicated("bigdocs", "r1", b"{\"v\":2}", 2)
+    let (_, updated) = ctrl
+        .stores()
+        .db_update_write("bigdocs", "r1", b"{\"v\":2}", 2)
         .unwrap();
+    ctrl.stores().apply_write(&updated).unwrap();
 
     for (to, message) in replica.transport.sent_messages() {
         if to == node(2) && matches!(message, ClusterMessage::SnapshotChunk(_)) {

@@ -1,16 +1,20 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use crate::cluster::db::{DbDataStore, DbEntity};
+use crate::cluster::protocol::Operation;
 use mqdb_core::error::{Error, Result};
 use mqdb_core::storage::{BatchOperations, MemoryBackend, StorageBackend};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
 pub(crate) struct FaultyBackend {
     inner: MemoryBackend,
     fail_flush: AtomicBool,
     fail_writes: AtomicBool,
+    failing_key: Mutex<Option<String>>,
+    writes_left: Mutex<Option<usize>>,
     inserts: AtomicUsize,
 }
 
@@ -27,6 +31,39 @@ impl FaultyBackend {
         self.fail_writes.store(fail, Ordering::SeqCst);
     }
 
+    pub(crate) fn fail_writes_to_keys_containing(&self, needle: &str) {
+        if let Ok(mut failing) = self.failing_key.lock() {
+            *failing = Some(needle.to_string());
+        }
+    }
+
+    pub(crate) fn fail_writes_after(&self, writes: usize) {
+        if let Ok(mut left) = self.writes_left.lock() {
+            *left = Some(writes);
+        }
+    }
+
+    fn budget_exhausted(&self) -> bool {
+        self.writes_left
+            .lock()
+            .ok()
+            .is_some_and(|mut left| match left.as_mut() {
+                Some(0) => true,
+                Some(remaining) => {
+                    *remaining -= 1;
+                    false
+                }
+                None => false,
+            })
+    }
+
+    fn failing_key(&self) -> Option<String> {
+        self.failing_key
+            .lock()
+            .ok()
+            .and_then(|failing| failing.clone())
+    }
+
     pub(crate) fn inserts(&self) -> usize {
         self.inserts.load(Ordering::SeqCst)
     }
@@ -40,8 +77,11 @@ impl FaultyBackend {
             .count())
     }
 
-    fn write_failure(&self) -> Result<()> {
-        if self.fail_writes.load(Ordering::SeqCst) {
+    fn write_failure(&self, key: &[u8]) -> Result<()> {
+        if self.fail_writes.load(Ordering::SeqCst)
+            || key_matches(self.failing_key().as_deref(), key)
+            || self.budget_exhausted()
+        {
             return Err(Error::StorageGeneric("write failed".into()));
         }
         Ok(())
@@ -54,13 +94,13 @@ impl StorageBackend for FaultyBackend {
     }
 
     fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.write_failure()?;
+        self.write_failure(key)?;
         self.inserts.fetch_add(1, Ordering::SeqCst);
         self.inner.insert(key, value)
     }
 
     fn remove(&self, key: &[u8]) -> Result<()> {
-        self.write_failure()?;
+        self.write_failure(key)?;
         self.inner.remove(key)
     }
 
@@ -92,7 +132,8 @@ impl StorageBackend for FaultyBackend {
     fn batch(&self) -> Box<dyn BatchOperations> {
         Box::new(FaultyBatch {
             inner: self.inner.batch(),
-            fail: self.fail_writes.load(Ordering::SeqCst),
+            fail: self.fail_writes.load(Ordering::SeqCst) || self.budget_exhausted(),
+            failing_key: self.failing_key(),
         })
     }
 
@@ -104,17 +145,24 @@ impl StorageBackend for FaultyBackend {
     }
 }
 
+fn key_matches(needle: Option<&str>, key: &[u8]) -> bool {
+    needle.is_some_and(|needle| String::from_utf8_lossy(key).contains(needle))
+}
+
 struct FaultyBatch {
     inner: Box<dyn BatchOperations>,
     fail: bool,
+    failing_key: Option<String>,
 }
 
 impl BatchOperations for FaultyBatch {
     fn insert(&mut self, key: Vec<u8>, value: Vec<u8>) {
+        self.fail |= key_matches(self.failing_key.as_deref(), &key);
         self.inner.insert(key, value);
     }
 
     fn remove(&mut self, key: Vec<u8>) {
+        self.fail |= key_matches(self.failing_key.as_deref(), &key);
         self.inner.remove(key);
     }
 
@@ -132,4 +180,27 @@ impl BatchOperations for FaultyBatch {
         }
         self.inner.commit()
     }
+}
+
+pub(crate) fn put_record(
+    store: &DbDataStore,
+    entity: &str,
+    id: &str,
+    data: &[u8],
+    timestamp_ms: u64,
+) {
+    let record = DbEntity::create(entity, id, data, timestamp_ms).unwrap();
+    store
+        .apply_replicated(
+            Operation::Insert,
+            &record.key(),
+            &DbDataStore::serialize(&record),
+        )
+        .unwrap();
+}
+
+pub(crate) fn remove_record(store: &DbDataStore, entity: &str, id: &str) {
+    store
+        .apply_replicated(Operation::Delete, &format!("{entity}/{id}"), &[])
+        .unwrap();
 }

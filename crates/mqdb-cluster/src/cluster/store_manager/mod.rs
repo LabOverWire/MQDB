@@ -54,6 +54,7 @@ pub struct RecoveryStats {
     pub db_index: usize,
     pub db_unique: usize,
     pub db_fk: usize,
+    pub db_constraint: usize,
     pub topic_index_rebuilt: usize,
     pub wildcards_rebuilt: usize,
 }
@@ -72,6 +73,7 @@ enum RecoveryField {
     DbIndex,
     DbUnique,
     DbFk,
+    DbConstraint,
 }
 
 impl RecoveryStats {
@@ -89,6 +91,7 @@ impl RecoveryStats {
             RecoveryField::DbIndex => self.db_index += 1,
             RecoveryField::DbUnique => self.db_unique += 1,
             RecoveryField::DbFk => self.db_fk += 1,
+            RecoveryField::DbConstraint => self.db_constraint += 1,
         }
     }
 
@@ -106,6 +109,7 @@ impl RecoveryStats {
             + self.db_index
             + self.db_unique
             + self.db_fk
+            + self.db_constraint
     }
 }
 
@@ -130,6 +134,7 @@ pub enum StoreApplyError {
     ClientLocationError,
     ChangeEventError,
     PersistenceError,
+    SnapshotTooLarge,
 }
 
 impl std::fmt::Display for StoreApplyError {
@@ -154,6 +159,7 @@ impl std::fmt::Display for StoreApplyError {
             Self::ClientLocationError => write!(f, "client location store error"),
             Self::ChangeEventError => write!(f, "change event store error"),
             Self::PersistenceError => write!(f, "persistence error"),
+            Self::SnapshotTooLarge => write!(f, "partition snapshot exceeds the frame size limits"),
         }
     }
 }

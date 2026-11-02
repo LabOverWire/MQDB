@@ -34,10 +34,52 @@ impl DbRequestHandler {
     }
 }
 
+pub(crate) fn delete_expected_version(payload: &[u8]) -> Result<Option<u64>, String> {
+    if payload.is_empty() {
+        return Ok(None);
+    }
+    let mut value: Value =
+        serde_json::from_slice(payload).map_err(|e| format!("invalid JSON payload: {e}"))?;
+    mqdb_core::protocol::take_expected_version(&mut value).map_err(|e| e.to_string())
+}
+
+pub(crate) fn update_fields(payload: &[u8]) -> Result<Value, String> {
+    if payload.is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_slice(payload).map_err(|_| "invalid JSON payload".to_string())
+}
+
+pub(crate) fn update_payload_error(payload: &[u8]) -> Option<String> {
+    let mut value = match update_fields(payload) {
+        Ok(value) => value,
+        Err(message) => return Some(message),
+    };
+    mqdb_core::protocol::take_expected_version(&mut value)
+        .err()
+        .map(|e| e.to_string())
+}
+
 pub(crate) fn json_write_failure(error: DbDataStoreError) -> Vec<u8> {
     match error {
         DbDataStoreError::NotPrimary => DbRequestHandler::json_error(503, &error.to_string()),
         _ => DbRequestHandler::json_error(500, "internal error"),
+    }
+}
+
+pub(crate) fn json_record_write_failure(
+    entity: &str,
+    id: &str,
+    error: DbDataStoreError,
+) -> Vec<u8> {
+    match error {
+        DbDataStoreError::AlreadyExists => {
+            DbRequestHandler::json_error(409, "entity already exists")
+        }
+        DbDataStoreError::NotFound => {
+            DbRequestHandler::json_error(404, &format!("entity not found: {entity} id={id}"))
+        }
+        error => json_write_failure(error),
     }
 }
 
