@@ -394,6 +394,37 @@ async fn a_wiped_node_that_persisted_replica_writes_is_not_treated_as_a_legacy_s
     assert_eq!(restarted.role(held), ReplicaRole::AwaitingSnapshot);
 }
 
+async fn an_unmarked_store_keeps_the_role(record: ReplicationWrite) {
+    let partition = record.partition;
+    let backend = crate::cluster::test_support::FaultyBackend::shared();
+    let first_version = controller_on(2, &backend);
+    first_version.stores().apply_write(&record).unwrap();
+    drop(first_version);
+
+    let mut upgraded = controller_on(2, &backend);
+    upgraded.stores().recover().unwrap();
+    assert_eq!(upgraded.stores().db_data.count(), 0);
+    upgraded
+        .apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
+        .await;
+
+    assert_eq!(upgraded.role(partition), ReplicaRole::Primary);
+    assert_eq!(snapshot_requests_to(&upgraded, node(3)), 0);
+}
+
+#[tokio::test]
+async fn an_upgraded_store_holding_only_sessions_keeps_the_role_without_a_snapshot() {
+    an_unmarked_store_keeps_the_role(session_write("c1", 1)).await;
+}
+
+#[tokio::test]
+async fn an_upgraded_store_holding_only_retained_messages_keeps_the_role_without_a_snapshot() {
+    let (_, record) = controller(9)
+        .stores()
+        .set_retained_replicated("topic/one", 1, b"payload", 1);
+    an_unmarked_store_keeps_the_role(record).await;
+}
+
 #[tokio::test]
 async fn a_forwarded_write_waits_while_the_primary_waits_for_its_snapshot() {
     let partition = session_partition("c1");

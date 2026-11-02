@@ -61,6 +61,18 @@ impl StoreManager {
         self.write_marker(partition, EPOCH_ID, epoch)
     }
 
+    fn holds_mqtt_records(&self) -> bool {
+        self.storage.as_ref().is_some_and(|storage| {
+            [entity::SESSIONS, entity::RETAINED]
+                .into_iter()
+                .any(|name| {
+                    storage
+                        .scan_entity(name)
+                        .is_ok_and(|found| !found.is_empty())
+                })
+        })
+    }
+
     pub(crate) fn held_primaries(&self) -> HeldPrimaries {
         let mut held = HeldPrimaries {
             epochs: [None; NUM_PARTITIONS as usize],
@@ -77,7 +89,8 @@ impl StoreManager {
             }
         };
         let marked_store = entries.iter().any(|(_, id, _)| id == MARKED_STORE_ID);
-        held.legacy_store = !marked_store && self.db_data.count() > 0;
+        held.legacy_store =
+            !marked_store && (self.db_data.count() > 0 || self.holds_mqtt_records());
         for (partition, id, data) in entries {
             if id != EPOCH_ID {
                 continue;
