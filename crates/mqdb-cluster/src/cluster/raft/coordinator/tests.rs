@@ -1086,15 +1086,15 @@ async fn the_periodic_check_adds_no_replica_soon_after_a_death() {
     let node4 = NodeId::validated(4).unwrap();
     let node5 = NodeId::validated(5).unwrap();
     let id = PartitionId::new(0).unwrap();
-    let mut coord =
-        restarted_leader_of_five(&[assign(0, 4, 5, 1), assign(1, 2, 3, 1), assign(2, 3, 2, 1)])
-            .await;
+    let mut log = vec![assign(0, 4, 5, 1), assign(1, 3, 2, 1)];
+    log.extend((2..12u16).map(|p| assign(p, 2, 3, 1)));
+    let mut coord = restarted_leader_of_five(&log).await;
     let start = 1_790_000_000_000u64;
+    assert!(coord.primaries_imbalanced());
 
-    coord.tick(start + 40_000).await;
     coord.handle_node_death(node5).await;
     commit_tail(&mut coord).await;
-    coord.tick(start + 40_200).await;
+    coord.tick(start + 40_000).await;
     commit_tail(&mut coord).await;
     assert!(
         coord.partition_map().replicas(id).is_empty(),
@@ -1103,9 +1103,11 @@ async fn the_periodic_check_adds_no_replica_soon_after_a_death() {
     assert_eq!(coord.partition_map().primary(id), Some(node4));
 
     coord.tick(start + 71_000).await;
-    coord.force_rebalance().await;
     commit_tail(&mut coord).await;
-    assert!(!coord.partition_map().replicas(id).is_empty());
+    assert!(
+        !coord.partition_map().replicas(id).is_empty(),
+        "the check resumes once the 30 s have passed"
+    );
 }
 
 fn same_assignments(a: &PartitionMap, b: &PartitionMap) -> bool {
