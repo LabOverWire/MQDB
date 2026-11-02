@@ -502,15 +502,24 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    pub(super) async fn catchup_answered(&mut self, partition: PartitionId, more_may_follow: bool) {
-        if more_may_follow {
-            self.request_catchup(partition).await;
-        } else if self
+    pub(super) fn catchup_finished(&mut self, partition: PartitionId) {
+        if self
             .incoming_snapshots
             .get(&partition)
             .is_some_and(IncomingSnapshot::catching_up)
         {
             self.incoming_snapshots.remove(&partition);
+        }
+    }
+
+    pub(super) fn catchup_progressed(&mut self, partition: PartitionId) {
+        let stamp = self.snapshot_stamp();
+        if let Some(incoming) = self
+            .incoming_snapshots
+            .get_mut(&partition)
+            .filter(|incoming| incoming.catching_up())
+        {
+            incoming.since_ms = stamp;
         }
     }
 

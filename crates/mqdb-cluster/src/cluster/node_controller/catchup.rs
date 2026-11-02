@@ -32,8 +32,7 @@ impl<T: ClusterTransport> NodeController<T> {
         );
 
         let newest_held = to_seq.min(self.sequence(partition).unwrap_or(0));
-        let writes =
-            limit_catchup_bytes(self.write_log.get_range(partition, from_seq, newest_held));
+        let writes = self.write_log.get_range(partition, from_seq, newest_held);
 
         tracing::info!(
             ?partition,
@@ -43,13 +42,44 @@ impl<T: ClusterTransport> NodeController<T> {
             "sending catchup response"
         );
 
+        let nothing_to_send = writes.is_empty();
+        let all_sent = self.send_catchup_writes(from, partition, writes).await;
+        if nothing_to_send || (all_sent && to_seq == u64::MAX) {
+            self.send_catchup_piece(from, partition, Vec::new()).await;
+        }
+    }
+
+    pub(super) async fn send_catchup_writes(
+        &self,
+        to: NodeId,
+        partition: PartitionId,
+        writes: Vec<ReplicationWrite>,
+    ) -> bool {
+        for piece in catchup_pieces(writes) {
+            if !self.send_catchup_piece(to, partition, piece).await {
+                return false;
+            }
+        }
+        true
+    }
+
+    async fn send_catchup_piece(
+        &self,
+        to: NodeId,
+        partition: PartitionId,
+        writes: Vec<ReplicationWrite>,
+    ) -> bool {
         let resp = CatchupResponse::create(partition, self.node_id, writes);
-        if let Err(error) = self
+        match self
             .transport
-            .send(from, ClusterMessage::CatchupResponse(resp))
+            .send(to, ClusterMessage::CatchupResponse(resp))
             .await
         {
-            tracing::debug!(?partition, to = from.get(), %error, "catchup response not sent");
+            Ok(()) => true,
+            Err(error) => {
+                tracing::debug!(?partition, to = to.get(), %error, "catchup response not sent");
+                false
+            }
         }
     }
 
@@ -84,7 +114,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 );
                 self.catch_up_by_snapshot(partition, responder).await;
             } else {
-                self.catchup_answered(partition, false).await;
+                self.catchup_finished(partition);
             }
             return;
         }
@@ -92,21 +122,25 @@ impl<T: ClusterTransport> NodeController<T> {
         let mut writes: Vec<_> = resp.writes;
         writes.sort_by_key(|w| w.sequence);
 
-        let more_may_follow = encoded_bytes(&writes) >= CATCHUP_RESPONSE_MAX_BYTES / 2;
         let mut applied_count = 0;
         let mut rejected_count = 0;
         for write in &writes {
             if let Some(state) = self.replicas.get_mut(&partition.get()) {
-                if write.epoch <= state.epoch() && write.sequence <= state.sequence() {
+                let sequence_before = state.sequence();
+                if write.epoch <= state.epoch() && write.sequence <= sequence_before {
                     continue;
                 }
                 let ack = state.handle_write(write);
                 if ack.is_ok() {
                     if let Err(e) = self.apply_replicated_write(write) {
                         tracing::error!(?partition, ?e, "failed to apply catchup write to stores");
-                    } else {
-                        self.sync_retained_to_broker(write).await;
+                        if let Some(state) = self.replicas.get_mut(&partition.get()) {
+                            state.set_sequence(sequence_before);
+                        }
+                        rejected_count += 1;
+                        break;
                     }
+                    self.sync_retained_to_broker(write).await;
                     self.write_log
                         .append(partition, write.sequence, write.clone());
                     applied_count += 1;
@@ -131,7 +165,7 @@ impl<T: ClusterTransport> NodeController<T> {
             );
             self.catch_up_by_snapshot(partition, responder).await;
         } else {
-            self.catchup_answered(partition, more_may_follow).await;
+            self.catchup_progressed(partition);
         }
     }
 
@@ -144,23 +178,21 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 }
 
-pub(super) fn limit_catchup_bytes(mut writes: Vec<ReplicationWrite>) -> Vec<ReplicationWrite> {
-    let mut total = 0;
-    let within_limit = writes
-        .iter()
-        .take_while(|write| {
-            total += encoded_write_bytes(write);
-            total <= CATCHUP_RESPONSE_MAX_BYTES
-        })
-        .count();
-    writes.truncate(within_limit.max(1));
-    writes
-}
-
-fn encoded_write_bytes(write: &ReplicationWrite) -> usize {
-    write.to_bytes().map_or(0, |bytes| bytes.len()) + WRITE_FRAMING_BYTES
-}
-
-fn encoded_bytes(writes: &[ReplicationWrite]) -> usize {
-    writes.iter().map(encoded_write_bytes).sum()
+pub(super) fn catchup_pieces(writes: Vec<ReplicationWrite>) -> Vec<Vec<ReplicationWrite>> {
+    let mut pieces = Vec::new();
+    let mut piece = Vec::new();
+    let mut piece_bytes = 0;
+    for write in writes {
+        let write_bytes = write.to_bytes().map_or(0, |bytes| bytes.len()) + WRITE_FRAMING_BYTES;
+        if !piece.is_empty() && piece_bytes + write_bytes > CATCHUP_RESPONSE_MAX_BYTES {
+            pieces.push(std::mem::take(&mut piece));
+            piece_bytes = 0;
+        }
+        piece_bytes += write_bytes;
+        piece.push(write);
+    }
+    if !piece.is_empty() {
+        pieces.push(piece);
+    }
+    pieces
 }

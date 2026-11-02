@@ -164,7 +164,8 @@ impl ReplicaState {
         }
 
         let first_pending = *self.pending_writes.first_key_value()?.0;
-        Some((self.sequence + 1, first_pending - 1))
+        let next = self.sequence + 1;
+        Some((next, first_pending.saturating_sub(1).max(next)))
     }
 
     #[must_use]
@@ -336,6 +337,18 @@ mod tests {
         state.handle_write(&write(1, 5));
         let gap = state.gap_range().unwrap();
         assert_eq!(gap, (2, 4));
+    }
+
+    #[test]
+    fn gap_range_is_not_inverted_when_the_next_write_is_buffered() {
+        let mut state = ReplicaState::new(partition(), node());
+        state.become_replica(Epoch::new(1), 0);
+
+        state.handle_write(&write(1, 3));
+        state.handle_write(&write(1, 2));
+        state.handle_write(&write(1, 1));
+
+        assert_eq!(state.gap_range(), Some((2, 2)));
     }
 
     #[test]
