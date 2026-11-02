@@ -753,7 +753,8 @@ MQDB supports distributed clustering with automatic failover and partition rebal
 > to its last holder and answers 503, rather than move to a node with no copy and answer 404, until
 > that node returns. If you know the holders are never coming back, `mqdb cluster rebalance` gives
 > those partitions to a live node, which starts them empty. A partition can also stay at 503 when
-> a holder that lost its place in the map returns before the mapped one.
+> a holder that lost its place in the map returns before the mapped one. A leader without links to
+> a majority proposes no failover at all until it has them again.
 >
 > This does not stop every disruption. A returning node with links to a majority that excludes the
 > leader can still raise the term and depose it (#314). Voter sets are not committed membership
