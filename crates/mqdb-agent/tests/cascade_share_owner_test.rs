@@ -4,11 +4,15 @@
 use mqdb_agent::Database;
 use mqdb_agent::database::{GranteeIdentity, ShareActor};
 use mqdb_agent::vault_backend::DbAccess;
+use mqdb_core::config::DatabaseConfig;
+use mqdb_core::keys::encode_data_key;
 use mqdb_core::protocol::{build_request, parse_db_topic};
+use mqdb_core::storage::{MemoryBackend, StorageBackend};
 use mqdb_core::types::{OwnershipConfig, ScopeConfig};
 use mqdb_core::{Request, Response};
 use serde_json::{Value, json};
 use std::collections::HashSet;
+use std::sync::Arc;
 use tempfile::TempDir;
 
 fn ownership() -> OwnershipConfig {
@@ -532,4 +536,44 @@ async fn cascade_unshare_clears_a_member_grant_stored_under_the_resolved_id() {
         .await
         .unwrap();
     assert_eq!(carol_access(&db, "kid").await, (json!(403), json!(403)));
+}
+
+#[tokio::test]
+async fn cascade_unshare_revokes_the_root_when_a_member_cannot_be_decoded() {
+    let tmp = TempDir::new().unwrap();
+    let backend = Arc::new(MemoryBackend::new());
+    let db = Database::open_with_backend(
+        backend.clone(),
+        DatabaseConfig::new(tmp.path()).without_background_tasks(),
+    )
+    .await
+    .unwrap();
+    db.add_relationship("diagrams".into(), "parent".into(), "diagrams".into())
+        .await;
+    for record in [
+        json!({"id": "kid", "userId": "alice", "title": "k"}),
+        json!({"id": "top", "userId": "alice", "title": "t", "parent_id": "kid"}),
+    ] {
+        db.execute(Request::Create {
+            entity: "diagrams".into(),
+            data: record,
+        })
+        .await;
+    }
+    data(publish(&db, "$DB/diagrams/top/share", CAROL_EDIT_CASCADE, "alice").await);
+    assert_eq!(carol_access(&db, "top").await, (json!("ok"), json!("ok")));
+
+    backend
+        .insert(&encode_data_key("diagrams", "kid"), b"undecodable")
+        .unwrap();
+    let unshared = publish(
+        &db,
+        "$DB/diagrams/top/unshare",
+        br#"{"grantee":"carol","cascade":true}"#,
+        "alice",
+    )
+    .await;
+
+    assert!(matches!(unshared, Response::Error { .. }));
+    assert_eq!(carol_access(&db, "top").await, (json!(403), json!(403)));
 }

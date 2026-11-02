@@ -328,16 +328,17 @@ impl Database {
         {
             keys.push(resolved);
         }
-        let mut revoked_ids = vec![id.to_string()];
+        for revoke_key in &keys {
+            self.clear_grant(entity, id, revoke_key, sender, ownership)
+                .await?;
+        }
         if cascade {
             let closure = self.shareable_closure(entity, id, actor).await?;
-            revoked_ids.extend(closure.members);
-            revoked_ids.extend(closure.missing);
-        }
-        for revoked_id in &revoked_ids {
-            for revoke_key in &keys {
-                self.clear_grant(entity, revoked_id, revoke_key, sender, ownership)
-                    .await?;
+            for revoked_id in closure.members.iter().chain(&closure.missing) {
+                for revoke_key in &keys {
+                    self.clear_grant(entity, revoked_id, revoke_key, sender, ownership)
+                        .await?;
+                }
             }
         }
         Ok(json!({ "status": "unshared", "grantee": grantee.key }))
