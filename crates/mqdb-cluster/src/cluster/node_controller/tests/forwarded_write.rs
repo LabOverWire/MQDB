@@ -16,16 +16,14 @@ fn controller(id: u16) -> NodeController<MockTransport> {
 }
 
 fn controller_with_storage(id: u16, backend: &Arc<FaultyBackend>) -> NodeController<MockTransport> {
-    let (tx_raft_messages, _rx_raft_messages) = flume::unbounded();
-    let (tx_raft_events, _rx_raft_events) = flume::unbounded();
     let storage: Arc<dyn StorageBackend> = backend.clone();
     NodeController::new_with_storage(
         node(id),
         MockTransport::new(node(id)),
         TransportConfig::default(),
         Some(storage),
-        tx_raft_messages,
-        tx_raft_events,
+        flume::unbounded().0,
+        flume::unbounded().0,
     )
 }
 
@@ -245,8 +243,9 @@ async fn a_write_the_primary_cannot_store_is_not_replicated() {
     backend.fail_writes(true);
 
     let result = ctrl
-        .replicate_write_async(session_write("c1", 1), &[node(3)], None)
-        .await;
+        .replicate_primary_write(session_write("c1", 1), &[node(3)], None, &[])
+        .await
+        .map_err(|refused| refused.error);
 
     assert_eq!(result, Err(ReplicationError::StoreFailed));
     assert!(replicated_ids(&ctrl, node(3)).is_empty());
@@ -255,8 +254,9 @@ async fn a_write_the_primary_cannot_store_is_not_replicated() {
 
     backend.fail_writes(false);
     let result = ctrl
-        .replicate_write_async(session_write("c1", 1), &[node(3)], None)
-        .await;
+        .replicate_primary_write(session_write("c1", 1), &[node(3)], None, &[])
+        .await
+        .map_err(|refused| refused.error);
 
     assert_eq!(result, Ok(1));
     assert_eq!(replicated_ids(&ctrl, node(3)), ["c1"]);
@@ -273,8 +273,9 @@ async fn a_persisted_write_the_primary_cannot_apply_in_memory_is_still_replicate
     unreadable.data = vec![0xff];
 
     let result = ctrl
-        .replicate_write_async(unreadable, &[node(3)], None)
-        .await;
+        .replicate_primary_write(unreadable, &[node(3)], None, &[])
+        .await
+        .map_err(|refused| refused.error);
 
     assert_eq!(result, Ok(1));
     assert_eq!(backend.keys_containing("c1").unwrap(), 1);
