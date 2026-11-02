@@ -123,11 +123,12 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
     pub async fn handle_node_death(&mut self, dead_node: NodeId) -> Vec<u64> {
         self.cluster_members.retain(|&n| n != dead_node);
         self.death_since_last_tick = true;
+        self.refresh_links().await;
 
-        if !self.leader_ready() {
+        if !self.leader_ready() || !self.node.can_reach_quorum() {
             tracing::info!(
                 ?dead_node,
-                "not leader, queuing dead node for later processing"
+                "no leader with a quorum here, queuing dead node for later processing"
             );
             self.pending_dead_nodes.insert(dead_node);
             return Vec::new();

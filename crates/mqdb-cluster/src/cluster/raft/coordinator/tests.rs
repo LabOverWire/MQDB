@@ -1110,6 +1110,84 @@ async fn the_periodic_check_adds_no_replica_soon_after_a_death() {
     );
 }
 
+#[tokio::test]
+async fn a_leader_without_a_quorum_of_links_proposes_no_failover() {
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let node4 = NodeId::validated(4).unwrap();
+    let mut coord = restarted_leader_of_five(&[assign(0, 4, 1, 1), assign(1, 2, 3, 1)]).await;
+    let links = Arc::clone(&coord.transport.links);
+    let start = 1_790_000_000_000u64;
+    *links.lock().unwrap() = Some(Vec::new());
+    coord.tick(start + 2_000).await;
+    let before = coord.last_log_index();
+
+    coord.handle_node_death(node4).await;
+    coord.tick(start + 2_200).await;
+    assert_eq!(
+        coord.last_log_index(),
+        before,
+        "an entry no quorum can commit would commit after the holders return"
+    );
+    assert_eq!(
+        coord.partition_map().primary(PartitionId::new(0).unwrap()),
+        Some(node4)
+    );
+
+    *links.lock().unwrap() = Some(vec![node2, node3]);
+    coord.tick(start + 2_400).await;
+    commit_tail(&mut coord).await;
+    assert_ne!(
+        coord.partition_map().primary(PartitionId::new(0).unwrap()),
+        Some(node4),
+        "the queued failover runs once a quorum is reachable"
+    );
+}
+
+#[tokio::test]
+async fn a_stale_link_to_a_node_with_a_death_verdict_does_not_count_toward_quorum() {
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let mut coord = restarted_leader_of_five(&[assign(0, 2, 1, 1), assign(1, 3, 2, 1)]).await;
+    *coord.transport.links.lock().unwrap() = Some(vec![node2, node3]);
+    let start = 1_790_000_000_000u64;
+    coord.tick(start + 2_000).await;
+
+    coord.handle_node_death(node3).await;
+    commit_tail(&mut coord).await;
+    let before = coord.last_log_index();
+    coord.handle_node_death(node2).await;
+
+    assert_eq!(
+        coord.last_log_index(),
+        before,
+        "both links are stale, so no quorum can commit this failover"
+    );
+}
+
+#[tokio::test]
+async fn a_node_back_before_its_queued_failover_runs_keeps_its_partitions() {
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let node4 = NodeId::validated(4).unwrap();
+    let mut coord = restarted_leader_of_five(&[assign(0, 4, 1, 1), assign(1, 2, 3, 1)]).await;
+    let links = Arc::clone(&coord.transport.links);
+    let start = 1_790_000_000_000u64;
+    *links.lock().unwrap() = Some(Vec::new());
+    coord.tick(start + 2_000).await;
+
+    coord.handle_node_death(node4).await;
+    coord.handle_node_alive(node4).await;
+    *links.lock().unwrap() = Some(vec![node2, node3, node4]);
+    coord.tick(start + 2_400).await;
+    commit_tail(&mut coord).await;
+
+    assert_eq!(
+        coord.partition_map().primary(PartitionId::new(0).unwrap()),
+        Some(node4)
+    );
+}
+
 fn same_assignments(a: &PartitionMap, b: &PartitionMap) -> bool {
     PartitionId::all().all(|p| a.get(p) == b.get(p))
 }

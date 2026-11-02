@@ -52,7 +52,10 @@
 (*   _sequential_today, _sequential_lasttail: fails InvNoLoneLeader; voters *)
 (*       taken from the last entry let an uncommitted failover tail name    *)
 (*       only the restarting node                                           *)
-(*   _sequential_tail, _sequential_converge: the fix passes; these and      *)
+(*   _sequential_gated: a leader with no quorum of links proposes nothing   *)
+(*   _sequential_tail: voters from the whole log pass even when a stale     *)
+(*       link lets a leader propose with no quorum                          *)
+(*   _sequential_converge: the fix passes; these and                        *)
 (*       _sequential turn writes off, so InvAckedVisible is not shown there *)
 (*   _sequential: the fix passes authority, completeness, lone leader       *)
 (*   _ordinary_restart: an ordinary restart with no Raft snapshot, the hold *)
@@ -81,7 +84,7 @@ CONSTANTS
     RedialPeriod, RedialUnlinked, Redial, PersistBook,
     RestoreSnapshot, HoldMap,
     Grace, Detect,
-    KillSet, KillOrder, StayDown, Writes, FailedElections, Isolations, MaxKills, MaxTerm, MaxLog
+    KillSet, KillOrder, StayDown, Writes, FailedElections, QuorumGate, Isolations, MaxKills, MaxTerm, MaxLog
 
 VARIABLES
     up, term, log, commit, role, voters, links, heard,
@@ -386,6 +389,7 @@ Propose(l, primary, named) ==
 
 Failover(l, d) ==
     /\ l \in Leaders
+    /\ (QuorumGate => CanLink(l))
     /\ Len(log[l]) < MaxLog
     /\ d \in detected
     /\ ~Linked(l, d)

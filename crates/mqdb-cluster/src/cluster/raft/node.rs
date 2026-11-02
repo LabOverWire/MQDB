@@ -241,7 +241,8 @@ impl RaftNode {
         self.linked_voters = Some(linked);
     }
 
-    fn can_reach_quorum(&self) -> bool {
+    #[must_use]
+    pub fn can_reach_quorum(&self) -> bool {
         self.linked_voters
             .is_none_or(|linked| linked + 1 >= self.state.quorum_size())
     }

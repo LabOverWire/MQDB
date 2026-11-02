@@ -14,9 +14,7 @@ use std::collections::BTreeSet;
 
 impl<T: ClusterTransport> RaftCoordinator<T> {
     pub async fn tick(&mut self, now_ms: u64) -> Vec<u64> {
-        if let Some(links) = self.transport.direct_peers().await {
-            self.node.observe_links(&links);
-        }
+        self.refresh_links().await;
         let outputs = self.node.tick(now_ms);
         self.process_outputs(outputs).await;
 
@@ -44,6 +42,12 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             return self.initialize_partitions().await;
         }
 
+        let can_commit = ready && self.node.can_reach_quorum();
+
+        if can_commit && !self.pending_dead_nodes.is_empty() {
+            return self.process_pending_dead_nodes().await;
+        }
+
         if ready
             && self.pending_partition_proposals == 0
             && !self.pending_new_nodes.is_empty()
@@ -56,7 +60,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             return self.process_pending_new_nodes().await;
         }
 
-        if ready
+        if can_commit
             && self.pending_partition_proposals == 0
             && now_ms.saturating_sub(self.last_balance_check) > 30_000
             && self.partitions_initialized()
@@ -75,6 +79,13 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         }
 
         Vec::new()
+    }
+
+    pub(super) async fn refresh_links(&mut self) {
+        if let Some(mut links) = self.transport.direct_peers().await {
+            links.retain(|node| self.cluster_members.contains(node));
+            self.node.observe_links(&links);
+        }
     }
 
     pub(super) async fn process_pending_draining_nodes(&mut self) -> Vec<u64> {
