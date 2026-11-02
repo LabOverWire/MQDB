@@ -568,13 +568,20 @@ impl ClusteredAgent {
     }
 
     async fn redial_down_peers(&self, backoff: &mut RedialBackoff) {
-        let (quic, dead) = {
+        let (quic, dead, members) = {
             let ctrl = self.controller.read().await;
-            (ctrl.transport().as_quic().cloned(), ctrl.dead_nodes())
+            (
+                ctrl.transport().as_quic().cloned(),
+                ctrl.dead_nodes(),
+                ctrl.partition_map().all_nodes(),
+            )
         };
         let Some(quic) = quic else {
             return;
         };
+        if !members.is_empty() {
+            quic.forget_unlinked_peers_outside(&members).await;
+        }
         let due = backoff.due(&quic.peers_needing_dial(&dead).await, current_time_ms());
         if !due.is_empty() {
             tokio::spawn(async move {

@@ -11,9 +11,9 @@
 (*             startup_grace_period_ms passed; quorum of one.              *)
 (*   Elect     quorum_size = div_ceil(peers, 2) + 1; votes travel only     *)
 (*             over links (quic_transport send => NodeNotFound otherwise). *)
-(*   Dial      quic_transport redial_unlinked + connect_to_peer; driven    *)
-(*             by cluster_agent/event_loop.rs mesh tick and death trigger. *)
-(*             Only a node with the address dials (--peers).               *)
+(*   Dial      quic_transport redial + dial; driven by the event loop's    *)
+(*             redial tick. Only a node with the address dials: --peers,   *)
+(*             or with PersistBook a node that has been linked to it.      *)
 (*   Failover  raft/coordinator/replication.rs                             *)
 (*             reassign_partitions_for_dead_node.                          *)
 (*   Join      trigger_rebalance_for_new_node, reduced to naming the node. *)
@@ -27,72 +27,84 @@
 (*   Elections are atomic. Links are symmetric because one dial opens one  *)
 (*   bidirectional stream. A link is usable or gone: stale peer-map        *)
 (*   entries (ClusterRedial) are not modelled. A heartbeat is taken as     *)
-(*   arriving with the link, so voters grow on Dial. Death verdicts are    *)
+(*   arriving with the link, so voters grow on Dial. A new leader counts   *)
+(*   as having heard only after it commits (RaftNode::map_is_current).     *)
+(*   Death verdicts are    *)
 (*   one set, not per observer: a verdict on x stands until every other    *)
 (*   node has a link to x, so each survivor still dials x.                 *)
 (*   Time is coarse: Tick is about 5 s, Grace 2 (10 s), Detect 3 (15 s).   *)
-(*   RedialPeriod 4 stands in for the 60 s tick: only "longer than Grace"  *)
+(*   RedialPeriod 3 stands in for the 60 s tick: only "longer than Grace"  *)
 (*   matters, and 12 adds states but no behaviour. A due dial is urgent:   *)
 (*   Tick waits for it, unless Isolate (a network fault) blocks the node.  *)
 (*                                                                         *)
-(* Results are per cfg; each failing cfg names exactly one invariant or    *)
-(* property because the checker stops at the first violation. Verified for *)
-(* 3 nodes (1 for _single), one kill, MaxTerm 3, MaxLog 5, not proven:      *)
-(*   _today_authority      fails InvSingleAuthority: the #300 second leader *)
-(*   _today_complete       fails InvLeaderComplete: survivor loses entries  *)
-(*   _today_acked          fails InvAckedVisible: reads miss acked writes   *)
-(*   _fastredial           passes: redial below grace, no network fault     *)
-(*   _fastredial_fail      fails InvSingleAuthority: redial needs the guard *)
-(*   _book_fail            fails InvSingleAuthority: book needs the guard   *)
-(*   _guard_noredial       fails Converge: the guard needs some redial      *)
-(*   _guard_slow           passes: the guard alone is safe, rejoin is slow  *)
-(*   _nogate               fails InvNoRejoinDisruption: a waiting node      *)
-(*                         raises its term and deposes the working leader   *)
-(*   _nohold               fails InvAckedVisible: a restored snapshot map   *)
-(*                         serves stale until the leader is heard           *)
-(*   _single_neveralone    fails Converge: a blanket guard breaks one node  *)
-(*   ClusterRestartRejoin  passes all: guard, gate, hold, fast redial, book *)
-(*   _nobook               passes all: same before an address is remembered *)
-(*   _killany              passes all: any node killed, not only node 1     *)
-(*   _single               passes: a one-node cluster still restarts alone  *)
-(*   _firstboot, _firstboot_single  pass Converge: first boot still forms   *)
-(*                         (_firstboot uses MaxTerm 2, MaxLog 3)            *)
+(* Not modelled: forgetting a learned address, the unseen-member timeout,  *)
+(* and a whole-log replay of more than one map (NamedSince is the union).   *)
+(* Each failing cfg names one invariant or property because the checker     *)
+(* stops at the first violation. Verified for the cfg's constants only, and *)
+(* see the PR for the run results. Expected:                                *)
+(*   _today_authority, _today_complete, _today_acked: the #300 failure      *)
+(*   _sequential_today, _sequential_lasttail: fails InvNoLoneLeader; voters *)
+(*       taken from the last entry let an uncommitted failover tail name    *)
+(*       only the restarting node                                           *)
+(*   _sequential_tail, _sequential, _sequential_converge: the fix passes    *)
+(*   _fastredial_fail, _book_fail: redial or book alone need the guard      *)
+(*   _guard_noredial: fails Converge, the guard needs some redial           *)
+(*   _guard_slow, _nobook, _killany: pass                                   *)
+(*   _nogate: fails InvNoIsolatedDisruption, a node with no links raises    *)
+(*       its term                                                           *)
+(*   _followerlink: fails InvNoRejoinDisruption: known limit, needs pre-vote *)
+(*       (gh #314)                                                          *)
+(*   _nohold: fails InvAckedVisible, a restored map serves stale            *)
+(*   _single_neveralone: fails Converge, a blanket guard breaks one node    *)
+(*   _single, _firstboot, _firstboot_single: pass                           *)
+(*   _stale_voters, _stale_voters_authority: known limit, two nodes down    *)
+(*       while others joined reach a majority of their old set and can      *)
+(*       overwrite committed entries; needs committed membership (gh #157)  *)
+(*   _stale_voters_today: the same failure without the guard                *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
-    n1, n2, n3, Nodes,
+    n1, n2, n3, n4, n5, Nodes,
     Formed,
-    RestoreVoters, LinkGate, NeverAlone,
+    RestoreVoters, VotersFromWholeTail, LinkGate, NeverAlone, LaggingStart,
     RedialPeriod, RedialUnlinked, Redial, PersistBook,
     RestoreSnapshot, HoldMap,
     Grace, Detect,
-    KillSet, Isolations, MaxKills, MaxTerm, MaxLog
+    KillSet, KillOrder, Writes, Isolations, MaxKills, MaxTerm, MaxLog
 
 VARIABLES
     up, term, log, commit, role, voters, links, heard,
     graceLeft, dialWait, detectLeft, detected, unseen, isolatedLeft,
-    killsLeft, isolationsLeft, acked, committed, deposed, bumped
+    killsLeft, isolationsLeft, acked, committed, deposed, bumped, learned, failedElection
 
 vars == <<up, term, log, commit, role, voters, links, heard,
           graceLeft, dialWait, detectLeft, detected, unseen, isolatedLeft,
-          killsLeft, isolationsLeft, acked, committed, deposed, bumped>>
+          killsLeft, isolationsLeft, acked, committed, deposed, bumped, learned, failedElection>>
 
 Min(a, b) == IF a < b THEN a ELSE b
 Max(a, b) == IF a > b THEN a ELSE b
 
-Rank(n) == IF n = n1 THEN 1 ELSE IF n = n2 THEN 2 ELSE 3
+Rank(n) == IF n = n1 THEN 1 ELSE IF n = n2 THEN 2 ELSE IF n = n3 THEN 3 ELSE IF n = n4 THEN 4 ELSE 5
 Configured == [n \in Nodes |-> {m \in Nodes : Rank(m) < Rank(n)}]
 
-Book(a) == IF PersistBook THEN Nodes \ {a} ELSE Configured[a]
+Book(a) == IF PersistBook THEN Configured[a] \cup learned[a] ELSE Configured[a]
 Linked(a, b) == {a, b} \in links
 LinkedVoters(n) == {v \in voters[n] : Linked(n, v)}
 Quorum(n) == (Cardinality(voters[n]) + 1) \div 2 + 1
 Reachable(n) == {v \in LinkedVoters(n) : term[v] <= term[n]}
+CanLink(n) == Cardinality(LinkedVoters(n)) + 1 >= Quorum(n)
 CanCommit(n) == Cardinality(Reachable(n)) + 1 >= Quorum(n)
 Named(s) == IF s = <<>> THEN {} ELSE s[Len(s)].named
 PrimaryOf(s) == s[Len(s)].primary
 Applied(n) == SubSeq(log[n], 1, commit[n])
+SnapshotPoint(n) == IF RestoreSnapshot THEN commit[n] ELSE 0
+NamedSince(n) ==
+    UNION {log[n][i].named : i \in Max(SnapshotPoint(n), 1)..Len(log[n])}
+RestoredVoters(n) ==
+    IF ~RestoreVoters THEN {}
+    ELSE IF VotersFromWholeTail THEN NamedSince(n) \ {n}
+    ELSE Named(log[n]) \ {n}
 Leaders == {n \in up : role[n] = "leader"}
 
 UpToDate(v, n) ==
@@ -117,17 +129,37 @@ Target(a, b) ==
        \/ /\ Redial
           /\ (b \in detected \/ RedialUnlinked)
 
+EarlyNames == {n1, n2, n3}
+EarlyEntry == [term |-> 1, primary |-> n3, named |-> EarlyNames]
+LateEntry == [term |-> 1, primary |-> n3, named |-> Nodes]
+Lagged == {n1, n2}
 FormedEntry == [term |-> 1, primary |-> n1, named |-> Nodes]
 
+InitialLog(n) ==
+    CASE LaggingStart /\ n \in Lagged -> <<EarlyEntry>>
+      [] LaggingStart -> <<EarlyEntry, LateEntry>>
+      [] Formed -> <<FormedEntry>>
+      [] OTHER -> <<>>
+
 Init ==
-    /\ up = IF Formed THEN Nodes ELSE {}
-    /\ term = [n \in Nodes |-> IF Formed THEN 1 ELSE 0]
-    /\ log = [n \in Nodes |-> IF Formed THEN <<FormedEntry>> ELSE <<>>]
-    /\ commit = [n \in Nodes |-> IF Formed THEN 1 ELSE 0]
-    /\ role = [n \in Nodes |-> IF Formed /\ n = FormedEntry.primary THEN "leader" ELSE "follower"]
-    /\ voters = [n \in Nodes |-> IF Formed THEN Nodes \ {n} ELSE {}]
-    /\ links = IF Formed THEN {{a, b} : a \in Nodes, b \in Nodes} \ {{a} : a \in Nodes} ELSE {}
-    /\ heard = [n \in Nodes |-> Formed]
+    /\ up = CASE LaggingStart -> Nodes \ Lagged
+              [] Formed -> Nodes
+              [] OTHER -> {}
+    /\ term = [n \in Nodes |-> IF Formed \/ LaggingStart THEN 1 ELSE 0]
+    /\ log = [n \in Nodes |-> InitialLog(n)]
+    /\ commit = [n \in Nodes |-> Len(InitialLog(n))]
+    /\ role = [n \in Nodes |->
+                 IF (LaggingStart /\ n = n3) \/ (~LaggingStart /\ Formed /\ n = n1)
+                 THEN "leader" ELSE "follower"]
+    /\ voters = [n \in Nodes |->
+                  IF LaggingStart /\ n \in Lagged THEN EarlyNames \ {n}
+                  ELSE IF Formed \/ LaggingStart THEN Nodes \ {n}
+                  ELSE {}]
+    /\ links = IF LaggingStart
+               THEN {{a, b} : a \in Nodes \ Lagged, b \in Nodes \ Lagged} \ {{a} : a \in Nodes}
+               ELSE IF Formed THEN {{a, b} : a \in Nodes, b \in Nodes} \ {{a} : a \in Nodes}
+               ELSE {}
+    /\ heard = [n \in Nodes |-> Formed \/ LaggingStart]
     /\ graceLeft = [n \in Nodes |-> 0]
     /\ dialWait = [n \in Nodes |-> RedialPeriod]
     /\ detectLeft = [n \in Nodes |-> 0]
@@ -137,13 +169,23 @@ Init ==
     /\ killsLeft = MaxKills
     /\ isolationsLeft = Isolations
     /\ acked = {}
-    /\ committed = IF Formed THEN {[idx |-> 1, term |-> 1, at |-> 1]} ELSE {}
+    /\ committed = IF LaggingStart
+                   THEN {[idx |-> 1, term |-> 1, at |-> 1], [idx |-> 2, term |-> 1, at |-> 1]}
+                   ELSE IF Formed THEN {[idx |-> 1, term |-> 1, at |-> 1]}
+                   ELSE {}
     /\ deposed = FALSE
     /\ bumped = {}
+    /\ learned = [n \in Nodes |->
+                   IF LaggingStart /\ n \in Lagged THEN EarlyNames \ {n}
+                   ELSE IF Formed \/ LaggingStart THEN Nodes \ {n}
+                   ELSE {}]
+    /\ failedElection = FALSE
 
 Kill(n) ==
     /\ n \in KillSet
-    /\ up = Nodes
+    /\ n \in up
+    /\ killsLeft > 0
+    /\ KillOrder # <<>> => n = KillOrder[MaxKills - killsLeft + 1]
     /\ killsLeft > 0
     /\ killsLeft' = killsLeft - 1
     /\ up' = up \ {n}
@@ -151,7 +193,7 @@ Kill(n) ==
     /\ links' = {l \in links : n \notin l}
     /\ detectLeft' = [detectLeft EXCEPT ![n] = Detect]
     /\ UNCHANGED <<term, log, commit, voters, heard, graceLeft, dialWait,
-                   detected, unseen, isolatedLeft, isolationsLeft, acked, committed, deposed, bumped>>
+                   detected, unseen, isolatedLeft, isolationsLeft, acked, committed, deposed, bumped, learned, failedElection>>
 
 Restart(n) ==
     /\ n \notin up
@@ -159,13 +201,13 @@ Restart(n) ==
     /\ role' = [role EXCEPT ![n] = "follower"]
     /\ commit' = [commit EXCEPT ![n] = IF RestoreSnapshot THEN @ ELSE 0]
     /\ voters' = [voters EXCEPT ![n] =
-                    Configured[n] \cup (IF RestoreVoters THEN Named(log[n]) \ {n} ELSE {})]
+                    Configured[n] \cup RestoredVoters(n)]
     /\ heard' = [heard EXCEPT ![n] = FALSE]
     /\ graceLeft' = [graceLeft EXCEPT ![n] = Grace]
     /\ dialWait' = [dialWait EXCEPT ![n] = 0]
     /\ unseen' = [unseen EXCEPT ![n] = Nodes \ {n}]
     /\ UNCHANGED <<term, log, links, detectLeft, detected, isolatedLeft, killsLeft,
-                   isolationsLeft, acked, committed, deposed, bumped>>
+                   isolationsLeft, acked, committed, deposed, bumped, learned, failedElection>>
 
 Dial(a, b) ==
     /\ {a, b} \subseteq up
@@ -175,12 +217,13 @@ Dial(a, b) ==
     /\ isolatedLeft[b] = 0
     /\ links' = links \cup {{a, b}}
     /\ voters' = [voters EXCEPT ![a] = @ \cup {b}, ![b] = @ \cup {a}]
+    /\ learned' = [learned EXCEPT ![a] = @ \cup {b}, ![b] = @ \cup {a}]
     /\ unseen' = [unseen EXCEPT ![a] = @ \ {b}, ![b] = @ \ {a}]
     /\ LET fullyLinked == {x \in {a, b} : \A y \in Nodes \ {x} : {x, y} \in links'}
        IN /\ detected' = detected \ fullyLinked
           /\ detectLeft' = [x \in Nodes |-> IF x \in fullyLinked THEN 0 ELSE detectLeft[x]]
     /\ UNCHANGED <<up, term, log, commit, role, heard, graceLeft, dialWait,
-                   isolatedLeft, killsLeft, isolationsLeft, acked, committed, deposed, bumped>>
+                   isolatedLeft, killsLeft, isolationsLeft, acked, committed, deposed, bumped, failedElection>>
 
 \* A network fault: no dial reaches n until the grace period has run out.
 Isolate(n) ==
@@ -191,7 +234,7 @@ Isolate(n) ==
     /\ isolatedLeft' = [isolatedLeft EXCEPT ![n] = Grace + 1]
     /\ UNCHANGED <<up, term, log, commit, role, voters, links, heard, graceLeft,
                    dialWait, detectLeft, detected, unseen, killsLeft, acked,
-                   committed, deposed, bumped>>
+                   committed, deposed, bumped, learned, failedElection>>
 
 DialDue ==
     \E a, b \in up :
@@ -209,7 +252,7 @@ Tick ==
                             ELSE IF dialWait[n] = 0 THEN RedialPeriod
                             ELSE dialWait[n] - 1]
     /\ UNCHANGED <<up, term, log, commit, role, voters, links, heard, unseen,
-                   killsLeft, isolationsLeft, acked, committed, deposed, bumped>>
+                   killsLeft, isolationsLeft, acked, committed, deposed, bumped, learned, failedElection>>
 
 BecomeLeader(n, voteSet) ==
     LET newTerm == term[n] + 1
@@ -218,7 +261,6 @@ BecomeLeader(n, voteSet) ==
     IN /\ term' = [v \in Nodes |-> IF v \in voteSet THEN newTerm ELSE term[v]]
        /\ role' = [role EXCEPT ![n] = "leader"]
        /\ log' = [log EXCEPT ![n] = Append(@, [term |-> newTerm, primary |-> priorPrimary, named |-> named])]
-       /\ heard' = [heard EXCEPT ![n] = TRUE]
 
 ElectAlone(n) ==
     /\ n \in up
@@ -229,10 +271,11 @@ ElectAlone(n) ==
     /\ Len(log[n]) < MaxLog
     /\ NeverAlone => log[n] = <<>>
     /\ BecomeLeader(n, {n})
+    /\ heard' = [heard EXCEPT ![n] = TRUE]
     /\ commit' = [commit EXCEPT ![n] = Len(log'[n])]
     /\ committed' = committed \cup {[idx |-> i, term |-> log'[n][i].term, at |-> term'[n]] : i \in 1..Len(log'[n])}
     /\ UNCHANGED <<up, voters, links, graceLeft, dialWait, detectLeft, detected,
-                   unseen, isolatedLeft, killsLeft, isolationsLeft, acked, deposed, bumped>>
+                   unseen, isolatedLeft, killsLeft, isolationsLeft, acked, deposed, bumped, learned, failedElection>>
 
 Elect(n) ==
     /\ n \in up
@@ -245,9 +288,9 @@ Elect(n) ==
         /\ Cardinality(voteSet) + 1 >= Quorum(n)
         /\ \A v \in voteSet : term[v] <= term[n] /\ role[v] = "follower" /\ UpToDate(v, n)
         /\ BecomeLeader(n, voteSet \cup {n})
-    /\ UNCHANGED <<up, commit, voters, links, graceLeft, dialWait, detectLeft,
+    /\ UNCHANGED <<heard, up, commit, voters, links, graceLeft, dialWait, detectLeft,
                    detected, unseen, isolatedLeft, killsLeft, isolationsLeft, acked,
-                   committed, deposed, bumped>>
+                   committed, deposed, bumped, learned, failedElection>>
 
 Bump(n) ==
     /\ ~LinkGate
@@ -261,7 +304,28 @@ Bump(n) ==
     /\ bumped' = bumped \cup {n}
     /\ UNCHANGED <<up, log, commit, role, voters, links, heard, graceLeft, dialWait,
                    detectLeft, detected, unseen, isolatedLeft, killsLeft, isolationsLeft,
-                   acked, committed, deposed>>
+                   acked, committed, deposed, learned, failedElection>>
+
+\* A node that links to a follower, reaches a quorum of links, and loses: the
+\* follower's vote is refused or the node never hears the leader first. Its raised
+\* term still reaches the leader through that follower. raft/node.rs start_election
+\* has no pre-vote (gh #314), so the link gate cannot stop this. Bounded to one per
+\* behaviour so that MaxTerm limits the state space rather than leadership.
+FailedElect(n) ==
+    /\ ~failedElection
+    /\ n \in up
+    /\ ~heard[n]
+    /\ Leaders # {}
+    /\ role[n] = "follower"
+    /\ voters[n] # {}
+    /\ CanLink(n)
+    /\ ~LeaderLinked(n)
+    /\ term[n] < MaxTerm
+    /\ term' = [term EXCEPT ![n] = @ + 1]
+    /\ failedElection' = TRUE
+    /\ UNCHANGED <<up, log, commit, role, voters, links, heard, graceLeft, dialWait,
+                   detectLeft, detected, unseen, isolatedLeft, killsLeft, isolationsLeft,
+                   acked, committed, deposed, bumped, learned>>
 
 StepDown(a, b) ==
     /\ a \in Leaders
@@ -273,7 +337,7 @@ StepDown(a, b) ==
     /\ deposed' = (deposed \/ b \in bumped)
     /\ UNCHANGED <<up, log, commit, voters, links, heard, graceLeft, dialWait,
                    detectLeft, detected, unseen, isolatedLeft, killsLeft, isolationsLeft,
-                   acked, committed, bumped>>
+                   acked, committed, bumped, learned, failedElection>>
 
 Replicate(l, f) ==
     /\ l \in Leaders
@@ -281,35 +345,35 @@ Replicate(l, f) ==
     /\ f # l
     /\ Linked(l, f)
     /\ term[l] >= term[f]
-    /\ (log[f] # log[l] \/ commit[f] # Min(Max(commit[f], commit[l]), Len(log[l])) \/ ~heard[f] \/ term[f] # term[l] \/ role[f] # "follower")
+    /\ (log[f] # log[l] \/ commit[f] # Min(Max(commit[f], commit[l]), Len(log[l])) \/ (~heard[f] /\ commit[l] = Len(log[l])) \/ term[f] # term[l] \/ role[f] # "follower")
     /\ log' = [log EXCEPT ![f] = log[l]]
     /\ term' = [term EXCEPT ![f] = term[l]]
     /\ role' = [role EXCEPT ![f] = "follower"]
     /\ commit' = [commit EXCEPT ![f] = Min(Max(commit[f], commit[l]), Len(log[l]))]
-    /\ heard' = [heard EXCEPT ![f] = TRUE]
+    /\ heard' = [heard EXCEPT ![f] = @ \/ commit[l] = Len(log[l])]
     /\ bumped' = bumped \ {f}
     /\ UNCHANGED <<up, voters, links, graceLeft, dialWait, detectLeft, detected,
-                   unseen, isolatedLeft, killsLeft, isolationsLeft, acked, committed, deposed>>
+                   unseen, isolatedLeft, killsLeft, isolationsLeft, acked, committed, deposed, learned, failedElection>>
 
 Commit(l) ==
     /\ l \in Leaders
     /\ commit[l] < Len(log[l])
     /\ Cardinality({v \in Reachable(l) : log[v] = log[l]}) + 1 >= Quorum(l)
     /\ commit' = [commit EXCEPT ![l] = Len(log[l])]
+    /\ heard' = [heard EXCEPT ![l] = TRUE]
     /\ committed' = committed \cup {[idx |-> i, term |-> log[l][i].term, at |-> term[l]] : i \in 1..Len(log[l])}
-    /\ UNCHANGED <<up, term, log, role, voters, links, heard, graceLeft, dialWait,
+    /\ UNCHANGED <<up, term, log, role, voters, links, graceLeft, dialWait,
                    detectLeft, detected, unseen, isolatedLeft, killsLeft, isolationsLeft,
-                   acked, deposed, bumped>>
+                   acked, deposed, bumped, learned, failedElection>>
 
 Propose(l, primary, named) ==
     /\ log' = [log EXCEPT ![l] = Append(@, [term |-> term[l], primary |-> primary, named |-> named])]
     /\ UNCHANGED <<up, term, commit, role, voters, links, heard, graceLeft, dialWait,
                    detectLeft, detected, unseen, isolatedLeft, killsLeft, isolationsLeft,
-                   acked, committed, deposed, bumped>>
+                   acked, committed, deposed, bumped, learned, failedElection>>
 
 Failover(l, d) ==
     /\ l \in Leaders
-    /\ commit[l] = Len(log[l])
     /\ Len(log[l]) < MaxLog
     /\ d \in detected
     /\ ~Linked(l, d)
@@ -330,16 +394,17 @@ Join(l, n) ==
     /\ Propose(l, PrimaryOf(log[l]), Named(log[l]) \cup {n})
 
 Write(p) ==
+    /\ Writes
     /\ Serving(p)
     /\ [idx |-> commit[p], term |-> log[p][commit[p]].term] \notin acked
     /\ acked' = acked \cup {[idx |-> commit[p], term |-> log[p][commit[p]].term]}
     /\ UNCHANGED <<up, term, log, commit, role, voters, links, heard, graceLeft,
                    dialWait, detectLeft, detected, unseen, isolatedLeft, killsLeft,
-                   isolationsLeft, committed, deposed, bumped>>
+                   isolationsLeft, committed, deposed, bumped, learned, failedElection>>
 
 Next ==
     \/ \E n \in Nodes :
-        \/ Kill(n) \/ Restart(n) \/ Isolate(n) \/ ElectAlone(n) \/ Elect(n) \/ Bump(n) \/ Commit(n) \/ Write(n)
+        \/ Kill(n) \/ Restart(n) \/ Isolate(n) \/ ElectAlone(n) \/ Elect(n) \/ Bump(n) \/ FailedElect(n) \/ Commit(n) \/ Write(n)
     \/ \E a, b \in Nodes :
         \/ Dial(a, b) \/ StepDown(a, b) \/ Replicate(a, b)
         \/ Failover(a, b) \/ Join(a, b)
@@ -386,8 +451,20 @@ InvAckedVisible ==
         (Serving(n) /\ ~LeaderLinked(n)) =>
             \E i \in 1..commit[n] : i = w.idx /\ log[n][i].term = w.term
 
-\* A restarted node waiting for a link does not depose the working leader.
-InvNoRejoinDisruption == ~deposed
+\* A node with links to no quorum raises no term, so it cannot depose a leader.
+InvNoIsolatedDisruption == ~deposed
+
+\* A returning node does not raise the term at all while a leader is working. This
+\* does NOT hold for the fix: see FailedElect and _followerlink. It needs pre-vote.
+InvNoRejoinDisruption == ~deposed /\ ~failedElection
+
+\* A node whose log holds a committed entry naming another node never leads alone.
+InvNoLoneLeader ==
+    \A l \in Leaders :
+        voters[l] = {} =>
+            \A c \in committed :
+                (c.idx <= Len(log[l]) /\ log[l][c.idx].term = c.term) =>
+                    log[l][c.idx].named \subseteq {l}
 
 Settled ==
     /\ up = Nodes

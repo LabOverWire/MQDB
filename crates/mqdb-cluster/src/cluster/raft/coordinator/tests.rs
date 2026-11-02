@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 struct MockTransport {
     node_id: NodeId,
     outbox: Arc<Mutex<Vec<(NodeId, ClusterMessage)>>>,
+    links: Arc<Mutex<Option<Vec<NodeId>>>>,
 }
 
 impl MockTransport {
@@ -20,6 +21,7 @@ impl MockTransport {
         Self {
             node_id,
             outbox: Arc::new(Mutex::new(Vec::new())),
+            links: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -56,7 +58,7 @@ impl ClusterTransport for MockTransport {
     }
 
     async fn direct_peers(&self) -> Option<Vec<NodeId>> {
-        None
+        self.links.lock().unwrap().clone()
     }
 
     fn recv(&self) -> Option<InboundMessage> {
@@ -364,7 +366,7 @@ async fn a_restarted_node_whose_log_names_other_nodes_does_not_elect_itself() {
 }
 
 #[tokio::test]
-async fn a_restarted_node_counts_every_node_its_latest_map_names_as_a_voter() {
+async fn a_restarted_node_counts_every_node_its_log_names_as_a_voter() {
     let node1 = NodeId::validated(1).unwrap();
     let backend = disk_with_log(
         3,
@@ -378,10 +380,12 @@ async fn a_restarted_node_counts_every_node_its_latest_map_names_as_a_voter() {
     )
     .unwrap();
 
+    let mut voters = coord.node.peers().to_vec();
+    voters.sort_by_key(|node| node.get());
     assert_eq!(
-        coord.node.peers(),
-        [NodeId::validated(3).unwrap()],
-        "node 2 left the latest map, so it is not a voter"
+        voters,
+        [NodeId::validated(2).unwrap(), NodeId::validated(3).unwrap()],
+        "the entry moving node 2 off may be uncommitted, so node 2 stays a voter"
     );
 }
 
@@ -437,6 +441,267 @@ async fn a_restarted_node_wins_an_election_only_with_a_majority_of_its_restored_
         )
         .await;
     assert!(coord.is_leader());
+}
+
+#[tokio::test]
+async fn uncommitted_failover_tail_must_not_shrink_the_restored_voters() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let backend: Arc<dyn mqdb_core::StorageBackend> = Arc::new(mqdb_core::MemoryBackend::new());
+    {
+        let mut leader = RaftCoordinator::new_with_storage(
+            node1,
+            MockTransport::new(node1),
+            grace_config(),
+            Arc::clone(&backend),
+        )
+        .unwrap();
+        leader.add_peer(node2);
+        leader.add_peer(node3);
+        let start = 1_790_000_000_000;
+        leader.tick(start).await;
+        leader.tick(start + 1_000).await;
+        let term = leader.current_term();
+        leader
+            .handle_request_vote_response(
+                node2,
+                crate::cluster::raft::rpc::RequestVoteResponse::granted(term),
+            )
+            .await;
+        assert!(leader.is_leader());
+        let last = leader.last_log_index();
+        for partition in 0..3u16 {
+            let cmd = assign(partition, partition % 3 + 1, (partition + 1) % 3 + 1, 1);
+            leader.propose_partition_update(cmd).await.unwrap();
+        }
+        let tail = leader.last_log_index();
+        for peer in [node2, node3] {
+            leader
+                .handle_append_entries_response(
+                    peer,
+                    crate::cluster::raft::rpc::AppendEntriesResponse::success(term, tail),
+                )
+                .await;
+        }
+        assert!(
+            leader.commit_index() >= tail,
+            "map naming 1,2,3 committed, base {last}"
+        );
+        leader.tick(start + 2_000).await;
+
+        leader.handle_node_death(node2).await;
+        leader.handle_node_death(node3).await;
+        assert_eq!(
+            leader.commit_index(),
+            tail,
+            "no quorum, so the failover tail is uncommitted"
+        );
+        assert!(
+            leader.last_log_index() > tail,
+            "the leader proposed failover entries"
+        );
+    }
+
+    let restarted = RaftCoordinator::new_with_storage(
+        node1,
+        MockTransport::new(node1),
+        grace_config(),
+        backend,
+    )
+    .unwrap();
+
+    assert!(
+        !restarted.node.peers().is_empty(),
+        "committed map names 2 and 3; uncommitted failover entries must not make this a single-node cluster"
+    );
+}
+
+#[tokio::test]
+async fn uncommitted_tail_after_second_failure_must_not_make_a_single_node_cluster() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let backend: Arc<dyn mqdb_core::StorageBackend> = Arc::new(mqdb_core::MemoryBackend::new());
+    {
+        let mut leader = RaftCoordinator::new_with_storage(
+            node1,
+            MockTransport::new(node1),
+            grace_config(),
+            Arc::clone(&backend),
+        )
+        .unwrap();
+        leader.add_peer(node2);
+        let start = 1_790_000_000_000;
+        leader.tick(start).await;
+        leader.tick(start + 1_000).await;
+        let term = leader.current_term();
+        leader
+            .handle_request_vote_response(
+                node2,
+                crate::cluster::raft::rpc::RequestVoteResponse::granted(term),
+            )
+            .await;
+        assert!(leader.is_leader());
+        leader
+            .propose_partition_update(assign(0, 1, 2, 1))
+            .await
+            .unwrap();
+        leader
+            .propose_partition_update(assign(1, 2, 1, 1))
+            .await
+            .unwrap();
+        let tail = leader.last_log_index();
+        leader
+            .handle_append_entries_response(
+                node2,
+                crate::cluster::raft::rpc::AppendEntriesResponse::success(term, tail),
+            )
+            .await;
+        assert_eq!(
+            leader.commit_index(),
+            tail,
+            "the map naming 1 and 2 is committed"
+        );
+        leader.tick(start + 2_000).await;
+        assert_eq!(
+            leader.partition_map().primary(PartitionId::new(1).unwrap()),
+            Some(node2)
+        );
+
+        leader.handle_node_death(node2).await;
+        assert_eq!(
+            leader.commit_index(),
+            tail,
+            "no quorum, so the failover is uncommitted"
+        );
+        assert!(leader.last_log_index() > tail);
+    }
+
+    let restarted = RaftCoordinator::new_with_storage(
+        node1,
+        MockTransport::new(node1),
+        grace_config(),
+        backend,
+    )
+    .unwrap();
+    assert_eq!(
+        restarted.node.peers(),
+        [node2],
+        "the last committed map names node 2; only an uncommitted proposal removed it"
+    );
+}
+
+#[tokio::test]
+async fn the_coordinator_feeds_the_links_to_the_election_gate() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    *transport.links.lock().unwrap() = Some(Vec::new());
+    let links = Arc::clone(&transport.links);
+    let mut coord = RaftCoordinator::new(node1, transport, grace_config());
+    coord.add_peer(node2);
+    let start = 1_790_000_000_000;
+
+    for elapsed in (0..=5_000).step_by(200) {
+        coord.tick(start + elapsed).await;
+    }
+    assert_eq!(coord.current_term(), 0, "no links, so no term is raised");
+
+    *links.lock().unwrap() = Some(vec![node2]);
+    for elapsed in (5_000..=6_000).step_by(200) {
+        coord.tick(start + elapsed).await;
+    }
+    assert!(
+        coord.current_term() >= 1,
+        "links reach a quorum, so an election starts"
+    );
+}
+
+async fn restarted_leader_with_a_map_naming_three_nodes() -> RaftCoordinator<MockTransport> {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let backend = disk_with_log(
+        3,
+        &[assign(0, 1, 2, 1), assign(1, 2, 1, 1), assign(2, 3, 1, 1)],
+    );
+    let mut coord = RaftCoordinator::new_with_storage(
+        node1,
+        MockTransport::new(node1),
+        grace_config(),
+        backend,
+    )
+    .unwrap();
+    let start = 1_790_000_000_000;
+    coord.tick(start).await;
+    coord.tick(start + 1_000).await;
+    let term = coord.current_term();
+    coord
+        .handle_request_vote_response(
+            node2,
+            crate::cluster::raft::rpc::RequestVoteResponse::granted(term),
+        )
+        .await;
+    assert!(coord.is_leader());
+    let last = coord.last_log_index();
+    coord
+        .handle_append_entries_response(
+            node2,
+            crate::cluster::raft::rpc::AppendEntriesResponse::success(term, last),
+        )
+        .await;
+    coord.tick(start + 1_200).await;
+    assert_eq!(coord.commit_index(), last, "the restored log is committed");
+    coord
+}
+
+#[tokio::test]
+async fn a_restarted_leader_does_not_treat_a_member_without_a_heartbeat_yet_as_dead() {
+    let mut coord = restarted_leader_with_a_map_naming_three_nodes().await;
+    let node3 = NodeId::validated(3).unwrap();
+
+    assert_eq!(
+        coord.partition_map().primary(PartitionId::new(2).unwrap()),
+        Some(node3)
+    );
+    assert_eq!(
+        coord.last_log_index(),
+        coord.commit_index(),
+        "no reassignment was proposed for node 3 or node 2"
+    );
+    let start = 1_790_000_000_000;
+    coord.tick(start + 5_000).await;
+    assert_eq!(coord.last_log_index(), coord.commit_index());
+}
+
+#[tokio::test]
+async fn a_restored_member_that_never_appears_is_failed_over_after_the_timeout() {
+    let mut coord = restarted_leader_with_a_map_naming_three_nodes().await;
+    let node2 = NodeId::validated(2).unwrap();
+    coord.handle_node_alive(node2).await;
+    let before = coord.last_log_index();
+    let start = 1_790_000_000_000;
+
+    coord.tick(start + 1_200 + 15_000).await;
+
+    assert!(
+        coord.last_log_index() > before,
+        "node 3 never appeared, so its partitions are reassigned"
+    );
+}
+
+#[tokio::test]
+async fn a_restored_member_that_appears_in_time_is_not_failed_over() {
+    let mut coord = restarted_leader_with_a_map_naming_three_nodes().await;
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    coord.handle_node_alive(node2).await;
+    coord.handle_node_alive(node3).await;
+    let before = coord.last_log_index();
+    let start = 1_790_000_000_000;
+
+    coord.tick(start + 1_200 + 15_000).await;
+
+    assert_eq!(coord.last_log_index(), before);
 }
 
 fn same_assignments(a: &PartitionMap, b: &PartitionMap) -> bool {

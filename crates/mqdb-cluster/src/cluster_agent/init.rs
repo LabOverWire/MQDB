@@ -384,3 +384,24 @@ impl ClusteredAgent {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_node_reads_its_remembered_peer_addresses_from_its_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(PEER_ADDRESSES_FILE), "2 127.0.0.1:2000\n").unwrap();
+        let node = NodeId::validated(1).unwrap();
+        let config = ClusterConfig::new(1, dir.path().to_path_buf(), Vec::new());
+
+        let (transport, _inbox) = ClusteredAgent::build_transport(node, &config);
+
+        let quic = transport.as_quic().unwrap();
+        assert_eq!(
+            quic.peers_needing_dial(&[]).await,
+            [NodeId::validated(2).unwrap()]
+        );
+    }
+}

@@ -670,3 +670,46 @@ async fn a_redial_that_finishes_after_the_peer_linked_first_keeps_the_new_link()
     );
     far_handle.abort();
 }
+
+#[tokio::test]
+async fn a_learned_peer_outside_the_map_is_forgotten_unless_it_is_linked() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let dir = tempfile::tempdir().unwrap();
+    let book = dir.path().join("peer_addrs");
+    std::fs::write(&book, "2 127.0.0.1:2000\n3 127.0.0.1:3000\n").unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let transport =
+        QuicDirectTransport::remembering_addresses_in(NodeId::validated(1).unwrap(), book.clone());
+
+    transport.forget_unlinked_peers_outside(&[node3]).await;
+
+    assert_eq!(transport.peers_needing_dial(&[]).await, [node3]);
+    assert_eq!(
+        std::fs::read_to_string(&book).unwrap(),
+        "3 127.0.0.1:3000\n"
+    );
+}
+
+#[tokio::test]
+async fn dials_reuse_the_client_tls_config_loaded_by_the_first_one() {
+    let local = NodeId::validated(1).unwrap();
+    let peer = NodeId::validated(2).unwrap();
+    let (transport, accepted, close, far_handle, dir) = linked_transport(local, peer).await;
+    std::fs::remove_file(dir.path().join("ca.pem")).unwrap();
+
+    close.send(()).ok();
+    for _ in 0..200 {
+        let _ = transport.send(peer, heartbeat(local, 1)).await;
+        if !transport.direct_peers().await.unwrap().contains(&peer) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    transport.redial(&[peer]).await;
+
+    tokio::time::timeout(Duration::from_secs(10), accepted.recv_async())
+        .await
+        .expect("the redial must not need the CA file again")
+        .unwrap();
+    far_handle.abort();
+}

@@ -141,6 +141,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
     }
 
     pub async fn handle_node_alive(&mut self, node: NodeId) -> Vec<u64> {
+        self.unseen_restored_members.remove(&node);
         let was_dead =
             self.pending_dead_nodes.remove(&node) || self.processed_dead_nodes.remove(&node);
         if was_dead {

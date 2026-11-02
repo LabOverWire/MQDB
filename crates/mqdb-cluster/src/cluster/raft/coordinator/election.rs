@@ -11,6 +11,8 @@ use super::RaftCoordinator;
 use crate::cluster::transport::ClusterTransport;
 use crate::cluster::{NodeId, PartitionId};
 
+const UNSEEN_MEMBER_TIMEOUT_MS: u64 = 15_000;
+
 impl<T: ClusterTransport> RaftCoordinator<T> {
     pub async fn tick(&mut self, now_ms: u64) -> Vec<u64> {
         if let Some(links) = self.transport.direct_peers().await {
@@ -23,7 +25,12 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         let just_became_ready = ready && !self.was_ready;
         self.was_ready = ready;
 
+        if !ready {
+            self.unseen_members_deadline = None;
+        }
+
         if just_became_ready {
+            self.unseen_members_deadline = Some(now_ms + UNSEEN_MEMBER_TIMEOUT_MS);
             self.last_balance_check = now_ms;
             self.pending_partition_proposals = 0;
             tracing::info!("Raft leader caught up, processing pending nodes");
@@ -37,6 +44,20 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
 
         if self.ready_to_initialize() {
             return self.initialize_partitions().await;
+        }
+
+        if self
+            .unseen_members_deadline
+            .is_some_and(|deadline| now_ms >= deadline)
+        {
+            self.unseen_members_deadline = None;
+            let unseen: Vec<NodeId> = self.unseen_restored_members.drain().collect();
+            let mut indices = Vec::new();
+            for node in unseen {
+                tracing::warn!(?node, "restored member never appeared, treating it as dead");
+                indices.extend(self.handle_node_death(node).await);
+            }
+            return indices;
         }
 
         if ready

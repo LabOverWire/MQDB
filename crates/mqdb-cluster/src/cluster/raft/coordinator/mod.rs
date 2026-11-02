@@ -11,7 +11,7 @@ use super::state::RaftCommand;
 use crate::cluster::transport::{ClusterMessage, ClusterTransport, TransportError};
 use crate::cluster::{NodeId, PartitionId, PartitionMap, PartitionMapExt};
 use mqdb_core::storage::StorageBackend;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
 pub struct RaftCoordinator<T: ClusterTransport> {
@@ -29,6 +29,8 @@ pub struct RaftCoordinator<T: ClusterTransport> {
     pub(super) pending_partition_proposals: usize,
     pub(super) last_balance_check: u64,
     pub(super) restored_map_held: bool,
+    pub(super) unseen_restored_members: HashSet<NodeId>,
+    pub(super) unseen_members_deadline: Option<u64>,
 }
 
 impl<T: ClusterTransport> RaftCoordinator<T> {
@@ -48,6 +50,8 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             pending_partition_proposals: 0,
             last_balance_check: 0,
             restored_map_held: false,
+            unseen_restored_members: HashSet::new(),
+            unseen_members_deadline: None,
         }
     }
 
@@ -76,6 +80,8 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             pending_partition_proposals: 0,
             last_balance_check: 0,
             restored_map_held: false,
+            unseen_restored_members: HashSet::new(),
+            unseen_members_deadline: None,
         };
 
         coordinator.rebuild_partition_map();
@@ -84,16 +90,22 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
     }
 
     fn restore_voters(&mut self) {
-        let mut latest_map = self.partition_map.clone();
+        let own_id = self.node.node_id();
+        let mut named: BTreeSet<NodeId> = self.cluster_members.iter().copied().collect();
+        named.extend(self.partition_map.all_nodes());
         for command in self.node.persisted_commands() {
             if let RaftCommand::UpdatePartition(update) = command {
-                latest_map.apply_update(&update);
+                let mut assignment = PartitionMap::new();
+                assignment.apply_update(&update);
+                named.extend(assignment.all_nodes());
             }
         }
-        for node in latest_map.all_nodes() {
-            self.node.add_peer(node);
+        named.remove(&own_id);
+        self.restored_map_held = !named.is_empty();
+        for node in named {
+            self.add_peer(node);
+            self.unseen_restored_members.insert(node);
         }
-        self.restored_map_held = !self.node.peers().is_empty();
     }
 
     pub fn holds_restored_map(&self) -> bool {

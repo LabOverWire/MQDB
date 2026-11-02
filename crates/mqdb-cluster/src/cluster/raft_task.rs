@@ -473,4 +473,93 @@ mod tests {
 
         assert_eq!(*rx_map.borrow(), only_self);
     }
+
+    #[tokio::test]
+    async fn a_leader_with_a_stale_commit_must_not_release_the_held_map() {
+        let node1 = NodeId::validated(1).unwrap();
+        let node2 = NodeId::validated(2).unwrap();
+        let stale = map_naming(&[(1, 2)]);
+        let (mut task, rx_map) = restarted_task(node1, &stale);
+        task.handle_raft_message(RaftMessage::AppendEntries {
+            from: node2,
+            request: crate::cluster::raft::AppendEntriesRequest::create(
+                3,
+                node2.get(),
+                40,
+                2,
+                vec![crate::cluster::raft::LogEntry::create(
+                    41,
+                    2,
+                    crate::cluster::raft::RaftCommand::update_partition(
+                        PartitionId::new(0).unwrap(),
+                        node2,
+                        &[],
+                        crate::cluster::Epoch::new(2),
+                    ),
+                )],
+                0,
+            ),
+        })
+        .await;
+        task.publish_partition_map();
+        assert_eq!(
+            *rx_map.borrow(),
+            PartitionMap::new(),
+            "entry 41 moved partition 0 off node 1, but the map says node 1 is still its primary"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_installed_snapshot_releases_the_held_map() {
+        let node1 = NodeId::validated(1).unwrap();
+        let node2 = NodeId::validated(2).unwrap();
+        let (mut task, rx_map) = restarted_task(node1, &map_naming(&[(1, 2)]));
+        let leader_map = map_naming(&[(2, 1)]);
+
+        task.handle_raft_message(RaftMessage::InstallSnapshot {
+            from: node2,
+            request: Box::new(crate::cluster::raft::InstallSnapshotRequest {
+                term: 3,
+                leader_id: node2.get(),
+                snapshot: crate::cluster::raft::RaftSnapshot::capture(
+                    90,
+                    3,
+                    &leader_map,
+                    &[node1, node2],
+                ),
+            }),
+        })
+        .await;
+        task.publish_partition_map();
+
+        assert_eq!(
+            rx_map.borrow().primary(PartitionId::new(0).unwrap()),
+            Some(node2)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_behind_the_restored_one_keeps_the_map_held() {
+        let node1 = NodeId::validated(1).unwrap();
+        let node2 = NodeId::validated(2).unwrap();
+        let (mut task, rx_map) = restarted_task(node1, &map_naming(&[(1, 2)]));
+
+        task.handle_raft_message(RaftMessage::InstallSnapshot {
+            from: node2,
+            request: Box::new(crate::cluster::raft::InstallSnapshotRequest {
+                term: 3,
+                leader_id: node2.get(),
+                snapshot: crate::cluster::raft::RaftSnapshot::capture(
+                    10,
+                    1,
+                    &map_naming(&[(2, 1)]),
+                    &[node1, node2],
+                ),
+            }),
+        })
+        .await;
+        task.publish_partition_map();
+
+        assert_eq!(*rx_map.borrow(), PartitionMap::new());
+    }
 }

@@ -735,13 +735,20 @@ MQDB supports distributed clustering with automatic failover and partition rebal
 > list the nodes started before it, as above; the links to nodes started afterwards are created when
 > *those* nodes dial in. A node keeps redialling a known peer that has no link, or that heartbeats
 > report dead, starting at once and backing off to every 5 seconds, so a restarted node re-links
-> without a change to its `--peers`.
+> without a change to its `--peers`. It forgets a remembered address once the peer is unlinked and
+> out of the partition map, but keeps dialling everything in `--peers`.
 >
-> A node restarted with its data does not lead alone if its stored partition map names other nodes:
-> it starts no election until it has links to a majority of them, and answers data requests with a
-> 503 until it has heard from a leader. If a majority of those nodes never returns, it stays that
-> way. A node with an empty data directory and no `--peers` counts as a first boot and leads alone
-> after 10 seconds, so point it at its peers if it is replacing a lost node.
+> A node restarted with its data counts every node named in its stored partition map or Raft log
+> as a voter, whether or not that entry committed. It does not lead alone if any other node is
+> named, and it starts no election until it has links to a majority of them. It answers data
+> requests with a 503 until it has heard from a leader. If a majority of those nodes never returns
+> it stays that way, and there is no option to force it to lead. Only a node whose stored state
+> names no other node leads alone, after 10 seconds: a single-node cluster, or an empty data
+> directory with no `--peers`. So point a node replacing a lost one at its peers.
+>
+> This does not stop every disruption. A returning node with links to a majority that excludes the
+> leader can still raise the term and depose it (#314). Voter sets are not committed membership
+> (#157): two nodes that were down while others joined can reach a majority of their old set.
 >
 > Run `mqdb cluster status` after starting or restarting a node — it reports any `UNLINKED` nodes —
 > and the broker logs a warning every minute while the mesh is incomplete.

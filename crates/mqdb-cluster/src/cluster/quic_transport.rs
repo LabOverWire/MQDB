@@ -13,7 +13,7 @@ use std::io::BufReader;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{Notify, RwLock};
 use tracing::{debug, error, info, trace, warn};
@@ -64,6 +64,7 @@ pub struct QuicDirectTransport {
     peers: Arc<RwLock<HashMap<NodeId, PeerConnection>>>,
     address_book: Arc<AddressBook>,
     dialing: Arc<Mutex<HashSet<NodeId>>>,
+    client_config: Arc<OnceLock<quinn::ClientConfig>>,
     generation: Arc<AtomicU64>,
     inbox_tx: flume::Sender<InboundMessage>,
     inbox_rx: flume::Receiver<InboundMessage>,
@@ -96,6 +97,7 @@ impl Clone for QuicDirectTransport {
             peers: self.peers.clone(),
             address_book: self.address_book.clone(),
             dialing: self.dialing.clone(),
+            client_config: self.client_config.clone(),
             generation: self.generation.clone(),
             inbox_tx: self.inbox_tx.clone(),
             inbox_rx: self.inbox_rx.clone(),
@@ -135,6 +137,7 @@ impl QuicDirectTransport {
             peers: Arc::new(RwLock::new(HashMap::new())),
             address_book: Arc::new(address_book),
             dialing: Arc::new(Mutex::new(HashSet::new())),
+            client_config: Arc::new(OnceLock::new()),
             generation: Arc::new(AtomicU64::new(0)),
             inbox_tx,
             inbox_rx,
@@ -249,17 +252,10 @@ impl QuicDirectTransport {
         self.dial(peer_id, peer_addr, FreshLink::Replace).await
     }
 
-    async fn dial(
-        &self,
-        peer_id: NodeId,
-        peer_addr: SocketAddr,
-        fresh_link: FreshLink,
-    ) -> Result<(), TransportError> {
-        let endpoint_guard = self.endpoint.read().await;
-        let endpoint = endpoint_guard
-            .as_ref()
-            .ok_or(TransportError::NotConnected)?;
-
+    fn client_config(&self) -> Result<quinn::ClientConfig, TransportError> {
+        if let Some(config) = self.client_config.get() {
+            return Ok(config.clone());
+        }
         let ca_file = self.ca_file.read().ok().and_then(|g| g.clone());
         let client_cert = self.cert_file.read().ok().and_then(|g| g.clone());
         let client_key = self.key_file.read().ok().and_then(|g| g.clone());
@@ -279,6 +275,21 @@ impl QuicDirectTransport {
             client_cert.as_deref(),
             client_key.as_deref(),
         )?;
+        Ok(self.client_config.get_or_init(|| client_config).clone())
+    }
+
+    async fn dial(
+        &self,
+        peer_id: NodeId,
+        peer_addr: SocketAddr,
+        fresh_link: FreshLink,
+    ) -> Result<(), TransportError> {
+        let endpoint_guard = self.endpoint.read().await;
+        let endpoint = endpoint_guard
+            .as_ref()
+            .ok_or(TransportError::NotConnected)?;
+
+        let client_config = self.client_config()?;
 
         let connection = endpoint
             .connect_with(client_config, peer_addr, "localhost")
@@ -375,6 +386,22 @@ impl QuicDirectTransport {
                 })
             })
             .collect()
+    }
+
+    pub async fn forget_unlinked_peers_outside(&self, members: &[NodeId]) {
+        let linked = self.peers.read().await;
+        let keep: Vec<NodeId> = members
+            .iter()
+            .copied()
+            .chain(linked.keys().copied())
+            .collect();
+        drop(linked);
+        for node in self.address_book.forget_learned_except(&keep).await {
+            info!(
+                peer = node.get(),
+                "forgot the address of a peer no longer in the partition map"
+            );
+        }
     }
 
     pub async fn redial(&self, targets: &[NodeId]) {

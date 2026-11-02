@@ -604,7 +604,8 @@ impl RaftNode {
         self.state.commit_append(prepared);
         self.state
             .update_commit_index(request.leader_commit.min(verified_index));
-        self.leader_synced = true;
+        self.leader_synced |=
+            request.leader_commit >= verified_index && verified_index >= self.state.commit_index();
         outputs.extend(self.apply_committed());
 
         (
@@ -650,7 +651,6 @@ impl RaftNode {
 
         let snapshot = request.snapshot;
         if snapshot.last_index <= self.state.commit_index() {
-            self.leader_synced = true;
             return (
                 AppendEntriesResponse::success(
                     self.state.current_term(),

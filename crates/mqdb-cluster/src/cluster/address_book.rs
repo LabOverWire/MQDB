@@ -70,6 +70,20 @@ impl AddressBook {
         }
     }
 
+    pub(super) async fn forget_learned_except(&self, keep: &[NodeId]) -> Vec<NodeId> {
+        let mut entries = self.entries.write().await;
+        let forgotten: Vec<NodeId> = entries
+            .iter()
+            .filter(|(node, entry)| !entry.configured && !keep.contains(node))
+            .map(|(node, _)| *node)
+            .collect();
+        if !forgotten.is_empty() {
+            entries.retain(|node, _| !forgotten.contains(node));
+            self.persist(&entries);
+        }
+        forgotten
+    }
+
     pub(super) async fn addr(&self, node: NodeId) -> Option<SocketAddr> {
         self.entries.read().await.get(&node).map(|entry| entry.addr)
     }
@@ -177,6 +191,24 @@ mod tests {
         book.configure(node(2), addr(2500)).await;
 
         assert_eq!(book.addr(node(2)).await, Some(addr(2500)));
+    }
+
+    #[tokio::test]
+    async fn a_learned_peer_is_forgotten_but_a_configured_one_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("peer_addrs");
+        let book = AddressBook::load(path.clone());
+        book.learn(node(2), addr(2000)).await;
+        book.learn(node(4), addr(4000)).await;
+        book.configure(node(3), addr(3000)).await;
+
+        let forgotten = book.forget_learned_except(&[node(2)]).await;
+
+        assert_eq!(forgotten, vec![node(4)]);
+        let reloaded = AddressBook::load(path);
+        assert_eq!(reloaded.addr(node(2)).await, Some(addr(2000)));
+        assert_eq!(reloaded.addr(node(4)).await, None);
+        assert_eq!(book.addr(node(3)).await, Some(addr(3000)));
     }
 
     #[tokio::test]
