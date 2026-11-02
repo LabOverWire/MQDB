@@ -314,7 +314,46 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             "forcing partition rebalance"
         );
 
-        self.trigger_rebalance_internal().await
+        let mut indices = self.adopt_partitions_without_a_live_holder().await;
+        indices.extend(self.trigger_rebalance_internal().await);
+        indices
+    }
+
+    async fn adopt_partitions_without_a_live_holder(&mut self) -> Vec<u64> {
+        let planned = self.planned_map();
+        let Some(adopter) = self.cluster_members.first().copied() else {
+            return Vec::new();
+        };
+        let mut indices = Vec::new();
+        for partition in PartitionId::all() {
+            let Some(primary) = planned.primary(partition) else {
+                continue;
+            };
+            let holder_alive = self.cluster_members.contains(&primary)
+                || planned
+                    .replicas(partition)
+                    .iter()
+                    .any(|replica| self.cluster_members.contains(replica));
+            if holder_alive {
+                continue;
+            }
+            tracing::warn!(
+                ?partition,
+                ?primary,
+                ?adopter,
+                "forced rebalance gives up on the holders of this partition, its records stay on them"
+            );
+            let cmd = RaftCommand::update_partition(
+                partition,
+                adopter,
+                &[],
+                planned.epoch(partition).next(),
+            );
+            if let Ok(index) = self.propose_partition_update(cmd).await {
+                indices.push(index);
+            }
+        }
+        indices
     }
 
     pub(super) async fn trigger_drain_rebalance(&mut self, draining_node: NodeId) -> Vec<u64> {
@@ -410,7 +449,11 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
                             proposed_indices.push(idx);
                         }
                     } else {
-                        tracing::error!(?partition, ?dead_node, "no replica available to promote");
+                        tracing::warn!(
+                            ?partition,
+                            ?dead_node,
+                            "no live replica holds this partition, leaving it unavailable until a holder returns"
+                        );
                     }
                 }
                 PartitionRole::Replica => {
@@ -453,11 +496,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         alive_nodes: &[NodeId],
     ) -> Option<NodeId> {
         let replicas = planned.replicas(partition);
-        replicas
-            .iter()
-            .find(|r| alive_nodes.contains(r))
-            .copied()
-            .or_else(|| alive_nodes.first().copied())
+        replicas.iter().find(|r| alive_nodes.contains(r)).copied()
     }
 
     pub(super) fn primaries_imbalanced(&self) -> bool {

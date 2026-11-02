@@ -68,6 +68,11 @@ impl MessageProcessor {
         self.heartbeat_manager.register_node(peer);
     }
 
+    #[cfg(test)]
+    pub(crate) fn check_timeouts(&mut self, now: u64) -> Vec<NodeId> {
+        self.heartbeat_manager.check_timeouts(now)
+    }
+
     pub fn expect_peer(&mut self, peer: NodeId) {
         self.heartbeat_manager.expect_node(peer);
     }

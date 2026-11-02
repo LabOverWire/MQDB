@@ -736,7 +736,8 @@ MQDB supports distributed clustering with automatic failover and partition rebal
 > *those* nodes dial in. A node keeps redialling a known peer that has no link, or that heartbeats
 > report dead, starting at once and backing off to every 5 seconds, then every minute once the peer
 > has been gone for 5 minutes, so a restarted node re-links without a change to its `--peers`. A
-> remembered address is kept until the peer dials in from a new one.
+> learned address is replaced when the peer dials in from a new one, and any address is dropped if
+> a different node answers on it. A `--peers` address returns on the next start.
 >
 > A node restarted with its data counts every node named in its stored partition map or Raft log
 > as a voter, whether or not that entry committed. It does not lead alone if any other node is
@@ -745,8 +746,14 @@ MQDB supports distributed clustering with automatic failover and partition rebal
 > it stays that way, and there is no option to force it to lead. Only a node whose stored state
 > names no other node leads alone, after 10 seconds: a single-node cluster, or an empty data
 > directory with no `--peers`. So point a node replacing a lost one at its peers. A restarted node
-> treats a named node it has not heard from within 15 seconds of starting as dead, the same as one
-> that stopped sending heartbeats, and the leader moves its partitions.
+> treats a named node it has not heard from within 30 seconds of starting as dead, so a node slower
+> than that has its partitions moved to their replicas, and gets partitions back from the rebalance.
+>
+> A partition moves only to a live replica. If both copies of a partition are gone it stays mapped
+> to its last holder and answers 503, rather than move to a node with no copy and answer 404, until
+> that node returns. If you know the holders are never coming back, `mqdb cluster rebalance` gives
+> those partitions to a live node, which starts them empty. A partition can also stay at 503 when
+> a holder that lost its place in the map returns before the mapped one.
 >
 > This does not stop every disruption. A returning node with links to a majority that excludes the
 > leader can still raise the term and depose it (#314). Voter sets are not committed membership

@@ -356,8 +356,22 @@ impl QuicDirectTransport {
         let notify = self.message_notify.clone();
         let local_node = self.node_id;
 
+        let dialled = DialledLink {
+            addr: peer_addr,
+            generation,
+            peers: self.peers.clone(),
+            address_book: self.address_book.clone(),
+        };
         tokio::spawn(async move {
-            receiver_task(recv_stream, peer_id, inbox_tx, notify, local_node).await;
+            receiver_task(
+                recv_stream,
+                peer_id,
+                inbox_tx,
+                notify,
+                local_node,
+                Some(dialled),
+            )
+            .await;
         });
 
         Ok(())
@@ -388,11 +402,18 @@ impl QuicDirectTransport {
             .collect()
     }
 
-    pub async fn configure_peer(&self, peer_id: NodeId, peer_addr: SocketAddr) {
-        self.address_book.configure(peer_id, peer_addr).await;
+    pub async fn connect_configured_peers(
+        &self,
+        peers: &[(NodeId, SocketAddr)],
+    ) -> Vec<(NodeId, String)> {
+        for (node, addr) in peers {
+            self.address_book.configure(*node, *addr).await;
+        }
+        let nodes: Vec<NodeId> = peers.iter().map(|(node, _)| *node).collect();
+        self.redial(&nodes).await
     }
 
-    pub async fn redial(&self, targets: &[NodeId]) {
+    pub async fn redial(&self, targets: &[NodeId]) -> Vec<(NodeId, String)> {
         let mut dials_running = tokio::task::JoinSet::new();
         for node in targets.iter().copied() {
             let Some(addr) = self.address_book.addr(node).await else {
@@ -403,24 +424,36 @@ impl QuicDirectTransport {
             }
             let transport = self.clone();
             dials_running.spawn(async move {
-                match tokio::time::timeout(
+                let failure = match tokio::time::timeout(
                     REDIAL_DIAL_TIMEOUT,
                     transport.dial(node, addr, FreshLink::Keep),
                 )
                 .await
                 {
-                    Ok(Ok(())) => debug!(peer = node.get(), addr = %addr, "redial to peer finished"),
+                    Ok(Ok(())) => {
+                        debug!(peer = node.get(), addr = %addr, "redial to peer finished");
+                        None
+                    }
                     Ok(Err(e)) => {
                         debug!(peer = node.get(), addr = %addr, error = %e, "redial to peer failed, will retry");
+                        Some((node, e.to_string()))
                     }
                     Err(_) => {
                         debug!(peer = node.get(), addr = %addr, "redial to peer timed out, will retry");
+                        Some((node, "timed out".to_string()))
                     }
-                }
+                };
                 transport.finish_dial(node);
+                failure
             });
         }
-        while dials_running.join_next().await.is_some() {}
+        let mut failures = Vec::new();
+        while let Some(finished) = dials_running.join_next().await {
+            if let Ok(Some(failure)) = finished {
+                failures.push(failure);
+            }
+        }
+        failures
     }
 
     async fn has_fresh_link(&self, node: NodeId) -> bool {
@@ -779,7 +812,7 @@ async fn handle_incoming_connection(
         peer_generation,
     ));
 
-    receiver_task(recv_stream, peer_node, inbox_tx, notify, local_node).await;
+    receiver_task(recv_stream, peer_node, inbox_tx, notify, local_node, None).await;
     Ok(())
 }
 
@@ -830,12 +863,33 @@ async fn remove_peer_generation(
     }
 }
 
+struct DialledLink {
+    addr: SocketAddr,
+    generation: u64,
+    peers: Arc<RwLock<HashMap<NodeId, PeerConnection>>>,
+    address_book: Arc<AddressBook>,
+}
+
+impl DialledLink {
+    async fn drop_wrong_peer(self, dialled: NodeId, actual: NodeId) {
+        warn!(
+            dialled = dialled.get(),
+            actual = actual.get(),
+            addr = %self.addr,
+            "the address of this peer now belongs to another node, forgetting it"
+        );
+        self.address_book.forget(dialled, self.addr).await;
+        remove_peer_generation(&self.peers, dialled, self.generation).await;
+    }
+}
+
 async fn receiver_task(
     mut recv_stream: RecvStream,
     peer_node: NodeId,
     inbox_tx: flume::Sender<InboundMessage>,
     notify: Arc<Notify>,
     local_node: NodeId,
+    mut dialled: Option<DialledLink>,
 ) {
     trace!(peer = peer_node.get(), "receiver task started");
 
@@ -859,6 +913,11 @@ async fn receiver_task(
         }
 
         if let Some(msg) = parse_message(&buf, local_node) {
+            if msg.from != peer_node
+                && let Some(link) = dialled.take()
+            {
+                link.drop_wrong_peer(peer_node, msg.from).await;
+            }
             if let Err(flume::TrySendError::Full(dropped)) = inbox_tx.try_send(msg) {
                 let msg_type = match &dropped.message {
                     ClusterMessage::Heartbeat(_) => "Heartbeat",

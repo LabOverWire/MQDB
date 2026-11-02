@@ -488,13 +488,12 @@ impl ClusteredAgent {
                         continue;
                     }
                 };
-                quic_transport
-                    .configure_peer(peer_node_id, peer_cluster_addr)
-                    .await;
-                configured.push(peer_node_id);
+                configured.push((peer_node_id, peer_cluster_addr));
             }
         }
-        quic_transport.redial(&configured).await;
+        for (peer, error) in quic_transport.connect_configured_peers(&configured).await {
+            warn!(peer = peer.get(), %error, "failed to connect to peer via QUIC, will retry");
+        }
 
         info!(broker_addr = %broker_addr, "creating separate MQTT client for admin");
         let admin_client_id = format!("mqdb-admin-{}", self.node_id.get());

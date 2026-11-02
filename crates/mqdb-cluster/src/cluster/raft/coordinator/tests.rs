@@ -775,9 +775,10 @@ fn pair_on_nodes_4_and_5() -> Vec<RaftCommand> {
 }
 
 #[tokio::test]
-async fn two_deaths_before_either_failover_commits_leave_no_dead_primary() {
+async fn both_holders_lost_keeps_the_partition_on_a_holder_until_they_return() {
     let node4 = NodeId::validated(4).unwrap();
     let node5 = NodeId::validated(5).unwrap();
+    let start = 1_790_000_000_000u64;
     for order in [[node4, node5], [node5, node4]] {
         let mut coord = restarted_leader_of_five(&pair_on_nodes_4_and_5()).await;
 
@@ -787,36 +788,197 @@ async fn two_deaths_before_either_failover_commits_leave_no_dead_primary() {
 
         for partition in [0u16, 1] {
             let id = PartitionId::new(partition).unwrap();
-            let primary = coord.partition_map().primary(id);
-            assert!(
-                !primary.is_some_and(|node| order.contains(&node)),
-                "partition {partition} rests on {primary:?}"
+            assert_eq!(
+                coord.partition_map().primary(id),
+                Some(order[1]),
+                "partition {partition} must stay on the last holder"
             );
-            assert!(
-                !coord
-                    .partition_map()
-                    .replicas(id)
-                    .iter()
-                    .any(|node| order.contains(node)),
-                "partition {partition} keeps a departed replica"
-            );
+            assert!(coord.partition_map().replicas(id).is_empty());
+        }
+
+        coord.handle_node_alive(node4).await;
+        coord.handle_node_alive(node5).await;
+        commit_tail(&mut coord).await;
+        for elapsed in (20_000u64..=200_000).step_by(1_000) {
+            coord.tick(start + elapsed).await;
+            commit_tail(&mut coord).await;
+        }
+        for partition in [0u16, 1] {
+            let primary = coord
+                .partition_map()
+                .primary(PartitionId::new(partition).unwrap());
+            assert!(primary == Some(node4) || primary == Some(node5));
         }
     }
 }
 
 #[tokio::test]
-async fn the_second_failover_of_a_partition_uses_a_newer_epoch_than_the_first() {
+async fn a_lost_node_with_a_live_replica_is_failed_over_to_it() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let mut coord = restarted_leader_of_five(&[assign(0, 3, 1, 1), assign(1, 2, 3, 1)]).await;
+
+    coord.handle_node_death(node3).await;
+    commit_tail(&mut coord).await;
+
+    let id = PartitionId::new(0).unwrap();
+    assert_eq!(coord.partition_map().primary(id), Some(node1));
+    assert_eq!(coord.partition_map().epoch(id), Epoch::new(2));
+}
+
+#[tokio::test]
+async fn a_second_promotion_of_a_partition_uses_a_newer_epoch_than_the_first() {
     let node4 = NodeId::validated(4).unwrap();
     let node5 = NodeId::validated(5).unwrap();
-    let mut coord = restarted_leader_of_five(&pair_on_nodes_4_and_5()).await;
+    let id = PartitionId::new(0).unwrap();
+    let two_replicas = RaftCommand::update_partition(
+        id,
+        node4,
+        &[node5, NodeId::validated(2).unwrap()],
+        Epoch::new(1),
+    );
+    let mut coord = restarted_leader_of_five(&[two_replicas, assign(1, 3, 1, 1)]).await;
 
     coord.handle_node_death(node4).await;
     coord.handle_node_death(node5).await;
     commit_tail(&mut coord).await;
 
     assert_eq!(
-        coord.partition_map().epoch(PartitionId::new(0).unwrap()),
-        Epoch::new(3)
+        coord.partition_map().primary(id),
+        Some(NodeId::validated(2).unwrap())
+    );
+    assert_eq!(coord.partition_map().epoch(id), Epoch::new(3));
+}
+
+#[tokio::test]
+async fn a_forced_rebalance_adopts_a_partition_whose_holders_are_gone() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node4 = NodeId::validated(4).unwrap();
+    let node5 = NodeId::validated(5).unwrap();
+    let mut coord = restarted_leader_of_five(&pair_on_nodes_4_and_5()).await;
+    coord.handle_node_death(node4).await;
+    coord.handle_node_death(node5).await;
+    commit_tail(&mut coord).await;
+
+    coord.force_rebalance().await;
+    commit_tail(&mut coord).await;
+
+    for partition in [0u16, 1] {
+        let primary = coord
+            .partition_map()
+            .primary(PartitionId::new(partition).unwrap());
+        assert!(primary.is_some_and(|node| node != node4 && node != node5));
+    }
+    assert_eq!(coord.node_id(), node1);
+}
+
+#[tokio::test]
+async fn a_node_whose_partitions_are_being_moved_off_counts_as_having_none() {
+    let node4 = NodeId::validated(4).unwrap();
+    let mut coord = restarted_leader_of_five(&[assign(0, 4, 1, 1), assign(1, 1, 2, 1)]).await;
+
+    coord.handle_node_death(node4).await;
+    coord.handle_node_alive(node4).await;
+
+    assert!(
+        coord.pending_new_nodes.contains(&node4),
+        "the unapplied failover leaves node 4 with nothing, so it needs a rebalance"
+    );
+}
+
+#[tokio::test]
+async fn a_forced_rebalance_reads_the_unapplied_failover() {
+    let node4 = NodeId::validated(4).unwrap();
+    let mut coord =
+        restarted_leader_of_five(&[assign(0, 1, 4, 1), assign(1, 2, 3, 1), assign(2, 3, 2, 1)])
+            .await;
+
+    coord.handle_node_death(node4).await;
+    coord.force_rebalance().await;
+    commit_tail(&mut coord).await;
+
+    let replicas = coord.partition_map().replicas(PartitionId::new(0).unwrap());
+    assert!(!replicas.contains(&node4));
+    assert!(
+        !replicas.is_empty(),
+        "the failover left the partition with no replica, so the rebalance adds one"
+    );
+}
+
+#[tokio::test]
+async fn a_drain_reads_the_unapplied_failover() {
+    let node2 = NodeId::validated(2).unwrap();
+    let node4 = NodeId::validated(4).unwrap();
+    let mut coord = restarted_leader_of_five(&[assign(0, 2, 4, 1), assign(1, 3, 1, 1)]).await;
+
+    coord.handle_node_death(node4).await;
+    coord.handle_drain_notification(node2).await;
+    commit_tail(&mut coord).await;
+
+    let id = PartitionId::new(0).unwrap();
+    assert!(!coord.partition_map().replicas(id).contains(&node4));
+    assert_ne!(coord.partition_map().primary(id), Some(node4));
+}
+
+#[tokio::test]
+async fn the_scan_at_leader_start_does_not_repeat_a_failover_it_just_proposed() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let node4 = NodeId::validated(4).unwrap();
+    let backend = disk_with_log(3, &[assign(0, 4, 1, 1), assign(1, 2, 3, 1)]);
+    let mut coord = RaftCoordinator::new_with_storage(
+        node1,
+        MockTransport::new(node1),
+        grace_config(),
+        backend,
+    )
+    .unwrap();
+    coord.handle_node_death(node4).await;
+    let start = 1_790_000_000_000u64;
+    coord.tick(start).await;
+    coord.tick(start + 1_000).await;
+    let term = coord.current_term();
+    for voter in [node2, node3] {
+        coord
+            .handle_request_vote_response(
+                voter,
+                crate::cluster::raft::rpc::RequestVoteResponse::granted(term),
+            )
+            .await;
+    }
+    commit_tail(&mut coord).await;
+    coord.tick(start + 1_200).await;
+
+    let updates_of_partition_0 = coord
+        .node
+        .unapplied_commands()
+        .iter()
+        .filter(|command| {
+            matches!(command, RaftCommand::UpdatePartition(update) if update.partition == 0)
+        })
+        .count();
+    assert_eq!(updates_of_partition_0, 1);
+}
+
+#[tokio::test]
+async fn a_replica_entry_on_a_departed_node_is_repaired_by_the_periodic_scan() {
+    let node4 = NodeId::validated(4).unwrap();
+    let mut coord =
+        restarted_leader_of_five(&[assign(0, 1, 4, 1), assign(1, 2, 3, 1), assign(2, 3, 2, 1)])
+            .await;
+    coord.cluster_members.retain(|member| *member != node4);
+    coord.processed_dead_nodes.insert(node4);
+    let start = 1_790_000_000_000u64;
+
+    coord.tick(start + 40_000).await;
+    commit_tail(&mut coord).await;
+
+    assert!(
+        !coord
+            .partition_map()
+            .replicas(PartitionId::new(0).unwrap())
+            .contains(&node4)
     );
 }
 
@@ -837,10 +999,6 @@ async fn a_late_member_returning_after_failovers_does_not_panic() {
     coord.handle_node_alive(node5).await;
     commit_tail(&mut coord).await;
 
-    assert!(
-        PartitionId::all().all(|p| coord.partition_map().primary(p) != Some(node4)),
-        "node 4 stayed away, so it holds no primary"
-    );
     assert_eq!(coord.node_id(), node1);
 }
 
@@ -848,7 +1006,7 @@ async fn a_late_member_returning_after_failovers_does_not_panic() {
 async fn a_failover_lost_with_leadership_is_repaired_by_the_next_leader_term() {
     let node2 = NodeId::validated(2).unwrap();
     let node4 = NodeId::validated(4).unwrap();
-    let mut coord = restarted_leader_of_five(&pair_on_nodes_4_and_5()).await;
+    let mut coord = restarted_leader_of_five(&[assign(0, 4, 1, 1), assign(1, 2, 3, 1)]).await;
     let committed = coord.commit_index();
     let start = 1_790_000_000_000u64;
 
@@ -909,7 +1067,7 @@ async fn a_failover_lost_with_leadership_is_repaired_by_the_next_leader_term() {
 #[tokio::test]
 async fn the_periodic_check_repairs_a_partition_on_a_departed_primary() {
     let node4 = NodeId::validated(4).unwrap();
-    let mut coord = restarted_leader_of_five(&pair_on_nodes_4_and_5()).await;
+    let mut coord = restarted_leader_of_five(&[assign(0, 4, 1, 1), assign(1, 2, 3, 1)]).await;
     coord.cluster_members.retain(|member| *member != node4);
     coord.processed_dead_nodes.insert(node4);
     let start = 1_790_000_000_000u64;

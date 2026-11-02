@@ -694,3 +694,98 @@ async fn dials_reuse_the_client_tls_config_loaded_by_the_first_one() {
         .unwrap();
     far_handle.abort();
 }
+
+#[tokio::test]
+async fn connecting_configured_peers_remembers_them_and_reports_each_failure() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let certs = generate_certs();
+    let dir = tempfile::tempdir().unwrap();
+    let ca_path = dir.path().join("ca.pem");
+    let leaf_path = dir.path().join("leaf.pem");
+    let leaf_key_path = dir.path().join("leaf.key");
+    std::fs::write(&ca_path, &certs.ca_pem).unwrap();
+    std::fs::write(&leaf_path, &certs.leaf_pem).unwrap();
+    std::fs::write(&leaf_key_path, &certs.leaf_key_pem).unwrap();
+
+    let endpoint = server_endpoint(&certs, 1024 * 1024);
+    let live_addr = endpoint.local_addr().unwrap();
+    let (streams_tx, streams_rx) = flume::unbounded();
+    let far_handle = tokio::spawn(stream_counting_far_end(endpoint, streams_tx));
+    let silent_peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let silent_addr = silent_peer.local_addr().unwrap();
+
+    let live = NodeId::validated(2).unwrap();
+    let silent = NodeId::validated(3).unwrap();
+    let transport = QuicDirectTransport::new(NodeId::validated(1).unwrap());
+    transport.set_ca_file(ca_path);
+    transport
+        .bind("127.0.0.1:0".parse().unwrap(), &leaf_path, &leaf_key_path)
+        .await
+        .unwrap();
+
+    let failures = transport
+        .connect_configured_peers(&[(live, live_addr), (silent, silent_addr)])
+        .await;
+
+    assert_eq!(
+        failures.iter().map(|(node, _)| *node).collect::<Vec<_>>(),
+        [silent]
+    );
+    tokio::time::timeout(Duration::from_secs(10), streams_rx.recv_async())
+        .await
+        .expect("the live peer must be dialled")
+        .unwrap();
+    assert_eq!(transport.peers_needing_dial(&[]).await, [silent]);
+    far_handle.abort();
+}
+
+#[tokio::test]
+async fn a_remembered_address_that_answers_as_another_node_is_forgotten() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let certs = generate_certs();
+    let dir = tempfile::tempdir().unwrap();
+    let ca_path = dir.path().join("ca.pem");
+    let leaf_path = dir.path().join("leaf.pem");
+    let leaf_key_path = dir.path().join("leaf.key");
+    std::fs::write(&ca_path, &certs.ca_pem).unwrap();
+    std::fs::write(&leaf_path, &certs.leaf_pem).unwrap();
+    std::fs::write(&leaf_key_path, &certs.leaf_key_pem).unwrap();
+
+    let new_id = NodeId::validated(6).unwrap();
+    let old_id = NodeId::validated(4).unwrap();
+    let local_id = NodeId::validated(1).unwrap();
+    let new_addr = free_udp_addr();
+    let new_node = QuicDirectTransport::new(new_id);
+    new_node.set_ca_file(ca_path.clone());
+    new_node
+        .bind(new_addr, &leaf_path, &leaf_key_path)
+        .await
+        .unwrap();
+
+    let book = dir.path().join("peer_addrs");
+    std::fs::write(&book, format!("4 {new_addr}\n")).unwrap();
+    let local = QuicDirectTransport::remembering_addresses_in(local_id, book.clone());
+    local.set_ca_file(ca_path);
+    local.set_cert_key_files(leaf_path.clone(), leaf_key_path.clone());
+    local
+        .bind(free_udp_addr(), &leaf_path, &leaf_key_path)
+        .await
+        .unwrap();
+    local.redial(&[old_id]).await;
+    assert!(local.direct_peers().await.unwrap().contains(&old_id));
+
+    for _ in 0..200 {
+        let _ = new_node.send(local_id, heartbeat(new_id, 1)).await;
+        if !local.direct_peers().await.unwrap().contains(&old_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    assert!(
+        !local.direct_peers().await.unwrap().contains(&old_id),
+        "the link is not to node 4"
+    );
+    assert!(local.peers_needing_dial(&[old_id]).await.is_empty());
+    assert_eq!(std::fs::read_to_string(&book).unwrap(), "");
+}

@@ -70,6 +70,14 @@ impl AddressBook {
         }
     }
 
+    pub(super) async fn forget(&self, node: NodeId, addr: SocketAddr) {
+        let mut entries = self.entries.write().await;
+        if entries.get(&node).is_some_and(|entry| entry.addr == addr) {
+            entries.remove(&node);
+            self.persist(&entries);
+        }
+    }
+
     pub(super) async fn addr(&self, node: NodeId) -> Option<SocketAddr> {
         self.entries.read().await.get(&node).map(|entry| entry.addr)
     }

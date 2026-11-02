@@ -8,8 +8,8 @@ use super::super::rpc::{
 use super::super::state::RaftCommand;
 use super::CoordinatorError;
 use super::RaftCoordinator;
+use crate::cluster::NodeId;
 use crate::cluster::transport::ClusterTransport;
-use crate::cluster::{NodeId, PartitionId};
 use std::collections::BTreeSet;
 
 impl<T: ClusterTransport> RaftCoordinator<T> {
@@ -58,18 +58,16 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             && self.partitions_initialized()
         {
             self.last_balance_check = now_ms;
-            let mut repairs = Vec::new();
-            self.scan_partition_map_for_dead_primaries(&mut repairs)
+            let mut indices = Vec::new();
+            self.scan_partition_map_for_departed_nodes(&mut indices)
                 .await;
-            if !repairs.is_empty() {
-                return repairs;
-            }
             if self.primaries_imbalanced() {
                 tracing::info!(
                     "periodic balance check: primaries imbalanced, triggering rebalance"
                 );
-                return self.trigger_rebalance_internal().await;
+                indices.extend(self.trigger_rebalance_internal().await);
             }
+            return indices;
         }
 
         Vec::new()
@@ -115,28 +113,26 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             }
         }
 
-        self.scan_partition_map_for_dead_primaries(&mut proposed_indices)
+        self.scan_partition_map_for_departed_nodes(&mut proposed_indices)
             .await;
 
         proposed_indices
     }
 
-    pub(super) async fn scan_partition_map_for_dead_primaries(
+    pub(super) async fn scan_partition_map_for_departed_nodes(
         &mut self,
         proposed_indices: &mut Vec<u64>,
     ) {
-        let planned = self.planned_map();
-        let departed: BTreeSet<NodeId> = PartitionId::all()
-            .filter_map(|partition| planned.primary(partition))
-            .filter(|primary| {
-                !self.cluster_members.contains(primary)
-                    && !self.pending_dead_nodes.contains(primary)
-            })
+        let departed: BTreeSet<NodeId> = self
+            .planned_map()
+            .all_nodes()
+            .into_iter()
+            .filter(|node| !self.cluster_members.contains(node))
             .collect();
-        for primary in departed {
-            tracing::warn!(?primary, "found partitions on a departed primary");
-            self.processed_dead_nodes.insert(primary);
-            let indices = self.reassign_partitions_for_dead_node(primary).await;
+        for node in departed {
+            tracing::warn!(?node, "found partitions on a departed node");
+            self.processed_dead_nodes.insert(node);
+            let indices = self.reassign_partitions_for_dead_node(node).await;
             proposed_indices.extend(indices);
         }
     }

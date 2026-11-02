@@ -6,6 +6,8 @@ use super::transport::{ClusterMessage, TransportConfig};
 use super::{NodeId, PartitionMap, PartitionRole};
 use std::collections::{BTreeSet, HashMap};
 
+const EXPECTED_NODE_BOOT_FACTOR: u64 = 2;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeStatus {
     Unknown,
@@ -260,8 +262,13 @@ impl HeartbeatManager {
             }
 
             let elapsed = now.saturating_sub(state.last_heartbeat);
+            let allowed = if state.status == NodeStatus::Unknown {
+                timeout * EXPECTED_NODE_BOOT_FACTOR
+            } else {
+                timeout
+            };
 
-            if elapsed > timeout {
+            if elapsed > allowed {
                 tracing::debug!(
                     node_id,
                     elapsed,
@@ -480,9 +487,9 @@ mod tests {
 
         assert!(manager.check_timeouts(1_000_000).is_empty());
         assert_eq!(manager.node_status(expected), NodeStatus::Unknown);
-        assert!(manager.check_timeouts(1_000_400).is_empty());
-        assert_eq!(manager.check_timeouts(1_000_600), vec![expected]);
-        assert!(manager.check_timeouts(1_000_700).is_empty());
+        assert!(manager.check_timeouts(1_000_900).is_empty());
+        assert_eq!(manager.check_timeouts(1_001_100), vec![expected]);
+        assert!(manager.check_timeouts(1_001_200).is_empty());
     }
 
     #[test]

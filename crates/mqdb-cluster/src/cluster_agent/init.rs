@@ -111,6 +111,29 @@ impl ClusteredAgent {
         restored_voters: &[NodeId],
         channels: MessageProcessorChannels,
     ) -> DedicatedExecutor {
+        let tx_batch = channels.tx_batch.clone();
+        let processor = Self::build_message_processor(
+            node_id,
+            transport_config,
+            peers,
+            restored_voters,
+            channels,
+        );
+        let executor = DedicatedExecutor::new("msg-processor", 2);
+        executor.handle().spawn(async move {
+            Box::pin(processor.run(tx_batch)).await;
+        });
+        info!("started message processor on dedicated executor");
+        executor
+    }
+
+    fn build_message_processor(
+        node_id: NodeId,
+        transport_config: TransportConfig,
+        peers: &[PeerConfig],
+        restored_voters: &[NodeId],
+        channels: MessageProcessorChannels,
+    ) -> MessageProcessor {
         let mut processor = MessageProcessor::new(
             node_id,
             transport_config,
@@ -128,12 +151,7 @@ impl ClusteredAgent {
         for voter in restored_voters {
             processor.expect_peer(*voter);
         }
-        let executor = DedicatedExecutor::new("msg-processor", 2);
-        executor.handle().spawn(async move {
-            Box::pin(processor.run(channels.tx_batch)).await;
-        });
-        info!("started message processor on dedicated executor");
-        executor
+        processor
     }
 
     /// # Errors
@@ -393,6 +411,35 @@ impl ClusteredAgent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restored_voters_are_expected_and_a_never_seen_one_gets_a_death_verdict() {
+        let node = NodeId::validated(1).unwrap();
+        let voter = NodeId::validated(2).unwrap();
+        let (tx_raft_messages, _rx_raft_messages) = flume::bounded(1);
+        let (tx_raft_events, _rx_raft_events) = flume::bounded(1);
+        let (tx_main_queue, _rx_main_queue) = flume::bounded(1);
+        let (_tx_inbox, transport_inbox_rx) = flume::bounded(1);
+        let (_tx_tick, rx_tick) = flume::bounded(1);
+        let (tx_batch, _rx_batch) = flume::bounded(1);
+        let mut processor = ClusteredAgent::build_message_processor(
+            node,
+            TransportConfig::default(),
+            &[],
+            &[voter],
+            MessageProcessorChannels {
+                tx_raft_messages,
+                tx_raft_events,
+                tx_main_queue,
+                transport_inbox_rx,
+                rx_tick,
+                tx_batch,
+            },
+        );
+
+        assert!(processor.check_timeouts(1_000_000).is_empty());
+        assert_eq!(processor.check_timeouts(1_031_000), [voter]);
+    }
 
     #[tokio::test]
     async fn a_node_reads_its_remembered_peer_addresses_from_its_data_dir() {
