@@ -71,6 +71,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             }
             RaftOutput::BecameLeader => {
                 tracing::info!(node = self.node.node_id().get(), "became Raft leader");
+                self.restored_map_unconfirmed = false;
             }
             RaftOutput::BecameFollower { leader } => {
                 tracing::info!(

@@ -1087,6 +1087,9 @@ impl<T: ClusterTransport> NodeController<T> {
     /// Initiate any queued promotion seals by sending seal requests directly (used by the cluster
     /// agent's async tick). Promises this node's epoch at a majority before it serves reserves.
     pub(crate) async fn drain_pending_seals(&mut self) {
+        if self.pending_seal_queue.is_empty() || self.unique_voter_group().is_empty() {
+            return;
+        }
         let queue = std::mem::take(&mut self.pending_seal_queue);
         for (partition, epoch) in queue {
             for (node, msg) in self.prepare_unique_seal(partition, epoch) {

@@ -126,7 +126,9 @@ impl<T: ClusterTransport> RaftTask<T> {
     }
 
     fn publish_partition_map(&self) {
-        let map = self.raft.partition_map();
+        let Some(map) = self.raft.publishable_partition_map() else {
+            return;
+        };
         self.tx_partition_map.send_if_modified(|published| {
             if published == map {
                 false
@@ -275,6 +277,61 @@ mod tests {
 
         async fn queue_local_publish_retained(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
         async fn queue_retained_refresh(&self, _topic: String) {}
+    }
+
+    #[tokio::test]
+    async fn a_restored_map_reaches_the_node_only_after_the_leader_accepts_this_log() {
+        let node1 = NodeId::validated(1).unwrap();
+        let node2 = NodeId::validated(2).unwrap();
+        let partition = PartitionId::new(7).unwrap();
+        let mut restored = PartitionMap::new();
+        restored.set(
+            partition,
+            crate::cluster::PartitionAssignment::new(
+                node2,
+                vec![node1],
+                crate::cluster::Epoch::new(1),
+            ),
+        );
+        let backend = FaultyBackend::shared();
+        let storage: Arc<dyn mqdb_core::StorageBackend> = backend.clone();
+        crate::cluster::raft::RaftStorage::new(storage)
+            .install_snapshot(
+                &crate::cluster::raft::RaftSnapshot::capture(10, 1, &restored, &[node1, node2]),
+                false,
+            )
+            .unwrap();
+        let raft = RaftCoordinator::new_with_storage(
+            node2,
+            RecordingTransport {
+                node_id: node2,
+                sent: Arc::new(Mutex::new(Vec::new())),
+            },
+            RaftConfig::default(),
+            backend,
+        )
+        .unwrap();
+        let (tx_partition_map, rx_map) = watch::channel(PartitionMap::new());
+        let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+        let mut task = RaftTask {
+            raft,
+            rx_messages: flume::unbounded().1,
+            rx_events: flume::unbounded().1,
+            rx_admin: flume::unbounded().1,
+            tx_partition_map,
+            tx_status: watch::channel(RaftStatus::default()).0,
+            shutdown_rx,
+            shutdown_tx,
+            fatal_error: Arc::new(std::sync::OnceLock::new()),
+        };
+
+        task.publish_partition_map();
+        assert_eq!(rx_map.borrow().primary(partition), None);
+
+        let accepted = crate::cluster::raft::AppendEntriesRequest::heartbeat(2, 1, 10, 1, 10);
+        task.raft.handle_append_entries(node1, accepted, 1000).await;
+        task.publish_partition_map();
+        assert_eq!(rx_map.borrow().primary(partition), Some(node2));
     }
 
     #[tokio::test]
