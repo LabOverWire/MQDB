@@ -307,6 +307,138 @@ async fn coordinator_from_storage_respects_startup_grace_without_peers() {
     assert!(coord.is_leader());
 }
 
+fn grace_config() -> RaftConfig {
+    RaftConfig {
+        election_timeout_min_ms: 150,
+        election_timeout_max_ms: 300,
+        heartbeat_interval_ms: 50,
+        startup_grace_period_ms: 10_000,
+    }
+}
+
+fn disk_with_log(term: u64, updates: &[RaftCommand]) -> Arc<dyn mqdb_core::StorageBackend> {
+    let backend: Arc<dyn mqdb_core::StorageBackend> = Arc::new(mqdb_core::MemoryBackend::new());
+    let storage = crate::cluster::raft::RaftStorage::new(Arc::clone(&backend));
+    storage.persist_state(term, None).unwrap();
+    for (position, command) in updates.iter().enumerate() {
+        let entry = crate::cluster::raft::LogEntry::create(position as u64 + 1, term, *command);
+        storage.append_log_entry(&entry).unwrap();
+    }
+    backend
+}
+
+fn assign(partition: u16, primary: u16, replica: u16, epoch: u64) -> RaftCommand {
+    RaftCommand::update_partition(
+        PartitionId::new(partition).unwrap(),
+        NodeId::validated(primary).unwrap(),
+        &[NodeId::validated(replica).unwrap()],
+        Epoch::new(epoch),
+    )
+}
+
+async fn tick_past_the_grace_period(coord: &mut RaftCoordinator<MockTransport>) {
+    let start = 1_790_000_000_000;
+    for elapsed in (0..=40_000).step_by(200) {
+        coord.tick(start + elapsed).await;
+    }
+}
+
+#[tokio::test]
+async fn a_restarted_node_whose_log_names_other_nodes_does_not_elect_itself() {
+    let node1 = NodeId::validated(1).unwrap();
+    let backend = disk_with_log(3, &[assign(0, 1, 2, 1), assign(1, 3, 1, 1)]);
+    let mut coord = RaftCoordinator::new_with_storage(
+        node1,
+        MockTransport::new(node1),
+        grace_config(),
+        backend,
+    )
+    .unwrap();
+
+    tick_past_the_grace_period(&mut coord).await;
+
+    assert!(
+        !coord.is_leader(),
+        "a node whose persisted map names other nodes must not elect itself alone"
+    );
+}
+
+#[tokio::test]
+async fn a_restarted_node_counts_every_node_its_latest_map_names_as_a_voter() {
+    let node1 = NodeId::validated(1).unwrap();
+    let backend = disk_with_log(
+        3,
+        &[assign(0, 2, 1, 1), assign(1, 3, 1, 1), assign(0, 3, 1, 2)],
+    );
+    let coord = RaftCoordinator::new_with_storage(
+        node1,
+        MockTransport::new(node1),
+        grace_config(),
+        backend,
+    )
+    .unwrap();
+
+    assert_eq!(
+        coord.node.peers(),
+        [NodeId::validated(3).unwrap()],
+        "node 2 left the latest map, so it is not a voter"
+    );
+}
+
+#[tokio::test]
+async fn a_restarted_single_node_cluster_still_elects_itself_after_the_grace_period() {
+    let node1 = NodeId::validated(1).unwrap();
+    let only_self =
+        RaftCommand::update_partition(PartitionId::new(0).unwrap(), node1, &[], Epoch::new(1));
+    let backend = disk_with_log(3, &[only_self]);
+    let mut coord = RaftCoordinator::new_with_storage(
+        node1,
+        MockTransport::new(node1),
+        grace_config(),
+        backend,
+    )
+    .unwrap();
+    let start = 1_790_000_000_000;
+
+    coord.tick(start).await;
+    coord.tick(start + 5_000).await;
+    assert!(!coord.is_leader(), "the grace period still applies");
+
+    tick_past_the_grace_period(&mut coord).await;
+    assert!(coord.is_leader());
+    assert_eq!(
+        coord.partition_map().primary(PartitionId::new(0).unwrap()),
+        Some(node1),
+        "the restored log is applied once the node leads itself"
+    );
+}
+
+#[tokio::test]
+async fn a_restarted_node_wins_an_election_only_with_a_majority_of_its_restored_voters() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let backend = disk_with_log(3, &[assign(0, 1, 2, 1), assign(1, 3, 1, 1)]);
+    let mut coord = RaftCoordinator::new_with_storage(
+        node1,
+        MockTransport::new(node1),
+        grace_config(),
+        backend,
+    )
+    .unwrap();
+
+    tick_past_the_grace_period(&mut coord).await;
+    let term = coord.current_term();
+    assert!(!coord.is_leader());
+
+    coord
+        .handle_request_vote_response(
+            node2,
+            crate::cluster::raft::rpc::RequestVoteResponse::granted(term),
+        )
+        .await;
+    assert!(coord.is_leader());
+}
+
 fn same_assignments(a: &PartitionMap, b: &PartitionMap) -> bool {
     PartitionId::all().all(|p| a.get(p) == b.get(p))
 }

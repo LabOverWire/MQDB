@@ -730,16 +730,21 @@ MQDB supports distributed clustering with automatic failover and partition rebal
 > misses its subscriptions, presence and cross-node publishes, and cannot read data whose partition
 > primary it is.
 >
-> A node dials only the nodes listed in its `--peers`, and only at startup — it never retries a
-> failed dial and never dials a node it learns about later. Because a dial only succeeds against a
-> node that is already listening, list the nodes started before it, as above; the links to nodes
-> started afterwards are created when *those* nodes dial in. **This also applies to restarts:** a
-> node restarted with only its original seed peer will not be re-dialled by the nodes that started
-> before it, so restart it with `--peers` listing every other node in the cluster.
+> A node dials the nodes in its `--peers` and the nodes that have dialled it, whose addresses it
+> keeps in `peer_addrs` in its `--db` directory. It never dials a node it has only heard about, so
+> list the nodes started before it, as above; the links to nodes started afterwards are created when
+> *those* nodes dial in. A node keeps redialling a known peer that has no link, or that heartbeats
+> report dead, starting at once and backing off to every 5 seconds, so a restarted node re-links
+> without a change to its `--peers`.
+>
+> A node restarted with its data does not lead alone if its stored partition map names other nodes:
+> it starts no election until it has links to a majority of them, and answers data requests with a
+> 503 until it has heard from a leader. If a majority of those nodes never returns, it stays that
+> way. A node with an empty data directory and no `--peers` counts as a first boot and leads alone
+> after 10 seconds, so point it at its peers if it is replacing a lost node.
 >
 > Run `mqdb cluster status` after starting or restarting a node — it reports any `UNLINKED` nodes —
-> and the broker logs a warning every minute while the mesh is incomplete. Note that this detects a
-> node that was never linked; a link that dies in flight is not currently detected.
+> and the broker logs a warning every minute while the mesh is incomplete.
 
 ### Cluster CLI Commands
 

@@ -21,6 +21,8 @@ use tracing::info;
 
 use super::PeerConfig;
 
+const PEER_ADDRESSES_FILE: &str = "peer_addrs";
+
 impl ClusteredAgent {
     fn open_stores_backend(
         config: &ClusterConfig,
@@ -68,7 +70,10 @@ impl ClusteredAgent {
         #[cfg(not(feature = "mqtt-bridge"))]
         let _ = config.quic.direct;
 
-        let quic_transport = QuicDirectTransport::new(node_id);
+        let quic_transport = QuicDirectTransport::remembering_addresses_in(
+            node_id,
+            config.db_path.join(PEER_ADDRESSES_FILE),
+        );
         #[cfg(feature = "dev-insecure")]
         quic_transport.set_insecure(config.quic.insecure);
         if let Some(ca_path) = &config.quic.ca_file {

@@ -66,6 +66,8 @@ pub struct RaftNode {
     restored_snapshot: Option<RaftSnapshot>,
     storage_failure: Option<String>,
     replication_due: bool,
+    linked_voters: Option<usize>,
+    leader_synced: bool,
 }
 
 impl RaftNode {
@@ -84,6 +86,8 @@ impl RaftNode {
             restored_snapshot: None,
             storage_failure: None,
             replication_due: false,
+            linked_voters: None,
+            leader_synced: false,
         }
     }
 
@@ -143,6 +147,8 @@ impl RaftNode {
             restored_snapshot,
             storage_failure: None,
             replication_due: false,
+            linked_voters: None,
+            leader_synced: false,
         })
     }
 
@@ -225,15 +231,43 @@ impl RaftNode {
         self.election_timeout = self.config.election_timeout_min_ms + offset;
     }
 
+    pub fn observe_links(&mut self, links: &[NodeId]) {
+        let linked = self
+            .state
+            .peers()
+            .iter()
+            .filter(|peer| links.contains(peer))
+            .count();
+        self.linked_voters = Some(linked);
+    }
+
+    fn can_reach_quorum(&self) -> bool {
+        self.linked_voters
+            .is_none_or(|linked| linked + 1 >= self.state.quorum_size())
+    }
+
     fn can_start_election(&self, now_ms: u64) -> bool {
-        let has_peers = !self.state.peers().is_empty();
-        if has_peers {
+        if !self.state.peers().is_empty() {
             return true;
         }
         let Some(startup) = self.startup_time else {
             return false;
         };
         now_ms >= startup + self.config.startup_grace_period_ms
+    }
+
+    #[must_use]
+    pub fn persisted_commands(&self) -> Vec<RaftCommand> {
+        self.state
+            .entries_from(self.state.log_base_index() + 1)
+            .iter()
+            .filter_map(LogEntry::command)
+            .collect()
+    }
+
+    #[must_use]
+    pub fn map_is_current(&self) -> bool {
+        self.leader_synced || (self.is_leader() && self.applied_own_term())
     }
 
     #[must_use]
@@ -314,6 +348,9 @@ impl RaftNode {
         let mut outputs = Vec::new();
 
         match self.state.role() {
+            RaftRole::Follower | RaftRole::Candidate if !self.can_reach_quorum() => {
+                self.last_heartbeat_time = now_ms;
+            }
             RaftRole::Follower | RaftRole::Candidate => {
                 if now_ms >= self.last_heartbeat_time + self.election_timeout
                     && self.can_start_election(now_ms)
@@ -567,6 +604,7 @@ impl RaftNode {
         self.state.commit_append(prepared);
         self.state
             .update_commit_index(request.leader_commit.min(verified_index));
+        self.leader_synced = true;
         outputs.extend(self.apply_committed());
 
         (
@@ -612,6 +650,7 @@ impl RaftNode {
 
         let snapshot = request.snapshot;
         if snapshot.last_index <= self.state.commit_index() {
+            self.leader_synced = true;
             return (
                 AppendEntriesResponse::success(
                     self.state.current_term(),
@@ -637,6 +676,7 @@ impl RaftNode {
         }
         self.state
             .install_snapshot(snapshot.last_index, snapshot.last_term);
+        self.leader_synced = true;
         let last_index = snapshot.last_index;
         outputs.push(RaftOutput::InstallSnapshot(snapshot));
 
@@ -1381,5 +1421,53 @@ mod tests {
                 .any(|o| matches!(o, RaftOutput::SendRequestVote { .. }))
         );
         assert_eq!(node.role(), RaftRole::Candidate);
+    }
+
+    #[test]
+    fn a_node_without_links_to_a_quorum_does_not_raise_its_term() {
+        let mut node = make_node(1);
+        node.add_peer(NodeId::validated(2).unwrap());
+        node.add_peer(NodeId::validated(3).unwrap());
+        node.observe_links(&[]);
+
+        for now in (1_000..=10_000).step_by(100) {
+            assert!(node.tick(now).is_empty());
+        }
+        assert_eq!(node.current_term(), 0);
+    }
+
+    #[test]
+    fn the_election_timer_starts_when_a_quorum_becomes_reachable() {
+        let peer = NodeId::validated(2).unwrap();
+        let mut node = make_node(1);
+        node.add_peer(peer);
+        node.add_peer(NodeId::validated(3).unwrap());
+        node.observe_links(&[]);
+        for now in (1_000..=10_000).step_by(100) {
+            node.tick(now);
+        }
+
+        node.observe_links(&[peer]);
+        node.tick(10_100);
+        assert_eq!(
+            node.current_term(),
+            0,
+            "a new link gets a full timeout to deliver the leader's heartbeat"
+        );
+
+        node.tick(10_100 + node.config.election_timeout_max_ms);
+        assert_eq!(node.current_term(), 1);
+    }
+
+    #[test]
+    fn a_node_with_links_to_a_quorum_elects_as_before() {
+        let peer = NodeId::validated(2).unwrap();
+        let mut node = make_node(1);
+        node.add_peer(peer);
+        node.observe_links(&[peer]);
+
+        node.tick(1_000);
+        node.tick(1_000 + node.config.election_timeout_max_ms);
+        assert_eq!(node.current_term(), 1);
     }
 }

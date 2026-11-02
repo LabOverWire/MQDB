@@ -126,6 +126,9 @@ impl<T: ClusterTransport> RaftTask<T> {
     }
 
     fn publish_partition_map(&self) {
+        if self.raft.holds_restored_map() {
+            return;
+        }
         let map = self.raft.partition_map();
         self.tx_partition_map.send_if_modified(|published| {
             if published == map {
@@ -339,5 +342,135 @@ mod tests {
                 .iter()
                 .any(|(_, m)| matches!(m, ClusterMessage::RequestVoteResponse(_)))
         );
+    }
+
+    fn map_naming(nodes: &[(u16, u16)]) -> PartitionMap {
+        let mut map = PartitionMap::new();
+        for (partition, (primary, replica)) in (0u16..).zip(nodes) {
+            map.set(
+                PartitionId::new(partition).unwrap(),
+                crate::cluster::PartitionAssignment::new(
+                    NodeId::validated(*primary).unwrap(),
+                    NodeId::validated(*replica).into_iter().collect(),
+                    crate::cluster::Epoch::new(1),
+                ),
+            );
+        }
+        map
+    }
+
+    fn restarted_task(
+        node: NodeId,
+        snapshot_map: &PartitionMap,
+    ) -> (RaftTask<RecordingTransport>, watch::Receiver<PartitionMap>) {
+        let backend: Arc<dyn mqdb_core::StorageBackend> = Arc::new(mqdb_core::MemoryBackend::new());
+        let storage = crate::cluster::raft::RaftStorage::new(Arc::clone(&backend));
+        let snapshot = crate::cluster::raft::RaftSnapshot::capture(40, 2, snapshot_map, &[node]);
+        storage.persist_state(2, None).unwrap();
+        storage.install_snapshot(&snapshot, false).unwrap();
+        let transport = RecordingTransport {
+            node_id: node,
+            sent: Arc::new(Mutex::new(Vec::new())),
+        };
+        let raft =
+            RaftCoordinator::new_with_storage(node, transport, RaftConfig::default(), backend)
+                .unwrap();
+        let (_tx_messages, rx_messages) = flume::unbounded();
+        let (_tx_events, rx_events) = flume::unbounded();
+        let (_tx_admin, rx_admin) = flume::unbounded();
+        let (tx_partition_map, rx_map) = watch::channel(PartitionMap::new());
+        let (tx_status, _rx_status) = watch::channel(RaftStatus::default());
+        let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+        (
+            RaftTask {
+                raft,
+                rx_messages,
+                rx_events,
+                rx_admin,
+                tx_partition_map,
+                tx_status,
+                shutdown_rx,
+                shutdown_tx,
+                fatal_error: Arc::new(std::sync::OnceLock::new()),
+            },
+            rx_map,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_restored_map_naming_other_nodes_stays_unpublished_until_the_leader_is_heard() {
+        let node1 = NodeId::validated(1).unwrap();
+        let node2 = NodeId::validated(2).unwrap();
+        let stale = map_naming(&[(1, 2), (2, 1)]);
+        let (mut task, rx_map) = restarted_task(node1, &stale);
+
+        task.publish_partition_map();
+        assert_eq!(
+            *rx_map.borrow(),
+            PartitionMap::new(),
+            "the stale map would make node 1 serve as primary for partitions that moved"
+        );
+
+        task.handle_raft_message(RaftMessage::AppendEntries {
+            from: node2,
+            request: crate::cluster::raft::AppendEntriesRequest::create(
+                3,
+                node2.get(),
+                40,
+                2,
+                vec![crate::cluster::raft::LogEntry::create(
+                    41,
+                    3,
+                    crate::cluster::raft::RaftCommand::update_partition(
+                        PartitionId::new(0).unwrap(),
+                        node2,
+                        &[],
+                        crate::cluster::Epoch::new(2),
+                    ),
+                )],
+                41,
+            ),
+        })
+        .await;
+        task.publish_partition_map();
+
+        assert_eq!(
+            rx_map.borrow().primary(PartitionId::new(0).unwrap()),
+            Some(node2)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_consistency_check_keeps_the_restored_map_unpublished() {
+        let node1 = NodeId::validated(1).unwrap();
+        let node2 = NodeId::validated(2).unwrap();
+        let (mut task, rx_map) = restarted_task(node1, &map_naming(&[(1, 2)]));
+
+        task.handle_raft_message(RaftMessage::AppendEntries {
+            from: node2,
+            request: crate::cluster::raft::AppendEntriesRequest::create(
+                3,
+                node2.get(),
+                90,
+                3,
+                Vec::new(),
+                90,
+            ),
+        })
+        .await;
+        task.publish_partition_map();
+
+        assert_eq!(*rx_map.borrow(), PartitionMap::new());
+    }
+
+    #[tokio::test]
+    async fn a_restored_single_node_map_is_published_at_once() {
+        let node1 = NodeId::validated(1).unwrap();
+        let only_self = map_naming(&[(1, 0)]);
+        let (task, rx_map) = restarted_task(node1, &only_self);
+
+        task.publish_partition_map();
+
+        assert_eq!(*rx_map.borrow(), only_self);
     }
 }

@@ -657,6 +657,10 @@ impl<T: ClusterTransport> NodeController<T> {
         self.heartbeat.alive_nodes()
     }
 
+    pub fn dead_nodes(&self) -> Vec<NodeId> {
+        self.heartbeat.dead_nodes()
+    }
+
     pub fn alive_or_suspected_nodes(&self) -> Vec<NodeId> {
         self.heartbeat.alive_or_suspected_nodes()
     }

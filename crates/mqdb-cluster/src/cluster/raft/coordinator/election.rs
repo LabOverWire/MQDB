@@ -13,6 +13,9 @@ use crate::cluster::{NodeId, PartitionId};
 
 impl<T: ClusterTransport> RaftCoordinator<T> {
     pub async fn tick(&mut self, now_ms: u64) -> Vec<u64> {
+        if let Some(links) = self.transport.direct_peers().await {
+            self.node.observe_links(&links);
+        }
         let outputs = self.node.tick(now_ms);
         self.process_outputs(outputs).await;
 

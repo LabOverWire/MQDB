@@ -1,19 +1,20 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use super::address_book::AddressBook;
 use super::transport::{
     ClusterMessage, ClusterTransport, InboundMessage, RoutedPublish, TransportError,
 };
 use super::{NodeId, PartitionId};
 use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::BufReader;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{Notify, RwLock};
 use tracing::{debug, error, info, trace, warn};
 
@@ -21,12 +22,20 @@ const INBOX_CHANNEL_CAPACITY: usize = 16384;
 const PEER_CONTROL_QUEUE_CAPACITY: usize = 256;
 const PEER_BULK_QUEUE_CAPACITY: usize = 1024;
 const REDIAL_DIAL_TIMEOUT: Duration = Duration::from_secs(5);
+const NEW_LINK_SETTLE: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FreshLink {
+    Keep,
+    Replace,
+}
 
 struct PeerConnection {
     _connection: Connection,
     control_tx: flume::Sender<Vec<u8>>,
     bulk_tx: flume::Sender<Vec<u8>>,
     generation: u64,
+    linked_at: Instant,
 }
 
 const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
@@ -53,7 +62,8 @@ pub struct QuicDirectTransport {
     node_id: NodeId,
     endpoint: Arc<RwLock<Option<Endpoint>>>,
     peers: Arc<RwLock<HashMap<NodeId, PeerConnection>>>,
-    peer_addrs: Arc<RwLock<HashMap<NodeId, SocketAddr>>>,
+    address_book: Arc<AddressBook>,
+    dialing: Arc<Mutex<HashSet<NodeId>>>,
     generation: Arc<AtomicU64>,
     inbox_tx: flume::Sender<InboundMessage>,
     inbox_rx: flume::Receiver<InboundMessage>,
@@ -84,7 +94,8 @@ impl Clone for QuicDirectTransport {
             node_id: self.node_id,
             endpoint: self.endpoint.clone(),
             peers: self.peers.clone(),
-            peer_addrs: self.peer_addrs.clone(),
+            address_book: self.address_book.clone(),
+            dialing: self.dialing.clone(),
             generation: self.generation.clone(),
             inbox_tx: self.inbox_tx.clone(),
             inbox_rx: self.inbox_rx.clone(),
@@ -106,6 +117,15 @@ impl Clone for QuicDirectTransport {
 impl QuicDirectTransport {
     #[must_use]
     pub fn new(node_id: NodeId) -> Self {
+        Self::with_address_book(node_id, AddressBook::in_memory())
+    }
+
+    #[must_use]
+    pub fn remembering_addresses_in(node_id: NodeId, path: std::path::PathBuf) -> Self {
+        Self::with_address_book(node_id, AddressBook::load(path))
+    }
+
+    fn with_address_book(node_id: NodeId, address_book: AddressBook) -> Self {
         let (inbox_tx, inbox_rx) = flume::bounded(INBOX_CHANNEL_CAPACITY);
         let (local_publish_tx, local_publish_rx) = flume::bounded(100_000);
 
@@ -113,7 +133,8 @@ impl QuicDirectTransport {
             node_id,
             endpoint: Arc::new(RwLock::new(None)),
             peers: Arc::new(RwLock::new(HashMap::new())),
-            peer_addrs: Arc::new(RwLock::new(HashMap::new())),
+            address_book: Arc::new(address_book),
+            dialing: Arc::new(Mutex::new(HashSet::new())),
             generation: Arc::new(AtomicU64::new(0)),
             inbox_tx,
             inbox_rx,
@@ -197,15 +218,25 @@ impl QuicDirectTransport {
         let local_node = self.node_id;
         let peers = self.peers.clone();
         let generation = self.generation.clone();
+        let address_book = self.address_book.clone();
 
         tokio::spawn(async move {
-            acceptor_task(endpoint, inbox_tx, notify, local_node, peers, generation).await;
+            acceptor_task(
+                endpoint,
+                inbox_tx,
+                notify,
+                local_node,
+                peers,
+                generation,
+                address_book,
+            )
+            .await;
         });
 
         Ok(())
     }
 
-    /// Connect to a peer node via QUIC.
+    /// Connect to a configured peer node via QUIC.
     ///
     /// # Errors
     /// Returns an error if the connection fails or the stream cannot be opened.
@@ -214,8 +245,16 @@ impl QuicDirectTransport {
         peer_id: NodeId,
         peer_addr: SocketAddr,
     ) -> Result<(), TransportError> {
-        self.peer_addrs.write().await.insert(peer_id, peer_addr);
+        self.address_book.configure(peer_id, peer_addr).await;
+        self.dial(peer_id, peer_addr, FreshLink::Replace).await
+    }
 
+    async fn dial(
+        &self,
+        peer_id: NodeId,
+        peer_addr: SocketAddr,
+        fresh_link: FreshLink,
+    ) -> Result<(), TransportError> {
         let endpoint_guard = self.endpoint.read().await;
         let endpoint = endpoint_guard
             .as_ref()
@@ -246,6 +285,15 @@ impl QuicDirectTransport {
             .map_err(|e| TransportError::SendFailed(format!("failed to connect to peer: {e}")))?
             .await
             .map_err(|e| TransportError::SendFailed(format!("connection to peer failed: {e}")))?;
+
+        if fresh_link == FreshLink::Keep && self.has_fresh_link(peer_id).await {
+            debug!(
+                peer = peer_id.get(),
+                "peer linked first, dropping this redial"
+            );
+            connection.close(0u32.into(), b"already linked");
+            return Ok(());
+        }
 
         #[cfg(feature = "dev-insecure")]
         info!(
@@ -280,6 +328,7 @@ impl QuicDirectTransport {
             control_tx,
             bulk_tx,
             generation,
+            linked_at: Instant::now(),
         };
         self.peers.write().await.insert(peer_id, peer_conn);
 
@@ -303,29 +352,49 @@ impl QuicDirectTransport {
         Ok(())
     }
 
-    /// Re-dial every configured peer that is not currently alive.
-    ///
-    /// Driven by the heartbeat liveness view rather than the transport peer
-    /// map, so a stale entry that has not yet been removed by a send failure
-    /// does not stop reconnection. `connect_to_peer` replaces any stale entry.
     pub async fn redial_unlinked(&self, linked: &[NodeId]) {
-        let targets: Vec<(NodeId, SocketAddr)> = {
-            let addrs = self.peer_addrs.read().await;
-            addrs
-                .iter()
-                .filter(|&(node, _)| *node != self.node_id && !linked.contains(node))
-                .map(|(node, addr)| (*node, *addr))
-                .collect()
-        };
+        let targets: Vec<NodeId> = self
+            .address_book
+            .nodes()
+            .await
+            .into_iter()
+            .filter(|node| *node != self.node_id && !linked.contains(node))
+            .collect();
+        self.redial(&targets).await;
+    }
 
-        let mut dials = tokio::task::JoinSet::new();
-        for (node, addr) in targets {
+    pub async fn peers_needing_dial(&self, dead: &[NodeId]) -> Vec<NodeId> {
+        let known = self.address_book.nodes().await;
+        let peers = self.peers.read().await;
+        known
+            .into_iter()
+            .filter(|node| *node != self.node_id)
+            .filter(|node| {
+                peers.get(node).is_none_or(|link| {
+                    dead.contains(node) && link.linked_at.elapsed() >= NEW_LINK_SETTLE
+                })
+            })
+            .collect()
+    }
+
+    pub async fn redial(&self, targets: &[NodeId]) {
+        let mut dials_running = tokio::task::JoinSet::new();
+        for node in targets.iter().copied() {
+            let Some(addr) = self.address_book.addr(node).await else {
+                continue;
+            };
+            if !self.start_dial(node) {
+                continue;
+            }
             let transport = self.clone();
-            dials.spawn(async move {
-                match tokio::time::timeout(REDIAL_DIAL_TIMEOUT, transport.connect_to_peer(node, addr))
-                    .await
+            dials_running.spawn(async move {
+                match tokio::time::timeout(
+                    REDIAL_DIAL_TIMEOUT,
+                    transport.dial(node, addr, FreshLink::Keep),
+                )
+                .await
                 {
-                    Ok(Ok(())) => info!(peer = node.get(), addr = %addr, "redialled peer"),
+                    Ok(Ok(())) => debug!(peer = node.get(), addr = %addr, "redial to peer finished"),
                     Ok(Err(e)) => {
                         debug!(peer = node.get(), addr = %addr, error = %e, "redial to peer failed, will retry");
                     }
@@ -333,9 +402,30 @@ impl QuicDirectTransport {
                         debug!(peer = node.get(), addr = %addr, "redial to peer timed out, will retry");
                     }
                 }
+                transport.finish_dial(node);
             });
         }
-        while dials.join_next().await.is_some() {}
+        while dials_running.join_next().await.is_some() {}
+    }
+
+    async fn has_fresh_link(&self, node: NodeId) -> bool {
+        self.peers
+            .read()
+            .await
+            .get(&node)
+            .is_some_and(|link| link.linked_at.elapsed() < NEW_LINK_SETTLE)
+    }
+
+    fn start_dial(&self, node: NodeId) -> bool {
+        self.dialing
+            .lock()
+            .is_ok_and(|mut dialing| dialing.insert(node))
+    }
+
+    fn finish_dial(&self, node: NodeId) {
+        if let Ok(mut dialing) = self.dialing.lock() {
+            dialing.remove(&node);
+        }
     }
 
     #[must_use]
@@ -583,6 +673,7 @@ async fn acceptor_task(
     local_node: NodeId,
     peers: Arc<RwLock<HashMap<NodeId, PeerConnection>>>,
     generation: Arc<AtomicU64>,
+    address_book: Arc<AddressBook>,
 ) {
     info!(node = local_node.get(), "QUIC acceptor task started");
 
@@ -599,10 +690,17 @@ async fn acceptor_task(
         let notify = notify.clone();
         let peers = peers.clone();
         let generation = generation.clone();
+        let address_book = address_book.clone();
 
         tokio::spawn(async move {
             if let Err(e) = handle_incoming_connection(
-                connection, inbox_tx, notify, local_node, peers, generation,
+                connection,
+                inbox_tx,
+                notify,
+                local_node,
+                peers,
+                generation,
+                address_book,
             )
             .await
             {
@@ -619,6 +717,7 @@ async fn handle_incoming_connection(
     local_node: NodeId,
     peers: Arc<RwLock<HashMap<NodeId, PeerConnection>>>,
     generation: Arc<AtomicU64>,
+    address_book: Arc<AddressBook>,
 ) -> Result<(), TransportError> {
     let (send_stream, mut recv_stream) = connection
         .accept_bi()
@@ -636,6 +735,11 @@ async fn handle_incoming_connection(
         .ok_or_else(|| TransportError::SendFailed("invalid peer node ID".to_string()))?;
 
     info!(peer = peer_node.get(), "accepted incoming QUIC connection");
+    if peer_node != local_node {
+        address_book
+            .learn(peer_node, connection.remote_address())
+            .await;
+    }
 
     let (control_tx, control_rx) = flume::bounded(PEER_CONTROL_QUEUE_CAPACITY);
     let (bulk_tx, bulk_rx) = flume::bounded(PEER_BULK_QUEUE_CAPACITY);
@@ -646,6 +750,7 @@ async fn handle_incoming_connection(
             control_tx,
             bulk_tx,
             generation: peer_generation,
+            linked_at: Instant::now(),
         };
         peers.write().await.insert(peer_node, peer_conn);
     }

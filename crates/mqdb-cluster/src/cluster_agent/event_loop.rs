@@ -1,11 +1,14 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use super::{AdminRequest, ClusteredAgent, MESH_CHECK_INTERVAL_SECS, RunningBroker};
+use super::{
+    AdminRequest, ClusteredAgent, MESH_CHECK_INTERVAL_SECS, REDIAL_CHECK_INTERVAL_SECS,
+    RunningBroker,
+};
 use crate::cluster::{
     ClusterMessage, ClusterTransport, LocalPublishKind, LocalPublishRequest, LocalRetainedWriter,
-    NodeController, NodeId, ProcessingBatch, RoutedDeliveryLanes, TopicSubscriptionBroadcast,
-    WildcardBroadcast,
+    NodeController, NodeId, ProcessingBatch, RedialBackoff, RoutedDeliveryLanes,
+    TopicSubscriptionBroadcast, WildcardBroadcast,
 };
 use mqdb_agent::auth_config::AuthSetupResult;
 use mqtt5::broker::router::MessageRouter;
@@ -84,6 +87,8 @@ impl ClusteredAgent {
         let mut ttl_cleanup_interval = interval(Duration::from_secs(TTL_CLEANUP_INTERVAL_SECS));
         let mut subscription_reconciliation_interval = interval(Duration::from_mins(5));
         let mut mesh_check_interval = interval(Duration::from_secs(MESH_CHECK_INTERVAL_SECS));
+        let mut redial_interval = interval(Duration::from_secs(REDIAL_CHECK_INTERVAL_SECS));
+        let mut redial_backoff = RedialBackoff::default();
         let mut retained_sync_cleanup_interval =
             interval(Duration::from_secs(RETAINED_SYNC_CLEANUP_INTERVAL_SECS));
         let mut cascade_retry_interval = tokio::time::interval_at(
@@ -172,6 +177,9 @@ impl ClusteredAgent {
                 _ = mesh_check_interval.tick() => {
                     self.warn_on_unlinked_nodes().await;
                     self.redial_disconnected_peers().await;
+                }
+                _ = redial_interval.tick() => {
+                    self.redial_down_peers(&mut redial_backoff).await;
                 }
                 _ = retained_sync_cleanup_interval.tick() => {
                     self.prune_retained_echoes();
@@ -282,10 +290,6 @@ impl ClusteredAgent {
                     }
                 }
             }
-        }
-
-        if !batch.dead_nodes.is_empty() {
-            self.redial_disconnected_peers().await;
         }
     }
 
@@ -559,6 +563,22 @@ impl ClusteredAgent {
         if let Some(quic) = quic {
             tokio::spawn(async move {
                 quic.redial_unlinked(&linked).await;
+            });
+        }
+    }
+
+    async fn redial_down_peers(&self, backoff: &mut RedialBackoff) {
+        let (quic, dead) = {
+            let ctrl = self.controller.read().await;
+            (ctrl.transport().as_quic().cloned(), ctrl.dead_nodes())
+        };
+        let Some(quic) = quic else {
+            return;
+        };
+        let due = backoff.due(&quic.peers_needing_dial(&dead).await, current_time_ms());
+        if !due.is_empty() {
+            tokio::spawn(async move {
+                quic.redial(&due).await;
             });
         }
     }

@@ -1,6 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+mod address_book;
 mod client_location;
 mod cursor;
 pub mod db;
@@ -33,6 +34,7 @@ pub mod raft;
 mod raft_task;
 mod rebalance_coordinator;
 mod rebalancer;
+mod redial_backoff;
 mod replication;
 mod retained_store;
 mod retained_sync;
@@ -114,6 +116,7 @@ pub use rebalancer::{
     PartitionReassignment, RebalanceConfig, compute_balanced_assignments,
     compute_incremental_assignments, compute_removal_assignments,
 };
+pub use redial_backoff::RedialBackoff;
 pub use replication::{ReplicaRole, ReplicaState, ReplicationError};
 pub use retained_store::{
     RetainedMessage, RetainedStore, RetainedStoreError, retained_message_key,
