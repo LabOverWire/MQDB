@@ -1,7 +1,9 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use super::super::node_controller::NodeController;
+use super::super::node_controller::{
+    NodeController, PendingFkDeleteWork, PendingFkWork, PendingUniqueWork,
+};
 use super::super::protocol::PresenceBroadcast;
 use super::super::transport::{ClusterMessage, ClusterTransport};
 use super::super::{
@@ -12,6 +14,7 @@ use super::{ClusterEventHandler, LwtForwardingData, qos_to_u8};
 use crate::cluster::{LocalShare, RemoteForward, remote_forwards};
 use mqtt5::broker::events::ClientPublishEvent;
 use std::collections::HashMap;
+use tokio::sync::RwLockWriteGuard;
 use tracing::{debug, trace, warn};
 
 impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
@@ -154,16 +157,13 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(super) async fn handle_db_publish(&self, node_id: NodeId, event: &ClientPublishEvent) {
         use super::super::db_handler::{DbPublishResult, MqttRequestContext};
-        use super::super::node_controller::fk::await_fk_checks;
 
         debug!(topic = %event.topic, "handling $DB/ request");
         let start = std::time::Instant::now();
         let mut ctrl = self.controller.write().await;
-        #[allow(clippy::cast_possible_truncation)]
-        let t_lock = start.elapsed().as_micros() as u64;
+        let t_lock = crate::cluster::node_controller::elapsed_micros(start);
         let ctx = MqttRequestContext {
             response_topic: event.response_topic.as_deref(),
             correlation_data: event.correlation_data.as_deref(),
@@ -174,16 +174,15 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             .db_handler
             .handle_publish(&mut ctrl, event.topic.as_ref(), &event.payload, &ctx)
             .await;
+        let qos = qos_to_u8(event.qos);
 
         match result {
             DbPublishResult::Response(response) => {
-                #[allow(clippy::cast_possible_truncation)]
-                let t_handle = start.elapsed().as_micros() as u64;
+                let t_handle = crate::cluster::node_controller::elapsed_micros(start);
                 ctrl.transport()
-                    .queue_local_publish(response.topic, response.payload, qos_to_u8(event.qos))
+                    .queue_local_publish(response.topic, response.payload, qos)
                     .await;
-                #[allow(clippy::cast_possible_truncation)]
-                let t_queue = start.elapsed().as_micros() as u64;
+                let t_queue = crate::cluster::node_controller::elapsed_micros(start);
                 tracing::info!(
                     node = node_id.get(),
                     t_lock,
@@ -194,118 +193,113 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             }
             DbPublishResult::NoResponse => {}
             DbPublishResult::PendingUniqueCheck(pending) => {
-                let local_reserved = pending.phase1.local_reserved;
-                let pending_remote = pending.phase1.pending_remote;
-                let pending_quorum = pending.phase1.pending_quorum;
-                let continuation = pending.continuation;
-                drop(ctrl);
-                let remote_results = combine_quorum(pending_remote, pending_quorum).await;
-                let mut ctrl = self.controller.write().await;
-                if let Some(response) = self
-                    .db_handler
-                    .complete_pending_unique_check(
-                        &mut ctrl,
-                        local_reserved,
-                        remote_results,
-                        continuation,
-                    )
-                    .await
-                {
-                    ctrl.transport()
-                        .queue_local_publish(response.topic, response.payload, qos_to_u8(event.qos))
-                        .await;
-                }
+                self.finish_unique_check(ctrl, *pending, qos).await;
             }
             DbPublishResult::PendingFkCheck(pending) => {
-                use super::super::db_handler::FkCheckCompletion;
-
-                let pending_checks = pending.pending_checks;
-                let continuation = pending.continuation;
-                drop(ctrl);
-                let fk_result = await_fk_checks(pending_checks).await;
-                let mut ctrl = self.controller.write().await;
-                let (fk_ok, fk_error) = match fk_result {
-                    Ok(()) => (true, None),
-                    Err(msg) => (false, Some(msg)),
-                };
-                match self
-                    .db_handler
-                    .complete_pending_fk_check(&mut ctrl, fk_ok, fk_error, continuation)
-                    .await
-                {
-                    FkCheckCompletion::Done(Some(response)) => {
-                        ctrl.transport()
-                            .queue_local_publish(
-                                response.topic,
-                                response.payload,
-                                qos_to_u8(event.qos),
-                            )
-                            .await;
-                    }
-                    FkCheckCompletion::NeedUniqueCheck(pending) => {
-                        let local_reserved = pending.phase1.local_reserved;
-                        let pending_remote = pending.phase1.pending_remote;
-                        let pending_quorum = pending.phase1.pending_quorum;
-                        let continuation = pending.continuation;
-                        drop(ctrl);
-                        let remote_results = combine_quorum(pending_remote, pending_quorum).await;
-                        let mut ctrl = self.controller.write().await;
-                        if let Some(response) = self
-                            .db_handler
-                            .complete_pending_unique_check(
-                                &mut ctrl,
-                                local_reserved,
-                                remote_results,
-                                continuation,
-                            )
-                            .await
-                        {
-                            ctrl.transport()
-                                .queue_local_publish(
-                                    response.topic,
-                                    response.payload,
-                                    qos_to_u8(event.qos),
-                                )
-                                .await;
-                        }
-                    }
-                    FkCheckCompletion::Done(None) => {}
-                }
+                self.finish_fk_check(ctrl, *pending, qos).await;
             }
             DbPublishResult::PendingFkDelete(pending) => {
-                let local_results = pending.local_results;
-                let pending_lookups = pending.pending_lookups;
-                let continuation = pending.continuation;
-                let (del_entity, del_id) = continuation.entity_id();
-                let (del_entity, del_id) = (del_entity.to_string(), del_id.to_string());
-                let sender_owned = continuation.sender_ref().map(String::from);
-                drop(ctrl);
-                let (restrict_error, side_effects) =
-                    super::super::node_controller::fk::collect_recursive_cascade(
-                        &self.controller,
-                        &del_entity,
-                        &del_id,
-                        local_results,
-                        pending_lookups,
-                        sender_owned.as_deref(),
-                    )
-                    .await;
-                let mut ctrl = self.controller.write().await;
-                if let Some(response) = self
-                    .db_handler
-                    .complete_pending_fk_delete(
-                        &mut ctrl,
-                        restrict_error,
-                        side_effects,
-                        continuation,
-                    )
-                    .await
-                {
-                    ctrl.transport()
-                        .queue_local_publish(response.topic, response.payload, qos_to_u8(event.qos))
-                        .await;
-                }
+                self.finish_fk_delete(ctrl, *pending, qos).await;
             }
+        }
+    }
+
+    async fn finish_unique_check(
+        &self,
+        ctrl: RwLockWriteGuard<'_, NodeController<T>>,
+        pending: PendingUniqueWork,
+        qos: u8,
+    ) {
+        let PendingUniqueWork {
+            phase1,
+            continuation,
+        } = pending;
+        drop(ctrl);
+        let remote_results = combine_quorum(phase1.pending_remote, phase1.pending_quorum).await;
+        let mut ctrl = self.controller.write().await;
+        if let Some(response) = self
+            .db_handler
+            .complete_pending_unique_check(
+                &mut ctrl,
+                phase1.local_reserved,
+                remote_results,
+                continuation,
+            )
+            .await
+        {
+            ctrl.transport()
+                .queue_local_publish(response.topic, response.payload, qos)
+                .await;
+        }
+    }
+
+    async fn finish_fk_check(
+        &self,
+        ctrl: RwLockWriteGuard<'_, NodeController<T>>,
+        pending: PendingFkWork,
+        qos: u8,
+    ) {
+        use super::super::db_handler::FkCheckCompletion;
+        use super::super::node_controller::fk::await_fk_checks;
+
+        drop(ctrl);
+        let fk_result = await_fk_checks(pending.pending_checks).await;
+        let mut ctrl = self.controller.write().await;
+        let (fk_ok, fk_error) = match fk_result {
+            Ok(()) => (true, None),
+            Err(msg) => (false, Some(msg)),
+        };
+        match self
+            .db_handler
+            .complete_pending_fk_check(&mut ctrl, fk_ok, fk_error, pending.continuation)
+            .await
+        {
+            FkCheckCompletion::Done(Some(response)) => {
+                ctrl.transport()
+                    .queue_local_publish(response.topic, response.payload, qos)
+                    .await;
+            }
+            FkCheckCompletion::NeedUniqueCheck(unique) => {
+                self.finish_unique_check(ctrl, *unique, qos).await;
+            }
+            FkCheckCompletion::Done(None) => {}
+        }
+    }
+
+    async fn finish_fk_delete(
+        &self,
+        ctrl: RwLockWriteGuard<'_, NodeController<T>>,
+        pending: PendingFkDeleteWork,
+        qos: u8,
+    ) {
+        let PendingFkDeleteWork {
+            local_results,
+            pending_lookups,
+            continuation,
+        } = pending;
+        let (del_entity, del_id) = continuation.entity_id();
+        let (del_entity, del_id) = (del_entity.to_string(), del_id.to_string());
+        let sender_owned = continuation.sender_ref().map(String::from);
+        drop(ctrl);
+        let (restrict_error, side_effects) =
+            super::super::node_controller::fk::collect_recursive_cascade(
+                &self.controller,
+                &del_entity,
+                &del_id,
+                local_results,
+                pending_lookups,
+                sender_owned.as_deref(),
+            )
+            .await;
+        let mut ctrl = self.controller.write().await;
+        if let Some(response) = self
+            .db_handler
+            .complete_pending_fk_delete(&mut ctrl, restrict_error, side_effects, continuation)
+            .await
+        {
+            ctrl.transport()
+                .queue_local_publish(response.topic, response.payload, qos)
+                .await;
         }
     }
 
@@ -413,22 +407,12 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
     }
 }
 
-type RemoteReserveResult = Result<
-    Vec<(String, Vec<u8>, NodeId)>,
-    (
-        super::super::node_controller::ReserveFailure,
-        Vec<(String, Vec<u8>, NodeId)>,
-    ),
->;
-
 async fn combine_quorum(
     pending_remote: Vec<super::super::node_controller::PendingUniqueReserve>,
     pending_quorum: Vec<(String, tokio::sync::oneshot::Receiver<bool>)>,
-) -> RemoteReserveResult {
+) -> super::super::node_controller::RemoteReserveResult {
     use super::super::node_controller::ReserveFailure;
     use super::super::node_controller::unique::{await_unique_quorum, await_unique_reserves};
-    // Await the remote-reserve and local-quorum rounds concurrently so a create waits the max of the
-    // two ~5s deadlines, not their sum.
     let (remote_results, quorum) = tokio::join!(
         await_unique_reserves(pending_remote),
         await_unique_quorum(pending_quorum),
@@ -439,7 +423,6 @@ async fn combine_quorum(
                 tracing::debug!(?durable, "unique reserve is majority-durable");
                 Ok(confirmed)
             }
-            // A quorum that never lands is transient, not a real conflict.
             Err(field) => Err((ReserveFailure::NotDurable(field), confirmed)),
         },
         Err(e) => Err(e),

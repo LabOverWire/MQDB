@@ -48,10 +48,12 @@ fn primary_holding(id: u16, blob_len: usize) -> (NodeController<MockTransport>, 
     let mut primary = controller(id);
     let partition = assign(&mut primary, node(id));
     primary.become_primary(partition, Epoch::new(1));
-    primary
+    let seeded = primary
         .stores
-        .db_create_replicated(ENTITY, ID, &record(blob_len), 0)
+        .db_create_write(ENTITY, ID, &record(blob_len), 0)
+        .map(|(_, write)| write)
         .unwrap();
+    primary.stores.apply_write(&seeded).unwrap();
     primary.transport.take_sent();
     (primary, partition)
 }
@@ -103,11 +105,15 @@ fn imported(ctrl: &NodeController<MockTransport>) -> bool {
 
 fn export_of(blob_len: usize, chunk_size: usize, transfer_id: u64) -> Vec<SnapshotChunk> {
     let (primary, partition) = primary_holding(9, blob_len);
-    let mut sender = SnapshotSender::new(partition, primary.stores.export_partition(partition), 1)
-        .unwrap()
-        .with_chunk_size(chunk_size)
-        .unwrap()
-        .with_transfer_id(transfer_id);
+    let mut sender = SnapshotSender::new(
+        partition,
+        primary.stores.export_partition(partition).unwrap(),
+        1,
+    )
+    .unwrap()
+    .with_chunk_size(chunk_size)
+    .unwrap()
+    .with_transfer_id(transfer_id);
     std::iter::from_fn(|| {
         let chunk = sender.current_chunk()?;
         sender.advance();
@@ -288,10 +294,14 @@ async fn a_chunk_nobody_asked_for_is_not_imported() {
     let mut replica = controller(2);
     assign(&mut replica, node(1));
 
-    let chunk = SnapshotSender::new(partition, primary.stores.export_partition(partition), 1)
-        .unwrap()
-        .current_chunk()
-        .unwrap();
+    let chunk = SnapshotSender::new(
+        partition,
+        primary.stores.export_partition(partition).unwrap(),
+        1,
+    )
+    .unwrap()
+    .current_chunk()
+    .unwrap();
     replica
         .transport
         .inject_message(node(1), ClusterMessage::SnapshotChunk(chunk));
@@ -305,10 +315,14 @@ async fn a_chunk_from_a_node_that_was_not_asked_is_not_imported() {
     let (other, partition) = primary_holding(3, 1024);
     let (mut replica, _) = awaiting_replica(node(1)).await;
 
-    let chunk = SnapshotSender::new(partition, other.stores.export_partition(partition), 1)
-        .unwrap()
-        .current_chunk()
-        .unwrap();
+    let chunk = SnapshotSender::new(
+        partition,
+        other.stores.export_partition(partition).unwrap(),
+        1,
+    )
+    .unwrap()
+    .current_chunk()
+    .unwrap();
     replica
         .transport
         .inject_message(node(3), ClusterMessage::SnapshotChunk(chunk));
@@ -409,10 +423,14 @@ async fn a_legacy_single_chunk_without_a_transfer_id_is_imported() {
     let (primary, partition) = primary_holding(1, 1024);
     let (mut replica, _) = awaiting_replica(node(1)).await;
 
-    let chunk = SnapshotSender::new(partition, primary.stores.export_partition(partition), 1)
-        .unwrap()
-        .current_chunk()
-        .unwrap();
+    let chunk = SnapshotSender::new(
+        partition,
+        primary.stores.export_partition(partition).unwrap(),
+        1,
+    )
+    .unwrap()
+    .current_chunk()
+    .unwrap();
     assert_eq!(chunk.transfer_id, None);
     replica
         .transport
@@ -621,10 +639,14 @@ async fn a_new_chunk_zero_restarts_the_transfer() {
 async fn a_legacy_transfer_spanning_several_chunks_is_imported_in_order() {
     let (primary, partition) = primary_holding(1, 1024);
     let (mut replica, _) = awaiting_replica(node(1)).await;
-    let mut sender = SnapshotSender::new(partition, primary.stores.export_partition(partition), 1)
-        .unwrap()
-        .with_chunk_size(256)
-        .unwrap();
+    let mut sender = SnapshotSender::new(
+        partition,
+        primary.stores.export_partition(partition).unwrap(),
+        1,
+    )
+    .unwrap()
+    .with_chunk_size(256)
+    .unwrap();
     while let Some(chunk) = sender.current_chunk() {
         assert_eq!(chunk.transfer_id, None);
         sender.advance();
@@ -759,7 +781,7 @@ fn counter(ctrl: &NodeController<MockTransport>) -> Option<u64> {
 
 async fn write_counter(primary: &mut NodeController<MockTransport>, n: u64) {
     primary
-        .db_upsert(ENTITY, ID, &counter_value(n), n + 1)
+        .db_update(ENTITY, ID, &counter_value(n), n + 1)
         .await
         .unwrap();
 }
@@ -891,7 +913,7 @@ async fn a_catchup_too_large_for_one_frame_arrives_in_pieces() {
     let chunks = start_transfer(&mut primary, &mut replica).await;
     let large = record(100 * 1024);
     for n in 0..110 {
-        primary.db_upsert(ENTITY, ID, &large, n + 1).await.unwrap();
+        primary.db_update(ENTITY, ID, &large, n + 1).await.unwrap();
     }
     primary.transport.take_sent();
     finish_transfer(&mut replica, &chunks).await;

@@ -1,6 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use super::super::StoreApplyError;
 use super::super::migration::MigrationPhase;
 use super::super::protocol::CatchupRequest;
 use super::super::replication::ReplicaRole;
@@ -95,18 +96,24 @@ impl<T: ClusterTransport> NodeController<T> {
         self.pump_outgoing_snapshots().await;
     }
 
-    fn export_snapshot(&self, partition: PartitionId) -> Option<SnapshotSender> {
-        let data = self.stores.export_partition(partition);
+    fn export_snapshot(
+        &self,
+        partition: PartitionId,
+    ) -> Result<Option<SnapshotSender>, StoreApplyError> {
+        let data = self.stores.export_partition(partition)?;
         let sequence = self.sequence(partition).unwrap_or(0);
         let transfer_id = uuid::Uuid::new_v4().as_u64_pair().0;
-        let sender = SnapshotSender::new(partition, data, sequence)?.with_transfer_id(transfer_id);
+        let Some(sender) = SnapshotSender::new(partition, data, sequence) else {
+            return Ok(None);
+        };
+        let sender = sender.with_transfer_id(transfer_id);
         tracing::info!(
             ?partition,
             total_chunks = sender.total_chunks(),
             transfer_id,
             "exported partition snapshot"
         );
-        Some(sender)
+        Ok(Some(sender))
     }
 
     async fn pump_outgoing_snapshots(&mut self) {
@@ -121,13 +128,20 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             if self.outgoing_snapshots[index].sender.is_none() {
                 let partition = self.outgoing_snapshots[index].partition;
-                let exported = self.export_snapshot(partition);
-                if exported.is_none() {
-                    tracing::warn!(?partition, to = to.get(), "partition too large to send");
-                    self.outgoing_snapshots.remove(index);
-                    continue;
+                match self.export_snapshot(partition) {
+                    Ok(Some(sender)) => self.outgoing_snapshots[index].sender = Some(sender),
+                    Ok(None) => {
+                        tracing::warn!(?partition, to = to.get(), "partition too large to send");
+                        self.outgoing_snapshots.remove(index);
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::error!(?partition, to = to.get(), %error, "partition snapshot not exported");
+                        self.outgoing_snapshots.remove(index);
+                        self.send_snapshot_failed(to, partition).await;
+                        continue;
+                    }
                 }
-                self.outgoing_snapshots[index].sender = exported;
             }
             let outgoing = &mut self.outgoing_snapshots[index];
             let Some(sender) = outgoing.sender.as_mut() else {
@@ -259,13 +273,17 @@ impl<T: ClusterTransport> NodeController<T> {
 
     async fn refuse_snapshot(&mut self, from: NodeId, partition: PartitionId) {
         self.back_off_snapshot(partition);
+        self.send_snapshot_failed(from, partition).await;
+    }
+
+    async fn send_snapshot_failed(&self, to: NodeId, partition: PartitionId) {
         let complete = SnapshotComplete::failed(partition);
         if let Err(error) = self
             .transport
-            .send(from, ClusterMessage::SnapshotComplete(complete))
+            .send(to, ClusterMessage::SnapshotComplete(complete))
             .await
         {
-            tracing::debug!(?partition, to = from.get(), %error, "snapshot failure notice not sent");
+            tracing::debug!(?partition, to = to.get(), %error, "snapshot failure notice not sent");
         }
     }
 
