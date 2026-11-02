@@ -120,7 +120,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
 
     #[must_use]
     pub fn publishable_partition_map(&self) -> Option<&PartitionMap> {
-        (!self.restored_map_unconfirmed).then_some(&self.partition_map)
+        (!self.restored_map_unconfirmed || self.leader_ready()).then_some(&self.partition_map)
     }
 
     pub fn commit_index(&self) -> u64 {

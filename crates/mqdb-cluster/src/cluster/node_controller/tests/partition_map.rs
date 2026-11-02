@@ -1332,3 +1332,30 @@ async fn a_marker_from_a_newer_assignment_is_not_trusted_for_an_older_map() {
 
     assert_eq!(restarted.role(partition), ReplicaRole::AwaitingSnapshot);
 }
+
+#[tokio::test]
+async fn a_partition_still_waiting_for_its_data_is_not_counted_as_ready() {
+    let partition = session_partition("c1");
+    let mut replica = controller(3);
+    replica.become_replica(partition, Epoch::new(1), 0);
+    let mut ctrl = controller(2);
+    ctrl.apply_raft_partition_map(map_with(partition, node(2), &[node(3)], 1))
+        .await;
+    assert_eq!(ctrl.partitions_ready(), 0);
+
+    serve_snapshot(&mut replica, &mut ctrl, partition).await;
+
+    assert_eq!(ctrl.role(partition), ReplicaRole::Primary);
+    assert_eq!(ctrl.partitions_ready(), 1);
+}
+
+#[tokio::test]
+async fn a_replica_still_waiting_for_its_data_does_not_block_readiness() {
+    let partition = session_partition("c1");
+    let mut ctrl = controller(2);
+    ctrl.apply_raft_partition_map(map_with(partition, node(1), &[node(2)], 1))
+        .await;
+
+    assert_eq!(ctrl.role(partition), ReplicaRole::AwaitingSnapshot);
+    assert_eq!(ctrl.partitions_ready(), 1);
+}

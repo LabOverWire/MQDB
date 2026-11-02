@@ -701,3 +701,33 @@ async fn a_map_without_a_restored_snapshot_is_publishable_from_the_start() {
             .unwrap();
     assert!(coord.publishable_partition_map().is_some());
 }
+
+#[tokio::test]
+async fn a_restored_leader_publishes_only_after_it_commits_its_own_term() {
+    let (mut coord, _) = coordinator_restored_from_a_snapshot();
+    let node2 = NodeId::validated(2).unwrap();
+    coord.add_peer(node2);
+    let refused = crate::cluster::raft::rpc::AppendEntriesRequest::heartbeat(3, 2, 50, 2, 0);
+    coord.handle_append_entries(node2, refused, 0).await;
+    coord.tick(0).await;
+    coord.tick(1000).await;
+    let term = coord.current_term();
+    coord
+        .handle_request_vote_response(
+            node2,
+            crate::cluster::raft::rpc::RequestVoteResponse::granted(term),
+        )
+        .await;
+    assert!(coord.is_leader());
+    assert!(coord.publishable_partition_map().is_none());
+
+    let matched = coord.last_log_index();
+    coord
+        .handle_append_entries_response(
+            node2,
+            crate::cluster::raft::rpc::AppendEntriesResponse::success(term, matched),
+        )
+        .await;
+
+    assert!(coord.publishable_partition_map().is_some());
+}

@@ -210,6 +210,14 @@ impl<T: ClusterTransport> NodeController<T> {
             && self.role(partition) == ReplicaRole::AwaitingSnapshot
     }
 
+    pub(crate) fn partitions_ready(&self) -> u16 {
+        let ready = PartitionId::all().filter(|partition| {
+            self.partition_map.primary(*partition).is_some()
+                && !self.waits_for_primary_data(*partition)
+        });
+        u16::try_from(ready.count()).unwrap_or(u16::MAX)
+    }
+
     pub async fn db_create(
         &mut self,
         entity_type: &str,
