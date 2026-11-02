@@ -3,7 +3,7 @@
 
 use super::{StoreApplyError, StoreManager};
 use crate::cluster::protocol::{Operation, ReplicationWrite};
-use crate::cluster::{Epoch, NUM_PARTITIONS, PartitionId, entity};
+use crate::cluster::{Epoch, NUM_PARTITIONS, PartitionAssignment, PartitionId, entity};
 
 const EPOCH_ID: &str = "";
 const MARKED_STORE_ID: &str = "marked";
@@ -15,8 +15,10 @@ pub(crate) struct HeldPrimaries {
 }
 
 impl HeldPrimaries {
-    pub(crate) fn trusts(&self, partition: PartitionId, epoch: Epoch) -> bool {
-        self.legacy_store || self.epochs[usize::from(partition.get())] == Some(epoch)
+    pub(crate) fn trusts(&self, partition: PartitionId, assignment: &PartitionAssignment) -> bool {
+        self.legacy_store
+            || self.epochs[usize::from(partition.get())]
+                .is_some_and(|held| (assignment.primary_since..=assignment.epoch).contains(&held))
     }
 
     pub(crate) fn without_legacy(self) -> Self {

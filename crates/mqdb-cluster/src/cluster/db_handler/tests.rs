@@ -139,6 +139,7 @@ fn setup_controller_with_partition(partition: PartitionId) -> NodeController<Moc
             primary: Some(node1),
             replicas: vec![],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -161,6 +162,7 @@ fn setup_controller_all_partitions() -> NodeController<MockTransport> {
                 primary: Some(node1),
                 replicas: vec![],
                 epoch: Epoch::new(1),
+                primary_since: Epoch::new(1),
             },
         );
     }
@@ -319,6 +321,7 @@ async fn unsealed_partition_reserve_is_retryable_not_a_conflict() {
                 primary: Some(node1),
                 replicas: vec![node2, node3],
                 epoch: Epoch::new(1),
+                primary_since: Epoch::new(1),
             },
         );
     }
@@ -774,6 +777,7 @@ async fn vault_json_create_forwarded_to_primary_keeps_ttl_expiry() {
         primary: Some(node2),
         replicas: vec![],
         epoch: Epoch::new(1),
+        primary_since: Epoch::new(1),
     };
 
     let outbox = Arc::new(Mutex::new(Vec::new()));
@@ -865,6 +869,7 @@ async fn ttl_reap_pass_fills_its_budget_with_rows_it_owns() {
                 primary: Some(node1),
                 replicas: vec![],
                 epoch: Epoch::new(1),
+                primary_since: Epoch::new(1),
             },
         );
     }
@@ -903,6 +908,7 @@ async fn ttl_reap_budget_skips_partitions_mapped_but_not_held_as_primary() {
                     primary: Some(node1),
                     replicas: vec![],
                     epoch: Epoch::new(1),
+                    primary_since: Epoch::new(1),
                 },
             );
         } else {
@@ -2690,6 +2696,7 @@ async fn cluster_share_and_read_forward_to_resource_primary() {
             primary: Some(node2),
             replicas: vec![],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -2776,6 +2783,7 @@ async fn cluster_forwarded_read_graded_against_grant_on_primary() {
             primary: Some(node1),
             replicas: vec![],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -3754,6 +3762,7 @@ async fn json_write_without_a_response_topic_is_forwarded_to_the_primary() {
             primary: Some(node2),
             replicas: vec![],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -3810,6 +3819,7 @@ async fn forwarded_write_without_a_response_topic_is_applied_without_a_reply() {
             primary: Some(node1),
             replicas: vec![],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -3865,6 +3875,7 @@ async fn a_forwarded_create_on_a_node_that_lost_the_partition_is_refused() {
             primary: Some(node3),
             replicas: vec![node1],
             epoch: Epoch::new(2),
+            primary_since: Epoch::new(2),
         },
     );
     ctrl.update_partition_map(map);
@@ -3928,6 +3939,7 @@ async fn a_create_whose_primary_moves_during_its_unique_check_is_refused() {
             primary: Some(node1),
             replicas: vec![node3],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.apply_raft_partition_map(map.clone()).await;
@@ -3937,6 +3949,7 @@ async fn a_create_whose_primary_moves_during_its_unique_check_is_refused() {
             primary: Some(node3),
             replicas: vec![node1],
             epoch: Epoch::new(2),
+            primary_since: Epoch::new(2),
         },
     );
     ctrl.apply_raft_partition_map(map).await;
@@ -4008,6 +4021,7 @@ fn lose_primary_role(
                     vec![node1]
                 },
                 epoch: Epoch::new(2),
+                primary_since: Epoch::new(2),
             },
         );
     }
@@ -4218,6 +4232,7 @@ fn controller_all_partitions_with_storage(
                 primary: Some(node1),
                 replicas: vec![],
                 epoch: Epoch::new(1),
+                primary_since: Epoch::new(1),
             },
         );
     }

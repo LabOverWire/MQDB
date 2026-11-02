@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::cluster::raft::PartitionUpdate;
-use crate::cluster::{PartitionAssignment, PartitionMap};
+use crate::cluster::{PartitionAssignment, PartitionMap, PartitionMapExt};
 
 fn node(id: u16) -> NodeId {
     NodeId::validated(id).unwrap()
@@ -164,7 +164,7 @@ async fn a_node_without_the_data_waits_for_the_replica_before_taking_the_primary
 }
 
 #[tokio::test]
-async fn a_restarted_primary_trusts_its_disk_only_for_the_assignment_it_held() {
+async fn a_restarted_primary_does_not_trust_a_marker_older_than_its_role() {
     let partition = session_partition("c1");
     let backend = crate::cluster::test_support::FaultyBackend::shared();
     let mut before_crash = controller_on(2, &backend);
@@ -850,17 +850,17 @@ async fn two_empty_nodes_waiting_on_each_other_both_take_their_roles() {
 }
 
 async fn swap_a_waiting_primary_after_a_replica_move() -> (
-    NodeController<MockTransport>,
-    NodeController<MockTransport>,
-    NodeController<MockTransport>,
+    Box<NodeController<MockTransport>>,
+    Box<NodeController<MockTransport>>,
+    Box<NodeController<MockTransport>>,
     PartitionId,
 ) {
     let partition = session_partition("c1");
-    let mut holder = controller(2);
+    let mut holder = Box::new(controller(2));
     holder.become_replica(partition, Epoch::new(1), 0);
     holder.stores().create_session_replicated("c1").unwrap();
-    let mut wiped = controller(1);
-    let mut joiner = controller(3);
+    let mut wiped = Box::new(controller(1));
+    let mut joiner = Box::new(controller(3));
     wiped
         .apply_raft_partition_map(map_with(partition, node(1), &[node(2)], 1))
         .await;
@@ -919,17 +919,17 @@ async fn a_stalled_request_of_a_waiting_primary_swapped_to_replica_keeps_its_sou
 }
 
 async fn a_waiting_primary_removed_while_a_request_is_deferred() -> (
-    NodeController<MockTransport>,
-    NodeController<MockTransport>,
-    NodeController<MockTransport>,
+    Box<NodeController<MockTransport>>,
+    Box<NodeController<MockTransport>>,
+    Box<NodeController<MockTransport>>,
     PartitionId,
 ) {
     let partition = session_partition("c1");
-    let mut holder = controller(2);
+    let mut holder = Box::new(controller(2));
     holder.become_replica(partition, Epoch::new(1), 0);
     holder.stores().create_session_replicated("c1").unwrap();
-    let mut wiped = controller(1);
-    let mut joiner = controller(3);
+    let mut wiped = Box::new(controller(1));
+    let mut joiner = Box::new(controller(3));
     wiped
         .apply_raft_partition_map(map_with(partition, node(1), &[node(2)], 1))
         .await;
@@ -1250,4 +1250,85 @@ async fn a_primary_built_from_a_constraint_only_snapshot_trusts_its_disk_after_a
     restarted.apply_raft_partition_map(map).await;
 
     assert_eq!(restarted.role(partition), ReplicaRole::Primary);
+}
+
+fn map_after_updates(partition: PartitionId, updates: &[(u16, u16, u32)]) -> PartitionMap {
+    let mut map = PartitionMap::default();
+    for &(primary, replica1, epoch) in updates {
+        assert!(map.apply_update(&PartitionUpdate {
+            partition: u8::try_from(partition.get()).unwrap(),
+            primary,
+            replica1,
+            replica2: 0,
+            epoch,
+        }));
+    }
+    map
+}
+
+async fn primary_with_a_stored_record(
+    backend: &Arc<crate::cluster::test_support::FaultyBackend>,
+    partition: PartitionId,
+    updates: &[(u16, u16, u32)],
+) {
+    let mut before = controller_on(2, backend);
+    before
+        .apply_raft_partition_map(map_after_updates(partition, updates))
+        .await;
+    assert_eq!(before.role(partition), ReplicaRole::Primary);
+    let (_, write) = before
+        .stores()
+        .db_create_write("bigdocs", "r1", b"{\"v\":1}", 1)
+        .unwrap();
+    before.stores().apply_write(&write).unwrap();
+}
+
+#[tokio::test]
+async fn a_primary_restarted_after_only_its_replica_changed_trusts_its_disk() {
+    let partition = crate::cluster::db::data_partition("bigdocs", "r1");
+    let backend = crate::cluster::test_support::FaultyBackend::shared();
+    primary_with_a_stored_record(&backend, partition, &[(2, 0, 1)]).await;
+
+    let mut restarted = controller_on(2, &backend);
+    restarted.stores().recover().unwrap();
+    restarted
+        .apply_raft_partition_map(map_after_updates(partition, &[(2, 0, 1), (2, 3, 2)]))
+        .await;
+
+    assert_eq!(restarted.role(partition), ReplicaRole::Primary);
+    assert_eq!(snapshot_requests_to(&restarted, node(3)), 0);
+}
+
+#[tokio::test]
+async fn a_primary_restarted_after_another_node_held_the_role_takes_a_snapshot() {
+    let partition = crate::cluster::db::data_partition("bigdocs", "r1");
+    let backend = crate::cluster::test_support::FaultyBackend::shared();
+    primary_with_a_stored_record(&backend, partition, &[(2, 0, 1)]).await;
+
+    let mut restarted = controller_on(2, &backend);
+    restarted.stores().recover().unwrap();
+    restarted
+        .apply_raft_partition_map(map_after_updates(
+            partition,
+            &[(2, 0, 1), (3, 0, 2), (3, 2, 3), (2, 3, 4)],
+        ))
+        .await;
+
+    assert_eq!(restarted.role(partition), ReplicaRole::AwaitingSnapshot);
+    assert_eq!(snapshot_requests_to(&restarted, node(3)), 1);
+}
+
+#[tokio::test]
+async fn a_marker_from_a_newer_assignment_is_not_trusted_for_an_older_map() {
+    let partition = crate::cluster::db::data_partition("bigdocs", "r1");
+    let backend = crate::cluster::test_support::FaultyBackend::shared();
+    primary_with_a_stored_record(&backend, partition, &[(2, 0, 1), (2, 0, 2)]).await;
+
+    let mut restarted = controller_on(2, &backend);
+    restarted.stores().recover().unwrap();
+    restarted
+        .apply_raft_partition_map(map_after_updates(partition, &[(2, 3, 1)]))
+        .await;
+
+    assert_eq!(restarted.role(partition), ReplicaRole::AwaitingSnapshot);
 }

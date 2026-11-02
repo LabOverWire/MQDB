@@ -32,7 +32,9 @@
 (*                                                                          *)
 (* Design = "fix": a node takes the primary role only if it already holds  *)
 (* the partition (Primary or Replica role), or if its disk records that it *)
-(* held the primary role at this very assignment (marker). Otherwise it   *)
+(* held the primary role and no other node has been assigned the role     *)
+(* since (marker at or after PrimarySince, the assignment that made this   *)
+(* node primary; a replica change alone keeps it). Otherwise it           *)
 (* waits for a snapshot from the replica and becomes primary on import. A  *)
 (* waiting node asks again                                                  *)
 (* when its assignment changes or its request is lost (Retry stands for    *)
@@ -52,6 +54,11 @@
 (* persist); a crash reloads memory from disk. So the marker is written     *)
 (* only for a partition the node did not fill with records by an import  *)
 (* in this run (an empty import changes nothing).                         *)
+(*                                                                          *)
+(* A write reaches the replica in the step it is acked, so this model does *)
+(* not show why PrimarySince matters for a primary restarted without a    *)
+(* wipe: replication lag would make its replica's copy older than its own.*)
+(* That is covered by a_primary_restarted_after_only_its_replica_changed. *)
 (*                                                                          *)
 (* ABSTRACTIONS: a snapshot transfer is one step (export and import), so  *)
 (* writes cannot fall between them; a write reaches the replica named by  *)
@@ -81,16 +88,16 @@
 (*  _current_move_nowipe (1 crash, 1 move): ServeCorrect fails without a   *)
 (*                   crash: a replica moved in is promoted before its      *)
 (*                   snapshot lands.                                        *)
-(*  _fix:            all invariants and both properties hold (256,526).   *)
+(*  _fix:            all invariants and both properties hold (252,264).   *)
 (*  _fix_move (1 crash, 1 move): all invariants and both properties hold  *)
-(*                   (34,516).                                              *)
+(*                   (34,392).                                              *)
 (*  _fix_move_anykeep (TakerKeepsSource FALSE): ServeCorrect fails: the   *)
 (*                   replica moves while the wiped primary waits, then the *)
 (*                   primary is swapped to replica and asks the new,       *)
 (*                   empty primary, and the two empty nodes serve each    *)
 (*                   other.                                                 *)
 (*  _fix_move_nowipe (1 crash without a wipe, 1 move): invariants hold    *)
-(*                   (22,072); the same setting fails for _current.        *)
+(*                   (21,948); the same setting fails for _current.        *)
 (*  _fix_noretry:    EventuallyServing fails: a request lost with its     *)
 (*                   source is never sent again.                            *)
 (*  _fix_switchsource (KeepSource FALSE, 1 crash, 1 move): ServeCorrect    *)
@@ -114,6 +121,8 @@
 (*                   primary of a rebalance keeps serving on its old map   *)
 (*                   after the new primary took over (#153). Not caused or *)
 (*                   fixed by this change.                                  *)
+(*  _anymarker:      Design "anymarker" trusts a marker of any age;       *)
+(*                   ServeCorrect fails: another node served in between.  *)
 (*  _markimport:     Design "markimport" also writes the marker after an   *)
 (*                   import; ServeCorrect fails: a wiped node fills from a *)
 (*                   snapshot, restarts without a wipe, and trusts a disk  *)
@@ -204,10 +213,15 @@ TakeRole(n, r) ==
        ELSE KeepRequest
 
 HeldData(n) == role[n] \in {"primary", "replica"}
+PrimarySince ==
+    LET Changed(i) == i = 1 \/ hist[i].p # hist[i - 1].p
+    IN CHOOSE i \in 1..Len(hist) :
+           Changed(i) /\ \A j \in (i + 1)..Len(hist) : ~Changed(j)
+
 TrustDisk(n) ==
-    IF Design = "recovered"
-    THEN \E k \in Keys : disk[n][k] # 0
-    ELSE marker[n] = Len(hist)
+    CASE Design = "recovered" -> \E k \in Keys : disk[n][k] # 0
+      [] Design = "anymarker" -> marker[n] # 0
+      [] OTHER -> marker[n] >= PrimarySince
 
 KeepsLiveSource(n) ==
     /\ Design = "fix"
@@ -271,7 +285,7 @@ ServeSnapshot(n) ==
     /\ src' = [src EXCEPT ![n] = None]
     /\ taker' = [taker EXCEPT ![n] = FALSE]
     /\ imported' = [imported EXCEPT ![n] =
-                        imported[n] \/ (Design \in {"fix", "recovered"} /\ \E k \in Keys : mem[src[n]][k] # 0)]
+                        imported[n] \/ (Design \in {"fix", "recovered", "anymarker"} /\ \E k \in Keys : mem[src[n]][k] # 0)]
     /\ marker' = [marker EXCEPT ![n] =
                       IF ImportedRole(n) = "primary" /\ Design \in {"current", "markimport"}
                       THEN applied[n] ELSE marker[n]]

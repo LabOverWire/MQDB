@@ -10,11 +10,20 @@ pub enum PartitionRole {
     Replica,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct PartitionAssignment {
     pub primary: Option<NodeId>,
     pub replicas: Vec<NodeId>,
     pub epoch: Epoch,
+    pub primary_since: Epoch,
+}
+
+impl PartialEq for PartitionAssignment {
+    fn eq(&self, other: &Self) -> bool {
+        self.primary == other.primary
+            && self.replicas == other.replicas
+            && self.epoch == other.epoch
+    }
 }
 
 impl Default for PartitionAssignment {
@@ -23,6 +32,7 @@ impl Default for PartitionAssignment {
             primary: None,
             replicas: Vec::new(),
             epoch: Epoch::ZERO,
+            primary_since: Epoch::ZERO,
         }
     }
 }
@@ -34,6 +44,7 @@ impl PartitionAssignment {
             primary: Some(primary),
             replicas,
             epoch,
+            primary_since: epoch,
         }
     }
 

@@ -486,7 +486,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let holds_data = matches!(
             self.role(partition),
             ReplicaRole::Primary | ReplicaRole::Replica
-        ) || held.trusts(partition, assignment.epoch);
+        ) || held.trusts(partition, assignment);
         if holds_data {
             return None;
         }
