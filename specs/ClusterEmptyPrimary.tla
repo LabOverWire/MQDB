@@ -123,6 +123,8 @@
 (*                   the new, empty replica alone, is excluded by Crash   *)
 (*                   here; the code asks the replica it replaced first    *)
 (*                   (a_replica_promoted_alone_asks_the_replica_it_replaced). *)
+(*                   A node whose first map is already that move knows no *)
+(*                   earlier holder and still takes the role; same on main. *)
 (*  _fix_move2 (2 crashes, 1 move): ServeCorrect fails: a primary         *)
 (*                   restarted without a wipe after its assignment changed *)
 (*                   imports a replica that was moved out and back and     *)

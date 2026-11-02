@@ -75,7 +75,8 @@ fn snapshot_requests(ctrl: &NodeController<MockTransport>) -> usize {
 }
 
 #[tokio::test]
-async fn a_replica_promoted_after_its_snapshot_request_was_lost_serves_without_the_record() {
+async fn a_replica_promoted_after_its_snapshot_request_was_lost_does_not_serve_without_the_record()
+{
     let partition = data_partition(ENTITY, ID);
     assert_eq!(partition.get(), 186);
     let mut primary = primary_holding_the_record(partition).await;
@@ -432,4 +433,20 @@ async fn a_waiting_replica_retries_its_primary_not_the_replica_it_replaced() {
 
     assert_eq!(requests_to(&moved_in, node(1)), 2);
     assert_eq!(requests_to(&moved_in, node(3)), 0);
+}
+
+#[tokio::test]
+async fn a_replica_whose_first_map_is_the_move_has_nobody_else_to_ask_when_promoted_alone() {
+    let partition = data_partition(ENTITY, ID);
+    let mut joined = controller(2);
+    heard_from(&mut joined, node(3));
+    joined
+        .apply_raft_partition_map(map_with(partition, node(1), &[node(2)], 2))
+        .await;
+
+    joined
+        .apply_raft_partition_map(map_with(partition, node(2), &[], 3))
+        .await;
+
+    assert_eq!(joined.role(partition), ReplicaRole::Primary);
 }
