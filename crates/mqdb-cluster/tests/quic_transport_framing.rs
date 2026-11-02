@@ -1233,6 +1233,21 @@ async fn a_remembered_address_that_answers_as_another_node_is_forgotten() {
         !local.direct_peers().await.unwrap().contains(&old_id),
         "the link is not to node 4"
     );
-    assert!(local.peers_needing_dial(&[old_id]).await.is_empty());
-    assert_eq!(std::fs::read_to_string(&book).unwrap(), "");
+    assert_eq!(local.peers_needing_dial(&[old_id]).await, [new_id]);
+    assert_eq!(
+        std::fs::read_to_string(&book).unwrap(),
+        format!("6 {new_addr}\n")
+    );
+
+    for _ in 0..20 {
+        new_node.send(local_id, heartbeat(new_id, 2)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        new_node.direct_peers().await.unwrap().contains(&local_id),
+        "the node that answered keeps its link, so what it sends in the meantime is not lost"
+    );
+
+    local.redial(&[new_id]).await;
+    assert!(local.direct_peers().await.unwrap().contains(&new_id));
 }

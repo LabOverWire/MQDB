@@ -993,7 +993,14 @@ impl DialledLink {
             "the address of this peer now belongs to another node, forgetting it"
         );
         self.address_book.forget(dialled, self.addr).await;
-        remove_peer_generation(&self.peers, dialled, self.generation).await;
+        self.address_book.learn(actual, self.addr).await;
+        let mut peers = self.peers.write().await;
+        if peers
+            .get(&dialled)
+            .is_some_and(|peer| peer.generation == self.generation)
+        {
+            peers.remove(&dialled);
+        }
     }
 }
 

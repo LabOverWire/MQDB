@@ -737,7 +737,8 @@ MQDB supports distributed clustering with automatic failover and partition rebal
 > report dead, starting at once and backing off to every 5 seconds, then every minute once the peer
 > has been gone for 5 minutes, so a restarted node re-links without a change to its `--peers`. A
 > learned address is replaced when the peer dials in from a new one, and any address is dropped if
-> a different node answers on it. A `--peers` address returns on the next start.
+> a different node answers on it, which is then dialled there instead. A `--peers` address returns
+> on the next start.
 >
 > A node restarted with its data counts every node named in its stored partition map or Raft log
 > as a voter, whether or not that entry committed. It does not lead alone if any other node is
