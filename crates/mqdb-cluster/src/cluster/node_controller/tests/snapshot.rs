@@ -1327,3 +1327,22 @@ async fn a_catchup_write_that_cannot_be_stored_leads_to_a_new_snapshot() {
     assert_eq!(requests_in(&replica.transport.take_sent()), 1);
     assert!(!replica.write_log.has_sequence(partition, 1));
 }
+
+#[tokio::test]
+async fn an_epoch_bump_during_a_transfer_is_repaired_without_a_later_write() {
+    let (mut primary, partition) = primary_holding(1, 1024);
+    let (mut replica, _) = awaiting_replica(node(1)).await;
+    let chunks = start_transfer(&mut primary, &mut replica).await;
+    write_counter(&mut primary, 1).await;
+    deliver(&primary, &mut replica).await;
+
+    let bumped = map_for(node(1), &[node(2), node(3)], 2);
+    primary.apply_raft_partition_map(bumped.clone()).await;
+    replica.apply_raft_partition_map(bumped).await;
+
+    finish_transfer(&mut replica, &chunks).await;
+    exchange(&mut primary, &mut replica).await;
+
+    assert_eq!(counter(&replica), Some(1));
+    assert_eq!(replica.sequence(partition), primary.sequence(partition));
+}
