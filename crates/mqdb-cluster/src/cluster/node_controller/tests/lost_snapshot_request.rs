@@ -348,3 +348,88 @@ async fn a_primary_waiting_on_a_prior_holder_that_died_takes_the_role() {
 
     assert_eq!(moved_in.role(partition), ReplicaRole::Primary);
 }
+
+fn requests_to(ctrl: &NodeController<MockTransport>, to: NodeId) -> usize {
+    ctrl.transport
+        .sent_messages()
+        .iter()
+        .filter(|(target, message)| {
+            *target == to && matches!(message, ClusterMessage::SnapshotRequest(_))
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn a_primary_alone_whose_kept_source_died_asks_the_replica_it_replaced() {
+    let partition = data_partition(ENTITY, ID);
+    let alone = map_with(partition, node(2), &[], 4);
+    let mut moved_in = replica_moved_in_while_the_primary_is_dead(partition).await;
+    heard_from(&mut moved_in, node(1));
+    moved_in
+        .apply_raft_partition_map(map_with(partition, node(2), &[node(1)], 3))
+        .await;
+    moved_in.apply_raft_partition_map(alone.clone()).await;
+    assert_eq!(requests_to(&moved_in, node(3)), 0);
+
+    moved_in.apply_dead_nodes(&[node(1)]);
+    let stalled_since = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(11))
+        .unwrap();
+    if let Some(request) = moved_in.requested_snapshots.get_mut(partition) {
+        request.last_activity = stalled_since;
+    }
+    moved_in.apply_raft_partition_map(alone).await;
+
+    assert_eq!(moved_in.role(partition), ReplicaRole::AwaitingSnapshot);
+    assert_eq!(requests_to(&moved_in, node(3)), 1);
+}
+
+#[tokio::test]
+async fn a_replica_promoted_with_a_new_replica_asks_the_replica_it_replaced() {
+    let partition = data_partition(ENTITY, ID);
+    let mut moved_in = replica_moved_in_while_the_primary_is_dead(partition).await;
+
+    moved_in
+        .apply_raft_partition_map(map_with(partition, node(2), &[node(4)], 3))
+        .await;
+
+    assert_eq!(moved_in.role(partition), ReplicaRole::AwaitingSnapshot);
+    assert_eq!(requests_to(&moved_in, node(4)), 0);
+    assert_eq!(requests_to(&moved_in, node(3)), 1);
+}
+
+#[tokio::test]
+async fn a_replica_swapped_to_primary_asks_the_old_primary_not_the_replica_it_replaced() {
+    let partition = data_partition(ENTITY, ID);
+    let mut moved_in = replica_moved_in_while_the_primary_is_dead(partition).await;
+    assert_eq!(requests_to(&moved_in, node(1)), 1);
+
+    moved_in
+        .apply_raft_partition_map(map_with(partition, node(2), &[node(1)], 3))
+        .await;
+
+    assert_eq!(requests_to(&moved_in, node(3)), 0);
+    assert_eq!(
+        moved_in.requested_snapshots.get(partition).unwrap().source,
+        node(1)
+    );
+}
+
+#[tokio::test]
+async fn a_waiting_replica_retries_its_primary_not_the_replica_it_replaced() {
+    let partition = data_partition(ENTITY, ID);
+    let mut moved_in = replica_moved_in_while_the_primary_is_dead(partition).await;
+    let stalled_since = std::time::Instant::now()
+        .checked_sub(std::time::Duration::from_secs(11))
+        .unwrap();
+    if let Some(request) = moved_in.requested_snapshots.get_mut(partition) {
+        request.last_activity = stalled_since;
+    }
+
+    moved_in
+        .apply_raft_partition_map(map_with(partition, node(1), &[node(2)], 2))
+        .await;
+
+    assert_eq!(requests_to(&moved_in, node(1)), 2);
+    assert_eq!(requests_to(&moved_in, node(3)), 0);
+}

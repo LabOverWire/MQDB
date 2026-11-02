@@ -418,10 +418,13 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             let keep_stalled_source =
                 stalled.taking_primary && self.source_is_alive(stalled.source);
+            let replaced = stalled
+                .replaced_replica
+                .filter(|node| waiting_to_take && self.source_is_alive(*node));
             let source = if keep_stalled_source {
                 Some(stalled.source)
             } else {
-                self.snapshot_source(partition)
+                replaced.or_else(|| self.snapshot_source(partition))
             };
             if let Some(source) = source {
                 tracing::info!(

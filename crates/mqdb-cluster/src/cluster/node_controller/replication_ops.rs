@@ -498,13 +498,16 @@ impl<T: ClusterTransport> NodeController<T> {
         if holds_data {
             return None;
         }
-        self.other_replica(assignment).or_else(|| {
-            self.requested_snapshots
-                .get(partition)
-                .and_then(|request| request.replaced_replica)
-                .or_else(|| self.other_replica(old_assignment))
-                .filter(|node| self.source_is_alive(*node))
-        })
+        let current = self.other_replica(assignment);
+        if current.is_some_and(|node| old_assignment.all_nodes().contains(&node)) {
+            return current;
+        }
+        self.requested_snapshots
+            .get(partition)
+            .and_then(|request| request.replaced_replica)
+            .or_else(|| self.other_replica(old_assignment))
+            .filter(|node| self.source_is_alive(*node))
+            .or(current)
     }
 
     fn other_replica(&self, assignment: &PartitionAssignment) -> Option<NodeId> {
