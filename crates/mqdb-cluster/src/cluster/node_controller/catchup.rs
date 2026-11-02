@@ -8,7 +8,7 @@ use crate::cluster::transport::{ClusterMessage, ClusterTransport};
 use crate::cluster::{NodeId, PartitionId};
 
 const CATCHUP_RESPONSE_MAX_BYTES: usize = 8 * 1024 * 1024;
-const WRITE_OVERHEAD_BYTES: usize = 64;
+const WRITE_FRAMING_BYTES: usize = 16;
 
 impl<T: ClusterTransport> NodeController<T> {
     pub(super) async fn handle_catchup_request(
@@ -31,7 +31,9 @@ impl<T: ClusterTransport> NodeController<T> {
             "received catchup request"
         );
 
-        let writes = limit_catchup_bytes(self.write_log.get_range(partition, from_seq, to_seq));
+        let newest_held = to_seq.min(self.sequence(partition).unwrap_or(0));
+        let writes =
+            limit_catchup_bytes(self.write_log.get_range(partition, from_seq, newest_held));
 
         tracing::info!(
             ?partition,
@@ -82,7 +84,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 );
                 self.catch_up_by_snapshot(partition, responder).await;
             } else {
-                self.catchup_answered(partition, true).await;
+                self.catchup_answered(partition, false).await;
             }
             return;
         }
@@ -90,10 +92,14 @@ impl<T: ClusterTransport> NodeController<T> {
         let mut writes: Vec<_> = resp.writes;
         writes.sort_by_key(|w| w.sequence);
 
+        let more_may_follow = encoded_bytes(&writes) >= CATCHUP_RESPONSE_MAX_BYTES / 2;
         let mut applied_count = 0;
         let mut rejected_count = 0;
         for write in &writes {
             if let Some(state) = self.replicas.get_mut(&partition.get()) {
+                if write.epoch <= state.epoch() && write.sequence <= state.sequence() {
+                    continue;
+                }
                 let ack = state.handle_write(write);
                 if ack.is_ok() {
                     if let Err(e) = self.apply_replicated_write(write) {
@@ -125,7 +131,7 @@ impl<T: ClusterTransport> NodeController<T> {
             );
             self.catch_up_by_snapshot(partition, responder).await;
         } else {
-            self.catchup_answered(partition, false).await;
+            self.catchup_answered(partition, more_may_follow).await;
         }
     }
 
@@ -143,10 +149,18 @@ pub(super) fn limit_catchup_bytes(mut writes: Vec<ReplicationWrite>) -> Vec<Repl
     let within_limit = writes
         .iter()
         .take_while(|write| {
-            total += write.data.len() + write.entity.len() + write.id.len() + WRITE_OVERHEAD_BYTES;
+            total += encoded_write_bytes(write);
             total <= CATCHUP_RESPONSE_MAX_BYTES
         })
         .count();
     writes.truncate(within_limit.max(1));
     writes
+}
+
+fn encoded_write_bytes(write: &ReplicationWrite) -> usize {
+    write.to_bytes().map_or(0, |bytes| bytes.len()) + WRITE_FRAMING_BYTES
+}
+
+fn encoded_bytes(writes: &[ReplicationWrite]) -> usize {
+    writes.iter().map(encoded_write_bytes).sum()
 }

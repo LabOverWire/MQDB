@@ -474,7 +474,17 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    pub(super) async fn catchup_answered(&mut self, partition: PartitionId, answered_empty: bool) {
+    pub(crate) fn abandon_snapshot_request(&mut self, partition: PartitionId) {
+        if !self
+            .incoming_snapshots
+            .get(&partition)
+            .is_some_and(IncomingSnapshot::catching_up)
+        {
+            self.incoming_snapshots.remove(&partition);
+        }
+    }
+
+    pub(super) async fn catchup_answered(&mut self, partition: PartitionId, more_may_follow: bool) {
         if !self
             .incoming_snapshots
             .get(&partition)
@@ -482,10 +492,10 @@ impl<T: ClusterTransport> NodeController<T> {
         {
             return;
         }
-        if answered_empty {
-            self.incoming_snapshots.remove(&partition);
-        } else {
+        if more_may_follow {
             self.request_catchup(partition).await;
+        } else {
+            self.incoming_snapshots.remove(&partition);
         }
     }
 

@@ -730,7 +730,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .entry(partition.get())
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
         state.become_replica(epoch, sequence);
-        self.incoming_snapshots.remove(&partition);
+        self.abandon_snapshot_request(partition);
         self.stop_sending_change_events(partition);
     }
 
