@@ -2,9 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::super::entity;
-use super::super::protocol::{
-    self, CatchupResponse, ChangeEventRecord, ReplicationAck, ReplicationWrite,
-};
+use super::super::protocol::{self, ChangeEventRecord, ReplicationAck, ReplicationWrite};
 use super::super::quorum::{QuorumResult, QuorumTracker};
 use super::super::replication::{ReplicaRole, ReplicaState};
 use super::super::store_manager::StoreManager;
@@ -284,10 +282,7 @@ impl<T: ClusterTransport> NodeController<T> {
             return;
         };
 
-        let resp = CatchupResponse::create(partition, self.node_id, writes);
-        let _ = self
-            .transport
-            .send(replica_node, ClusterMessage::CatchupResponse(resp))
+        self.send_catchup_writes(replica_node, partition, writes)
             .await;
     }
 

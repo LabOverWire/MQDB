@@ -133,6 +133,17 @@ impl TestCluster {
         self.runtime.clock().advance_ms(ms);
     }
 
+    fn now_ms(&self) -> u64 {
+        self.runtime.clock().now() / 1_000_000
+    }
+
+    async fn tick_all(&mut self, now: u64) {
+        for node in &mut self.nodes {
+            let output = node.controller.tick(now);
+            node.controller.send_tick_output(output).await;
+        }
+    }
+
     async fn replicate_from_first(&mut self, write: ReplicationWrite) {
         let replicas: Vec<NodeId> = self.nodes.iter().skip(1).map(|n| n.id).collect();
         self.nodes[0]
@@ -872,12 +883,7 @@ async fn setup_five_node_partition_cluster() -> (TestCluster, PartitionId, [Node
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -892,12 +898,7 @@ async fn split_brain_prevented_on_partition() {
 
     cluster.partition_groups(&[n1, n2], &[n3, n4, n5]);
     cluster.advance_ms(600);
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(600);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(600).await;
 
     assert_eq!(
         cluster.nodes[2].controller.node_status(n1),
@@ -1011,12 +1012,7 @@ async fn write_rejected_without_quorum() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -1095,12 +1091,7 @@ async fn quorum_write_reaches_replicas() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -1193,12 +1184,7 @@ async fn rebalance_preserves_sequence_continuity() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -1239,12 +1225,7 @@ async fn rebalance_preserves_sequence_continuity() {
 
     cluster.partition_node(n1);
     cluster.advance_ms(600);
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(600);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(600).await;
 
     cluster.nodes[1]
         .controller
@@ -1308,12 +1289,7 @@ async fn epoch_prevents_stale_primary_writes() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -1406,12 +1382,7 @@ async fn lwt_published_exactly_once() {
         .mark_disconnected("lwt-client", 1000)
         .unwrap();
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -1486,12 +1457,7 @@ async fn replica_catches_up_after_partition() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -1576,12 +1542,7 @@ async fn subscriptions_consistent_during_rebalance() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -1608,12 +1569,7 @@ async fn subscriptions_consistent_during_rebalance() {
 
     cluster.partition_node(n1);
     cluster.advance_ms(600);
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(600);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(600).await;
 
     cluster.nodes[1]
         .controller
@@ -1656,12 +1612,7 @@ async fn retained_message_survives_reassignment() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -1680,12 +1631,7 @@ async fn retained_message_survives_reassignment() {
 
     cluster.partition_node(n1);
     cluster.advance_ms(600);
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(600);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(600).await;
 
     cluster.nodes[1]
         .controller
@@ -1735,12 +1681,7 @@ async fn session_takeover_race_prevented() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -1896,12 +1837,7 @@ async fn qos2_state_survives_primary_failover() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -1930,12 +1866,7 @@ async fn qos2_state_survives_primary_failover() {
 
     cluster.partition_node(cluster.nodes[0].id);
     cluster.advance_ms(600);
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(600);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(600).await;
 
     cluster.nodes[1]
         .controller
@@ -1997,12 +1928,7 @@ async fn node_crash_restart_rejoins_cluster() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -2033,12 +1959,7 @@ async fn node_crash_restart_rejoins_cluster() {
 
     cluster.partition_node(n3);
     cluster.advance_ms(600);
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(600);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(600).await;
 
     assert_eq!(
         cluster.nodes[0].controller.node_status(n3),
@@ -2050,12 +1971,7 @@ async fn node_crash_restart_rejoins_cluster() {
     cluster.heal_node(n3);
     cluster.advance_ms(100);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(1700);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(1700).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -2113,12 +2029,7 @@ async fn snapshot_transfer_on_partition_migration() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -2149,11 +2060,10 @@ async fn snapshot_transfer_on_partition_migration() {
 
     for _ in 0..20 {
         cluster.advance_ms(10);
+        let now = cluster.now_ms();
         for node in &mut cluster.nodes {
-            {
-                let output = node.controller.tick(cluster.runtime.clock().now());
-                node.controller.send_tick_output(output).await;
-            }
+            let output = node.controller.tick(now);
+            node.controller.send_tick_output(output).await;
             node.controller.process_messages().await;
         }
     }
@@ -2187,12 +2097,7 @@ async fn graceful_shutdown_drain() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -2384,12 +2289,7 @@ async fn wildcard_broadcast_replication() {
 
     let client_partition = PartitionId::new(5).unwrap();
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -2451,12 +2351,7 @@ async fn cross_node_wildcard_publish_routing() {
     let mut cluster = TestCluster::new(2);
     let client_partition = session_partition("wildcard-subscriber");
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -2519,12 +2414,7 @@ async fn drain_notification_triggers_partition_reassignment() {
 
     let mut cluster = TestCluster::new(3);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
 
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -2667,10 +2557,7 @@ async fn db_crud_replication_to_replicas() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        let output = node.controller.tick(0);
-        node.controller.send_tick_output(output).await;
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -2734,12 +2621,7 @@ async fn db_list_returns_entities_by_type() {
             .become_replica(partition, Epoch::new(1), 0);
     }
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -2789,12 +2671,7 @@ async fn schema_broadcast_to_all_nodes() {
             .become_replica(partition, Epoch::new(1), 0);
     }
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -2874,12 +2751,7 @@ async fn schema_update_increments_version() {
             .become_replica(partition, Epoch::new(1), 0);
     }
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -2930,12 +2802,7 @@ async fn index_add_and_lookup() {
             .become_replica(partition, Epoch::new(1), 0);
     }
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -2989,12 +2856,7 @@ async fn index_multiple_records_same_value() {
             .become_replica(partition, Epoch::new(1), 0);
     }
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -3364,12 +3226,7 @@ async fn cross_node_lwt_routing() {
     let n1 = cluster.nodes[0].id;
     let n2 = cluster.nodes[1].id;
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -3657,12 +3514,7 @@ async fn unique_constraint_cross_node_message_flow() {
         node.controller.seed_unique_voters(voters.clone());
     }
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
