@@ -1570,3 +1570,60 @@ async fn a_replica_ahead_of_its_primary_still_finishes_catching_up() {
     assert_eq!(replica.role(partition), ReplicaRole::Replica);
     assert_eq!(replica.sequence(partition), Some(9));
 }
+
+#[tokio::test]
+async fn a_queued_write_overtaken_by_a_chunk_does_not_roll_the_import_back() {
+    let (mut primary, partition) = primary_holding(1, 1024);
+    let (mut replica, _) = awaiting_replica(node(1)).await;
+    write_counter(&mut primary, 1).await;
+    write_counter(&mut primary, 2).await;
+    let queued = primary
+        .transport
+        .take_sent()
+        .into_iter()
+        .find(|(to, message)| *to == node(2) && matches!(message, ClusterMessage::Write(_)))
+        .unwrap();
+    let chunks = start_transfer(&mut primary, &mut replica).await;
+    finish_transfer(&mut replica, &chunks).await;
+    assert_eq!(replica.sequence(partition), Some(2));
+    assert_eq!(counter(&replica), Some(2));
+
+    replica.transport.inject_message(node(1), queued.1);
+    replica.process_messages().await;
+    exchange(&mut primary, &mut replica).await;
+    assert_eq!(counter(&replica), Some(2));
+
+    write_counter(&mut primary, 3).await;
+    deliver(&primary, &mut replica).await;
+    assert_eq!(counter(&replica), Some(3));
+    assert_eq!(replica.write_log.entry_count(partition), 1);
+}
+
+#[tokio::test]
+async fn a_wildcard_write_with_no_sequence_is_still_stored_by_a_replica() {
+    let partition = data_partition(ENTITY, ID);
+    let mut sender = controller(1);
+    let writes = sender
+        .subscribe_wildcard_broadcast("sensors/+/temp", "client-1", partition, 1)
+        .unwrap();
+    let write = writes
+        .into_iter()
+        .find(|write| write.partition == partition)
+        .unwrap();
+    let mut replica = controller(2);
+    replica.become_replica(partition, Epoch::ZERO, 0);
+
+    replica
+        .transport
+        .inject_message(node(1), ClusterMessage::Write(write));
+    replica.process_messages().await;
+
+    assert_eq!(
+        replica
+            .stores
+            .wildcards
+            .match_topic("sensors/room/temp")
+            .len(),
+        1
+    );
+}

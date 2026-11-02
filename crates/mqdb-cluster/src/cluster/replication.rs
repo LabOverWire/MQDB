@@ -97,6 +97,11 @@ impl ReplicaState {
         self.pending_writes.clear();
     }
 
+    #[must_use]
+    pub fn already_holds(&self, write: &ReplicationWrite) -> bool {
+        write.sequence > 0 && write.epoch <= self.epoch && write.sequence <= self.sequence
+    }
+
     pub fn handle_write(&mut self, write: &ReplicationWrite) -> ReplicationAck {
         if self.role == ReplicaRole::None || self.role == ReplicaRole::AwaitingSnapshot {
             return ReplicationAck::not_replica(self.partition, self.node_id);
@@ -349,6 +354,14 @@ mod tests {
         state.handle_write(&write(1, 1));
 
         assert_eq!(state.gap_range(), Some((2, 2)));
+    }
+
+    #[test]
+    fn a_write_with_no_sequence_is_never_already_held() {
+        let mut state = ReplicaState::new(partition(), node());
+        state.become_replica(Epoch::ZERO, 0);
+
+        assert!(!state.already_holds(&write(0, 0)));
     }
 
     #[test]

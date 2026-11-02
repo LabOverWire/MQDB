@@ -170,7 +170,7 @@ impl<T: ClusterTransport> NodeController<T> {
         for write in &writes {
             if let Some(state) = self.replicas.get_mut(&partition.get()) {
                 let sequence_before = state.sequence();
-                if write.epoch <= state.epoch() && write.sequence <= sequence_before {
+                if state.already_holds(write) {
                     continue;
                 }
                 let ack = state.handle_write(write);

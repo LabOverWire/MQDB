@@ -8,7 +8,8 @@
 (*   bulk   P->R FIFO: live writes, catchup pieces, end markers. Pieces and *)
 (*          markers can be lost (inbox full); live writes cannot, so the    *)
 (*          lost-live-write behaviour of gh #309 stays out of the result.   *)
-(*   chunks P->R FIFO, independent of bulk, so a chunk can overtake it.     *)
+(*   chunks P->R lossy FIFO, independent of bulk, so a chunk can overtake   *)
+(*          bulk.                                                           *)
 (*   req    R->P lossy FIFO: snapshot requests, catchup requests, gap acks. *)
 (*                                                                          *)
 (* Primary (handle_catchup_request, gap ack path):                          *)
@@ -36,21 +37,31 @@
 (*                                     the marker carried answers_from:     *)
 (*                                     InvCoveredOrRetrying violated, by a  *)
 (*                                     marker from before the last import.  *)
-(*   ClusterSnapshotCatchup_noid_live.cfg  same, liveness only: holds. Every *)
-(*                                     write the replica lacks follows that *)
-(*                                     marker on the FIFO lane, so it stays *)
-(*                                     behind for good only if one is lost. *)
-(*   ClusterSnapshotCatchup.cfg        UseIdentity=TRUE: all properties.    *)
-(*   ClusterSnapshotCatchup_wide.cfg   more loss, smaller log, split pieces. *)
+(*   ClusterSnapshotCatchup_noid_live.cfg  same, liveness only: holds.      *)
+(*                                     Writes are never lost here, so this  *)
+(*                                     cannot show a replica stuck behind.  *)
+(*                                     Inference, not a result: every write *)
+(*                                     it lacks follows that marker on the  *)
+(*                                     FIFO lane, so it stays behind only   *)
+(*                                     if one of them is lost.              *)
+(*   ClusterSnapshotCatchup.cfg        UseIdentity=TRUE: TypeOK,            *)
+(*                                     InvAppliedPrefix,                    *)
+(*                                     InvCoveredOrRetrying and             *)
+(*                                     EventuallyConverged hold.            *)
+(*   ClusterSnapshotCatchup_wide.cfg   same four, with more loss, a smaller *)
+(*                                     log and split pieces.                *)
 (*   ClusterSnapshotCatchup_noloss.cfg no loss, no rejection, no eviction:  *)
-(*                                     exactly one snapshot.                *)
+(*                                     those four and InvOneSnapshot hold,  *)
+(*                                     for these constants.                 *)
 (*   ClusterSnapshotCatchup_loss.cfg   one loss: InvOneSnapshot violated, a *)
 (*                                     lost first piece costs a snapshot.   *)
 (*                                                                          *)
-(* NOT MODELLED: epochs and failover, so a replica ahead of its primary is  *)
-(* covered by tests only; values, so a replay rolling a record back is      *)
-(* covered by tests only; lost live writes (gh #309); the 5 s and 30 s      *)
-(* timer lengths; old nodes. A gap ack or its pieces are never lost here,   *)
+(* NOT MODELLED: epochs and failover. The one test for a replica ahead of   *)
+(* its primary sets the sequence directly; it has no restart or failover.   *)
+(* Values: a stale write is a no-op here, and tests check that it does not  *)
+(* roll a record back for a duplicate piece and for a queued write a chunk  *)
+(* overtook. Also lost live writes (gh #309); the 5 s and 30 s timer        *)
+(* lengths; old nodes. A gap ack or its pieces are never lost here,         *)
 (* since main has no retry for them either. Bounded constants: verified    *)
 (* for these sizes, not proven for all.                                     *)
 (***************************************************************************)
@@ -280,9 +291,6 @@ InvAppliedPrefix == (1..rSeq) \subseteq applied
 
 \* Without loss, rejection or eviction one snapshot is enough.
 InvOneSnapshot == imports <= 1
-
-TwoSnapshots == imports >= 2
-ThreeSnapshots == imports >= 3
 
 Converged == pSeq = MaxSeq /\ role = "Replica" /\ rSeq = MaxSeq
 EventuallyConverged == <>[]Converged

@@ -39,6 +39,7 @@ impl<T: ClusterTransport> NodeController<T> {
         );
 
         let ack = if let Some(state) = self.replicas.get_mut(&partition.get()) {
+            let already_held = state.already_holds(write);
             let ack = state.handle_write(write);
             let t_state = super::elapsed_micros(start);
             tracing::debug!(
@@ -48,7 +49,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 ack_status = ?ack.status(),
                 "handle_write result"
             );
-            if ack.is_ok() {
+            if ack.is_ok() && !already_held {
                 if let Err(e) = self.apply_replicated_write(write) {
                     tracing::error!(?partition, ?e, "failed to apply write to stores");
                 } else {
