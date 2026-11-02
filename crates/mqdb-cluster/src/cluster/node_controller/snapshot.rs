@@ -503,16 +503,13 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     pub(super) async fn catchup_answered(&mut self, partition: PartitionId, more_may_follow: bool) {
-        if !self
+        if more_may_follow {
+            self.request_catchup(partition).await;
+        } else if self
             .incoming_snapshots
             .get(&partition)
             .is_some_and(IncomingSnapshot::catching_up)
         {
-            return;
-        }
-        if more_may_follow {
-            self.request_catchup(partition).await;
-        } else {
             self.incoming_snapshots.remove(&partition);
         }
     }

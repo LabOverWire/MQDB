@@ -1082,3 +1082,61 @@ fn the_catchup_limit_counts_everything_a_write_encodes() {
     let response = CatchupResponse::create(partition, node(1), limited);
     assert!(response.to_bytes().unwrap().len() <= 8 * 1024 * 1024);
 }
+
+async fn caught_up_replica(
+    primary: &mut NodeController<MockTransport>,
+) -> NodeController<MockTransport> {
+    let (mut replica, _) = awaiting_replica(node(1)).await;
+    let chunks = start_transfer(primary, &mut replica).await;
+    finish_transfer(&mut replica, &chunks).await;
+    exchange(primary, &mut replica).await;
+    replica
+}
+
+#[tokio::test]
+async fn a_buffered_write_reaches_the_store_when_its_gap_is_filled() {
+    let (mut primary, partition) = primary_holding(1, 1024);
+    let mut replica = caught_up_replica(&mut primary).await;
+
+    write_counter(&mut primary, 1).await;
+    write_counter(&mut primary, 2).await;
+    write_counter(&mut primary, 3).await;
+    let last_write = primary
+        .transport
+        .take_sent()
+        .into_iter()
+        .rfind(|(to, message)| *to == node(2) && matches!(message, ClusterMessage::Write(_)))
+        .unwrap();
+    replica.transport.inject_message(node(1), last_write.1);
+    replica.process_messages().await;
+    assert_eq!(replica.sequence(partition), Some(0));
+
+    exchange(&mut primary, &mut replica).await;
+
+    assert_eq!(replica.sequence(partition), Some(3));
+    assert_eq!(counter(&replica), Some(3));
+    assert!(replica.write_log.has_sequence(partition, 3));
+}
+
+#[tokio::test]
+async fn a_gap_larger_than_one_catchup_response_is_filled_without_further_writes() {
+    let (mut primary, partition) = primary_holding(1, 1024);
+    let mut replica = caught_up_replica(&mut primary).await;
+
+    let large = record(100 * 1024);
+    for n in 0..110 {
+        primary.db_update(ENTITY, ID, &large, n + 1).await.unwrap();
+    }
+    let last_write = primary
+        .transport
+        .take_sent()
+        .into_iter()
+        .rfind(|(to, message)| *to == node(2) && matches!(message, ClusterMessage::Write(_)))
+        .unwrap();
+    replica.transport.inject_message(node(1), last_write.1);
+    replica.process_messages().await;
+
+    exchange(&mut primary, &mut replica).await;
+
+    assert_eq!(replica.sequence(partition), primary.sequence(partition));
+}
