@@ -1,57 +1,54 @@
 -------------------------------- MODULE CascadeClosure --------------------------------
-\* Verifies the transitive-share cascade (docs/design/diagram-sharing.md):
-\* sharing a root diagram must grant exactly the diagrams reachable from it via
-\* diagram->diagram references -- no more (over-sharing = leak), no less
-\* (under-sharing = broken functionality) -- and must terminate on cyclic graphs.
-\*
-\* The BFS (visited/frontier, visited-guarded) is checked against an independent
-\* fixpoint reachability, over EVERY possible reference graph on 3 diagrams.
-
 EXTENDS Integers, FiniteSets
 
 CONSTANTS d1, d2, d3
 Diagrams == {d1, d2, d3}
 Root     == d1
 
-VARIABLES refs, visited, frontier
-vars == <<refs, visited, frontier>>
+VARIABLES refs, shareable, visited, frontier, skipped
+vars == <<refs, shareable, visited, frontier, skipped>>
 
-\* independent definition of reachability: least fixpoint of the neighbour step
 RECURSIVE ReachSet(_)
 ReachSet(S) ==
-    LET S2 == S \cup {y \in Diagrams : \E x \in S : <<x, y>> \in refs}
+    LET S2 == S \cup {y \in shareable : \E x \in S : <<x, y>> \in refs}
     IN IF S2 = S THEN S ELSE ReachSet(S2)
 
 Reachable == ReachSet({Root})
 
+ForeignNeighbours == {y \in Diagrams \ shareable : \E x \in Reachable : <<x, y>> \in refs}
+
 Init ==
-    /\ refs \in SUBSET (Diagrams \X Diagrams)   \* every graph, incl. cycles & self-loops
+    /\ refs \in SUBSET (Diagrams \X Diagrams)
+    /\ shareable \in {S \in SUBSET Diagrams : Root \in S}
     /\ visited = {}
     /\ frontier = {Root}
+    /\ skipped = {}
 
-\* visit one frontier node; enqueue its not-yet-visited neighbours (cycle-safe)
 Step ==
     /\ frontier # {}
     /\ \E d \in frontier :
         LET nv   == visited \cup {d}
             nbrs == {y \in Diagrams : <<d, y>> \in refs}
         IN /\ visited'  = nv
-           /\ frontier' = (frontier \ {d}) \cup (nbrs \ nv)
-           /\ UNCHANGED refs
+           /\ frontier' = (frontier \ {d}) \cup ((nbrs \cap shareable) \ nv)
+           /\ skipped'  = skipped \cup (nbrs \ shareable)
+           /\ UNCHANGED <<refs, shareable>>
 
 Next == Step
 Spec == Init /\ [][Next]_vars
 
 TypeOK ==
     /\ refs \subseteq (Diagrams \X Diagrams)
+    /\ shareable \subseteq Diagrams
     /\ visited \subseteq Diagrams
     /\ frontier \subseteq Diagrams
+    /\ skipped \subseteq Diagrams
 
-\* never grant outside the reference closure (no over-sharing / leak)
+InvGrantsOnlyShareable == visited \subseteq shareable
 InvCascadeSound == visited \subseteq Reachable
-\* frontier stays within the closure too
 InvFrontierSound == frontier \subseteq Reachable
-\* on termination, granted set equals the closure exactly (no under-sharing)
+InvSkippedNeverGranted == skipped \cap visited = {}
 InvCascadeComplete == (frontier = {}) => (visited = Reachable)
+InvSkippedComplete == (frontier = {}) => (skipped = ForeignNeighbours)
 
 =============================================================================
