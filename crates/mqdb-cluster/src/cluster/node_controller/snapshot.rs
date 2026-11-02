@@ -31,7 +31,9 @@ enum IncomingState {
         builder: Option<SnapshotBuilder>,
     },
     BackingOff,
-    CatchingUp,
+    CatchingUp {
+        asked_from: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -44,12 +46,12 @@ impl IncomingSnapshot {
     fn requested_from(&self) -> Option<NodeId> {
         match self.state {
             IncomingState::Requested { source, .. } => Some(source),
-            IncomingState::BackingOff | IncomingState::CatchingUp => None,
+            IncomingState::BackingOff | IncomingState::CatchingUp { .. } => None,
         }
     }
 
     fn catching_up(&self) -> bool {
-        matches!(self.state, IncomingState::CatchingUp)
+        matches!(self.state, IncomingState::CatchingUp { .. })
     }
 
     fn expired(&self, now: u64) -> bool {
@@ -58,7 +60,9 @@ impl IncomingSnapshot {
         };
         let limit = match self.state {
             IncomingState::Requested { .. } => SNAPSHOT_STALL_TIMEOUT_MS,
-            IncomingState::BackingOff | IncomingState::CatchingUp => SNAPSHOT_RETRY_BACKOFF_MS,
+            IncomingState::BackingOff | IncomingState::CatchingUp { .. } => {
+                SNAPSHOT_RETRY_BACKOFF_MS
+            }
         };
         now.saturating_sub(since) >= limit
     }
@@ -474,14 +478,16 @@ impl<T: ClusterTransport> NodeController<T> {
             return;
         };
         let since_ms = self.snapshot_stamp();
+        let from_seq = self.sequence(partition).unwrap_or(0) + 1;
         self.incoming_snapshots.insert(
             partition,
             IncomingSnapshot {
-                state: IncomingState::CatchingUp,
+                state: IncomingState::CatchingUp {
+                    asked_from: from_seq,
+                },
                 since_ms,
             },
         );
-        let from_seq = self.sequence(partition).unwrap_or(0) + 1;
         let request = CatchupRequest::create(partition, from_seq, u64::MAX, self.node_id);
         if let Err(error) = self
             .transport
@@ -499,6 +505,13 @@ impl<T: ClusterTransport> NodeController<T> {
             .is_some_and(IncomingSnapshot::catching_up)
         {
             self.incoming_snapshots.remove(&partition);
+        }
+    }
+
+    pub(super) fn catchup_asked_from(&self, partition: PartitionId) -> Option<u64> {
+        match self.incoming_snapshots.get(&partition)?.state {
+            IncomingState::CatchingUp { asked_from } => Some(asked_from),
+            _ => None,
         }
     }
 

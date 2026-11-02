@@ -32,7 +32,17 @@ impl<T: ClusterTransport> NodeController<T> {
         );
 
         let newest_held = to_seq.min(self.sequence(partition).unwrap_or(0));
-        let writes = self.write_log.get_range(partition, from_seq, newest_held);
+        let unbounded = to_seq == u64::MAX;
+        let writes = if unbounded || self.write_log.can_catchup(partition, from_seq) {
+            self.write_log.get_range(partition, from_seq, newest_held)
+        } else {
+            tracing::warn!(
+                ?partition,
+                from_seq,
+                "cannot serve catchup - data evicted from log"
+            );
+            Vec::new()
+        };
 
         tracing::info!(
             ?partition,
@@ -44,8 +54,12 @@ impl<T: ClusterTransport> NodeController<T> {
 
         let nothing_to_send = writes.is_empty();
         let all_sent = self.send_catchup_writes(from, partition, writes).await;
-        if nothing_to_send || (all_sent && to_seq == u64::MAX) {
-            self.send_catchup_piece(from, partition, Vec::new()).await;
+        if unbounded && all_sent {
+            let marker = CatchupResponse::end_marker(partition, self.node_id, newest_held);
+            self.send_catchup_response(from, marker).await;
+        } else if nothing_to_send {
+            let empty = CatchupResponse::empty(partition, self.node_id);
+            self.send_catchup_response(from, empty).await;
         }
     }
 
@@ -56,23 +70,19 @@ impl<T: ClusterTransport> NodeController<T> {
         writes: Vec<ReplicationWrite>,
     ) -> bool {
         for piece in catchup_pieces(writes) {
-            if !self.send_catchup_piece(to, partition, piece).await {
+            let response = CatchupResponse::create(partition, self.node_id, piece);
+            if !self.send_catchup_response(to, response).await {
                 return false;
             }
         }
         true
     }
 
-    async fn send_catchup_piece(
-        &self,
-        to: NodeId,
-        partition: PartitionId,
-        writes: Vec<ReplicationWrite>,
-    ) -> bool {
-        let resp = CatchupResponse::create(partition, self.node_id, writes);
+    async fn send_catchup_response(&self, to: NodeId, response: CatchupResponse) -> bool {
+        let partition = response.partition;
         match self
             .transport
-            .send(to, ClusterMessage::CatchupResponse(resp))
+            .send(to, ClusterMessage::CatchupResponse(response))
             .await
         {
             Ok(()) => true,
@@ -103,6 +113,30 @@ impl<T: ClusterTransport> NodeController<T> {
         );
 
         if resp.writes.is_empty() {
+            if let Some(asked_from) = self.catchup_asked_from(partition) {
+                if self.partition_map.primary(partition) != Some(responder) {
+                    tracing::debug!(
+                        ?partition,
+                        responder = responder.get(),
+                        "ignoring catchup end from a node that is not the primary"
+                    );
+                    return;
+                }
+                let next = self.sequence(partition).unwrap_or(0) + 1;
+                if resp.covers_through.is_some_and(|covers| next <= covers) {
+                    if next > asked_from {
+                        self.request_catchup(partition).await;
+                    } else {
+                        tracing::info!(
+                            ?partition,
+                            next,
+                            "primary has nothing to send for a replica behind it - switching to awaiting snapshot"
+                        );
+                        self.catch_up_by_snapshot(partition, responder).await;
+                    }
+                    return;
+                }
+            }
             let needs_snapshot = self
                 .replicas
                 .get(&partition.get())
