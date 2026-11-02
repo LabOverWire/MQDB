@@ -1627,3 +1627,23 @@ async fn a_wildcard_write_with_no_sequence_is_still_stored_by_a_replica() {
         1
     );
 }
+
+#[tokio::test]
+async fn a_write_from_a_primary_restarted_at_a_lower_sequence_is_still_stored() {
+    let (mut primary, partition) = primary_holding(1, 1024);
+    let mut replica = caught_up_replica(&mut primary).await;
+    primary.transport.take_sent();
+    replica.transport.take_sent();
+    write_counter(&mut primary, 1).await;
+    write_counter(&mut primary, 2).await;
+    deliver(&primary, &mut replica).await;
+    assert_eq!(replica.sequence(partition), Some(2));
+    assert_eq!(counter(&replica), Some(2));
+
+    let (mut restarted, _) = primary_holding(1, 1024);
+    write_counter(&mut restarted, 9).await;
+    assert_eq!(restarted.sequence(partition), Some(1));
+    deliver(&restarted, &mut replica).await;
+
+    assert_eq!(counter(&replica), Some(9));
+}
