@@ -55,7 +55,8 @@ impl<T: ClusterTransport> NodeController<T> {
         let nothing_to_send = writes.is_empty();
         let all_sent = self.send_catchup_writes(from, partition, writes).await;
         if unbounded && all_sent {
-            let marker = CatchupResponse::end_marker(partition, self.node_id, newest_held);
+            let marker =
+                CatchupResponse::end_marker(partition, self.node_id, newest_held, from_seq);
             self.send_catchup_response(from, marker).await;
         } else if nothing_to_send {
             let empty = CatchupResponse::empty(partition, self.node_id);
@@ -119,6 +120,14 @@ impl<T: ClusterTransport> NodeController<T> {
                         ?partition,
                         responder = responder.get(),
                         "ignoring catchup end from a node that is not the primary"
+                    );
+                    return;
+                }
+                if resp.answers_from.is_some_and(|from| from != asked_from) {
+                    tracing::debug!(
+                        ?partition,
+                        asked_from,
+                        "ignoring catchup end from an earlier exchange"
                     );
                     return;
                 }

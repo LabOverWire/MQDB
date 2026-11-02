@@ -288,6 +288,7 @@ pub struct CatchupResponse {
     pub responder_id: NodeId,
     pub writes: Vec<ReplicationWrite>,
     pub covers_through: Option<u64>,
+    pub answers_from: Option<u64>,
 }
 
 impl CatchupResponse {
@@ -304,16 +305,23 @@ impl CatchupResponse {
             responder_id: responder,
             writes,
             covers_through: None,
+            answers_from: None,
         }
     }
 
     #[must_use]
-    pub fn end_marker(partition: PartitionId, responder: NodeId, covers_through: u64) -> Self {
+    pub fn end_marker(
+        partition: PartitionId,
+        responder: NodeId,
+        covers_through: u64,
+        answers_from: u64,
+    ) -> Self {
         Self {
             partition,
             responder_id: responder,
             writes: Vec::new(),
             covers_through: Some(covers_through),
+            answers_from: Some(answers_from),
         }
     }
 
@@ -324,6 +332,7 @@ impl CatchupResponse {
             responder_id: responder,
             writes: Vec::new(),
             covers_through: None,
+            answers_from: None,
         }
     }
 
@@ -349,6 +358,9 @@ impl CatchupResponse {
         if let Some(covers_through) = self.covers_through {
             buf.extend_from_slice(&covers_through.to_be_bytes());
         }
+        if let Some(answers_from) = self.answers_from {
+            buf.extend_from_slice(&answers_from.to_be_bytes());
+        }
 
         Some(buf)
     }
@@ -370,12 +382,14 @@ impl CatchupResponse {
             })
             .collect::<Option<Vec<_>>>()?;
         let covers_through = reader.u64();
+        let answers_from = reader.u64();
 
         Some(Self {
             partition,
             responder_id,
             writes,
             covers_through,
+            answers_from,
         })
     }
 }

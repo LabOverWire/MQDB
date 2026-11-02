@@ -1200,6 +1200,13 @@ async fn catching_up_lasts_until_the_primary_says_it_has_sent_everything() {
     replica
         .drive_snapshots(START + 2 * SNAPSHOT_RETRY_BACKOFF_MS)
         .await;
+    assert_eq!(catchup_requests_in(&replica.transport.sent_messages()), 1);
+
+    deliver(&replica, &mut primary).await;
+    deliver(&primary, &mut replica).await;
+    replica
+        .drive_snapshots(START + 3 * SNAPSHOT_RETRY_BACKOFF_MS)
+        .await;
     assert_eq!(catchup_requests_in(&replica.transport.take_sent()), 0);
     assert_eq!(replica.sequence(partition), Some(1));
 }
@@ -1463,14 +1470,16 @@ async fn a_bounded_catchup_request_past_the_log_is_answered_empty() {
 #[test]
 fn an_end_marker_carries_its_coverage_and_an_old_response_has_none() {
     let partition = data_partition(ENTITY, ID);
-    let marker = CatchupResponse::end_marker(partition, node(1), 42);
+    let marker = CatchupResponse::end_marker(partition, node(1), 42, 7);
     let decoded = CatchupResponse::from_bytes(&marker.to_bytes().unwrap()).unwrap();
     assert_eq!(decoded.covers_through, Some(42));
+    assert_eq!(decoded.answers_from, Some(7));
     assert!(decoded.writes.is_empty());
 
     let old = CatchupResponse::empty(partition, node(1));
     let decoded = CatchupResponse::from_bytes(&old.to_bytes().unwrap()).unwrap();
     assert_eq!(decoded.covers_through, None);
+    assert_eq!(decoded.answers_from, None);
 }
 
 #[tokio::test]
@@ -1490,4 +1499,74 @@ async fn an_empty_response_from_an_old_primary_still_finishes_a_catchup() {
 
     assert_eq!(catchup_requests_in(&replica.transport.take_sent()), 0);
     assert_eq!(replica.role(partition), ReplicaRole::Replica);
+}
+
+#[tokio::test]
+async fn a_marker_from_an_earlier_exchange_does_not_finish_a_later_catchup() {
+    let (mut primary, partition) = primary_holding(1, 1024);
+    let (mut replica, _) = awaiting_replica(node(1)).await;
+    replica.drive_snapshots(START).await;
+    let first_chunks = start_transfer(&mut primary, &mut replica).await;
+    write_counter(&mut primary, 1).await;
+    primary.transport.take_sent();
+    finish_transfer(&mut replica, &first_chunks).await;
+    deliver(&replica, &mut primary).await;
+    let exchange_a = catchup_responses(&primary);
+    assert_eq!(exchange_a.len(), 2);
+
+    let bumped = map_for(node(1), &[node(2), node(3)], 2);
+    primary.apply_raft_partition_map(bumped.clone()).await;
+    replica.apply_raft_partition_map(bumped).await;
+    primary.transport.take_sent();
+    replica.transport.take_sent();
+    replica
+        .transport
+        .inject_message(node(1), exchange_a[0].clone());
+    replica.process_messages().await;
+    assert_eq!(replica.role(partition), ReplicaRole::AwaitingSnapshot);
+
+    let second_chunks = start_transfer(&mut primary, &mut replica).await;
+    write_counter(&mut primary, 2).await;
+    primary.transport.take_sent();
+    finish_transfer(&mut replica, &second_chunks).await;
+    replica.transport.take_sent();
+
+    replica
+        .transport
+        .inject_message(node(1), exchange_a[1].clone());
+    replica.process_messages().await;
+    replica
+        .drive_snapshots(START + SNAPSHOT_RETRY_BACKOFF_MS)
+        .await;
+    exchange(&mut primary, &mut replica).await;
+
+    assert_eq!(replica.sequence(partition), primary.sequence(partition));
+    assert_eq!(counter(&replica), Some(2));
+}
+
+#[tokio::test]
+async fn a_replica_ahead_of_its_primary_still_finishes_catching_up() {
+    let (mut primary, partition) = primary_holding(1, 1024);
+    let mut replica = replica_catching_up_with_writes_pending(&mut primary).await;
+    deliver(&replica, &mut primary).await;
+    primary.transport.take_sent();
+    replica
+        .replicas
+        .get_mut(&partition.get())
+        .unwrap()
+        .set_sequence(9);
+    replica
+        .drive_snapshots(START + SNAPSHOT_RETRY_BACKOFF_MS)
+        .await;
+    deliver(&replica, &mut primary).await;
+    deliver(&primary, &mut replica).await;
+    replica.transport.take_sent();
+
+    replica
+        .drive_snapshots(START + 2 * SNAPSHOT_RETRY_BACKOFF_MS)
+        .await;
+
+    assert_eq!(catchup_requests_in(&replica.transport.take_sent()), 0);
+    assert_eq!(replica.role(partition), ReplicaRole::Replica);
+    assert_eq!(replica.sequence(partition), Some(9));
 }
