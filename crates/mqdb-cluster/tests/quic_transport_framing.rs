@@ -708,3 +708,144 @@ async fn a_first_chunk_is_written_after_the_bulk_frames_queued_before_it() {
 
     far_handle.abort();
 }
+
+fn snapshot_chunk_of(transfer: u8, index: u32) -> ClusterMessage {
+    ClusterMessage::SnapshotChunk(
+        SnapshotChunk::new(PartitionId::ZERO, index, u32::MAX, 0, vec![transfer; 1024])
+            .with_transfer_id(u64::from(transfer)),
+    )
+}
+
+#[tokio::test]
+async fn a_first_chunk_after_a_full_lane_is_not_held_by_refused_frames() {
+    let StalledPeer {
+        transport,
+        local,
+        peer,
+        frame_rx,
+        release_tx,
+        far_handle,
+    } = setup_stalled_peer().await;
+
+    let mut accepted = 0;
+    let mut refused = 0;
+    while refused <= 20 {
+        match transport.send(peer, bulk_message(local)).await {
+            Ok(()) => accepted += 1,
+            Err(TransportError::SendQueueFull(_)) => refused += 1,
+            Err(other) => panic!("unexpected bulk send error: {other}"),
+        }
+    }
+    transport.send(peer, snapshot_chunk(0)).await.unwrap();
+    release_tx.send(()).ok();
+
+    let snapshot_type = snapshot_chunk(0).message_type();
+    let mut bulk_before_chunk = 0;
+    while collect_frame(&frame_rx).await[2] != snapshot_type {
+        bulk_before_chunk += 1;
+    }
+    assert_eq!(bulk_before_chunk, accepted);
+
+    far_handle.abort();
+}
+
+#[tokio::test]
+async fn a_first_chunk_is_positioned_exactly_and_control_frames_do_not_count_as_bulk() {
+    let StalledPeer {
+        transport,
+        local,
+        peer,
+        frame_rx,
+        release_tx,
+        far_handle,
+    } = setup_stalled_peer().await;
+
+    for _ in 0..300 {
+        transport.send(peer, bulk_message(local)).await.unwrap();
+    }
+    transport.send(peer, snapshot_chunk_of(1, 0)).await.unwrap();
+    transport.send(peer, snapshot_chunk_of(1, 1)).await.unwrap();
+    for _ in 0..100 {
+        transport.send(peer, bulk_message(local)).await.unwrap();
+    }
+    transport.send(peer, snapshot_chunk_of(2, 0)).await.unwrap();
+    for _ in 0..50 {
+        transport.send(peer, bulk_message(local)).await.unwrap();
+    }
+    transport.send(peer, heartbeat(local, 7)).await.unwrap();
+    release_tx.send(()).ok();
+
+    let snapshot_type = snapshot_chunk(0).message_type();
+    let heartbeat_type = heartbeat(local, 0).message_type();
+    let mut bulk = 0;
+    let mut chunk_positions = Vec::new();
+    let mut heartbeat_seen = false;
+    while bulk < 450 || chunk_positions.len() < 3 {
+        let frame = collect_frame(&frame_rx).await;
+        if frame[2] == snapshot_type {
+            chunk_positions.push(bulk);
+        } else if frame[2] == heartbeat_type {
+            heartbeat_seen = true;
+        } else {
+            bulk += 1;
+        }
+    }
+    assert_eq!(chunk_positions[0], 300);
+    assert!(chunk_positions[1] >= 300);
+    assert!(
+        chunk_positions[2] >= 400,
+        "the second transfer overtook bulk queued before it: {chunk_positions:?}"
+    );
+    assert!(heartbeat_seen);
+
+    far_handle.abort();
+}
+
+#[tokio::test]
+async fn a_first_chunk_is_written_when_no_bulk_follows_it() {
+    let StalledPeer {
+        transport,
+        local,
+        peer,
+        frame_rx,
+        release_tx,
+        far_handle,
+    } = setup_stalled_peer().await;
+
+    for _ in 0..5 {
+        transport.send(peer, bulk_message(local)).await.unwrap();
+    }
+    transport.send(peer, snapshot_chunk(0)).await.unwrap();
+    release_tx.send(()).ok();
+
+    let snapshot_type = snapshot_chunk(0).message_type();
+    let mut bulk_before_chunk = 0;
+    while collect_frame(&frame_rx).await[2] != snapshot_type {
+        bulk_before_chunk += 1;
+    }
+    assert_eq!(bulk_before_chunk, 5);
+
+    far_handle.abort();
+}
+
+#[tokio::test]
+async fn a_first_chunk_with_no_bulk_ever_queued_is_written() {
+    let StalledPeer {
+        transport,
+        peer,
+        frame_rx,
+        release_tx,
+        far_handle,
+        ..
+    } = setup_stalled_peer().await;
+
+    transport.send(peer, snapshot_chunk(0)).await.unwrap();
+    release_tx.send(()).ok();
+
+    assert_eq!(
+        collect_frame(&frame_rx).await[2],
+        snapshot_chunk(0).message_type()
+    );
+
+    far_handle.abort();
+}
