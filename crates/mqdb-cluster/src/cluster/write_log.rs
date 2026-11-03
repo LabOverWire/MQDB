@@ -27,7 +27,22 @@ impl BoundedLog {
     }
 
     fn append(&mut self, sequence: u64, write: ReplicationWrite, max_entries: usize) {
-        if sequence <= self.base_sequence && !self.entries.is_empty() {
+        while self
+            .entries
+            .back()
+            .is_some_and(|last| last.sequence >= sequence && last.write.epoch < write.epoch)
+        {
+            self.entries.pop_back();
+        }
+        if self.entries.is_empty() {
+            self.base_sequence = 0;
+        }
+        if sequence <= self.base_sequence
+            || self
+                .entries
+                .back()
+                .is_some_and(|last| last.sequence >= sequence)
+        {
             return;
         }
 
@@ -132,6 +147,12 @@ impl PartitionWriteLog {
             logs: RwLock::new(HashMap::new()),
             max_entries,
         }
+    }
+
+    /// # Panics
+    /// Panics if the internal lock is poisoned.
+    pub fn clear(&self, partition: PartitionId) {
+        self.logs.write().unwrap().remove(&partition.get());
     }
 
     /// # Panics
@@ -261,6 +282,83 @@ mod tests {
             format!("id{seq}"),
             vec![],
         )
+    }
+
+    fn write_in(epoch: u64, seq: u64) -> ReplicationWrite {
+        ReplicationWrite {
+            epoch: Epoch::new(epoch),
+            ..write(seq)
+        }
+    }
+
+    fn sequences_and_epochs(log: &PartitionWriteLog) -> Vec<(u64, u64)> {
+        log.get_from(partition(0), 0)
+            .iter()
+            .map(|w| (w.sequence, w.epoch.get()))
+            .collect()
+    }
+
+    #[test]
+    fn a_write_of_a_newer_epoch_drops_older_entries_at_or_above_its_sequence() {
+        let log = PartitionWriteLog::new();
+        for seq in 1..=4 {
+            log.append(partition(0), seq, write_in(1, seq));
+        }
+
+        log.append(partition(0), 3, write_in(2, 3));
+
+        assert_eq!(sequences_and_epochs(&log), vec![(1, 1), (2, 1), (3, 2)]);
+    }
+
+    #[test]
+    fn a_repeated_write_of_the_same_epoch_keeps_the_entries_after_it() {
+        let log = PartitionWriteLog::new();
+        for seq in 1..=4 {
+            log.append(partition(0), seq, write_in(1, seq));
+        }
+
+        log.append(partition(0), 2, write_in(1, 2));
+
+        assert_eq!(
+            sequences_and_epochs(&log),
+            vec![(1, 1), (2, 1), (3, 1), (4, 1)]
+        );
+    }
+
+    #[test]
+    fn a_write_of_an_older_epoch_is_not_appended() {
+        let log = PartitionWriteLog::new();
+        log.append(partition(0), 1, write_in(2, 1));
+        log.append(partition(0), 2, write_in(2, 2));
+
+        log.append(partition(0), 2, write_in(1, 2));
+
+        assert_eq!(sequences_and_epochs(&log), vec![(1, 2), (2, 2)]);
+    }
+
+    #[test]
+    fn a_newer_epoch_below_the_evicted_base_replaces_the_whole_log() {
+        let log = PartitionWriteLog::with_max_entries(2);
+        for seq in 1..=5 {
+            log.append(partition(0), seq, write_in(1, seq));
+        }
+
+        log.append(partition(0), 1, write_in(2, 1));
+        log.append(partition(0), 2, write_in(2, 2));
+
+        assert_eq!(sequences_and_epochs(&log), vec![(1, 2), (2, 2)]);
+    }
+
+    #[test]
+    fn clearing_forgets_only_that_partition() {
+        let log = PartitionWriteLog::new();
+        log.append(partition(0), 1, write(1));
+        log.append(partition(1), 1, write(1));
+
+        log.clear(partition(0));
+
+        assert!(log.get_from(partition(0), 0).is_empty());
+        assert_eq!(log.get_from(partition(1), 0).len(), 1);
     }
 
     #[test]

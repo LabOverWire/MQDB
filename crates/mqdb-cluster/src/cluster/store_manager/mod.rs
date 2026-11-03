@@ -10,6 +10,7 @@ mod index_ops;
 mod mqtt_state;
 pub(crate) mod outbox;
 mod partition_io;
+mod primary_marker;
 mod query;
 mod recovery;
 mod schema_ops;
@@ -36,6 +37,8 @@ use super::topic_index::TopicIndex;
 use super::wildcard_store::WildcardStore;
 use mqdb_core::storage::StorageBackend;
 use std::sync::Arc;
+
+pub(crate) use primary_marker::HeldPrimaries;
 
 #[derive(Debug, Default, Clone)]
 pub struct RecoveryStats {
@@ -131,6 +134,7 @@ pub enum StoreApplyError {
     ClientLocationError,
     ChangeEventError,
     PersistenceError,
+    SnapshotTooLarge,
 }
 
 impl std::fmt::Display for StoreApplyError {
@@ -155,6 +159,7 @@ impl std::fmt::Display for StoreApplyError {
             Self::ClientLocationError => write!(f, "client location store error"),
             Self::ChangeEventError => write!(f, "change event store error"),
             Self::PersistenceError => write!(f, "persistence error"),
+            Self::SnapshotTooLarge => write!(f, "partition snapshot exceeds the frame size limits"),
         }
     }
 }

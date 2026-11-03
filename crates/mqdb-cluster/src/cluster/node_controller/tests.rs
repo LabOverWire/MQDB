@@ -6,6 +6,7 @@ use crate::cluster::NUM_PARTITIONS;
 use crate::cluster::protocol::{Heartbeat, Operation};
 use crate::cluster::quorum::QuorumResult;
 use crate::cluster::session_partition;
+use crate::cluster::test_support::{put_record, remove_record};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
@@ -13,8 +14,8 @@ fn create_test_controller(
     node_id: NodeId,
     transport: MockTransport,
 ) -> NodeController<MockTransport> {
-    let (tx_raft_messages, _rx_raft_messages) = flume::unbounded();
-    let (tx_raft_events, _rx_raft_events) = flume::unbounded();
+    let tx_raft_messages = flume::unbounded().0;
+    let tx_raft_events = flume::unbounded().0;
     NodeController::new(
         node_id,
         transport,
@@ -36,6 +37,7 @@ fn set_unique_group(
             primary: Some(primary),
             replicas: replicas.to_vec(),
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -62,6 +64,9 @@ struct MockTransport {
     queued_publishes: Arc<Mutex<Vec<QueuedPublish>>>,
     refuse_local_delivery: Arc<std::sync::atomic::AtomicBool>,
     refuse_sends: Arc<std::sync::atomic::AtomicBool>,
+    queue_full: Arc<std::sync::atomic::AtomicBool>,
+    full_peers: Arc<Mutex<std::collections::HashSet<NodeId>>>,
+    retained_refreshes: Arc<Mutex<Vec<String>>>,
 }
 
 impl MockTransport {
@@ -74,7 +79,14 @@ impl MockTransport {
             queued_publishes: Arc::new(Mutex::new(Vec::new())),
             refuse_local_delivery: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             refuse_sends: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            queue_full: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            full_peers: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            retained_refreshes: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    fn take_sent(&self) -> Vec<(NodeId, ClusterMessage)> {
+        std::mem::take(&mut *self.outbox.lock().unwrap())
     }
 
     fn inject_message(&self, from: NodeId, message: ClusterMessage) {
@@ -107,6 +119,11 @@ impl ClusterTransport for MockTransport {
         if self.refuse_sends.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(super::super::transport::TransportError::NotConnected);
         }
+        if self.queue_full.load(std::sync::atomic::Ordering::SeqCst)
+            || self.full_peers.lock().unwrap().contains(&to)
+        {
+            return Err(super::super::transport::TransportError::SendQueueFull(to));
+        }
         self.outbox.lock().unwrap().push((to, message));
         Ok(())
     }
@@ -124,8 +141,8 @@ impl ClusterTransport for MockTransport {
 
     async fn send_to_partition_primary(
         &self,
-        _partition: PartitionId,
-        _message: ClusterMessage,
+        _: PartitionId,
+        _: ClusterMessage,
     ) -> Result<(), super::super::transport::TransportError> {
         Ok(())
     }
@@ -138,7 +155,7 @@ impl ClusterTransport for MockTransport {
         self.inbox.lock().unwrap().pop_front()
     }
 
-    fn try_recv_timeout(&self, _timeout_ms: u64) -> Option<InboundMessage> {
+    fn try_recv_timeout(&self, _: u64) -> Option<InboundMessage> {
         self.inbox.lock().unwrap().pop_front()
     }
 
@@ -175,8 +192,10 @@ impl ClusterTransport for MockTransport {
         true
     }
 
-    async fn queue_local_publish_retained(&self, _topic: String, _payload: Vec<u8>, _qos: u8) {}
-    async fn queue_retained_refresh(&self, _topic: String) {}
+    async fn queue_local_publish_retained(&self, _: String, _: Vec<u8>, _: u8) {}
+    async fn queue_retained_refresh(&self, topic: String) {
+        self.retained_refreshes.lock().unwrap().push(topic);
+    }
 }
 
 fn forwarded_publish(origin: NodeId, topic: &str) -> ClusterMessage {
@@ -433,6 +452,7 @@ async fn reconcile_apply_skips_record_deleted_after_collection() {
                 primary: Some(node1),
                 replicas: vec![],
                 epoch: Epoch::new(1),
+                primary_since: Epoch::new(1),
             },
         );
     }
@@ -441,10 +461,13 @@ async fn reconcile_apply_skips_record_deleted_after_collection() {
         .db_constraints
         .add(ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
         .unwrap();
-    ctrl.stores()
-        .db_data
-        .create("users", "u1", br#"{"email":"a@x.com"}"#, 1000)
-        .unwrap();
+    put_record(
+        &ctrl.stores().db_data,
+        "users",
+        "u1",
+        br#"{"email":"a@x.com"}"#,
+        1000,
+    );
 
     let work = ctrl.collect_unique_reconcile_work();
     assert_eq!(
@@ -453,7 +476,7 @@ async fn reconcile_apply_skips_record_deleted_after_collection() {
         "one reassert work item for the durable record"
     );
 
-    ctrl.stores().db_data.delete("users", "u1").unwrap();
+    remove_record(&ctrl.stores().db_data, "users", "u1");
     ctrl.apply_unique_reconcile_chunk(&work).await;
 
     let value = serde_json::to_vec(&serde_json::json!("a@x.com")).unwrap();
@@ -518,6 +541,7 @@ async fn project_reconcile_work_skips_key_deleted_after_gather() {
                 primary: Some(node1),
                 replicas: vec![],
                 epoch: Epoch::new(1),
+                primary_since: Epoch::new(1),
             },
         );
     }
@@ -526,15 +550,18 @@ async fn project_reconcile_work_skips_key_deleted_after_gather() {
         .db_constraints
         .add(ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
         .unwrap();
-    ctrl.stores()
-        .db_data
-        .create("users", "u1", br#"{"email":"a@x.com"}"#, 1000)
-        .unwrap();
+    put_record(
+        &ctrl.stores().db_data,
+        "users",
+        "u1",
+        br#"{"email":"a@x.com"}"#,
+        1000,
+    );
 
     let keys = ctrl.collect_unique_reconcile_keys();
     assert_eq!(keys.len(), 1, "one owned durable record gathered");
 
-    ctrl.stores().db_data.delete("users", "u1").unwrap();
+    remove_record(&ctrl.stores().db_data, "users", "u1");
     let work = ctrl.project_unique_reconcile_work(&keys);
     assert!(
         work.is_empty(),
@@ -576,6 +603,7 @@ async fn empty_voter_set_fails_closed_before_founding_in_multi_node_cluster() {
             primary: Some(node1),
             replicas: vec![node2],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -592,6 +620,7 @@ async fn empty_voter_set_fails_closed_before_founding_in_multi_node_cluster() {
             primary: Some(node1),
             replicas: vec![],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     solo_ctrl.update_partition_map(solo_map);
@@ -755,6 +784,7 @@ async fn fk_then_unique_defers_reserve_to_async_completion() {
                 primary: Some(node1),
                 replicas: vec![],
                 epoch: Epoch::new(1),
+                primary_since: Epoch::new(1),
             },
         );
     }
@@ -894,6 +924,7 @@ async fn empty_voter_seal_re_queues_then_completes_after_founding() {
             primary: Some(node1),
             replicas: vec![node2, node3],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -1078,13 +1109,14 @@ async fn create_session_quorum_succeeds_as_primary() {
     let partition = session_partition("client1");
     ctrl.become_primary(partition, Epoch::new(1));
 
-    let (session, _rx) = ctrl.create_session_quorum("client1").await.unwrap();
+    let (session, completion) = ctrl.create_session_quorum("client1").await.unwrap();
+    assert_eq!(completion.await, Ok(QuorumResult::Success));
     assert_eq!(session.client_id_str(), "client1");
     assert!(ctrl.stores().sessions.get("client1").is_some());
 }
 
 #[tokio::test]
-async fn replicate_write_async_sends_without_tracking() {
+async fn replicate_primary_write_sends_without_tracking() {
     let node1 = NodeId::validated(1).unwrap();
     let node2 = NodeId::validated(2).unwrap();
     let node3 = NodeId::validated(3).unwrap();
@@ -1101,8 +1133,9 @@ async fn replicate_write_async_sends_without_tracking() {
         .unwrap();
 
     let seq = ctrl
-        .replicate_write_async(write, &[node2, node3], None)
+        .replicate_primary_write(write, &[node2, node3], None, &[])
         .await
+        .map_err(|refused| refused.error)
         .unwrap();
     assert_eq!(seq, 1);
 
@@ -1145,6 +1178,7 @@ async fn broadcast_wildcard_writes_sends_to_replicas() {
             primary: Some(node1),
             replicas: vec![node2],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -1187,6 +1221,7 @@ async fn create_session_quorum_signals_completion_on_acks() {
             primary: Some(node1),
             replicas: vec![node2],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -1253,7 +1288,7 @@ async fn primary_has_local_data_after_replicate_write() {
 }
 
 #[tokio::test]
-async fn primary_has_local_data_after_replicate_write_async() {
+async fn primary_has_local_data_after_replicate_primary_write() {
     use crate::cluster::entity::SESSIONS;
     use bebytes::BeBytes;
 
@@ -1278,8 +1313,9 @@ async fn primary_has_local_data_after_replicate_write_async() {
     );
 
     let seq = ctrl
-        .replicate_write_async(write, &[node2], None)
+        .replicate_primary_write(write, &[node2], None, &[])
         .await
+        .map_err(|refused| refused.error)
         .unwrap();
     assert_eq!(seq, 1);
 
@@ -1314,6 +1350,7 @@ async fn commit_offset_stores_locally_and_replicates() {
             primary: Some(node1),
             replicas: vec![node2],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -1419,6 +1456,7 @@ async fn db_create_stores_entity_and_replicates() {
             primary: Some(node1),
             replicas: vec![node2],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -1454,7 +1492,32 @@ async fn db_create_fails_if_exists() {
     assert!(result1.is_ok());
 
     let result2 = ctrl.db_create("users", "456", b"{}", 2000).await;
-    assert!(result2.is_err());
+    assert!(matches!(
+        result2,
+        Err(crate::cluster::db::DbDataStoreError::AlreadyExists)
+    ));
+}
+
+#[tokio::test]
+async fn db_update_and_delete_of_a_missing_record_are_not_found() {
+    let node1 = NodeId::validated(1).unwrap();
+    let transport = MockTransport::new(node1);
+    let mut ctrl = create_test_controller(node1, transport);
+
+    let partition = crate::cluster::db::data_partition("users", "missing");
+    ctrl.become_primary(partition, Epoch::new(1));
+
+    let update = ctrl.db_update("users", "missing", b"{}", 1000).await;
+    assert!(matches!(
+        update,
+        Err(crate::cluster::db::DbDataStoreError::NotFound)
+    ));
+    let delete = ctrl.db_delete("users", "missing").await;
+    assert!(matches!(
+        delete,
+        Err(crate::cluster::db::DbDataStoreError::NotFound)
+    ));
+    assert!(ctrl.stores().db_data.get("users", "missing").is_none());
 }
 
 #[tokio::test]
@@ -1492,29 +1555,6 @@ async fn db_delete_removes_entity() {
 
     ctrl.db_delete("users", "del1").await.unwrap();
     assert!(ctrl.db_get("users", "del1").is_none());
-}
-
-#[tokio::test]
-async fn db_upsert_creates_or_updates() {
-    let node1 = NodeId::validated(1).unwrap();
-    let transport = MockTransport::new(node1);
-    let mut ctrl = create_test_controller(node1, transport);
-
-    let partition = crate::cluster::db::data_partition("products", "p1");
-    ctrl.become_primary(partition, Epoch::new(1));
-
-    let entity1 = ctrl
-        .db_upsert("products", "p1", b"{\"price\":100}", 1000)
-        .await
-        .unwrap();
-    assert_eq!(entity1.data, b"{\"price\":100}");
-
-    let entity2 = ctrl
-        .db_upsert("products", "p1", b"{\"price\":200}", 2000)
-        .await
-        .unwrap();
-    assert_eq!(entity2.data, b"{\"price\":200}");
-    assert_eq!(entity2.timestamp_ms, 2000);
 }
 
 #[tokio::test]
@@ -1628,6 +1668,7 @@ fn setup_all_partitions_primary(ctrl: &mut NodeController<MockTransport>, node: 
                     primary: Some(node),
                     replicas: vec![],
                     epoch: Epoch::new(1),
+                    primary_since: Epoch::new(1),
                 },
             );
         }
@@ -1788,6 +1829,7 @@ fn make_all_primary(ctrl: &mut NodeController<MockTransport>, node: NodeId) {
                     primary: Some(node),
                     replicas: vec![],
                     epoch: Epoch::new(1),
+                    primary_since: Epoch::new(1),
                 },
             );
         }
@@ -1811,6 +1853,7 @@ fn setup_all_primary_except(
                         primary: Some(excluded_primary),
                         replicas: vec![node],
                         epoch: Epoch::new(1),
+                        primary_since: Epoch::new(1),
                     },
                 );
             } else {
@@ -1821,6 +1864,7 @@ fn setup_all_primary_except(
                         primary: Some(node),
                         replicas: vec![],
                         epoch: Epoch::new(1),
+                        primary_since: Epoch::new(1),
                     },
                 );
             }
@@ -1836,17 +1880,12 @@ async fn db_list_primary_only_excludes_replica_data() {
     let transport = MockTransport::new(node1);
     let mut ctrl = create_test_controller(node1, transport);
 
-    let (primary_id, _primary_part, replica_id, replica_part) =
+    let (primary_id, primary_part, replica_id, replica_part) =
         find_two_ids_on_different_partitions("items");
+    assert_ne!(primary_part, replica_part);
 
-    ctrl.stores
-        .db_data
-        .upsert("items", &primary_id, b"{}", 1000)
-        .unwrap();
-    ctrl.stores
-        .db_data
-        .upsert("items", &replica_id, b"{}", 1000)
-        .unwrap();
+    put_record(&ctrl.stores.db_data, "items", &primary_id, b"{}", 1000);
+    put_record(&ctrl.stores.db_data, "items", &replica_id, b"{}", 1000);
 
     assert_eq!(ctrl.db_list("items").len(), 2);
 
@@ -1892,17 +1931,21 @@ async fn fk_reverse_lookup_ignores_stale_replica_data() {
         "id": replica_post_id
     });
     let post_bytes = serde_json::to_vec(&post_data).unwrap();
-    ctrl.stores
-        .db_data
-        .upsert("posts", &replica_post_id, &post_bytes, 1000)
-        .unwrap();
+    put_record(
+        &ctrl.stores.db_data,
+        "posts",
+        &replica_post_id,
+        &post_bytes,
+        1000,
+    );
 
     assert_eq!(ctrl.db_list("posts").len(), 1);
 
-    let (local_results, _pending) = ctrl
+    let (local_results, pending) = ctrl
         .start_fk_reverse_lookup("users", "u1", None)
         .await
         .unwrap();
+    assert!(pending.is_empty());
     assert!(
         local_results.is_empty(),
         "stale replica data should not appear in FK reverse lookup"
@@ -1948,10 +1991,11 @@ async fn fk_reverse_lookup_finds_primary_partition_data() {
         .await
         .unwrap();
 
-    let (local_results, _pending) = ctrl
+    let (local_results, pending) = ctrl
         .start_fk_reverse_lookup("users", "u1", None)
         .await
         .unwrap();
+    assert!(pending.is_empty());
     assert_eq!(local_results.len(), 1);
     assert_eq!(local_results[0].referencing_ids.len(), 1);
     assert_eq!(local_results[0].referencing_ids[0], primary_post_id);
@@ -2004,15 +2048,13 @@ async fn fk_reverse_lookup_restrict_blocks_only_on_primary_data() {
     )
     .await
     .unwrap();
-    ctrl.stores
-        .db_data
-        .upsert(
-            "posts",
-            &replica_post_id,
-            &post_bytes(&replica_post_id),
-            1000,
-        )
-        .unwrap();
+    put_record(
+        &ctrl.stores.db_data,
+        "posts",
+        &replica_post_id,
+        &post_bytes(&replica_post_id),
+        1000,
+    );
 
     assert_eq!(ctrl.db_list("posts").len(), 2);
 
@@ -2154,7 +2196,8 @@ async fn cascade_set_nulls_cross_owned_ref_with_no_owned_siblings() {
 
     let mut visited = std::collections::HashSet::new();
     visited.insert(("users".to_string(), "u1".to_string()));
-    let (filtered, _queue) = filter_and_extract_cascade(vec![reply], &mut visited);
+    let (filtered, queue) = filter_and_extract_cascade(vec![reply], &mut visited);
+    assert!(queue.is_empty());
     assert_eq!(
         filtered.len(),
         1,
@@ -2207,7 +2250,8 @@ async fn cross_owned_set_null_blocked_on_typed_field() {
 
     let mut visited = std::collections::HashSet::new();
     visited.insert(("users".to_string(), "u1".to_string()));
-    let (filtered, _queue) = filter_and_extract_cascade(vec![reply], &mut visited);
+    let (filtered, queue) = filter_and_extract_cascade(vec![reply], &mut visited);
+    assert!(queue.is_empty());
 
     assert!(
         ctrl.prepare_fk_side_effects(&filtered).is_err(),
@@ -2413,11 +2457,12 @@ async fn cascade_delete_fan_out_propagates_sender_to_remote_primary() {
             primary: Some(node2),
             replicas: vec![],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
 
-    let _rx = ctrl
+    let ack = ctrl
         .send_cascade_request(
             partition,
             JsonDbOp::Delete,
@@ -2427,6 +2472,7 @@ async fn cascade_delete_fan_out_propagates_sender_to_remote_primary() {
             EventOrigin::new(Some("alice"), None),
         )
         .await;
+    assert!(ack.is_some());
 
     let req = ctrl
         .transport
@@ -2547,10 +2593,11 @@ async fn circular_fk_cascade_terminates() {
     ctrl.db_create("alpha", "a1", &a_data, 1000).await.unwrap();
     ctrl.db_create("beta", "b1", &b_data, 1001).await.unwrap();
 
-    let (local, _pending) = ctrl
+    let (local, pending) = ctrl
         .start_fk_reverse_lookup("alpha", "a1", None)
         .await
         .unwrap();
+    assert!(pending.is_empty());
 
     let result = ctrl.collect_local_cascade("alpha", "a1", local, None);
     assert!(
@@ -2617,10 +2664,11 @@ async fn three_way_circular_fk_cascade_terminates() {
     ctrl.db_create("bbb", "b1", &b_data, 1001).await.unwrap();
     ctrl.db_create("ccc", "c1", &c_data, 1002).await.unwrap();
 
-    let (local, _pending) = ctrl
+    let (local, pending) = ctrl
         .start_fk_reverse_lookup("aaa", "a1", None)
         .await
         .unwrap();
+    assert!(pending.is_empty());
     let result = ctrl.collect_local_cascade("aaa", "a1", local, None);
     assert!(
         result.is_ok(),
@@ -2708,6 +2756,7 @@ async fn forwarded_write_without_a_response_topic_keeps_no_vault_decrypt() {
             primary: Some(node2),
             replicas: vec![],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -2740,8 +2789,8 @@ async fn forwarded_write_without_a_response_topic_keeps_no_vault_decrypt() {
                 payload: update,
                 response_topic: "resp/t",
                 correlation_data: None,
-                origin: EventOrigin::new(Some("alice"), None)
-            }
+                origin: EventOrigin::new(Some("alice"), None),
+            },
         )
         .await
     );
@@ -2756,6 +2805,7 @@ fn three_node_map() -> PartitionMap {
             primary: NodeId::validated(1),
             replicas: vec![NodeId::validated(2).unwrap(), NodeId::validated(3).unwrap()],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     map
@@ -2768,9 +2818,9 @@ struct RunningProcessor {
 }
 
 fn spawn_message_processor(node: NodeId, map: PartitionMap) -> RunningProcessor {
-    let (tx_raft_messages, _rx_raft_messages) = flume::unbounded();
-    let (tx_raft_events, _rx_raft_events) = flume::unbounded();
-    let (tx_main_queue, _rx_main_queue) = flume::unbounded();
+    let tx_raft_messages = flume::unbounded().0;
+    let tx_raft_events = flume::unbounded().0;
+    let tx_main_queue = flume::unbounded().0;
     let (inbox, rx_inbox) = flume::unbounded();
     let (tick, rx_tick) = flume::unbounded();
     let (tx_batch, batches) = flume::unbounded();
@@ -3118,10 +3168,17 @@ async fn forwarded_delete_cascade_events_carry_the_deleters_origin() {
     assert_written_by_editor(&events);
 }
 
+mod cascade_share;
 mod change_events;
 mod forwarded_write;
+mod lost_snapshot_request;
 mod missing_record;
 mod partition_map;
+mod promoted_transfer;
+mod remote_fk_unique;
+mod snapshot;
+mod stale_log;
+mod store_failure;
 
 #[tokio::test]
 async fn forwarded_create_refuses_an_id_longer_than_the_record_id_limit() {

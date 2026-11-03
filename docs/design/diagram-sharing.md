@@ -36,7 +36,7 @@ example.
 - Owner shares a diagram **publicly** (anyone with the link, including not-logged-in
   users) at view (optionally edit).
 - Sharing follows references: sharing diagram A shares the diagrams A references
-  (transitive closure) at the same level.
+  that the sharer may share (transitive closure) at the same level.
 - The grant holds **everywhere**: CRUD on the diagram, CRUD on its child entities,
   and the live event stream. View-only genuinely prevents edits and genuinely
   prevents seeing data you weren't granted.
@@ -224,22 +224,34 @@ open editors refresh), delivered via the recipient-scoped routing below. The
 
 ### Transitive sharing
 
-Diagram→diagram references are the registered relationships / FKs where
-`source_entity == target_entity == "diagrams"` (`mqdb-core/src/relationship.rs`,
-`constraint.rs`). The handler walks them with a bounded, cycle-safe BFS:
+Diagram→diagram references are the registered relationships / FKs (FKs only in a
+cluster) where `source_entity == target_entity == "diagrams"`
+(`mqdb-core/src/relationship.rs`, `constraint.rs`). The handler walks them with a bounded, cycle-safe BFS:
 
 ```
 const MAX_CASCADE_DIAGRAMS = 256;
-visited = {}; queue = [root]
-while queue and |visited| < MAX_CASCADE_DIAGRAMS:
-    id = pop(queue); if id in visited: continue; visited.add(id)
+visited = {root}; queue = [root]; members = []; skipped = 0; truncated = false
+while queue:
+    id = pop(queue)
     for f in self_reference_fields(entity):
-        r = record(entity,id)[f]; if r and r not in visited: push(queue, r)
-upsert a grant for every id in visited (cascade = max-of-levels)
+        r = record(entity,id)[f]
+        if not r or r in visited: continue
+        if |visited| >= MAX_CASCADE_DIAGRAMS: truncated = true; continue
+        visited.add(r)
+        if may_share(sender, r): members.push(r); push(queue, r)
+        else: skipped += 1
+upsert a grant on root and on every id in members (cascade = max-of-levels)
 ```
 
-`MAX_CASCADE_DIAGRAMS` bounds work; `visited` is the cycle guard. `unshare
---cascade` removes grants across the same closure.
+`may_share` holds when `r` exists and the sender owns it, is an admin, or is absent. A
+referenced record the sender may not share is skipped (counted in
+`resources_skipped`) and not followed, so a cascade never grants on, or walks
+through, another user's diagram, and never leaves a grant on a dangling
+reference. `MAX_CASCADE_DIAGRAMS` bounds work and a dropped reference is reported
+as `cascade_truncated`; `visited` is the cycle guard.
+A cascading `unshare` removes grants across the same closure, and on any reference
+whose record no longer exists, so a stale grant is not inherited by a later record
+with that id.
 
 ---
 
@@ -247,8 +259,8 @@ upsert a grant for every id in visited (cascade = max-of-levels)
 
 A public grant is a `_shares` row with `grantee = "_public"` and a level (default
 `view`). `can_see`/`can_edit` treat a `_public` grant as matching *any* reader
-(including `_anonymous`). Cascade applies, so a public diagram's referenced
-diagrams become public too. Revoke = remove the `_public` grant.
+(including `_anonymous`). Cascade applies, so the referenced diagrams the sharer
+may share become public too. Revoke = remove the `_public` grant.
 
 The diagram UUID *is* the link (UUIDs are unguessable); "public" simply lifts the
 auth requirement for that resource. Public **edit** is supported as an explicit
@@ -455,14 +467,14 @@ including the cross-node event-routing case.
 
 ## Formal verification (TLA+)
 
-The authorization core was model-checked with the `specs/` TLA+ toolchain. Three
+The authorization core was model-checked with the `specs/` TLA+ toolchain. Four
 specs, all exhaustively checked (no `limit_reached`):
 
 | Spec | What it checks | Result |
 |------|----------------|--------|
 | `specs/DiagramSharing.tla` | Proposed design: view/edit/public/pending grants, child derivation, recipient-scoped event routing, ownership transfer | **13/13 invariants hold**, 26,244 states exhausted |
 | `specs/DiagramSharingCurrent.tla` | Today's behavior (owner-only diagrams, ungated children, broadcast events). Checked with two cfgs: `DiagramSharingCurrent.cfg` and `DiagramSharingCurrentChild.cfg` | `InvEventConfidentiality` (first cfg) and `InvChildNeedsParentEdit` (second cfg) **violated** (counterexamples in initial state) |
-| `specs/CascadeClosure.tla` | Transitive cascade vs. an independent fixpoint reachability, over all reference graphs on 3 diagrams | **3/3 invariants hold**, cycle-safe & terminating, 1,792 states |
+| `specs/CascadeClosure.tla` | Transitive cascade vs. an independent fixpoint reachability through shareable diagrams, over all reference graphs and shareable sets on 3 diagrams | **7/7 invariants hold**, cycle-safe & terminating, 5,376 states; following every reference instead violates `InvFrontierSound` |
 | `specs/GrantLifecycle.tla` | Level-merge and revocation rules for a grant cell (direct = set, cascade = max, unshare = remove) | **6/6 invariants hold**; a replay confirms direct demotes, cascade never downgrades, revoke clears access |
 
 Invariants proven on the proposed design:
@@ -480,8 +492,9 @@ Invariants proven on the proposed design:
   **pending grants inert**, **reserved sentinels never own**.
 - **Ownership transfer** preserves grants (the action leaves the grant set
   unchanged) and every safety invariant continues to hold in post-transfer states.
-- **Cascade = exact reference closure** (no over- or under-sharing) and terminates
-  on cyclic graphs.
+- **Cascade = exact reference closure through shareable diagrams** (no over- or
+  under-sharing; a diagram the sharer may not share is never granted and is
+  reported as skipped) and terminates on cyclic graphs.
 - **Level-merge**: direct `/share` sets exactly the requested level (demotion
   allowed); cascade is exactly `max(previous, requested)` and never downgrades.
 - **Revocation removes access**: after `/unshare`, the cell confers neither see nor

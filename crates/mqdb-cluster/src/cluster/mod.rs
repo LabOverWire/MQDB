@@ -124,8 +124,8 @@ pub(crate) use share_routing::{
     BrokerView, LocalShare, RemoteForward, assign_share_groups, remote_forwards, share_members,
 };
 pub use snapshot::{
-    SnapshotBuilder, SnapshotChunk, SnapshotComplete, SnapshotRequest, SnapshotSender,
-    SnapshotStatus,
+    ChunkOutcome, SnapshotBuilder, SnapshotChunk, SnapshotComplete, SnapshotRequest,
+    SnapshotSender, SnapshotStatus,
 };
 pub use store_manager::outbox::{CascadePendingEntry, CascadeRemoteOp, ClusterOutbox};
 pub use store_manager::{RecoveryStats, StoreApplyError, StoreManager};
@@ -170,9 +170,20 @@ impl PartitionMapExt for PartitionMap {
         }
 
         let epoch = Epoch::new(u64::from(update.epoch));
+        let current = self.get(partition);
+        let primary_since = if current.primary == Some(primary) {
+            current.primary_since
+        } else {
+            epoch
+        };
         self.set(
             partition,
-            PartitionAssignment::new(primary, replicas, epoch),
+            PartitionAssignment {
+                primary: Some(primary),
+                replicas,
+                epoch,
+                primary_since,
+            },
         );
         true
     }

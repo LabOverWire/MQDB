@@ -97,6 +97,11 @@ impl ReplicaState {
         self.pending_writes.clear();
     }
 
+    #[must_use]
+    pub fn already_holds(&self, write: &ReplicationWrite) -> bool {
+        write.sequence > 0 && write.epoch <= self.epoch && write.sequence <= self.sequence
+    }
+
     pub fn handle_write(&mut self, write: &ReplicationWrite) -> ReplicationAck {
         if self.role == ReplicaRole::None || self.role == ReplicaRole::AwaitingSnapshot {
             return ReplicationAck::not_replica(self.partition, self.node_id);
@@ -120,7 +125,7 @@ impl ReplicaState {
 
         if write.sequence == expected {
             self.sequence = write.sequence;
-            self.apply_pending();
+            self.discard_applied_pending();
             return ReplicationAck::ok(self.partition, self.epoch, write.sequence, self.node_id);
         }
 
@@ -138,15 +143,8 @@ impl ReplicaState {
         ReplicationAck::sequence_gap(self.partition, self.epoch, expected, self.node_id)
     }
 
-    fn apply_pending(&mut self) {
-        while let Some((&seq, _)) = self.pending_writes.first_key_value() {
-            if seq == self.sequence + 1 {
-                self.pending_writes.pop_first();
-                self.sequence = seq;
-            } else {
-                break;
-            }
-        }
+    fn discard_applied_pending(&mut self) {
+        self.pending_writes = self.pending_writes.split_off(&(self.sequence + 1));
     }
 
     pub fn advance_sequence(&mut self) -> u64 {
@@ -171,7 +169,8 @@ impl ReplicaState {
         }
 
         let first_pending = *self.pending_writes.first_key_value()?.0;
-        Some((self.sequence + 1, first_pending - 1))
+        let next = self.sequence + 1;
+        Some((next, first_pending.saturating_sub(1).max(next)))
     }
 
     #[must_use]
@@ -295,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn buffer_out_of_order_writes() {
+    fn buffered_writes_do_not_advance_the_sequence_until_each_is_applied() {
         let mut state = ReplicaState::new(partition(), node());
         state.become_replica(Epoch::new(1), 0);
 
@@ -310,6 +309,11 @@ mod tests {
 
         let ack1 = state.handle_write(&write(1, 1));
         assert!(ack1.is_ok());
+        assert_eq!(state.sequence(), 1);
+        assert_eq!(state.pending_count(), 2);
+
+        assert!(state.handle_write(&write(1, 2)).is_ok());
+        assert!(state.handle_write(&write(1, 3)).is_ok());
         assert_eq!(state.sequence(), 3);
         assert_eq!(state.pending_count(), 0);
     }
@@ -338,6 +342,26 @@ mod tests {
         state.handle_write(&write(1, 5));
         let gap = state.gap_range().unwrap();
         assert_eq!(gap, (2, 4));
+    }
+
+    #[test]
+    fn gap_range_is_not_inverted_when_the_next_write_is_buffered() {
+        let mut state = ReplicaState::new(partition(), node());
+        state.become_replica(Epoch::new(1), 0);
+
+        state.handle_write(&write(1, 3));
+        state.handle_write(&write(1, 2));
+        state.handle_write(&write(1, 1));
+
+        assert_eq!(state.gap_range(), Some((2, 2)));
+    }
+
+    #[test]
+    fn a_write_with_no_sequence_is_never_already_held() {
+        let mut state = ReplicaState::new(partition(), node());
+        state.become_replica(Epoch::ZERO, 0);
+
+        assert!(!state.already_holds(&write(0, 0)));
     }
 
     #[test]

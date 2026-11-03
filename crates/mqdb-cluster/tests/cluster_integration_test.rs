@@ -8,8 +8,8 @@ use mqdb_cluster::cluster::raft::{RaftConfig, RaftNode, RaftOutput, RaftRole};
 use mqdb_cluster::cluster::{
     ClusterTransport, Epoch, NUM_PARTITIONS, NodeController, NodeId, NodeStatus, Operation,
     PartitionAssignment, PartitionId, PartitionMap, PublishRouter, Qos2Store, RaftEvent,
-    RaftMessage, ReplicationWrite, RetainedStore, SessionStore, SubscriptionCache, TopicIndex,
-    TransportConfig, WildcardStore, session_partition, topic_partition,
+    ReplicationWrite, RetainedStore, SessionStore, SubscriptionCache, TopicIndex, TransportConfig,
+    WildcardStore, session_partition, topic_partition,
 };
 use simulation::framework::runtime::SimulatedRuntime;
 use simulation::transport::SimulatedTransport;
@@ -34,8 +34,6 @@ struct TestNode {
     subscriptions: SubscriptionCache,
     qos2: Qos2Store,
     rx_raft_events: flume::Receiver<RaftEvent>,
-    #[allow(dead_code)]
-    rx_raft_messages: flume::Receiver<RaftMessage>,
 }
 
 struct TestCluster {
@@ -50,10 +48,7 @@ impl TestCluster {
         let network = runtime.network().clone();
 
         let node_ids: Vec<NodeId> = (1..=node_count)
-            .map(|i| {
-                #[allow(clippy::cast_possible_truncation)]
-                NodeId::validated(i as u16).unwrap()
-            })
+            .map(|i| NodeId::validated(u16::try_from(i).unwrap()).unwrap())
             .collect();
 
         let mut nodes = Vec::with_capacity(node_count);
@@ -72,7 +67,7 @@ impl TestCluster {
                 heartbeat_timeout_ms: 500,
                 ack_timeout_ms: 50,
             };
-            let (tx_raft_messages, rx_raft_messages) = flume::unbounded();
+            let tx_raft_messages = flume::unbounded().0;
             let (tx_raft_events, rx_raft_events) = flume::unbounded();
             let mut controller = NodeController::new(
                 node_id,
@@ -108,7 +103,6 @@ impl TestCluster {
                 subscriptions: SubscriptionCache::new(node_id),
                 qos2: Qos2Store::new(node_id),
                 rx_raft_events,
-                rx_raft_messages,
             });
         }
 
@@ -139,6 +133,37 @@ impl TestCluster {
         self.runtime.clock().advance_ms(ms);
     }
 
+    fn now_ms(&self) -> u64 {
+        self.runtime.clock().now() / 1_000_000
+    }
+
+    async fn tick_all(&mut self, now: u64) {
+        for node in &mut self.nodes {
+            let output = node.controller.tick(now);
+            node.controller.send_tick_output(output).await;
+        }
+    }
+
+    async fn replicate_from_first(&mut self, write: ReplicationWrite) {
+        let replicas: Vec<NodeId> = self.nodes.iter().skip(1).map(|n| n.id).collect();
+        self.nodes[0]
+            .controller
+            .replicate_write(write, &replicas, replicas.len())
+            .await
+            .unwrap();
+        self.advance_ms(10);
+        for node in &mut self.nodes {
+            node.controller.process_messages().await;
+        }
+    }
+
+    fn data_on_each_node(&self, entity: &str, id: &str) -> Vec<Option<Vec<u8>>> {
+        self.nodes
+            .iter()
+            .map(|n| n.controller.db_get(entity, id).map(|e| e.data))
+            .collect()
+    }
+
     async fn setup_all_primaries(&mut self) {
         for i in 0..NUM_PARTITIONS {
             let partition = PartitionId::new(i).unwrap();
@@ -150,10 +175,8 @@ impl TestCluster {
             }
         }
         for node in &mut self.nodes {
-            {
-                let output = node.controller.tick(0);
-                node.controller.send_tick_output(output).await;
-            }
+            let output = node.controller.tick(0);
+            node.controller.send_tick_output(output).await;
         }
         self.advance_ms(5);
         for node in &mut self.nodes {
@@ -232,7 +255,7 @@ impl TestCluster {
             heartbeat_timeout_ms: 500,
             ack_timeout_ms: 50,
         };
-        let (tx_raft_messages, rx_raft_messages) = flume::unbounded();
+        let tx_raft_messages = flume::unbounded().0;
         let (tx_raft_events, rx_raft_events) = flume::unbounded();
         let mut controller = NodeController::new(
             node_id,
@@ -255,7 +278,6 @@ impl TestCluster {
 
         let node_count = self.nodes.len();
         let new_rx_events = rx_raft_events;
-        let new_rx_messages = rx_raft_messages;
         let all_node_ids: Vec<NodeId> = self.nodes.iter().map(|n| n.id).collect();
         let mut partition_map = PartitionMap::new();
         for i in 0..NUM_PARTITIONS {
@@ -285,7 +307,6 @@ impl TestCluster {
             subscriptions: SubscriptionCache::new(node_id),
             qos2: Qos2Store::new(node_id),
             rx_raft_events: new_rx_events,
-            rx_raft_messages: new_rx_messages,
         };
     }
 }
@@ -862,12 +883,7 @@ async fn setup_five_node_partition_cluster() -> (TestCluster, PartitionId, [Node
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -882,12 +898,7 @@ async fn split_brain_prevented_on_partition() {
 
     cluster.partition_groups(&[n1, n2], &[n3, n4, n5]);
     cluster.advance_ms(600);
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(600);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(600).await;
 
     assert_eq!(
         cluster.nodes[2].controller.node_status(n1),
@@ -1001,12 +1012,7 @@ async fn write_rejected_without_quorum() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -1085,12 +1091,7 @@ async fn quorum_write_reaches_replicas() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -1183,12 +1184,7 @@ async fn rebalance_preserves_sequence_continuity() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -1229,12 +1225,7 @@ async fn rebalance_preserves_sequence_continuity() {
 
     cluster.partition_node(n1);
     cluster.advance_ms(600);
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(600);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(600).await;
 
     cluster.nodes[1]
         .controller
@@ -1298,12 +1289,7 @@ async fn epoch_prevents_stale_primary_writes() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -1396,12 +1382,7 @@ async fn lwt_published_exactly_once() {
         .mark_disconnected("lwt-client", 1000)
         .unwrap();
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -1476,12 +1457,7 @@ async fn replica_catches_up_after_partition() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -1566,12 +1542,7 @@ async fn subscriptions_consistent_during_rebalance() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -1598,12 +1569,7 @@ async fn subscriptions_consistent_during_rebalance() {
 
     cluster.partition_node(n1);
     cluster.advance_ms(600);
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(600);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(600).await;
 
     cluster.nodes[1]
         .controller
@@ -1646,12 +1612,7 @@ async fn retained_message_survives_reassignment() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -1670,12 +1631,7 @@ async fn retained_message_survives_reassignment() {
 
     cluster.partition_node(n1);
     cluster.advance_ms(600);
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(600);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(600).await;
 
     cluster.nodes[1]
         .controller
@@ -1725,12 +1681,7 @@ async fn session_takeover_race_prevented() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -1886,12 +1837,7 @@ async fn qos2_state_survives_primary_failover() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -1920,12 +1866,7 @@ async fn qos2_state_survives_primary_failover() {
 
     cluster.partition_node(cluster.nodes[0].id);
     cluster.advance_ms(600);
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(600);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(600).await;
 
     cluster.nodes[1]
         .controller
@@ -1987,12 +1928,7 @@ async fn node_crash_restart_rejoins_cluster() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -2023,12 +1959,7 @@ async fn node_crash_restart_rejoins_cluster() {
 
     cluster.partition_node(n3);
     cluster.advance_ms(600);
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(600);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(600).await;
 
     assert_eq!(
         cluster.nodes[0].controller.node_status(n3),
@@ -2040,12 +1971,7 @@ async fn node_crash_restart_rejoins_cluster() {
     cluster.heal_node(n3);
     cluster.advance_ms(100);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(1700);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(1700).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -2103,12 +2029,7 @@ async fn snapshot_transfer_on_partition_migration() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -2139,11 +2060,10 @@ async fn snapshot_transfer_on_partition_migration() {
 
     for _ in 0..20 {
         cluster.advance_ms(10);
+        let now = cluster.now_ms();
         for node in &mut cluster.nodes {
-            {
-                let output = node.controller.tick(cluster.runtime.clock().now());
-                node.controller.send_tick_output(output).await;
-            }
+            let output = node.controller.tick(now);
+            node.controller.send_tick_output(output).await;
             node.controller.process_messages().await;
         }
     }
@@ -2177,12 +2097,7 @@ async fn graceful_shutdown_drain() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -2264,7 +2179,6 @@ async fn graceful_shutdown_drain() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn raft_command_application_updates_partition_map() {
     use mqdb_cluster::cluster::PartitionMap;
     use mqdb_cluster::cluster::raft::RaftCommand;
@@ -2278,23 +2192,14 @@ async fn raft_command_application_updates_partition_map() {
     cluster.nodes[0].raft.tick(0);
     let outputs = cluster.nodes[0].raft.tick(1000);
     assert_eq!(cluster.nodes[0].raft.role(), RaftRole::Candidate);
-
-    let mut vote_requests = Vec::new();
     for output in outputs {
-        if let RaftOutput::SendRequestVote { to, request } = output {
-            vote_requests.push((to, request));
+        if let RaftOutput::SendRequestVote { to, request } = output
+            && let Some(follower) = cluster.nodes.iter_mut().find(|n| n.id == to)
+        {
+            let (resp, _) = follower.raft.handle_request_vote(n1, request, 1000);
+            cluster.nodes[0].raft.handle_request_vote_response(to, resp);
         }
     }
-
-    for (to, req) in &vote_requests {
-        if let Some(follower) = cluster.nodes.iter_mut().find(|n| n.id == *to) {
-            let (resp, _) = follower.raft.handle_request_vote(n1, *req, 1000);
-            cluster.nodes[0]
-                .raft
-                .handle_request_vote_response(*to, resp);
-        }
-    }
-
     assert_eq!(cluster.nodes[0].raft.role(), RaftRole::Leader);
 
     let partition = PartitionId::new(10).unwrap();
@@ -2316,10 +2221,9 @@ async fn raft_command_application_updates_partition_map() {
 
     for (to, request) in &append_requests {
         if let Some(follower) = cluster.nodes.iter_mut().find(|n| n.id == *to) {
-            let (response, _outputs) =
-                follower
-                    .raft
-                    .handle_append_entries(n1, request.clone(), 1100);
+            let (response, _) = follower
+                .raft
+                .handle_append_entries(n1, request.clone(), 1100);
             assert!(
                 response.is_success(),
                 "Follower should accept AppendEntries"
@@ -2385,12 +2289,7 @@ async fn wildcard_broadcast_replication() {
 
     let client_partition = PartitionId::new(5).unwrap();
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -2419,7 +2318,7 @@ async fn wildcard_broadcast_replication() {
         .transport()
         .broadcast(msg)
         .await
-        .ok();
+        .unwrap();
 
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -2452,12 +2351,7 @@ async fn cross_node_wildcard_publish_routing() {
     let mut cluster = TestCluster::new(2);
     let client_partition = session_partition("wildcard-subscriber");
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -2481,7 +2375,7 @@ async fn cross_node_wildcard_publish_routing() {
         .transport()
         .broadcast(msg)
         .await
-        .ok();
+        .unwrap();
 
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -2520,12 +2414,7 @@ async fn drain_notification_triggers_partition_reassignment() {
 
     let mut cluster = TestCluster::new(3);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
 
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -2541,7 +2430,7 @@ async fn drain_notification_triggers_partition_reassignment() {
         .transport()
         .broadcast(drain_msg)
         .await
-        .ok();
+        .unwrap();
 
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
@@ -2650,13 +2539,10 @@ async fn raft_log_persisted_and_recovered() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn db_crud_replication_to_replicas() {
     use mqdb_cluster::cluster::db::data_partition;
 
     let mut cluster = TestCluster::new(3);
-    let (n2, n3) = (cluster.nodes[1].id, cluster.nodes[2].id);
-
     let entity_type = "users";
     let entity_id = "user-123";
     let partition = data_partition(entity_type, entity_id);
@@ -2671,12 +2557,7 @@ async fn db_crud_replication_to_replicas() {
         .controller
         .become_replica(partition, Epoch::new(1), 0);
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -2685,106 +2566,41 @@ async fn db_crud_replication_to_replicas() {
     let (entity, create_write) = cluster.nodes[0]
         .controller
         .stores()
-        .db_create_replicated(entity_type, entity_id, b"initial data", 1000)
+        .db_create_write(entity_type, entity_id, b"initial data", 1000)
         .expect("create should succeed");
     assert_eq!(entity.entity_str(), entity_type);
     assert_eq!(entity.id_str(), entity_id);
-
-    cluster.nodes[0]
-        .controller
-        .replicate_write(create_write, &[n2, n3], 2)
-        .await
-        .ok();
-    cluster.advance_ms(10);
-    for node in &mut cluster.nodes {
-        node.controller.process_messages().await;
-    }
-
-    let primary_entity = cluster.nodes[0].controller.db_get(entity_type, entity_id);
-    assert!(primary_entity.is_some(), "Primary should have the entity");
-    assert_eq!(primary_entity.unwrap().data, b"initial data");
-
-    let replica1_entity = cluster.nodes[1].controller.db_get(entity_type, entity_id);
-    assert!(
-        replica1_entity.is_some(),
-        "Replica 1 should have the entity after replication"
+    cluster.replicate_from_first(create_write).await;
+    assert_eq!(
+        cluster.data_on_each_node(entity_type, entity_id),
+        vec![Some(b"initial data".to_vec()); 3],
+        "primary and both replicas should have the created entity"
     );
-    assert_eq!(replica1_entity.unwrap().data, b"initial data");
-
-    let replica2_entity = cluster.nodes[2].controller.db_get(entity_type, entity_id);
-    assert!(
-        replica2_entity.is_some(),
-        "Replica 2 should have the entity after replication"
-    );
-    assert_eq!(replica2_entity.unwrap().data, b"initial data");
 
     let (updated, update_write) = cluster.nodes[0]
         .controller
         .stores()
-        .db_update_replicated(entity_type, entity_id, b"updated data", 2000)
+        .db_update_write(entity_type, entity_id, b"updated data", 2000)
         .expect("update should succeed");
     assert_eq!(updated.data, b"updated data");
-
-    cluster.nodes[0]
-        .controller
-        .replicate_write(update_write, &[n2, n3], 2)
-        .await
-        .ok();
-    cluster.advance_ms(10);
-    for node in &mut cluster.nodes {
-        node.controller.process_messages().await;
-    }
-
-    let primary_updated = cluster.nodes[0].controller.db_get(entity_type, entity_id);
-    assert_eq!(primary_updated.unwrap().data, b"updated data");
-
-    let replica1_updated = cluster.nodes[1].controller.db_get(entity_type, entity_id);
+    cluster.replicate_from_first(update_write).await;
     assert_eq!(
-        replica1_updated.unwrap().data,
-        b"updated data",
-        "Replica 1 should have updated data"
-    );
-
-    let replica2_updated = cluster.nodes[2].controller.db_get(entity_type, entity_id);
-    assert_eq!(
-        replica2_updated.unwrap().data,
-        b"updated data",
-        "Replica 2 should have updated data"
+        cluster.data_on_each_node(entity_type, entity_id),
+        vec![Some(b"updated data".to_vec()); 3],
+        "primary and both replicas should have the updated entity"
     );
 
     let (deleted, delete_write) = cluster.nodes[0]
         .controller
         .stores()
-        .db_delete_replicated(entity_type, entity_id)
+        .db_delete_write(entity_type, entity_id)
         .expect("delete should succeed");
     assert_eq!(deleted.id_str(), entity_id);
-
-    cluster.nodes[0]
-        .controller
-        .replicate_write(delete_write, &[n2, n3], 2)
-        .await
-        .ok();
-    cluster.advance_ms(10);
-    for node in &mut cluster.nodes {
-        node.controller.process_messages().await;
-    }
-
-    let primary_deleted = cluster.nodes[0].controller.db_get(entity_type, entity_id);
-    assert!(
-        primary_deleted.is_none(),
-        "Entity should be deleted on primary"
-    );
-
-    let replica1_deleted = cluster.nodes[1].controller.db_get(entity_type, entity_id);
-    assert!(
-        replica1_deleted.is_none(),
-        "Entity should be deleted on replica 1"
-    );
-
-    let replica2_deleted = cluster.nodes[2].controller.db_get(entity_type, entity_id);
-    assert!(
-        replica2_deleted.is_none(),
-        "Entity should be deleted on replica 2"
+    cluster.replicate_from_first(delete_write).await;
+    assert_eq!(
+        cluster.data_on_each_node(entity_type, entity_id),
+        vec![None; 3],
+        "the entity should be deleted on the primary and both replicas"
     );
 }
 
@@ -2805,12 +2621,7 @@ async fn db_list_returns_entities_by_type() {
             .become_replica(partition, Epoch::new(1), 0);
     }
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -2860,12 +2671,7 @@ async fn schema_broadcast_to_all_nodes() {
             .become_replica(partition, Epoch::new(1), 0);
     }
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -2945,12 +2751,7 @@ async fn schema_update_increments_version() {
             .become_replica(partition, Epoch::new(1), 0);
     }
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -2987,8 +2788,6 @@ async fn schema_update_increments_version() {
 #[tokio::test]
 async fn index_add_and_lookup() {
     let mut cluster = TestCluster::new(3);
-    let n2 = cluster.nodes[1].id;
-    let n3 = cluster.nodes[2].id;
 
     for i in 0..NUM_PARTITIONS {
         let partition = PartitionId::new(i).unwrap();
@@ -3003,12 +2802,7 @@ async fn index_add_and_lookup() {
             .become_replica(partition, Epoch::new(1), 0);
     }
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -3031,16 +2825,7 @@ async fn index_add_and_lookup() {
     assert_eq!(entry.value, value.to_vec());
     assert_eq!(entry.record_id_str(), record_id);
 
-    cluster.nodes[0]
-        .controller
-        .replicate_write(write, &[n2, n3], 2)
-        .await
-        .expect("replication should succeed");
-
-    cluster.advance_ms(10);
-    for node in &mut cluster.nodes {
-        node.controller.process_messages().await;
-    }
+    cluster.replicate_from_first(write).await;
 
     let results = cluster.nodes[0]
         .controller
@@ -3071,12 +2856,7 @@ async fn index_multiple_records_same_value() {
             .become_replica(partition, Epoch::new(1), 0);
     }
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -3103,7 +2883,7 @@ async fn index_multiple_records_same_value() {
             .controller
             .replicate_write(write, &[n2, n3], 2)
             .await
-            .ok();
+            .unwrap();
     }
 
     cluster.advance_ms(20);
@@ -3153,7 +2933,7 @@ async fn unique_constraint_reserve_commit_release() {
             .controller
             .replicate_write(write, &[n2, n3], 2)
             .await
-            .ok();
+            .unwrap();
     }
     cluster.advance_ms(10);
     for node in &mut cluster.nodes {
@@ -3191,15 +2971,7 @@ async fn unique_constraint_reserve_commit_release() {
         .expect("commit should succeed");
     assert!(committed.is_committed());
 
-    cluster.nodes[0]
-        .controller
-        .replicate_write(commit_write, &[n2, n3], 2)
-        .await
-        .ok();
-    cluster.advance_ms(10);
-    for node in &mut cluster.nodes {
-        node.controller.process_messages().await;
-    }
+    cluster.replicate_from_first(commit_write).await;
 
     let post_commit_params = UniqueReserveParams {
         entity,
@@ -3279,126 +3051,51 @@ async fn unique_constraint_expires_after_ttl() {
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn fk_validation_request_lifecycle() {
     use mqdb_cluster::cluster::db::FkValidationRequest;
 
     let mut cluster = TestCluster::new(3);
-    let n2 = cluster.nodes[1].id;
-    let n3 = cluster.nodes[2].id;
-
-    for i in 0..NUM_PARTITIONS {
-        let partition = PartitionId::new(i).unwrap();
-        cluster.nodes[0]
-            .controller
-            .become_primary(partition, Epoch::new(1));
-        cluster.nodes[1]
-            .controller
-            .become_replica(partition, Epoch::new(1), 0);
-        cluster.nodes[2]
-            .controller
-            .become_replica(partition, Epoch::new(1), 0);
-    }
-
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
-    cluster.advance_ms(5);
-    for node in &mut cluster.nodes {
-        node.controller.process_messages().await;
-    }
+    cluster.setup_all_primaries().await;
 
     let request = FkValidationRequest::create("users", "user-123", "fk-req-001", 5000, 1000);
-
     let write = cluster.nodes[0]
         .controller
         .stores()
         .fk_add_request_replicated(request.clone())
         .expect("add request should succeed");
-
-    cluster.nodes[0]
-        .controller
-        .replicate_write(write, &[n2, n3], 2)
-        .await
-        .ok();
-
-    cluster.advance_ms(10);
-    for node in &mut cluster.nodes {
-        node.controller.process_messages().await;
-    }
+    cluster.replicate_from_first(write).await;
 
     let retrieved = cluster.nodes[0]
         .controller
         .stores()
         .fk_get_request("fk-req-001");
-    assert!(retrieved.is_some(), "Primary should have FK request");
-    assert_eq!(retrieved.unwrap().entity_str(), "users");
-
-    let replica1_request = cluster.nodes[1]
-        .controller
-        .stores()
-        .fk_get_request("fk-req-001");
-    assert!(
-        replica1_request.is_some(),
-        "Replica 1 should have FK request after replication"
+    assert_eq!(
+        retrieved.map(|r| r.entity_str().to_string()),
+        Some("users".to_string())
     );
-
-    let replica2_request = cluster.nodes[2]
-        .controller
-        .stores()
-        .fk_get_request("fk-req-001");
-    assert!(
-        replica2_request.is_some(),
-        "Replica 2 should have FK request after replication"
-    );
+    let held: Vec<bool> = cluster
+        .nodes
+        .iter()
+        .map(|n| n.controller.stores().fk_get_request("fk-req-001").is_some())
+        .collect();
+    assert_eq!(held, [true; 3], "every node should hold the FK request");
 
     let (completed, complete_write) = cluster.nodes[0]
         .controller
         .stores()
         .fk_complete_request_replicated("fk-req-001")
         .expect("complete should succeed");
-
     assert_eq!(completed.request_id_str(), "fk-req-001");
+    cluster.replicate_from_first(complete_write).await;
 
-    cluster.nodes[0]
-        .controller
-        .replicate_write(complete_write, &[n2, n3], 2)
-        .await
-        .ok();
-
-    cluster.advance_ms(10);
-    for node in &mut cluster.nodes {
-        node.controller.process_messages().await;
-    }
-
-    let after_complete = cluster.nodes[0]
-        .controller
-        .stores()
-        .fk_get_request("fk-req-001");
-    assert!(
-        after_complete.is_none(),
-        "Request should be removed on primary after completion"
-    );
-
-    let replica1_after = cluster.nodes[1]
-        .controller
-        .stores()
-        .fk_get_request("fk-req-001");
-    assert!(
-        replica1_after.is_none(),
-        "Request should be removed on replica 1 after completion"
-    );
-
-    let replica2_after = cluster.nodes[2]
-        .controller
-        .stores()
-        .fk_get_request("fk-req-001");
-    assert!(
-        replica2_after.is_none(),
-        "Request should be removed on replica 2 after completion"
+    let held: Vec<bool> = cluster
+        .nodes
+        .iter()
+        .map(|n| n.controller.stores().fk_get_request("fk-req-001").is_some())
+        .collect();
+    assert_eq!(
+        held, [false; 3],
+        "the request should be removed everywhere after completion"
     );
 }
 
@@ -3425,13 +3122,13 @@ async fn fk_validation_cleanup_expired() {
         .controller
         .stores()
         .fk_add_request_replicated(short_timeout_request)
-        .ok();
+        .unwrap();
 
     cluster.nodes[0]
         .controller
         .stores()
         .fk_add_request_replicated(long_timeout_request)
-        .ok();
+        .unwrap();
 
     assert!(
         cluster.nodes[0]
@@ -3529,12 +3226,7 @@ async fn cross_node_lwt_routing() {
     let n1 = cluster.nodes[0].id;
     let n2 = cluster.nodes[1].id;
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
@@ -3817,25 +3509,17 @@ async fn unique_constraint_cross_node_message_flow() {
             .become_replica(partition, Epoch::new(1), 0);
     }
 
-    // Establish the unique-voter set (what the leader founds from membership) so reserves/seals use a
-    // concrete majority; without it a multi-node cluster fails closed until the set is founded.
     let voters: std::collections::BTreeSet<_> = cluster.nodes.iter().map(|n| n.id).collect();
     for node in &mut cluster.nodes {
         node.controller.seed_unique_voters(voters.clone());
     }
 
-    for node in &mut cluster.nodes {
-        {
-            let output = node.controller.tick(0);
-            node.controller.send_tick_output(output).await;
-        }
-    }
+    cluster.tick_all(0).await;
     cluster.advance_ms(5);
     for node in &mut cluster.nodes {
         node.controller.process_messages().await;
     }
 
-    // Complete the promotion seal handshake so node 0 may serve reserves for the value partition.
     for _ in 0..3 {
         cluster.advance_ms(1);
         cluster.nodes[0].controller.process_messages().await;
@@ -3861,16 +3545,13 @@ async fn unique_constraint_cross_node_message_flow() {
         message: ClusterMessage::UniqueReserveRequest(request),
         received_at: 0,
     };
-    // Node 1 (value primary) applies the reserve and group-replicates it, deferring its response.
     cluster.nodes[0].controller.transport().requeue(request_msg);
     cluster.advance_ms(1);
     cluster.nodes[0].controller.process_messages().await;
 
-    // Node 2 (the other group member) accepts the replicate and acks it.
     cluster.advance_ms(1);
     cluster.nodes[1].controller.process_messages().await;
 
-    // Node 1 sees the majority ack and only now sends the deferred reserve response.
     cluster.advance_ms(1);
     cluster.nodes[0].controller.process_messages().await;
 
@@ -3892,18 +3573,46 @@ async fn unique_constraint_cross_node_message_flow() {
     );
 }
 
+fn put_record(
+    store: &mqdb_cluster::cluster::DbDataStore,
+    entity: &str,
+    id: &str,
+    data: &[u8],
+    timestamp_ms: u64,
+) {
+    let record = mqdb_cluster::cluster::DbEntity::create(entity, id, data, timestamp_ms).unwrap();
+    store
+        .apply_replicated(
+            Operation::Insert,
+            &record.key(),
+            &mqdb_cluster::cluster::DbDataStore::serialize(&record),
+        )
+        .unwrap();
+}
+
 fn json_value_bytes(value: &str) -> Vec<u8> {
     serde_json::to_vec(&serde_json::Value::String(value.to_string())).unwrap()
 }
 
+fn sku_reservation<'a>(
+    value: &'a [u8],
+    record_id: &'a str,
+    request_id: &'a str,
+) -> mqdb_cluster::cluster::db::UniqueReserveParams<'a> {
+    mqdb_cluster::cluster::db::UniqueReserveParams {
+        entity: "products",
+        field: "sku",
+        value,
+        record_id,
+        request_id,
+        data_partition: PartitionId::new(5).unwrap(),
+        ttl_ms: 30_000,
+    }
+}
+
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn no_oversell_when_new_primary_missed_a_reservation() {
-    // Model-as-oracle NoOversell test for the exact scenario ClusterUniqueMonotonic.tla flagged:
-    // a promoted primary that MISSED an existing reservation must still refuse to reassign the value.
-    // Without the seal reservation-learning (d-2), node1 would grant the value to a second record and
-    // oversell — so this test fails if that fix regresses.
-    use mqdb_cluster::cluster::db::{ReserveResult, UniqueReserveParams};
+    use mqdb_cluster::cluster::db::ReserveResult;
     use mqdb_cluster::cluster::{ClusterMessage, InboundMessage};
 
     let mut cluster = TestCluster::new(3);
@@ -3919,8 +3628,6 @@ async fn no_oversell_when_new_primary_missed_a_reservation() {
             .become_replica(p, Epoch::new(1), 0);
     }
 
-    // Establish the unique-voter set (what the leader founds from membership) so the promotion seal
-    // has a concrete majority to reach; without it a multi-node cluster fails closed.
     let voters: std::collections::BTreeSet<_> = cluster.nodes.iter().map(|n| n.id).collect();
     for node in &mut cluster.nodes {
         node.controller.seed_unique_voters(voters.clone());
@@ -3930,17 +3637,7 @@ async fn no_oversell_when_new_primary_missed_a_reservation() {
     let unique_part = mqdb_cluster::cluster::db::unique_partition("products", "sku", &value);
     let node0_id = cluster.nodes[0].id;
 
-    // node0 (epoch 1) reserves the value for record "A", but the replication reaches only node2 —
-    // node1 (the future primary) never sees it.
-    let params_a = UniqueReserveParams {
-        entity: "products",
-        field: "sku",
-        value: &value,
-        record_id: "A",
-        request_id: "req-A",
-        data_partition: PartitionId::new(5).unwrap(),
-        ttl_ms: 30_000,
-    };
+    let params_a = sku_reservation(&value, "A", "req-A");
     let (res_a, write_a) = cluster.nodes[0]
         .controller
         .stores()
@@ -3952,9 +3649,9 @@ async fn no_oversell_when_new_primary_missed_a_reservation() {
         write_a.operation,
         Epoch::new(1),
         0,
-        write_a.entity.clone(),
-        write_a.id.clone(),
-        write_a.data.clone(),
+        write_a.entity,
+        write_a.id,
+        write_a.data,
     );
     cluster.nodes[2]
         .controller
@@ -3978,7 +3675,6 @@ async fn no_oversell_when_new_primary_missed_a_reservation() {
         "the future primary must genuinely be missing the reservation for the test to be meaningful"
     );
 
-    // Failover: node1 is promoted to primary at epoch 2 and seals — the seal must LEARN A.
     cluster.nodes[1]
         .controller
         .become_primary(unique_part, Epoch::new(2));
@@ -3986,8 +3682,11 @@ async fn no_oversell_when_new_primary_missed_a_reservation() {
         let output = cluster.nodes[1].controller.tick(0);
         cluster.nodes[1].controller.send_tick_output(output).await;
         cluster.advance_ms(1);
-        cluster.nodes[0].controller.process_messages().await;
-        cluster.nodes[2].controller.process_messages().await;
+        for (other, node) in cluster.nodes.iter_mut().enumerate() {
+            if other != 1 {
+                node.controller.process_messages().await;
+            }
+        }
         cluster.advance_ms(1);
         cluster.nodes[1].controller.process_messages().await;
     }
@@ -3999,16 +3698,7 @@ async fn no_oversell_when_new_primary_missed_a_reservation() {
         .expect("the promotion seal must teach the new primary the reservation it missed");
     assert_eq!(learned.record_id_str(), "A");
 
-    // The new primary now tries to reserve the SAME value for a DIFFERENT record "B".
-    let params_b = UniqueReserveParams {
-        entity: "products",
-        field: "sku",
-        value: &value,
-        record_id: "B",
-        request_id: "req-B",
-        data_partition: PartitionId::new(5).unwrap(),
-        ttl_ms: 30_000,
-    };
+    let params_b = sku_reservation(&value, "B", "req-B");
     let (res_b, _) = cluster.nodes[1]
         .controller
         .stores()
@@ -4019,7 +3709,6 @@ async fn no_oversell_when_new_primary_missed_a_reservation() {
         "the value is already held by A; the promoted primary must not oversell it to B"
     );
 
-    // NoOversell: exactly one record holds the value, and it is the original owner.
     assert_eq!(
         cluster.nodes[1]
             .controller
@@ -4033,7 +3722,7 @@ async fn no_oversell_when_new_primary_missed_a_reservation() {
 
 #[tokio::test]
 async fn unique_seal_fences_superseded_primary_reserve() {
-    use mqdb_cluster::cluster::db::{ReserveResult, UniqueReserveParams};
+    use mqdb_cluster::cluster::db::ReserveResult;
     use mqdb_cluster::cluster::{ClusterMessage, InboundMessage, UniqueSealRequest};
 
     let mut cluster = TestCluster::new(3);
@@ -4043,8 +3732,6 @@ async fn unique_seal_fences_superseded_primary_reserve() {
     let unique_part = mqdb_cluster::cluster::db::unique_partition("products", "sku", value);
     let node0_id = cluster.nodes[0].id;
 
-    // A newly promoted primary seals the partition at epoch 2 by promising it at the group: each
-    // member records the promise on receiving the seal request.
     for i in 1..cluster.nodes.len() {
         cluster.nodes[i]
             .controller
@@ -4062,17 +3749,7 @@ async fn unique_seal_fences_superseded_primary_reserve() {
         cluster.nodes[i].controller.process_messages().await;
     }
 
-    // The superseded epoch-1 primary tries to replicate a reservation to the group; sealed members
-    // must reject it (epoch below their promise).
-    let params = UniqueReserveParams {
-        entity: "products",
-        field: "sku",
-        value,
-        record_id: "old",
-        request_id: "req-old",
-        data_partition: PartitionId::new(5).unwrap(),
-        ttl_ms: 30_000,
-    };
+    let params = sku_reservation(value, "old", "req-old");
     let (result, write) = cluster.nodes[0]
         .controller
         .stores()
@@ -4133,12 +3810,13 @@ async fn unique_reconcile_reestablishes_lost_reservation() {
         .db_constraints
         .add(ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
         .unwrap();
-    cluster.nodes[0]
-        .controller
-        .stores()
-        .db_data
-        .create("users", "u1", br#"{"email":"a@x.com"}"#, 1000)
-        .unwrap();
+    put_record(
+        &cluster.nodes[0].controller.stores().db_data,
+        "users",
+        "u1",
+        br#"{"email":"a@x.com"}"#,
+        1000,
+    );
 
     let value = json_value_bytes("a@x.com");
     assert!(
@@ -4177,10 +3855,13 @@ async fn unique_reconcile_repairs_lost_commit() {
         .db_constraints
         .add(ClusterConstraint::unique("users", "uniq_email", "email").unwrap())
         .unwrap();
-    stores
-        .db_data
-        .create("users", "u1", br#"{"email":"a@x.com"}"#, 1000)
-        .unwrap();
+    put_record(
+        &stores.db_data,
+        "users",
+        "u1",
+        br#"{"email":"a@x.com"}"#,
+        1000,
+    );
 
     let value = json_value_bytes("a@x.com");
     let params = UniqueReserveParams {
@@ -4376,22 +4057,14 @@ async fn unique_write_replicates_to_quorum_group() {
 
 #[tokio::test]
 async fn unique_replicate_fences_stale_epoch() {
-    use mqdb_cluster::cluster::db::{ReserveResult, UniqueReserveParams};
+    use mqdb_cluster::cluster::db::ReserveResult;
     use mqdb_cluster::cluster::{ClusterMessage, InboundMessage};
 
     let mut cluster = TestCluster::new(3);
     cluster.setup_all_primaries().await;
 
     let value = b"widget".as_slice();
-    let params = UniqueReserveParams {
-        entity: "products",
-        field: "sku",
-        value,
-        record_id: "p1",
-        request_id: "req-1",
-        data_partition: PartitionId::new(5).unwrap(),
-        ttl_ms: 30_000,
-    };
+    let params = sku_reservation(value, "p1", "req-1");
     let (result, insert_write) = cluster.nodes[0]
         .controller
         .stores()

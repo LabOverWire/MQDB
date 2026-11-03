@@ -6,7 +6,7 @@ use crate::cluster::db::{DbDataStoreError, data_partition, generate_id_for_parti
 use crate::cluster::db_handler::helpers::json_write_failure;
 use mqdb_core::types::{AccessLevel, SHARES_ENTITY};
 use serde_json::{Value, json};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 
 #[cfg(feature = "http-api")]
 use super::db_ops::{EventOrigin, ForwardedJsonRequest};
@@ -31,6 +31,13 @@ struct GrantWrite<'a> {
     grantee_email: Option<&'a str>,
     level: AccessLevel,
     granted_by: &'a str,
+}
+
+#[derive(Default)]
+struct CascadeOutcome {
+    granted: usize,
+    skipped: usize,
+    truncated: bool,
 }
 
 impl<T: ClusterTransport> NodeController<T> {
@@ -167,7 +174,12 @@ impl<T: ClusterTransport> NodeController<T> {
             .max()
     }
 
-    async fn clear_grant(&mut self, entity: &str, id: &str, grantee_key: &str) {
+    async fn clear_grant(
+        &mut self,
+        entity: &str,
+        id: &str,
+        grantee_key: &str,
+    ) -> Result<(), DbDataStoreError> {
         let victims: Vec<String> = self
             .shares_for_resource(entity, id)
             .into_iter()
@@ -176,20 +188,33 @@ impl<T: ClusterTransport> NodeController<T> {
                     .then_some(sid)
             })
             .collect();
-        for sid in victims {
-            let _ = self.db_delete(SHARES_ENTITY, &sid).await;
-        }
+        self.delete_grants(&victims).await
     }
 
-    pub(crate) async fn clear_all_resource_grants(&mut self, entity: &str, id: &str) {
+    pub(crate) async fn clear_all_resource_grants(
+        &mut self,
+        entity: &str,
+        id: &str,
+    ) -> Result<(), DbDataStoreError> {
         let victims: Vec<String> = self
             .shares_for_resource(entity, id)
             .into_iter()
             .map(|(sid, _)| sid)
             .collect();
-        for sid in victims {
-            let _ = self.db_delete(SHARES_ENTITY, &sid).await;
+        self.delete_grants(&victims).await
+    }
+
+    async fn delete_grants(&mut self, share_ids: &[String]) -> Result<(), DbDataStoreError> {
+        let mut first_failure = None;
+        for sid in share_ids {
+            match self.db_delete(SHARES_ENTITY, sid).await {
+                Ok(_) | Err(DbDataStoreError::NotFound) => {}
+                Err(e) => {
+                    first_failure.get_or_insert(e);
+                }
+            }
         }
+        first_failure.map_or(Ok(()), Err)
     }
 
     async fn write_grant(
@@ -197,12 +222,12 @@ impl<T: ClusterTransport> NodeController<T> {
         entity: &str,
         id: &str,
         grant: GrantWrite<'_>,
-    ) -> Result<(), String> {
-        self.clear_grant(entity, id, grant.grantee_key).await;
+    ) -> Result<(), DbDataStoreError> {
+        self.clear_grant(entity, id, grant.grantee_key).await?;
         if let Some(resolved) = grant.grantee
             && resolved != grant.grantee_key
         {
-            self.clear_grant(entity, id, resolved).await;
+            self.clear_grant(entity, id, resolved).await?;
         }
         let partition = data_partition(entity, id);
         let share_id = generate_id_for_partition(SHARES_ENTITY, partition);
@@ -216,15 +241,15 @@ impl<T: ClusterTransport> NodeController<T> {
             "permission": grant.level.as_str(),
             "granted_by": grant.granted_by,
         });
-        let bytes = serde_json::to_vec(&record).map_err(|e| e.to_string())?;
+        let bytes =
+            serde_json::to_vec(&record).map_err(|_| DbDataStoreError::SerializationError)?;
         let now = Self::current_time_ms();
         self.db_create(SHARES_ENTITY, &share_id, &bytes, now)
-            .await
-            .map_err(|e| format!("failed to write grant: {e:?}"))?;
+            .await?;
         Ok(())
     }
 
-    fn self_ref_fields(&self, entity: &str) -> Vec<String> {
+    fn self_ref_fields(&self, entity: &str) -> BTreeSet<String> {
         self.stores
             .constraint_get_fk_constraints(entity)
             .into_iter()
@@ -233,19 +258,33 @@ impl<T: ClusterTransport> NodeController<T> {
             .collect()
     }
 
-    async fn cascade_share(&mut self, entity: &str, root_id: &str, grant: GrantWrite<'_>) -> usize {
-        let fields = self.self_ref_fields(entity);
-        if fields.is_empty() {
-            return 0;
+    fn may_share(&self, entity: &str, id: &str, sender: Option<&str>) -> bool {
+        let Some(owner_field) = self.share_owner_field(entity) else {
+            return false;
+        };
+        match sender {
+            Some(uid) if !self.ownership.is_admin(uid) => matches!(
+                self.resource_ownership(entity, id, &owner_field, uid),
+                ResourceOwnership::Owner
+            ),
+            _ => self.db_get(entity, id).is_some(),
         }
+    }
+
+    async fn cascade_share(
+        &mut self,
+        entity: &str,
+        root_id: &str,
+        grant: GrantWrite<'_>,
+        sender: Option<&str>,
+    ) -> Result<CascadeOutcome, usize> {
+        let fields = self.self_ref_fields(entity);
+        let mut outcome = CascadeOutcome::default();
         let mut visited: HashSet<String> = HashSet::from([root_id.to_string()]);
         let mut queue: VecDeque<String> = VecDeque::from([root_id.to_string()]);
-        let mut granted = 0;
+        let mut failed = 0;
         let mut skipped_remote = 0;
         while let Some(cur) = queue.pop_front() {
-            if visited.len() > MAX_CASCADE_RESOURCES {
-                break;
-            }
             let children: Vec<String> = {
                 let Some(rec) = self.db_get(entity, &cur) else {
                     continue;
@@ -259,19 +298,33 @@ impl<T: ClusterTransport> NodeController<T> {
                     .collect()
             };
             for child in children {
-                if !visited.insert(child.clone()) {
+                if visited.contains(&child) {
                     continue;
                 }
-                if self.holds_primary_role(data_partition(entity, &child)) {
-                    let existing = self.existing_grant_level(entity, &child, grant.grantee_key);
-                    if existing.is_none_or(|current| current < grant.level) {
-                        let _ = self.write_grant(entity, &child, grant).await;
-                    }
-                    granted += 1;
-                    queue.push_back(child);
-                } else {
-                    skipped_remote += 1;
+                if visited.len() >= MAX_CASCADE_RESOURCES {
+                    outcome.truncated = true;
+                    continue;
                 }
+                visited.insert(child.clone());
+                if !self.holds_primary_role(data_partition(entity, &child)) {
+                    skipped_remote += 1;
+                    outcome.skipped += 1;
+                    continue;
+                }
+                if !self.may_share(entity, &child, sender) {
+                    outcome.skipped += 1;
+                    continue;
+                }
+                let existing = self.existing_grant_level(entity, &child, grant.grantee_key);
+                if existing.is_none_or(|current| current < grant.level)
+                    && let Err(error) = self.write_grant(entity, &child, grant).await
+                {
+                    tracing::warn!(entity, id = %child, %error, "cascade grant failed");
+                    failed += 1;
+                    continue;
+                }
+                outcome.granted += 1;
+                queue.push_back(child);
             }
         }
         if skipped_remote > 0 {
@@ -283,7 +336,11 @@ impl<T: ClusterTransport> NodeController<T> {
                  partitions and were not granted (cross-partition cascade is tracked in #122)"
             );
         }
-        granted
+        if failed == 0 {
+            Ok(outcome)
+        } else {
+            Err(failed)
+        }
     }
 
     pub(crate) async fn handle_share_local(
@@ -341,31 +398,44 @@ impl<T: ClusterTransport> NodeController<T> {
             granted_by: &granted_by,
         };
         if let Err(e) = self.write_grant(entity, id, grant).await {
-            return Self::json_error(500, &e);
+            return json_write_failure(e);
         }
-        let mut shared = 1;
-        if payload.get("cascade").and_then(Value::as_bool) == Some(true) {
-            shared += self.cascade_share(entity, id, grant).await;
-        }
+        let outcome = if payload.get("cascade").and_then(Value::as_bool) == Some(true) {
+            match self.cascade_share(entity, id, grant, sender).await {
+                Ok(outcome) => outcome,
+                Err(failed) => {
+                    return Self::json_error(
+                        500,
+                        &format!(
+                            "cascade share incomplete: at least {failed} resource(s) not granted"
+                        ),
+                    );
+                }
+            }
+        } else {
+            CascadeOutcome::default()
+        };
         let status = if grantee.is_none() {
             "pending"
         } else {
             "shared"
         };
-        Self::share_response(status, grantee.as_deref(), level, shared)
+        Self::share_response(status, grantee.as_deref(), level, &outcome)
     }
 
     fn share_response(
         status: &str,
         grantee: Option<&str>,
         level: AccessLevel,
-        resources_shared: usize,
+        outcome: &CascadeOutcome,
     ) -> Vec<u8> {
         let data = json!({
             "status": status,
             "grantee": grantee,
             "permission": level.as_str(),
-            "resources_shared": resources_shared,
+            "resources_shared": 1 + outcome.granted,
+            "resources_skipped": outcome.skipped,
+            "cascade_truncated": outcome.truncated,
         });
         serde_json::to_vec(&json!({ "status": "ok", "data": data })).unwrap_or_default()
     }
@@ -396,11 +466,14 @@ impl<T: ClusterTransport> NodeController<T> {
             .get("grantee_key")
             .and_then(Value::as_str)
             .map(str::to_string);
-        self.clear_grant(entity, id, &primary_key).await;
+        if let Err(e) = self.clear_grant(entity, id, &primary_key).await {
+            return json_write_failure(e);
+        }
         if let Some(resolved) = resolved_key
             && resolved != primary_key
+            && let Err(e) = self.clear_grant(entity, id, &resolved).await
         {
-            self.clear_grant(entity, id, &resolved).await;
+            return json_write_failure(e);
         }
         serde_json::to_vec(&json!({
             "status": "ok",
@@ -415,6 +488,9 @@ impl<T: ClusterTransport> NodeController<T> {
         id: &str,
         sender: Option<&str>,
     ) -> Vec<u8> {
+        if !self.can_serve_reads(data_partition(entity, id)) {
+            return Self::json_error(503, "partition is not ready on this node");
+        }
         if let Some(err) = self.require_owner_or_admin(entity, id, sender) {
             return err;
         }
@@ -559,7 +635,7 @@ impl<T: ClusterTransport> NodeController<T> {
         if cont.invalidated {
             let body = serde_json::to_vec(&json!({
                 "status": "ok",
-                "data": { "status": "superseded", "resources_shared": 0 }
+                "data": { "status": "superseded", "resources_shared": 0, "resources_skipped": 0, "cascade_truncated": false }
             }))
             .unwrap_or_default();
             self.transport

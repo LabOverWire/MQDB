@@ -205,6 +205,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         );
         let (response, outputs) = self.node.handle_append_entries(from, request, now_ms);
         self.process_outputs(outputs).await;
+        self.restored_map_unconfirmed &= !response.is_success();
         response
     }
 
@@ -222,6 +223,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         );
         let (response, outputs) = self.node.handle_install_snapshot(from, request, now_ms);
         self.process_outputs(outputs).await;
+        self.restored_map_unconfirmed &= !response.is_success();
         response
     }
 

@@ -6,6 +6,10 @@ use crate::cluster::db::DbDataStoreError;
 use serde_json::{Value, json};
 
 impl DbRequestHandler {
+    pub(super) fn partition_not_ready() -> Vec<u8> {
+        Self::json_error(503, "partition is not ready on this node")
+    }
+
     pub(super) fn json_error(code: u16, message: &str) -> Vec<u8> {
         let result = json!({
             "status": "error",
@@ -60,6 +64,22 @@ pub(crate) fn json_write_failure(error: DbDataStoreError) -> Vec<u8> {
     match error {
         DbDataStoreError::NotPrimary => DbRequestHandler::json_error(503, &error.to_string()),
         _ => DbRequestHandler::json_error(500, "internal error"),
+    }
+}
+
+pub(crate) fn json_record_write_failure(
+    entity: &str,
+    id: &str,
+    error: DbDataStoreError,
+) -> Vec<u8> {
+    match error {
+        DbDataStoreError::AlreadyExists => {
+            DbRequestHandler::json_error(409, "entity already exists")
+        }
+        DbDataStoreError::NotFound => {
+            DbRequestHandler::json_error(404, &format!("entity not found: {entity} id={id}"))
+        }
+        error => json_write_failure(error),
     }
 }
 

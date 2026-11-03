@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mqdb_cluster::{
-    ClusterMessage, ClusterTransport, ForwardedPublish, Heartbeat, NodeId, QuicDirectTransport,
-    TransportError,
+    ClusterMessage, ClusterTransport, ForwardedPublish, Heartbeat, NodeId, PartitionId,
+    QuicDirectTransport, SnapshotChunk, TransportError,
 };
 use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig, TransportConfig, VarInt};
 use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
@@ -110,7 +110,9 @@ struct StalledPeer {
 }
 
 async fn setup_stalled_peer() -> StalledPeer {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
 
     let certs = generate_certs();
     let dir = tempfile::tempdir().unwrap();
@@ -295,7 +297,7 @@ async fn control_plane_survives_a_full_bulk_queue() {
         assert_eq!(
             &frame[0..2],
             &local.get().to_be_bytes(),
-            "stream mis-framed under the two-lane writer"
+            "stream mis-framed under the lane writer"
         );
         if frame[2] == heartbeat_type {
             heartbeat_delivered = true;
@@ -310,35 +312,114 @@ async fn control_plane_survives_a_full_bulk_queue() {
     far_handle.abort();
 }
 
+fn snapshot_chunk(index: u32) -> ClusterMessage {
+    ClusterMessage::SnapshotChunk(
+        SnapshotChunk::new(PartitionId::ZERO, index, u32::MAX, 0, vec![0u8; 1024])
+            .with_transfer_id(1),
+    )
+}
+
+#[tokio::test]
+async fn bulk_messages_survive_a_full_snapshot_lane() {
+    let StalledPeer {
+        transport,
+        local,
+        peer,
+        frame_rx,
+        release_tx,
+        far_handle,
+    } = setup_stalled_peer().await;
+
+    let mut chunks_dropped = false;
+    for index in 0..SEND_ATTEMPTS {
+        match tokio::time::timeout(
+            Duration::from_millis(500),
+            transport.send(peer, snapshot_chunk(index)),
+        )
+        .await
+        {
+            Err(_) => panic!("snapshot chunk send blocked under backpressure"),
+            Ok(Ok(())) => {}
+            Ok(Err(TransportError::SendQueueFull(_))) => {
+                chunks_dropped = true;
+                break;
+            }
+            Ok(Err(other)) => panic!("unexpected snapshot send error: {other}"),
+        }
+    }
+    assert!(
+        chunks_dropped,
+        "snapshot chunks should eventually fill their lane"
+    );
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(500),
+        transport.send(peer, bulk_message(local)),
+    )
+    .await
+    .expect("bulk send blocked under backpressure");
+    assert!(
+        matches!(result, Ok(())),
+        "a bulk message was refused while snapshot chunks filled the queue: {result:?}"
+    );
+
+    release_tx.send(()).ok();
+
+    let bulk_type = bulk_message(local).message_type();
+    let mut bulk_delivered = false;
+    for _ in 0..SEND_ATTEMPTS {
+        let frame = collect_frame(&frame_rx).await;
+        assert_eq!(
+            &frame[0..2],
+            &local.get().to_be_bytes(),
+            "stream mis-framed"
+        );
+        if frame[2] == bulk_type {
+            bulk_delivered = true;
+            break;
+        }
+    }
+    assert!(
+        bulk_delivered,
+        "the bulk message was accepted but never delivered"
+    );
+
+    far_handle.abort();
+}
+
 async fn reconnecting_far_end(
     endpoint: Endpoint,
     close_first: oneshot::Receiver<()>,
     accepted_tx: flume::Sender<()>,
 ) {
     let conn1: Connection = endpoint.accept().await.unwrap().await.unwrap();
-    let (_s1, mut r1): (SendStream, RecvStream) = conn1.accept_bi().await.unwrap();
+    let (s1, mut r1): (SendStream, RecvStream) = conn1.accept_bi().await.unwrap();
     let mut header = [0u8; 2];
     r1.read_exact(&mut header).await.unwrap();
     accepted_tx.send(()).ok();
 
     close_first.await.ok();
     conn1.close(0u32.into(), b"test-close");
+    drop(s1);
     drop(r1);
     drop(conn1);
 
     let conn2: Connection = endpoint.accept().await.unwrap().await.unwrap();
-    let (_s2, mut r2): (SendStream, RecvStream) = conn2.accept_bi().await.unwrap();
+    let (s2, mut r2): (SendStream, RecvStream) = conn2.accept_bi().await.unwrap();
     let mut header2 = [0u8; 2];
     r2.read_exact(&mut header2).await.unwrap();
     accepted_tx.send(()).ok();
 
     std::future::pending::<()>().await;
+    drop(s2);
     drop(conn2);
 }
 
 #[tokio::test]
 async fn dead_peer_is_removed_and_redialled() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
 
     let certs = generate_certs();
     let dir = tempfile::tempdir().unwrap();
@@ -378,7 +459,7 @@ async fn dead_peer_is_removed_and_redialled() {
     close_tx.send(()).ok();
     let mut removed = false;
     for _ in 0..200 {
-        let _ = transport.send(peer, heartbeat(local, 1)).await;
+        transport.send(peer, heartbeat(local, 1)).await.ok();
         if !transport.direct_peers().await.unwrap().contains(&peer) {
             removed = true;
             break;
@@ -397,7 +478,373 @@ async fn dead_peer_is_removed_and_redialled() {
         .unwrap();
     assert!(
         transport.direct_peers().await.unwrap().contains(&peer),
-        "peer should be re-linked after redial_disconnected"
+        "peer should be re-linked after redial_unlinked"
+    );
+
+    far_handle.abort();
+}
+
+async fn stream_stopping_far_end(endpoint: Endpoint, closed_tx: oneshot::Sender<()>) {
+    let connection: Connection = endpoint.accept().await.unwrap().await.unwrap();
+    let (send_stream, mut recv): (SendStream, RecvStream) = connection.accept_bi().await.unwrap();
+    let mut header = [0u8; 2];
+    recv.read_exact(&mut header).await.unwrap();
+    recv.stop(0u32.into()).unwrap();
+    connection.closed().await;
+    closed_tx.send(()).ok();
+    drop(send_stream);
+}
+
+#[tokio::test]
+async fn a_failed_writer_closes_the_peer_connection() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
+
+    let certs = generate_certs();
+    let dir = tempfile::tempdir().unwrap();
+    let ca_path = dir.path().join("ca.pem");
+    let leaf_path = dir.path().join("leaf.pem");
+    let leaf_key_path = dir.path().join("leaf.key");
+    std::fs::write(&ca_path, &certs.ca_pem).unwrap();
+    std::fs::write(&leaf_path, &certs.leaf_pem).unwrap();
+    std::fs::write(&leaf_key_path, &certs.leaf_key_pem).unwrap();
+
+    let endpoint = server_endpoint(&certs, 1024 * 1024);
+    let far_addr: SocketAddr = endpoint.local_addr().unwrap();
+    let (closed_tx, closed_rx) = oneshot::channel();
+    let far_handle = tokio::spawn(stream_stopping_far_end(endpoint, closed_tx));
+
+    let local = NodeId::validated(1).unwrap();
+    let peer = NodeId::validated(2).unwrap();
+    let transport = QuicDirectTransport::new(local);
+    transport.set_ca_file(ca_path);
+    transport
+        .bind("127.0.0.1:0".parse().unwrap(), &leaf_path, &leaf_key_path)
+        .await
+        .unwrap();
+    transport.connect_to_peer(peer, far_addr).await.unwrap();
+
+    let mut removed = false;
+    for tick in 0..200 {
+        transport.send(peer, heartbeat(local, tick)).await.ok();
+        if !transport.direct_peers().await.unwrap().contains(&peer) {
+            removed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(removed, "a stopped stream should remove the peer");
+
+    tokio::time::timeout(Duration::from_secs(10), closed_rx)
+        .await
+        .expect("the connection behind a failed writer was left open")
+        .unwrap();
+
+    far_handle.abort();
+}
+
+#[tokio::test]
+async fn a_snapshot_chunk_is_not_held_behind_a_full_bulk_lane() {
+    let StalledPeer {
+        transport,
+        local,
+        peer,
+        frame_rx,
+        release_tx,
+        far_handle,
+    } = setup_stalled_peer().await;
+
+    let mut bulk_full = false;
+    let mut bulk_accepted = 0;
+    for _ in 0..SEND_ATTEMPTS {
+        match transport.send(peer, bulk_message(local)).await {
+            Ok(()) => bulk_accepted += 1,
+            Err(TransportError::SendQueueFull(_)) => {
+                bulk_full = true;
+                break;
+            }
+            Err(other) => panic!("unexpected bulk send error: {other}"),
+        }
+    }
+    assert!(bulk_full, "bulk messages should eventually fill their lane");
+    transport
+        .send(peer, snapshot_chunk(1))
+        .await
+        .expect("snapshot chunk refused while only the bulk lane was full");
+
+    release_tx.send(()).ok();
+
+    let snapshot_type = snapshot_chunk(0).message_type();
+    let mut frames_before = 0;
+    loop {
+        let frame = collect_frame(&frame_rx).await;
+        if frame[2] == snapshot_type {
+            break;
+        }
+        frames_before += 1;
+    }
+    assert!(
+        frames_before < bulk_accepted,
+        "the snapshot chunk waited behind all {bulk_accepted} queued bulk frames"
+    );
+
+    far_handle.abort();
+}
+
+#[tokio::test]
+async fn bulk_gets_a_byte_share_while_snapshot_chunks_are_queued() {
+    let StalledPeer {
+        transport,
+        local,
+        peer,
+        frame_rx,
+        release_tx,
+        far_handle,
+    } = setup_stalled_peer().await;
+
+    for index in 0..SEND_ATTEMPTS {
+        if transport.send(peer, snapshot_chunk(index)).await.is_err() {
+            break;
+        }
+    }
+    for _ in 0..SEND_ATTEMPTS {
+        if transport.send(peer, bulk_message(local)).await.is_err() {
+            break;
+        }
+    }
+    release_tx.send(()).ok();
+
+    let snapshot_type = snapshot_chunk(0).message_type();
+    let mut frame = collect_frame(&frame_rx).await;
+    while frame[2] == snapshot_type {
+        frame = collect_frame(&frame_rx).await;
+    }
+    while frame[2] != snapshot_type {
+        frame = collect_frame(&frame_rx).await;
+    }
+    let chunk_len = frame.len();
+    let mut bulk_len = 0;
+    frame = collect_frame(&frame_rx).await;
+    while frame[2] != snapshot_type {
+        bulk_len += frame.len();
+        frame = collect_frame(&frame_rx).await;
+    }
+    assert!(
+        bulk_len * 2 >= chunk_len,
+        "only {bulk_len} bulk bytes went out between chunks of {chunk_len} bytes"
+    );
+
+    far_handle.abort();
+}
+
+#[tokio::test]
+async fn a_frame_over_the_receive_limit_is_refused_at_send() {
+    let StalledPeer {
+        transport,
+        local,
+        peer,
+        far_handle,
+        ..
+    } = setup_stalled_peer().await;
+
+    let oversized = ClusterMessage::ForwardedPublish(ForwardedPublish::new(
+        local,
+        "oversized".to_string(),
+        0,
+        false,
+        vec![0u8; 10 * 1024 * 1024 + 1],
+        Vec::new(),
+    ));
+    let result = transport.send(peer, oversized).await;
+    assert!(
+        matches!(result, Err(TransportError::SendFailed(_))),
+        "a frame the receiver would reject was accepted: {result:?}"
+    );
+
+    far_handle.abort();
+}
+
+#[tokio::test]
+async fn a_first_chunk_is_written_after_the_bulk_frames_queued_before_it() {
+    let StalledPeer {
+        transport,
+        local,
+        peer,
+        frame_rx,
+        release_tx,
+        far_handle,
+    } = setup_stalled_peer().await;
+
+    let queued_before = 300;
+    for _ in 0..queued_before {
+        transport.send(peer, bulk_message(local)).await.unwrap();
+    }
+    transport.send(peer, snapshot_chunk(0)).await.unwrap();
+    transport.send(peer, snapshot_chunk(1)).await.unwrap();
+    for _ in 0..50 {
+        transport.send(peer, bulk_message(local)).await.unwrap();
+    }
+    release_tx.send(()).ok();
+
+    let snapshot_type = snapshot_chunk(0).message_type();
+    let mut bulk_before_first_chunk = 0;
+    while collect_frame(&frame_rx).await[2] != snapshot_type {
+        bulk_before_first_chunk += 1;
+    }
+    assert!(
+        bulk_before_first_chunk >= queued_before,
+        "the first chunk overtook bulk frames: only {bulk_before_first_chunk} of {queued_before} went first"
+    );
+
+    let mut bulk_before_second_chunk = 0;
+    while collect_frame(&frame_rx).await[2] != snapshot_type {
+        bulk_before_second_chunk += 1;
+    }
+    assert!(
+        bulk_before_first_chunk + bulk_before_second_chunk < queued_before + 50,
+        "the second chunk waited behind every later bulk frame"
+    );
+
+    far_handle.abort();
+}
+
+fn snapshot_chunk_of(transfer: u8, index: u32) -> ClusterMessage {
+    ClusterMessage::SnapshotChunk(
+        SnapshotChunk::new(PartitionId::ZERO, index, u32::MAX, 0, vec![transfer; 1024])
+            .with_transfer_id(u64::from(transfer)),
+    )
+}
+
+#[tokio::test]
+async fn a_first_chunk_after_a_full_lane_is_not_held_by_refused_frames() {
+    let StalledPeer {
+        transport,
+        local,
+        peer,
+        frame_rx,
+        release_tx,
+        far_handle,
+    } = setup_stalled_peer().await;
+
+    let mut accepted = 0;
+    let mut refused = 0;
+    while refused <= 20 {
+        match transport.send(peer, bulk_message(local)).await {
+            Ok(()) => accepted += 1,
+            Err(TransportError::SendQueueFull(_)) => refused += 1,
+            Err(other) => panic!("unexpected bulk send error: {other}"),
+        }
+    }
+    transport.send(peer, snapshot_chunk(0)).await.unwrap();
+    release_tx.send(()).ok();
+
+    let snapshot_type = snapshot_chunk(0).message_type();
+    let mut bulk_before_chunk = 0;
+    while collect_frame(&frame_rx).await[2] != snapshot_type {
+        bulk_before_chunk += 1;
+    }
+    assert_eq!(bulk_before_chunk, accepted);
+
+    far_handle.abort();
+}
+
+#[tokio::test]
+async fn a_first_chunk_is_positioned_exactly_and_control_frames_do_not_count_as_bulk() {
+    let StalledPeer {
+        transport,
+        local,
+        peer,
+        frame_rx,
+        release_tx,
+        far_handle,
+    } = setup_stalled_peer().await;
+
+    for _ in 0..300 {
+        transport.send(peer, bulk_message(local)).await.unwrap();
+    }
+    transport.send(peer, snapshot_chunk_of(1, 0)).await.unwrap();
+    transport.send(peer, snapshot_chunk_of(1, 1)).await.unwrap();
+    for _ in 0..100 {
+        transport.send(peer, bulk_message(local)).await.unwrap();
+    }
+    transport.send(peer, snapshot_chunk_of(2, 0)).await.unwrap();
+    for _ in 0..50 {
+        transport.send(peer, bulk_message(local)).await.unwrap();
+    }
+    transport.send(peer, heartbeat(local, 7)).await.unwrap();
+    release_tx.send(()).ok();
+
+    let snapshot_type = snapshot_chunk(0).message_type();
+    let heartbeat_type = heartbeat(local, 0).message_type();
+    let mut bulk = 0;
+    let mut chunk_positions = Vec::new();
+    let mut heartbeat_seen = false;
+    while bulk < 450 || chunk_positions.len() < 3 {
+        let frame = collect_frame(&frame_rx).await;
+        if frame[2] == snapshot_type {
+            chunk_positions.push(bulk);
+        } else if frame[2] == heartbeat_type {
+            heartbeat_seen = true;
+        } else {
+            bulk += 1;
+        }
+    }
+    assert_eq!(chunk_positions[0], 300);
+    assert!(chunk_positions[1] >= 300);
+    assert!(
+        chunk_positions[2] >= 400,
+        "the second transfer overtook bulk queued before it: {chunk_positions:?}"
+    );
+    assert!(heartbeat_seen);
+
+    far_handle.abort();
+}
+
+#[tokio::test]
+async fn a_first_chunk_is_written_when_no_bulk_follows_it() {
+    let StalledPeer {
+        transport,
+        local,
+        peer,
+        frame_rx,
+        release_tx,
+        far_handle,
+    } = setup_stalled_peer().await;
+
+    for _ in 0..5 {
+        transport.send(peer, bulk_message(local)).await.unwrap();
+    }
+    transport.send(peer, snapshot_chunk(0)).await.unwrap();
+    release_tx.send(()).ok();
+
+    let snapshot_type = snapshot_chunk(0).message_type();
+    let mut bulk_before_chunk = 0;
+    while collect_frame(&frame_rx).await[2] != snapshot_type {
+        bulk_before_chunk += 1;
+    }
+    assert_eq!(bulk_before_chunk, 5);
+
+    far_handle.abort();
+}
+
+#[tokio::test]
+async fn a_first_chunk_with_no_bulk_ever_queued_is_written() {
+    let StalledPeer {
+        transport,
+        peer,
+        frame_rx,
+        release_tx,
+        far_handle,
+        ..
+    } = setup_stalled_peer().await;
+
+    transport.send(peer, snapshot_chunk(0)).await.unwrap();
+    release_tx.send(()).ok();
+
+    assert_eq!(
+        collect_frame(&frame_rx).await[2],
+        snapshot_chunk(0).message_type()
     );
 
     far_handle.abort();
