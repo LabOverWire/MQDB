@@ -539,7 +539,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let saved_events = self.set_aside_change_events(partition);
         match self.stores.import_partition_counted(&data) {
             Ok(counts) => {
-                self.write_log.clear(partition);
+                self.write_log.clear_partition(partition);
                 if counts.partition_records > 0 {
                     self.imported_partitions[usize::from(partition.get())] = true;
                 }
