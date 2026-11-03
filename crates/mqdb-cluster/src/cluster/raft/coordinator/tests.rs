@@ -877,6 +877,54 @@ async fn a_single_death_fails_over_once_the_batch_window_has_passed() {
 }
 
 #[tokio::test]
+async fn a_node_rebalanced_on_return_is_not_rebalanced_again_when_the_leader_catches_up() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let log: Vec<RaftCommand> = PartitionId::all()
+        .map(|partition| {
+            let (primary, replica) = if partition.get().is_multiple_of(2) {
+                (1, 2)
+            } else {
+                (2, 1)
+            };
+            assign(partition.get(), primary, replica, 1)
+        })
+        .collect();
+    let mut coord = RaftCoordinator::new_with_storage(
+        node1,
+        MockTransport::new(node1),
+        grace_config(),
+        disk_with_log(3, &log),
+    )
+    .unwrap();
+    let start = 1_790_000_000_000u64;
+    coord.tick(start).await;
+    coord.tick(start + 1_000).await;
+    let term = coord.current_term();
+    coord
+        .handle_request_vote_response(
+            node2,
+            crate::cluster::raft::rpc::RequestVoteResponse::granted(term),
+        )
+        .await;
+    assert!(coord.is_leader());
+
+    assert!(coord.handle_node_alive(node3).await.is_empty());
+    commit_tail(&mut coord).await;
+    assert!(!coord.handle_node_alive(node3).await.is_empty());
+    let after_first = coord.last_log_index();
+
+    coord.tick(start + 1_200).await;
+
+    assert_eq!(
+        coord.last_log_index(),
+        after_first,
+        "a second plan on top of the first promotes the new replica before its snapshot"
+    );
+}
+
+#[tokio::test]
 async fn a_lost_node_with_a_live_replica_is_failed_over_to_it() {
     let node1 = NodeId::validated(1).unwrap();
     let node3 = NodeId::validated(3).unwrap();

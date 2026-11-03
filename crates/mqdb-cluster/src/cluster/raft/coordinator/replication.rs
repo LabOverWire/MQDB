@@ -175,6 +175,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
                 self.pending_new_nodes.insert(node);
                 return Vec::new();
             }
+            self.pending_new_nodes.remove(&node);
             tracing::info!(?node, "node has no partitions, triggering rebalance");
             return self.trigger_rebalance_for_new_node().await;
         }
