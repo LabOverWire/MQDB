@@ -924,6 +924,139 @@ async fn a_node_rebalanced_on_return_is_not_rebalanced_again_when_the_leader_cat
     );
 }
 
+async fn new_leader_of_five_with_a_death_queued(
+    transport: MockTransport,
+    start: u64,
+) -> RaftCoordinator<MockTransport> {
+    let node1 = NodeId::validated(1).unwrap();
+    let node4 = NodeId::validated(4).unwrap();
+    let mut coord = RaftCoordinator::new_with_storage(
+        node1,
+        transport,
+        grace_config(),
+        disk_with_log(3, &pair_on_nodes_4_and_5()),
+    )
+    .unwrap();
+    coord.tick(start).await;
+    coord.tick(start + 1_000).await;
+    coord.handle_node_death(node4).await;
+    let term = coord.current_term();
+    for voter in [2u16, 3] {
+        coord
+            .handle_request_vote_response(
+                NodeId::validated(voter).unwrap(),
+                crate::cluster::raft::rpc::RequestVoteResponse::granted(term),
+            )
+            .await;
+    }
+    assert!(coord.is_leader());
+    commit_tail(&mut coord).await;
+    coord
+}
+
+#[tokio::test]
+async fn a_new_leader_waits_out_the_batch_window_before_a_queued_failover() {
+    let node4 = NodeId::validated(4).unwrap();
+    let node5 = NodeId::validated(5).unwrap();
+    let start = 1_790_000_000_000u64;
+    let node1 = NodeId::validated(1).unwrap();
+    let mut coord = new_leader_of_five_with_a_death_queued(MockTransport::new(node1), start).await;
+
+    coord.tick(start + 1_200).await;
+    coord.handle_node_death(node5).await;
+    commit_tail(&mut coord).await;
+    coord.tick(start + 1_400).await;
+    coord.tick(start + 3_400).await;
+    commit_tail(&mut coord).await;
+
+    assert_eq!(holders(&coord, 0), (Some(node4), vec![node5]));
+    assert_eq!(holders(&coord, 1), (Some(node5), vec![node4]));
+}
+
+#[tokio::test]
+async fn a_new_leader_without_a_quorum_of_links_keeps_the_failover_queued() {
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let node5 = NodeId::validated(5).unwrap();
+    let start = 1_790_000_000_000u64;
+    let transport = MockTransport::new(NodeId::validated(1).unwrap());
+    let links = Arc::clone(&transport.links);
+    let mut coord = new_leader_of_five_with_a_death_queued(transport, start).await;
+    *links.lock().unwrap() = Some(Vec::new());
+    let before = coord.last_log_index();
+
+    coord.tick(start + 1_200).await;
+    coord.tick(start + 4_000).await;
+    assert_eq!(coord.last_log_index(), before);
+
+    *links.lock().unwrap() = Some(vec![node2, node3]);
+    coord.tick(start + 4_200).await;
+    commit_tail(&mut coord).await;
+    assert_eq!(holders(&coord, 0), (Some(node5), Vec::new()));
+}
+
+#[tokio::test]
+async fn a_new_leader_plans_no_rebalance_for_a_new_node_while_a_death_is_queued() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node6 = NodeId::validated(6).unwrap();
+    let start = 1_790_000_000_000u64;
+    let log: Vec<RaftCommand> = PartitionId::all()
+        .map(|partition| {
+            let (primary, replica) = if partition.get().is_multiple_of(2) {
+                (4, 5)
+            } else {
+                (5, 4)
+            };
+            assign(partition.get(), primary, replica, 1)
+        })
+        .collect();
+    let mut coord = RaftCoordinator::new_with_storage(
+        node1,
+        MockTransport::new(node1),
+        grace_config(),
+        disk_with_log(3, &log),
+    )
+    .unwrap();
+    coord.tick(start).await;
+    coord.tick(start + 1_000).await;
+    coord.handle_node_death(NodeId::validated(4).unwrap()).await;
+    coord.handle_node_alive(node6).await;
+    let term = coord.current_term();
+    coord
+        .handle_request_vote_response(
+            NodeId::validated(5).unwrap(),
+            crate::cluster::raft::rpc::RequestVoteResponse::granted(term),
+        )
+        .await;
+    coord
+        .handle_request_vote_response(
+            NodeId::validated(6).unwrap(),
+            crate::cluster::raft::rpc::RequestVoteResponse::granted(term),
+        )
+        .await;
+    assert!(coord.is_leader());
+    assert!(coord.pending_new_nodes.contains(&node6));
+    let tail = coord.last_log_index();
+    for voter in [5u16, 6] {
+        coord
+            .handle_append_entries_response(
+                NodeId::validated(voter).unwrap(),
+                crate::cluster::raft::rpc::AppendEntriesResponse::success(term, tail),
+            )
+            .await;
+    }
+    let before = coord.last_log_index();
+
+    coord.tick(start + 1_200).await;
+    assert_eq!(coord.last_log_index(), before);
+    coord.tick(start + 1_400).await;
+    assert_eq!(coord.last_log_index(), before);
+    assert!(coord.pending_new_nodes.contains(&node6));
+
+    coord.tick(start + 3_000).await;
+    assert!(coord.last_log_index() > before);
+}
+
 #[tokio::test]
 async fn a_lost_node_with_a_live_replica_is_failed_over_to_it() {
     let node1 = NodeId::validated(1).unwrap();
@@ -1053,7 +1186,6 @@ async fn the_scan_at_leader_start_does_not_repeat_a_failover_it_just_proposed() 
     )
     .unwrap();
     coord.handle_node_death(node4).await;
-    coord.process_pending_dead_nodes().await;
     let start = 1_790_000_000_000u64;
     coord.tick(start).await;
     coord.tick(start + 1_000).await;
@@ -1068,6 +1200,7 @@ async fn the_scan_at_leader_start_does_not_repeat_a_failover_it_just_proposed() 
     }
     commit_tail(&mut coord).await;
     coord.tick(start + 1_200).await;
+    coord.tick(start + 3_000).await;
 
     let updates_of_partition_0 = coord
         .node

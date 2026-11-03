@@ -29,14 +29,18 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         let ready = self.leader_ready();
         let just_became_ready = ready && !self.was_ready;
         self.was_ready = ready;
+        let can_commit = ready && self.node.can_reach_quorum();
 
         if just_became_ready {
             self.last_balance_check = now_ms;
             self.pending_partition_proposals = 0;
             tracing::info!("Raft leader caught up, processing pending nodes");
-            let mut indices = self.process_pending_dead_nodes().await;
+            let mut indices = Vec::new();
+            if can_commit && deaths_settled {
+                indices.extend(self.process_pending_dead_nodes().await);
+            }
             indices.extend(self.process_pending_draining_nodes().await);
-            if self.partitions_initialized() {
+            if self.partitions_initialized() && self.pending_dead_nodes.is_empty() {
                 indices.extend(self.process_pending_new_nodes().await);
             }
             return indices;
@@ -46,8 +50,6 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             return self.initialize_partitions().await;
         }
 
-        let can_commit = ready && self.node.can_reach_quorum();
-
         if can_commit && deaths_settled && !self.pending_dead_nodes.is_empty() {
             return self.process_pending_dead_nodes().await;
         }
@@ -55,6 +57,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         if ready
             && self.pending_partition_proposals == 0
             && !self.pending_new_nodes.is_empty()
+            && self.pending_dead_nodes.is_empty()
             && self.partitions_initialized()
         {
             tracing::info!(

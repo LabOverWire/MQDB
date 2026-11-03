@@ -29,10 +29,12 @@
 (*   ScanReplicas       FALSE: Scan looks at primaries only.                *)
 (*   AddReplicas        TRUE: a replica with no copy can be added and then  *)
 (*                      promoted, since the map does not record who synced. *)
-(*   WaitForData        TRUE: a node mapped primary with no copy waits for  *)
-(*                      its transfer (gh #273) and takes the role empty     *)
-(*                      only if the source has died. FALSE: it serves at    *)
-(*                      once.                                               *)
+(*   WaitForData        TRUE: TakeRole refuses a node mapped primary with   *)
+(*                      no copy while its mapped source is alive (gh #273). *)
+(*                      FALSE: it can serve at once. The code also takes    *)
+(*                      the role with a live source after 30 s without a    *)
+(*                      finished catchup and after 90 s on a source never   *)
+(*                      heard from; those takes are not modelled.           *)
 (*   Together           TRUE: two nodes can die within the window.          *)
 (*   BatchDeaths        TRUE: deaths in the window are all out of the alive *)
 (*                      set before any is processed. FALSE: the first is    *)
@@ -44,38 +46,43 @@
 (* are the only nodes holding either partition, so InvPrimaryWasAHolder     *)
 (* reads as "never promote L". A holder is assumed to keep its copy, so     *)
 (* #287 is out of scope. Only L can lack a copy; ClusterEmptyPrimary and    *)
-(* ClusterPromotedTransfer model the transfer itself. The 30 s and 90 s     *)
-(* takes of gh #273 with a live source are not modelled. The time a         *)
-(* detection takes is not modelled.                                         *)
+(* ClusterPromotedTransfer model the transfer itself. The time a detection  *)
+(* takes is not modelled.                                                   *)
 (*                                                                         *)
 (* Expected, verified for these constants only:                             *)
 (*   ClusterFailoverPlanning: all pass                                      *)
 (*   _no_holder_rule: fails InvPrimaryWasAHolder                            *)
-(*   _stale: passes; with the holder rule, reading the applied map breaks   *)
-(*       none of these invariants. The planning matters for epochs, which   *)
-(*       this model lacks, and is covered by unit tests                     *)
+(*   _stale: passes. It turns RepairScan and the planned-map reads off and   *)
+(*       checks InvNoStrandedPrimary only, with no lost proposals. Planning  *)
+(*       matters for epochs, which this model lacks; see the unit tests     *)
 (*   _departed: fails InvRebalanceTargetLive, the gh #280 panic             *)
-(*   _new_replica: fails InvPrimaryWasAHolder and is the map-level limit:   *)
-(*       the map can still name a node with no copy. _new_replica_nowait    *)
-(*       fails InvNoEmptyServe without gh #273; _new_replica_wait passes it *)
-(*       with one failure; _new_replica_source_dies fails it with two: the  *)
-(*       source dies during the wait and the node takes the role empty      *)
+(*   _new_replica: fails InvPrimaryWasAHolder: the map can still name a node *)
+(*       with no copy.                                                      *)
+(*   _new_replica_nowait: WaitForData off, one failure, fails InvNoEmptyServe.*)
+(*   _new_replica_wait: one failure, passes InvNoEmptyTake.                 *)
+(*   _new_replica_source_dies: two failures, fails InvNoEmptyTake: the      *)
+(*       source dies during the wait and the node takes the role empty.     *)
 (*   _no_scan: fails Repaired, a lost failover is never redone              *)
 (*   _scan_primaries_only: fails Repaired, a lost replica entry stays       *)
 (*   _two_die_today: BatchDeaths and KeepDeadReplica off, fails HolderServes *)
 (*   _no_batch: fails HolderServes, promoted to a node dying in the window  *)
 (*   _no_keep: fails HolderServes, the replica returns first with no entry  *)
-(*   _current: passes InvServingPrimaryIsCurrent and HolderServes with no   *)
-(*       lost proposals; a lost tail makes the staleness rule over-approximate *)
 (*                                                                         *)
-(* current[p] is the set of nodes holding every write of p: a holder that   *)
-(* dies while another stays alive counts as stale, since the survivor is or *)
-(* is about to be the primary, even if that promotion is then lost; holders *)
-(* dying in the window all stay current. Catching up on return is not       *)
-(* modelled, a returning replica of a live primary is current at once. So a *)
-(* second death after the window, before the first failover commits, is     *)
-(* outside HolderServes: the first holder has left the map and counts as    *)
-(* stale, and the partition stays at 503 until its last holder returns.     *)
+(* This model has no writes, so it says nothing about who holds an acked    *)
+(* write. Replication is asynchronous: a primary acks before its replica    *)
+(* applies, so holders dying together can differ, and promoting either can  *)
+(* lose acked writes. HolderServes only says a partition whose map entries  *)
+(* named a node when both holders died gets a live primary once that node   *)
+(* is back. An earlier version tracked current[p] and                       *)
+(* InvServingPrimaryIsCurrent; a review refuted them as a measure of acked  *)
+(* writes and they are gone.                                                *)
+(*                                                                         *)
+(* A second death after the window is outside HolderServes: the first       *)
+(* holder has left the map and the partition stays at 503 until the second  *)
+(* returns or a forced rebalance.                                           *)
+(*                                                                         *)
+(* Model restriction: Rejoin requires proposals = <<>>, so a node does not  *)
+(* return while a proposal is unapplied. The code has no such guard.        *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -84,11 +91,11 @@ CONSTANTS L, A, B,
           Together, BatchDeaths, KeepDeadReplica, WaitForData,
           MaxFails, MaxProposals, MaxLost
 
-VARIABLES applied, proposals, members, failsLeft, proposalsLeft, lostLeft, deadTarget, current, returned,
-          filled
+VARIABLES applied, proposals, members, failsLeft, proposalsLeft, lostLeft, deadTarget, named, returned,
+          filled, takenEmpty
 
-vars == <<applied, proposals, members, failsLeft, proposalsLeft, lostLeft, deadTarget, current, returned,
-          filled>>
+vars == <<applied, proposals, members, failsLeft, proposalsLeft, lostLeft, deadTarget, named, returned,
+          filled, takenEmpty>>
 
 Nodes == {L, A, B}
 Partitions == {1, 2}
@@ -121,8 +128,9 @@ Init ==
     /\ proposalsLeft = MaxProposals
     /\ lostLeft = MaxLost
     /\ deadTarget = FALSE
-    /\ current = [p \in Partitions |-> {A, B}]
-    /\ returned = FALSE
+    /\ named = [p \in Partitions |-> {}]
+    /\ returned = [p \in Partitions |-> FALSE]
+    /\ takenEmpty = "no"
     /\ filled = [p \in Partitions |-> FALSE]
 
 \* The repair one departed node d needs on partition p, or None.
@@ -140,12 +148,6 @@ Repair(map, p, d, alive) ==
 
 Repairs(map, d, alive) == {Repair(map, p, d, alive) : p \in Partitions} \ {None}
 
-\* Who still holds every write of a partition once these nodes are gone.
-AfterDeaths(dying) ==
-    [p \in Partitions |->
-        LET live == (current[p] \cap members) \ dying
-        IN IF live # {} THEN live ELSE current[p]]
-
 Fail(d) ==
     /\ d \in members
     /\ d # L
@@ -157,8 +159,7 @@ Fail(d) ==
           /\ proposalsLeft' = proposalsLeft - Cardinality(repairs)
           /\ proposals' = proposals \o SetToSeq(repairs)
           /\ members' = alive
-    /\ current' = AfterDeaths({d})
-    /\ UNCHANGED <<applied, lostLeft, deadTarget, returned, filled>>
+    /\ UNCHANGED <<applied, lostLeft, deadTarget, named, returned, filled, takenEmpty>>
 
 \* Both deaths reach the task within the window, d1 first.
 FailTogether(d1, d2) ==
@@ -177,26 +178,24 @@ FailTogether(d1, d2) ==
           /\ proposalsLeft' = proposalsLeft - count
           /\ proposals' = proposals \o SetToSeq(first) \o SetToSeq(second)
           /\ members' = alive
-    /\ current' = AfterDeaths({d1, d2})
-    /\ UNCHANGED <<applied, lostLeft, deadTarget, returned, filled>>
+    /\ named' = [p \in Partitions |->
+                    IF {Base[p].primary, Base[p].replica} = {d1, d2} THEN {d1, d2} ELSE named[p]]
+    /\ UNCHANGED <<applied, lostLeft, deadTarget, returned, filled, takenEmpty>>
 
 Commit ==
     /\ proposals # <<>>
     /\ applied' = Apply(applied, Head(proposals))
     /\ proposals' = Tail(proposals)
-    /\ LET q == Head(proposals)
-           serving == {q.primary} \cup ({q.replica} \cap members)
-       IN current' = IF q.primary \in members
-                     THEN [current EXCEPT ![q.p] = @ \cap serving]
-                     ELSE current
-    /\ UNCHANGED <<members, failsLeft, proposalsLeft, lostLeft, deadTarget, returned, filled>>
+    /\ returned' = [p \in Partitions |->
+                       returned[p] /\ applied'[p].primary \notin members /\ applied'[p].replica \in members]
+    /\ UNCHANGED <<members, failsLeft, proposalsLeft, lostLeft, deadTarget, named, filled, takenEmpty>>
 
 LoseTail ==
     /\ proposals # <<>>
     /\ lostLeft > 0
     /\ lostLeft' = lostLeft - 1
     /\ proposals' = <<>>
-    /\ UNCHANGED <<applied, members, failsLeft, proposalsLeft, deadTarget, current, returned, filled>>
+    /\ UNCHANGED <<applied, members, failsLeft, proposalsLeft, deadTarget, named, returned, filled, takenEmpty>>
 
 Departed(n) == n \in Nodes /\ n \notin members
 
@@ -216,21 +215,15 @@ Scan ==
     /\ Cardinality(ScanRepairs) <= proposalsLeft
     /\ proposalsLeft' = proposalsLeft - Cardinality(ScanRepairs)
     /\ proposals' = SetToSeq(ScanRepairs)
-    /\ UNCHANGED <<applied, members, failsLeft, lostLeft, deadTarget, current, returned, filled>>
+    /\ UNCHANGED <<applied, members, failsLeft, lostLeft, deadTarget, named, returned, filled, takenEmpty>>
 
 Rejoin(n) ==
     /\ Departed(n)
     /\ proposals = <<>>
     /\ members' = members \cup {n}
-    /\ returned' = TRUE
-    /\ current' =
-        [p \in Partitions |->
-            LET a == applied[p]
-            IN CASE a.primary = n ->
-                        current[p] \cap ({n} \cup ({a.replica} \cap members))
-                 [] a.replica = n /\ a.primary \in members -> current[p] \cup {n}
-                 [] OTHER -> current[p]]
-    /\ UNCHANGED <<applied, proposals, failsLeft, proposalsLeft, lostLeft, deadTarget, filled>>
+    /\ returned' = [p \in Partitions |->
+                       returned[p] \/ (applied[p].replica = n /\ applied[p].primary \notin members)]
+    /\ UNCHANGED <<applied, proposals, failsLeft, proposalsLeft, lostLeft, deadTarget, named, filled, takenEmpty>>
 
 Rebalance(p) ==
     /\ proposalsLeft > 0
@@ -241,7 +234,7 @@ Rebalance(p) ==
           /\ (LiveTargetsOnly => a.replica \in members)
           /\ deadTarget' = (deadTarget \/ a.replica \notin members)
           /\ proposals' = Append(proposals, [p |-> p, primary |-> a.replica, replica |-> a.primary])
-    /\ UNCHANGED <<applied, members, failsLeft, lostLeft, current, returned, filled>>
+    /\ UNCHANGED <<applied, members, failsLeft, lostLeft, named, returned, filled, takenEmpty>>
 
 \* add_missing_replicas gives a partition a new replica with no copy yet. L plays
 \* that node. The code waits 30 s after a death before doing this from the periodic
@@ -254,7 +247,7 @@ AddReplica(p) ==
     /\ Base[p].primary \in members
     /\ Base[p].primary # L
     /\ proposals' = Append(proposals, [p |-> p, primary |-> Base[p].primary, replica |-> L])
-    /\ UNCHANGED <<applied, members, failsLeft, lostLeft, deadTarget, current, returned, filled>>
+    /\ UNCHANGED <<applied, members, failsLeft, lostLeft, deadTarget, named, returned, filled, takenEmpty>>
 
 \* The snapshot for a node with no copy arrives while a holder of it is live and mapped.
 Transfer(p) ==
@@ -263,9 +256,22 @@ Transfer(p) ==
     /\ L \in {applied[p].primary, applied[p].replica}
     /\ ({applied[p].primary, applied[p].replica} \ {L}) \cap members # {}
     /\ filled' = [filled EXCEPT ![p] = TRUE]
-    /\ UNCHANGED <<applied, proposals, members, failsLeft, proposalsLeft, lostLeft, deadTarget, current, returned>>
+    /\ UNCHANGED <<applied, proposals, members, failsLeft, proposalsLeft, lostLeft, deadTarget, named, returned, takenEmpty>>
+
+\* A node mapped primary with no copy takes the role. takenEmpty records whether its
+\* mapped source was alive at that moment.
+TakeRole(p) ==
+    /\ AddReplicas
+    /\ takenEmpty = "no"
+    /\ applied[p].primary = L
+    /\ ~filled[p]
+    /\ LET sourceLive == applied[p].replica \in members \ {L}
+       IN /\ (WaitForData => ~sourceLive)
+          /\ takenEmpty' = IF sourceLive THEN "source_alive" ELSE "source_dead"
+    /\ UNCHANGED <<applied, proposals, members, failsLeft, proposalsLeft, lostLeft, deadTarget, named, returned, filled>>
 
 Next ==
+    \/ \E p \in Partitions : TakeRole(p)
     \/ \E p \in Partitions : Transfer(p)
     \/ \E p \in Partitions : AddReplica(p)
     \/ \E d \in Nodes : Fail(d)
@@ -284,9 +290,9 @@ InvPrimaryWasAHolder == \A p \in Partitions : applied[p].primary \in {A, B}
 \* Once a failover is applied and no proposal is lost, a partition does not rest
 \* on a departed node while its mapped replica is alive.
 InvNoStrandedPrimary ==
-    (proposals = <<>> /\ lostLeft = MaxLost /\ ~returned) =>
+    (proposals = <<>> /\ lostLeft = MaxLost) =>
         \A p \in Partitions :
-            Departed(applied[p].primary) => applied[p].replica \notin members
+            (Departed(applied[p].primary) /\ ~returned[p]) => applied[p].replica \notin members
 
 \* Rebalance never moves a primary to a replica outside the members (gh #280).
 InvRebalanceTargetLive == ~deadTarget
@@ -300,25 +306,18 @@ NothingToRepair ==
 \* After failures stop, every repairable entry is repaired, whatever was lost.
 Repaired == <>[](NothingToRepair \/ proposalsLeft < 2)
 
-\* A live node holds every write of p, so p has a live primary.
+\* Every node the map named when both holders died: once one is back, p has a live primary.
 ServedByAHolderBack ==
     \A p \in Partitions :
-        (current[p] \cap members # {}) => applied[p].primary \in members
+        (named[p] \cap members # {}) => applied[p].primary \in members
 
-\* A partition whose holder returns with its copy serves again with no manual
-\* rebalance, in whichever order the holders died and returned.
+\* No manual rebalance is needed, in whichever order the holders died and returned.
+\* This is about the map only, not about acked writes.
 HolderServes == <>[](ServedByAHolderBack \/ proposalsLeft < 2)
 
-\* A node with no copy never serves a partition while a source for it is alive.
-\* With no live source it takes the role empty, the source-dies limit of gh #273.
-InvNoEmptyServe ==
-    \A p \in Partitions :
-        (applied[p].primary = L /\ ~filled[p]) =>
-            (WaitForData /\ applied[p].replica \in members \ {L})
+\* No node with no copy takes the role while its source is alive.
+InvNoEmptyServe == takenEmpty # "source_alive"
 
-\* A serving primary holds every write.
-InvServingPrimaryIsCurrent ==
-    proposals = <<>> =>
-        \A p \in Partitions :
-            applied[p].primary \in members => applied[p].primary \in current[p]
+\* No node with no copy takes the role at all.
+InvNoEmptyTake == takenEmpty = "no"
 =============================================================================

@@ -752,7 +752,9 @@ MQDB supports distributed clustering with automatic failover and partition rebal
 >
 > A partition moves only to a live replica. If both copies of a partition are gone it stays mapped
 > to them and answers 503, rather than move to a node with no copy and answer 404. When its primary
-> returns it serves at once, and when its replica returns it is promoted within 30 seconds. If you
+> returns it serves at once, and when its replica returns it is promoted within 30 seconds.
+> Replication is asynchronous, so a replica promoted this way can lack writes its primary acked, and
+> those writes are not merged back when the primary returns. If you
 > know the holders are never coming back, `mqdb cluster rebalance` gives those partitions to a live
 > node, which starts them empty. Failover waits until 1.5 seconds have passed with no new death, so
 > deaths detected closer together than that count as one. If the second holder dies later, the first
