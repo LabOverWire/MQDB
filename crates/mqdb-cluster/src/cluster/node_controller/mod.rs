@@ -453,6 +453,10 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) dead_nodes_for_session_update: VecDeque<NodeId>,
     pub(super) migration_manager: MigrationManager,
     pub(super) incoming_snapshots: HashMap<PartitionId, snapshot::IncomingSnapshot>,
+    pub(super) imported_partitions: [bool; super::NUM_PARTITIONS as usize],
+    pub(super) deferred_snapshot_requests: VecDeque<(NodeId, PartitionId)>,
+    pub(super) primary_taken_after_wait: bool,
+    pub(super) held_primaries: Option<super::store_manager::HeldPrimaries>,
     pub(super) outgoing_snapshots: VecDeque<snapshot::OutgoingSnapshot>,
     pub(super) snapshot_clock_ms: u64,
     pub(super) draining: bool,
@@ -531,6 +535,10 @@ impl<T: ClusterTransport> NodeController<T> {
             dead_nodes_for_session_update: VecDeque::new(),
             migration_manager: MigrationManager::new(node_id),
             incoming_snapshots: HashMap::new(),
+            imported_partitions: [false; super::NUM_PARTITIONS as usize],
+            deferred_snapshot_requests: VecDeque::new(),
+            primary_taken_after_wait: false,
+            held_primaries: None,
             outgoing_snapshots: VecDeque::new(),
             snapshot_clock_ms: 0,
             draining: false,
@@ -621,13 +629,14 @@ impl<T: ClusterTransport> NodeController<T> {
 
     #[must_use]
     pub fn can_serve_reads(&self, partition: PartitionId) -> bool {
-        if self.is_primary_for_partition(partition) {
-            return true;
+        match self.role(partition) {
+            ReplicaRole::Primary => true,
+            ReplicaRole::Replica => self
+                .partition_map
+                .replicas(partition)
+                .contains(&self.node_id),
+            ReplicaRole::None | ReplicaRole::AwaitingSnapshot => false,
         }
-        self.partition_map
-            .replicas(partition)
-            .contains(&self.node_id)
-            && self.role(partition) == ReplicaRole::Replica
     }
 
     /// Pick a local partition for creating new entities (round-robin).
@@ -639,7 +648,7 @@ impl<T: ClusterTransport> NodeController<T> {
         for _ in 0..super::NUM_PARTITIONS {
             let idx = COUNTER.fetch_add(1, Ordering::Relaxed) % super::NUM_PARTITIONS;
             if let Some(partition) = PartitionId::new(idx)
-                && self.is_primary_for_partition(partition)
+                && self.role(partition) == ReplicaRole::Primary
             {
                 return partition;
             }
@@ -689,6 +698,11 @@ impl<T: ClusterTransport> NodeController<T> {
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
         state.become_primary(epoch);
         self.incoming_snapshots.remove(&partition);
+        if !self.imported_partitions[usize::from(partition.get())]
+            && let Err(e) = self.stores.record_held_primary(partition, epoch)
+        {
+            tracing::warn!(?partition, ?e, "failed to persist the held primary marker");
+        }
         self.seal_or_queue_unique(partition, epoch);
         self.start_sending_change_events(partition);
     }
@@ -709,22 +723,7 @@ impl<T: ClusterTransport> NodeController<T> {
         epoch: Epoch,
         primary: NodeId,
     ) {
-        let state = self
-            .replicas
-            .entry(partition.get())
-            .or_insert_with(|| ReplicaState::new(partition, self.node_id));
-
-        state.become_awaiting_snapshot(epoch);
-        self.stop_sending_change_events(partition);
-
-        tracing::info!(
-            ?partition,
-            epoch = epoch.get(),
-            source = primary.get(),
-            "becoming replica, requesting initial snapshot"
-        );
-
-        self.request_snapshot(partition, primary).await;
+        self.await_snapshot(partition, epoch, primary, false).await;
     }
 
     pub fn step_down(&mut self, partition: PartitionId) {
@@ -1293,6 +1292,10 @@ impl<T: ClusterTransport> NodeController<T> {
                 );
             }
             ClusterMessage::JsonDbRequest { partition, request } => {
+                if matches!(request.op, JsonDbOp::Read) && !self.can_serve_reads(*partition) {
+                    self.refuse_unready_read(from, request).await;
+                    return None;
+                }
                 return self.handle_json_db_request(from, *partition, request).await;
             }
             ClusterMessage::JsonDbResponse(response) => {

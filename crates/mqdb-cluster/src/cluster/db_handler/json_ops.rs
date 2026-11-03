@@ -142,6 +142,9 @@ impl DbRequestHandler {
                 }
             }
             DbTopicOperation::JsonRead { entity, id } => {
+                if controller.waits_for_primary_data(data_partition(entity, id)) {
+                    return JsonOpResult::Response(Self::partition_not_ready());
+                }
                 if let OwnershipDecision::Check { owner_field, .. } =
                     self.ownership.evaluate(entity, sender)
                 {

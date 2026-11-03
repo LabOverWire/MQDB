@@ -6,6 +6,10 @@ use crate::cluster::db::DbDataStoreError;
 use serde_json::{Value, json};
 
 impl DbRequestHandler {
+    pub(super) fn partition_not_ready() -> Vec<u8> {
+        Self::json_error(503, "partition is not ready on this node")
+    }
+
     pub(super) fn json_error(code: u16, message: &str) -> Vec<u8> {
         let result = json!({
             "status": "error",

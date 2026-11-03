@@ -89,6 +89,7 @@ fn assign(
             primary: Some(primary),
             replicas: replicas.to_vec(),
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);

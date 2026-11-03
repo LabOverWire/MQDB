@@ -139,6 +139,7 @@ fn setup_controller_with_partition(partition: PartitionId) -> NodeController<Moc
             primary: Some(node1),
             replicas: vec![],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -161,6 +162,7 @@ fn setup_controller_all_partitions() -> NodeController<MockTransport> {
                 primary: Some(node1),
                 replicas: vec![],
                 epoch: Epoch::new(1),
+                primary_since: Epoch::new(1),
             },
         );
     }
@@ -319,6 +321,7 @@ async fn unsealed_partition_reserve_is_retryable_not_a_conflict() {
                 primary: Some(node1),
                 replicas: vec![node2, node3],
                 epoch: Epoch::new(1),
+                primary_since: Epoch::new(1),
             },
         );
     }
@@ -774,6 +777,7 @@ async fn vault_json_create_forwarded_to_primary_keeps_ttl_expiry() {
         primary: Some(node2),
         replicas: vec![],
         epoch: Epoch::new(1),
+        primary_since: Epoch::new(1),
     };
 
     let outbox = Arc::new(Mutex::new(Vec::new()));
@@ -865,6 +869,7 @@ async fn ttl_reap_pass_fills_its_budget_with_rows_it_owns() {
                 primary: Some(node1),
                 replicas: vec![],
                 epoch: Epoch::new(1),
+                primary_since: Epoch::new(1),
             },
         );
     }
@@ -903,6 +908,7 @@ async fn ttl_reap_budget_skips_partitions_mapped_but_not_held_as_primary() {
                     primary: Some(node1),
                     replicas: vec![],
                     epoch: Epoch::new(1),
+                    primary_since: Epoch::new(1),
                 },
             );
         } else {
@@ -2690,6 +2696,7 @@ async fn cluster_share_and_read_forward_to_resource_primary() {
             primary: Some(node2),
             replicas: vec![],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -2776,6 +2783,7 @@ async fn cluster_forwarded_read_graded_against_grant_on_primary() {
             primary: Some(node1),
             replicas: vec![],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -3754,6 +3762,7 @@ async fn json_write_without_a_response_topic_is_forwarded_to_the_primary() {
             primary: Some(node2),
             replicas: vec![],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -3810,6 +3819,7 @@ async fn forwarded_write_without_a_response_topic_is_applied_without_a_reply() {
             primary: Some(node1),
             replicas: vec![],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -3865,6 +3875,7 @@ async fn a_forwarded_create_on_a_node_that_lost_the_partition_is_refused() {
             primary: Some(node3),
             replicas: vec![node1],
             epoch: Epoch::new(2),
+            primary_since: Epoch::new(2),
         },
     );
     ctrl.update_partition_map(map);
@@ -3920,6 +3931,7 @@ async fn a_create_whose_primary_moves_during_its_unique_check_is_refused() {
     };
     let mut ctrl = create_test_controller(node1, transport);
     let partition = data_partition("nr", "r1");
+    ctrl.become_primary(partition, Epoch::new(1));
     let mut map = PartitionMap::default();
     map.set(
         partition,
@@ -3927,6 +3939,7 @@ async fn a_create_whose_primary_moves_during_its_unique_check_is_refused() {
             primary: Some(node1),
             replicas: vec![node3],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.apply_raft_partition_map(map.clone()).await;
@@ -3936,6 +3949,7 @@ async fn a_create_whose_primary_moves_during_its_unique_check_is_refused() {
             primary: Some(node3),
             replicas: vec![node1],
             epoch: Epoch::new(2),
+            primary_since: Epoch::new(2),
         },
     );
     ctrl.apply_raft_partition_map(map).await;
@@ -4007,6 +4021,7 @@ fn lose_primary_role(
                     vec![node1]
                 },
                 epoch: Epoch::new(2),
+                primary_since: Epoch::new(2),
             },
         );
     }
@@ -4217,6 +4232,7 @@ fn controller_all_partitions_with_storage(
                 primary: Some(node1),
                 replicas: vec![],
                 epoch: Epoch::new(1),
+                primary_since: Epoch::new(1),
             },
         );
     }
@@ -4444,4 +4460,110 @@ async fn json_create_refuses_an_entity_name_longer_than_the_limit() {
     let at_limit = "e".repeat(limit);
     let json = json_create(&mut ctrl, &at_limit, &serde_json::json!({"id": "r1"})).await;
     assert_eq!(json["status"], "ok");
+}
+
+#[tokio::test]
+async fn per_id_requests_on_a_primary_still_waiting_for_its_data_are_refused_as_not_ready() {
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let handler = DbRequestHandler::new(node2);
+    let mut ctrl = create_test_controller(node2, MockTransport::new(node2));
+    let partition = data_partition("docs", "d");
+    let mut map = PartitionMap::default();
+    map.set(
+        partition,
+        crate::cluster::PartitionAssignment::new(node2, vec![node3], Epoch::new(1)),
+    );
+    ctrl.apply_raft_partition_map(map).await;
+    let ctx = MqttRequestContext {
+        response_topic: Some("resp/t"),
+        correlation_data: None,
+        sender: None,
+        client_id: None,
+    };
+    let update = serde_json::to_vec(&serde_json::json!({"n": 1})).unwrap();
+
+    for (topic, payload) in [
+        ("$DB/docs/d/update", update.as_slice()),
+        ("$DB/docs/d/delete", b"{}".as_slice()),
+        ("$DB/docs/d", b"{}".as_slice()),
+    ] {
+        let response = handler
+            .handle_publish(&mut ctrl, topic, payload, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            parse_json_response(&response.payload)["code"],
+            503,
+            "{topic}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn owned_per_id_requests_on_a_primary_still_waiting_for_its_data_are_refused_as_not_ready() {
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let ownership = ownership_config("docs", "owner");
+    let handler = DbRequestHandler::new(node2).with_ownership(Arc::clone(&ownership));
+    let mut ctrl = create_test_controller(node2, MockTransport::new(node2));
+    ctrl.set_ownership(Arc::clone(&ownership));
+    let partition = data_partition("docs", "d");
+    let mut map = PartitionMap::default();
+    map.set(
+        partition,
+        crate::cluster::PartitionAssignment::new(node2, vec![node3], Epoch::new(1)),
+    );
+    ctrl.apply_raft_partition_map(map).await;
+    let ctx = MqttRequestContext {
+        response_topic: Some("resp/t"),
+        correlation_data: None,
+        sender: Some("alice"),
+        client_id: None,
+    };
+    let update = serde_json::to_vec(&serde_json::json!({"n": 1})).unwrap();
+    let mut codes = Vec::new();
+    for (topic, payload) in [
+        ("$DB/docs/d/update", update.as_slice()),
+        ("$DB/docs/d/delete", b"{}".as_slice()),
+        ("$DB/docs/d", b"{}".as_slice()),
+    ] {
+        let response = handler
+            .handle_publish(&mut ctrl, topic, payload, &ctx)
+            .await
+            .unwrap();
+        let body = parse_json_response(&response.payload);
+        codes.push(format!("{topic} -> {} {}", body["code"], body["message"]));
+    }
+    assert!(codes.iter().all(|c| c.contains("-> 503")), "{codes:?}");
+}
+
+#[tokio::test]
+async fn per_id_writes_on_a_replica_still_waiting_for_its_data_go_to_the_primary() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let handler = DbRequestHandler::new(node2);
+    let mut ctrl = create_test_controller(node2, MockTransport::new(node2));
+    let partition = data_partition("docs", "d");
+    let mut map = PartitionMap::default();
+    map.set(
+        partition,
+        crate::cluster::PartitionAssignment::new(node1, vec![node2], Epoch::new(1)),
+    );
+    ctrl.apply_raft_partition_map(map).await;
+    assert_eq!(
+        ctrl.role(partition),
+        crate::cluster::replication::ReplicaRole::AwaitingSnapshot
+    );
+    let ctx = MqttRequestContext {
+        response_topic: Some("resp/t"),
+        correlation_data: None,
+        sender: None,
+        client_id: None,
+    };
+    let update = serde_json::to_vec(&serde_json::json!({"n": 1})).unwrap();
+    let response = handler
+        .handle_publish(&mut ctrl, "$DB/docs/d/update", &update, &ctx)
+        .await;
+    assert!(matches!(response, super::DbPublishResult::NoResponse));
 }

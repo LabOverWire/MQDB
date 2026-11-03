@@ -205,6 +205,23 @@ impl<T: ClusterTransport> NodeController<T> {
         self.role(partition) == ReplicaRole::Primary
     }
 
+    pub(crate) fn waits_for_primary_data(&self, partition: PartitionId) -> bool {
+        self.partition_map.primary(partition) == Some(self.node_id)
+            && self.role(partition) == ReplicaRole::AwaitingSnapshot
+    }
+
+    pub(crate) fn waits_for_any_primary_data(&self) -> bool {
+        PartitionId::all().any(|partition| self.waits_for_primary_data(partition))
+    }
+
+    pub(crate) fn partitions_ready(&self) -> u16 {
+        let ready = PartitionId::all().filter(|partition| {
+            self.partition_map.primary(*partition).is_some()
+                && !self.waits_for_primary_data(*partition)
+        });
+        u16::try_from(ready.count()).unwrap_or(u16::MAX)
+    }
+
     pub async fn db_create(
         &mut self,
         entity_type: &str,

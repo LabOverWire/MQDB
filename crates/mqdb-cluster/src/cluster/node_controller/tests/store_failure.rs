@@ -38,6 +38,7 @@ pub(super) fn controller_where(
                 primary: Some(primary),
                 replicas: replicas.to_vec(),
                 epoch: Epoch::new(1),
+                primary_since: Epoch::new(1),
             },
         );
         if primary == node(1) {
@@ -241,6 +242,7 @@ fn hand_partition_to(
                 primary: Some(owner),
                 replicas,
                 epoch: Epoch::new(2),
+                primary_since: Epoch::new(2),
             },
         );
     }

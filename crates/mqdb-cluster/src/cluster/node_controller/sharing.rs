@@ -488,6 +488,9 @@ impl<T: ClusterTransport> NodeController<T> {
         id: &str,
         sender: Option<&str>,
     ) -> Vec<u8> {
+        if !self.can_serve_reads(data_partition(entity, id)) {
+            return Self::json_error(503, "partition is not ready on this node");
+        }
         if let Some(err) = self.require_owner_or_admin(entity, id, sender) {
             return err;
         }

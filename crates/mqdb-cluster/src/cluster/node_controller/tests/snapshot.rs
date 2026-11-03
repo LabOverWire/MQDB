@@ -34,6 +34,7 @@ fn assign(ctrl: &mut NodeController<MockTransport>, primary: NodeId) -> Partitio
             primary: Some(primary),
             replicas: vec![node(2)],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -448,6 +449,7 @@ fn map_for(primary: NodeId, replicas: &[NodeId], epoch: u64) -> PartitionMap {
             primary: Some(primary),
             replicas: replicas.to_vec(),
             epoch: Epoch::new(epoch),
+            primary_since: Epoch::new(epoch),
         },
     );
     map
@@ -467,13 +469,43 @@ async fn a_snapshot_finishing_after_the_node_became_primary_is_not_imported() {
     let (mut replica, partition) = awaiting_replica_from_map().await;
     deliver(&replica, &mut primary).await;
 
+    replica.heartbeat.receive_heartbeat(
+        node(1),
+        &crate::cluster::protocol::Heartbeat::create(node(1), 0),
+        0,
+    );
+    replica.apply_dead_nodes(&[node(1)]);
     replica
-        .apply_raft_partition_map(map_for(node(2), &[node(3)], 2))
+        .apply_raft_partition_map(map_for(node(2), &[], 2))
         .await;
     assert_eq!(replica.role(partition), ReplicaRole::Primary);
     deliver(&primary, &mut replica).await;
 
     assert!(!imported(&replica));
+    assert_eq!(replica.role(partition), ReplicaRole::Primary);
+}
+
+#[tokio::test]
+async fn a_replica_promoted_during_a_multi_chunk_transfer_keeps_it_and_takes_the_role_on_import() {
+    let (mut primary, _) = primary_holding(1, 1024 * 1024);
+    let (mut replica, partition) = awaiting_replica_from_map().await;
+    deliver(&replica, &mut primary).await;
+    deliver(&primary, &mut replica).await;
+    assert!(replica.snapshot_in_progress(partition));
+
+    let swapped = map_for(node(2), &[node(1)], 2);
+    replica.apply_raft_partition_map(swapped.clone()).await;
+    assert_eq!(replica.role(partition), ReplicaRole::AwaitingSnapshot);
+    assert!(replica.snapshot_in_progress(partition));
+    primary.apply_raft_partition_map(swapped).await;
+
+    for now in 1..40 {
+        primary.drive_snapshots(now).await;
+        deliver(&primary, &mut replica).await;
+        deliver(&replica, &mut primary).await;
+    }
+
+    assert!(imported(&replica));
     assert_eq!(replica.role(partition), ReplicaRole::Primary);
 }
 
@@ -531,7 +563,7 @@ async fn a_request_to_a_dead_source_is_abandoned() {
 
     replica.apply_dead_nodes(&[node(1)]);
 
-    assert!(!replica.incoming_snapshots.contains_key(&partition));
+    assert!(!replica.snapshot_transfer_running(partition));
 }
 
 #[tokio::test]

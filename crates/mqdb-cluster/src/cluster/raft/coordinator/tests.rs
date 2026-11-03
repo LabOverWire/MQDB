@@ -604,3 +604,130 @@ async fn a_new_leader_that_has_not_applied_the_log_does_not_initialize_again() {
         "a leader that inherits partition assignments must not initialize them again"
     );
 }
+
+fn coordinator_restored_from_a_snapshot() -> (RaftCoordinator<MockTransport>, PartitionId) {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let partition = PartitionId::new(7).unwrap();
+    let mut map = PartitionMap::new();
+    map.set(
+        partition,
+        crate::cluster::PartitionAssignment::new(node1, vec![node2], Epoch::new(1)),
+    );
+    let backend: Arc<dyn mqdb_core::StorageBackend> = Arc::new(mqdb_core::MemoryBackend::new());
+    crate::cluster::raft::RaftStorage::new(backend.clone())
+        .install_snapshot(
+            &crate::cluster::raft::RaftSnapshot::capture(10, 1, &map, &[node1, node2]),
+            false,
+        )
+        .unwrap();
+    let coord =
+        RaftCoordinator::new_with_storage(node1, MockTransport::new(node1), test_config(), backend)
+            .unwrap();
+    (coord, partition)
+}
+
+#[tokio::test]
+async fn a_restored_map_is_published_only_after_the_leader_accepts_this_log() {
+    let (mut coord, partition) = coordinator_restored_from_a_snapshot();
+    assert_eq!(
+        coord.partition_map().primary(partition),
+        NodeId::validated(1)
+    );
+    assert!(coord.publishable_partition_map().is_none());
+    let node2 = NodeId::validated(2).unwrap();
+
+    let refused = crate::cluster::raft::rpc::AppendEntriesRequest::heartbeat(2, 2, 50, 2, 0);
+    assert!(
+        !coord
+            .handle_append_entries(node2, refused, 1000)
+            .await
+            .is_success()
+    );
+    assert!(coord.publishable_partition_map().is_none());
+
+    let accepted = crate::cluster::raft::rpc::AppendEntriesRequest::heartbeat(2, 2, 10, 1, 10);
+    assert!(
+        coord
+            .handle_append_entries(node2, accepted, 1001)
+            .await
+            .is_success()
+    );
+    assert!(coord.publishable_partition_map().is_some());
+}
+
+#[tokio::test]
+async fn a_restored_map_is_published_after_a_newer_snapshot_from_the_leader() {
+    let (mut coord, _) = coordinator_restored_from_a_snapshot();
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let request = crate::cluster::raft::rpc::InstallSnapshotRequest {
+        term: 2,
+        leader_id: 2,
+        snapshot: crate::cluster::raft::RaftSnapshot::capture(
+            20,
+            2,
+            &PartitionMap::new(),
+            &[node1, node2],
+        ),
+    };
+
+    assert!(
+        coord
+            .handle_install_snapshot(node2, request, 1000)
+            .await
+            .is_success()
+    );
+
+    assert!(coord.publishable_partition_map().is_some());
+}
+
+#[tokio::test]
+async fn a_restored_map_is_published_when_this_node_becomes_leader() {
+    let (mut coord, _) = coordinator_restored_from_a_snapshot();
+    coord.tick(0).await;
+    coord.tick(1000).await;
+
+    assert!(coord.is_leader());
+    assert!(coord.publishable_partition_map().is_some());
+}
+
+#[tokio::test]
+async fn a_map_without_a_restored_snapshot_is_publishable_from_the_start() {
+    let node1 = NodeId::validated(1).unwrap();
+    let backend: Arc<dyn mqdb_core::StorageBackend> = Arc::new(mqdb_core::MemoryBackend::new());
+    let coord =
+        RaftCoordinator::new_with_storage(node1, MockTransport::new(node1), test_config(), backend)
+            .unwrap();
+    assert!(coord.publishable_partition_map().is_some());
+}
+
+#[tokio::test]
+async fn a_restored_leader_publishes_only_after_it_commits_its_own_term() {
+    let (mut coord, _) = coordinator_restored_from_a_snapshot();
+    let node2 = NodeId::validated(2).unwrap();
+    coord.add_peer(node2);
+    let refused = crate::cluster::raft::rpc::AppendEntriesRequest::heartbeat(3, 2, 50, 2, 0);
+    coord.handle_append_entries(node2, refused, 0).await;
+    coord.tick(0).await;
+    coord.tick(1000).await;
+    let term = coord.current_term();
+    coord
+        .handle_request_vote_response(
+            node2,
+            crate::cluster::raft::rpc::RequestVoteResponse::granted(term),
+        )
+        .await;
+    assert!(coord.is_leader());
+    assert!(coord.publishable_partition_map().is_none());
+
+    let matched = coord.last_log_index();
+    coord
+        .handle_append_entries_response(
+            node2,
+            crate::cluster::raft::rpc::AppendEntriesResponse::success(term, matched),
+        )
+        .await;
+
+    assert!(coord.publishable_partition_map().is_some());
+}
