@@ -66,6 +66,7 @@ struct MockTransport {
     refuse_sends: Arc<std::sync::atomic::AtomicBool>,
     queue_full: Arc<std::sync::atomic::AtomicBool>,
     full_peers: Arc<Mutex<std::collections::HashSet<NodeId>>>,
+    retained_refreshes: Arc<Mutex<Vec<String>>>,
 }
 
 impl MockTransport {
@@ -80,6 +81,7 @@ impl MockTransport {
             refuse_sends: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             queue_full: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             full_peers: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            retained_refreshes: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -191,7 +193,9 @@ impl ClusterTransport for MockTransport {
     }
 
     async fn queue_local_publish_retained(&self, _: String, _: Vec<u8>, _: u8) {}
-    async fn queue_retained_refresh(&self, _: String) {}
+    async fn queue_retained_refresh(&self, topic: String) {
+        self.retained_refreshes.lock().unwrap().push(topic);
+    }
 }
 
 fn forwarded_publish(origin: NodeId, topic: &str) -> ClusterMessage {

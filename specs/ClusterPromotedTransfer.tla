@@ -14,9 +14,16 @@
 (*  "after":  take the role on import, then ask the source for the rest.   *)
 (*  "before": on import stay waiting and ask the source for what follows   *)
 (*            the snapshot; take the role on its end marker when it covers *)
-(*            nothing newer. A lost exchange is asked again. If the marker *)
-(*            covers more than the source can send, take a new snapshot.   *)
-(*            If the source dies, take the role with what arrived.         *)
+(*            nothing newer. A lost exchange is asked again until 30 s     *)
+(*            after the import. If the marker covers more than the source  *)
+(*            can send, take a new snapshot. If the source dies, take the  *)
+(*            role with what arrived.                                      *)
+(*                                                                          *)
+(* TakeWhenOverdue = TRUE adds the 30 s step: with the source alive and the *)
+(* exchange unanswered, the node takes the role with what it has, and a    *)
+(* write the source acked after the export is missing there. The code does *)
+(* this; main also loses this write. FALSE leaves the step out, so the     *)
+(* _before cfgs assume the source answers within 30 s.                     *)
 (*                                                                          *)
 (* Lag = FALSE: the old primary applies the swap in the same step, so it   *)
 (* acks nothing once the map names the new primary. Lag = TRUE: it keeps   *)
@@ -39,10 +46,13 @@
 (*             write only on a dead source is the replication window.      *)
 (*  _before_lag (Lag TRUE): ServeCorrect fails: the old primary acks a     *)
 (*             write after the marker. Not closed here (#153, #318).        *)
+(*  _before_overdue (TakeWhenOverdue TRUE): ServeCorrect fails: the role   *)
+(*             is taken without the write acked after the export. Not      *)
+(*             closed here.                                                *)
 (***************************************************************************)
 EXTENDS Naturals
 
-CONSTANTS Design, Lag, MaxWrites, MaxLost, MaxEvict, Crashable
+CONSTANTS Design, Lag, MaxWrites, MaxLost, MaxEvict, Crashable, TakeWhenOverdue
 
 VARIABLES acked, oldData, swapped, oldApplied, oldUp, snap, phase, newData,
           newRole, covers, lost, evicted, logFloor
@@ -164,6 +174,15 @@ SourceGone ==
     /\ phase' = "done"
     /\ UNCHANGED <<acked, oldData, swapped, oldApplied, oldUp, snap, newData, covers, lost, evicted, logFloor>>
 
+Overdue ==
+    /\ TakeWhenOverdue
+    /\ oldUp
+    /\ newRole = "awaiting"
+    /\ phase = "asked"
+    /\ newRole' = "primary"
+    /\ phase' = "done"
+    /\ UNCHANGED <<acked, oldData, swapped, oldApplied, oldUp, snap, newData, covers, lost, evicted, logFloor>>
+
 Next ==
     \/ Write
     \/ Export
@@ -176,6 +195,7 @@ Next ==
     \/ Finish
     \/ Crash
     \/ SourceGone
+    \/ Overdue
 
 Spec ==
     /\ Init /\ [][Next]_vars

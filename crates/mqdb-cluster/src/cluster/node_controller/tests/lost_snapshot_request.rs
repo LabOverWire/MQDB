@@ -462,6 +462,47 @@ async fn a_request_abandoned_because_the_primary_moved_remembers_the_replaced_re
 }
 
 #[tokio::test]
+async fn the_replaced_replica_stays_remembered_after_the_import_while_catching_up() {
+    let partition = data_partition(ENTITY, ID);
+    let mut old_primary = controller(1);
+    old_primary.become_replica(partition, Epoch::new(1), 0);
+    let (_, write) = old_primary
+        .stores()
+        .db_create_write(ENTITY, ID, br#"{"n":2}"#, 1000)
+        .unwrap();
+    old_primary.stores().apply_write(&write).unwrap();
+    old_primary.step_down(partition);
+    let mut moved_in = replica_moved_in_while_the_primary_is_dead(partition).await;
+    heard_from(&mut moved_in, node(1));
+    moved_in
+        .apply_raft_partition_map(map_with(partition, node(2), &[node(4)], 3))
+        .await;
+    assert_eq!(moved_in.snapshot_asked_from(partition), Some(node(1)));
+
+    old_primary.transport.inject_message(
+        node(2),
+        ClusterMessage::SnapshotRequest(SnapshotRequest::create(partition, node(2))),
+    );
+    old_primary.process_messages().await;
+    for (to, message) in old_primary.transport.sent_messages() {
+        if to == node(2) && matches!(message, ClusterMessage::SnapshotChunk(_)) {
+            moved_in.transport.inject_message(node(1), message);
+        }
+    }
+    moved_in.process_messages().await;
+    assert!(moved_in.db_get(ENTITY, ID).is_some());
+    assert_eq!(moved_in.role(partition), ReplicaRole::AwaitingSnapshot);
+
+    moved_in.apply_dead_nodes(&[node(1)]);
+    moved_in
+        .apply_raft_partition_map(map_with(partition, node(2), &[], 4))
+        .await;
+
+    assert_eq!(moved_in.role(partition), ReplicaRole::AwaitingSnapshot);
+    assert_eq!(moved_in.snapshot_asked_from(partition), Some(node(3)));
+}
+
+#[tokio::test]
 async fn a_repeated_request_to_the_same_source_remembers_the_replaced_replica() {
     let partition = data_partition(ENTITY, ID);
     let mut moved_in = replica_moved_in_while_the_primary_is_dead(partition).await;

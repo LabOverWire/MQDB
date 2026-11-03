@@ -222,32 +222,133 @@ async fn a_waiting_primary_does_not_answer_fk_check_that_the_target_is_missing()
     );
 }
 
+fn id_outside(partition: PartitionId) -> String {
+    (0..10_000)
+        .map(|i| format!("other{i}"))
+        .find(|id| data_partition(ENTITY, id) != partition)
+        .unwrap()
+}
+
+fn two_partitions(
+    held: PartitionId,
+    waiting: PartitionId,
+    primary: NodeId,
+    replica: NodeId,
+) -> PartitionMap {
+    let mut map = PartitionMap::default();
+    for partition in [held, waiting] {
+        map.set(
+            partition,
+            PartitionAssignment::new(primary, vec![replica], Epoch::new(1)),
+        );
+    }
+    map
+}
+
+fn client_answer(ctrl: &NodeController<MockTransport>, topic: &str) -> serde_json::Value {
+    ctrl.transport
+        .queued_publishes
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|publish| match publish {
+            QueuedPublish::Plain(t, payload, _) if t == topic => {
+                serde_json::from_slice(payload).ok()
+            }
+            _ => None,
+        })
+        .expect("the client got no answer")
+}
+
 #[tokio::test]
-async fn a_waiting_primary_does_not_answer_a_list_as_complete() {
+async fn a_list_through_a_peer_returns_what_a_node_waiting_on_another_partition_holds() {
+    let held = data_partition(ENTITY, ID);
+    let waiting = data_partition(ENTITY, &id_outside(held));
+    let mut holder = controller(2);
+    holder.become_primary(held, Epoch::new(1));
+    holder
+        .apply_raft_partition_map(map_for(node(2), &[node(3)], 1))
+        .await;
+    holder
+        .db_create(ENTITY, ID, &value(1, 16), 100)
+        .await
+        .unwrap();
+    holder
+        .apply_raft_partition_map(two_partitions(held, waiting, node(2), node(3)))
+        .await;
+    assert_eq!(holder.role(waiting), ReplicaRole::AwaitingSnapshot);
+    holder.transport.take_sent();
+
+    let mut peer = controller(1);
+    heard(&mut peer, node(2));
+    assert!(
+        peer.start_scatter_list_query(
+            ENTITY,
+            b"{}",
+            "resp/client".to_string(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .await
+    );
+    deliver(&peer, &mut holder).await;
+    deliver(&holder, &mut peer).await;
+
+    let answer = client_answer(&peer, "resp/client");
+    assert_eq!(answer["status"], "ok");
+    assert_eq!(answer["data"].as_array().map(Vec::len), Some(1), "{answer}");
+}
+
+fn waiting_owner_controller() -> NodeController<MockTransport> {
     let mut ctrl = controller(2);
+    let fields = std::collections::HashMap::from([(ENTITY.to_string(), "owner".to_string())]);
+    let admins = std::collections::HashSet::from(["admin".to_string()]);
+    ctrl.set_ownership(std::sync::Arc::new(
+        mqdb_core::types::OwnershipConfig::new(fields).with_admin_users(admins),
+    ));
+    ctrl
+}
+
+#[tokio::test]
+async fn shares_of_a_waiting_partition_are_refused() {
+    let mut ctrl = waiting_owner_controller();
     ctrl.apply_raft_partition_map(map_for(node(2), &[node(3)], 1))
         .await;
-    let partition = data_partition(ENTITY, ID);
-    assert_eq!(ctrl.role(partition), ReplicaRole::AwaitingSnapshot);
+
+    let body: serde_json::Value =
+        serde_json::from_slice(&ctrl.handle_shares_local(ENTITY, ID, Some("admin"))).unwrap();
+
+    assert_eq!(body["code"], 503, "{body}");
+}
+
+#[tokio::test]
+async fn forwarded_shares_of_a_waiting_partition_are_refused() {
+    let mut ctrl = waiting_owner_controller();
+    ctrl.apply_raft_partition_map(map_for(node(2), &[node(3)], 1))
+        .await;
     ctrl.transport.take_sent();
     ctrl.transport.inject_message(
         node(1),
         ClusterMessage::JsonDbRequest {
-            partition,
+            partition: data_partition(ENTITY, ID),
             request: JsonDbRequest {
                 request_id: 7,
-                op: JsonDbOp::List,
+                op: JsonDbOp::Shares,
                 entity: ENTITY.to_string(),
-                id: None,
+                id: Some(ID.to_string()),
                 payload: b"{}".to_vec(),
-                response_topic: "resp/l".to_string(),
+                response_topic: "resp/s".to_string(),
                 correlation_data: None,
-                sender: None,
+                sender: Some("admin".to_string()),
                 client_id: None,
             },
         },
     );
     ctrl.process_messages().await;
+
     let payload = ctrl
         .transport
         .take_sent()
@@ -258,7 +359,33 @@ async fn a_waiting_primary_does_not_answer_a_list_as_complete() {
         })
         .unwrap();
     let body: serde_json::Value = serde_json::from_slice(&payload).unwrap();
-    assert_ne!(body["status"], "ok", "list while waiting answered {body}");
+    assert_eq!(body["code"], 503, "{body}");
+}
+
+#[tokio::test]
+async fn share_and_unshare_of_a_waiting_partition_are_refused() {
+    let mut ctrl = waiting_owner_controller();
+    ctrl.apply_raft_partition_map(map_for(node(2), &[node(3)], 1))
+        .await;
+    let payload = br#"{"grantee":"bob"}"#;
+
+    let shared = ctrl
+        .handle_share_local(ENTITY, ID, payload, Some("admin"))
+        .await;
+    let unshared = ctrl
+        .handle_unshare_local(ENTITY, ID, payload, Some("admin"))
+        .await;
+
+    for out in [shared, unshared] {
+        let body: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(body["code"], 503, "{body}");
+    }
+    assert!(ctrl.transport.take_sent().iter().all(|(_, message)| {
+        !matches!(
+            message,
+            ClusterMessage::Write(_) | ClusterMessage::WriteRequest(_)
+        )
+    }));
 }
 
 #[tokio::test]
@@ -574,4 +701,67 @@ async fn a_catchup_write_already_held_does_not_roll_the_record_back() {
 
     assert_eq!(counter(&promoted), Some(1));
     assert_eq!(promoted.sequence(partition), Some(held));
+}
+
+#[tokio::test]
+async fn a_retained_catchup_write_refreshes_the_broker_before_the_role_is_taken() {
+    let (mut promoted, partition) = imported_and_catching_up_from_node_1().await;
+    let (_, mut write) =
+        controller(9)
+            .stores()
+            .set_retained_replicated("topic/one", 1, b"payload", 1);
+    write.partition = partition;
+    write.sequence = promoted.sequence(partition).unwrap_or(0) + 1;
+
+    answer_with(&mut promoted, partition, vec![write]).await;
+
+    assert_eq!(
+        *promoted.transport.retained_refreshes.lock().unwrap(),
+        vec!["topic/one".to_string()]
+    );
+    assert_eq!(promoted.role(partition), ReplicaRole::AwaitingSnapshot);
+}
+
+#[tokio::test]
+async fn a_long_transfer_does_not_use_up_the_time_given_to_the_catchup() {
+    let partition = data_partition(ENTITY, ID);
+    let mut old_primary = primary_with_record(1024 * 1024).await;
+    let mut promoted = controller(2);
+    heard(&mut promoted, node(1));
+    promoted.drive_snapshots(10).await;
+    promoted
+        .apply_raft_partition_map(map_for(node(1), &[node(2)], 2))
+        .await;
+    assert_eq!(promoted.snapshot_first_asked(partition), Some(10));
+    deliver(&promoted, &mut old_primary).await;
+    for now in 1..40 {
+        old_primary.drive_snapshots(now).await;
+    }
+    let chunks = chunks_in(old_primary.transport.take_sent());
+    assert!(chunks.len() > 2, "need a multi-chunk transfer");
+    let (last, earlier) = chunks.split_last().unwrap();
+    promoted
+        .apply_raft_partition_map(map_for(node(2), &[node(1)], 3))
+        .await;
+    promoted.drive_snapshots(20_000).await;
+    for chunk in earlier {
+        promoted
+            .transport
+            .inject_message(node(1), ClusterMessage::SnapshotChunk(chunk.clone()));
+    }
+    promoted.process_messages().await;
+    promoted
+        .drive_snapshots(SNAPSHOT_STALL_TIMEOUT_MS + 10_000)
+        .await;
+    promoted.transport.take_sent();
+
+    promoted
+        .transport
+        .inject_message(node(1), ClusterMessage::SnapshotChunk(last.clone()));
+    promoted.process_messages().await;
+
+    assert_eq!(promoted.role(partition), ReplicaRole::AwaitingSnapshot);
+    assert!(promoted.transport.take_sent().iter().any(|(to, message)| {
+        *to == node(1) && matches!(message, ClusterMessage::CatchupRequest(_))
+    }));
 }
