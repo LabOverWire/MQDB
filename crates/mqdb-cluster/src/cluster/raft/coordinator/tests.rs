@@ -950,7 +950,6 @@ async fn new_leader_of_five_with_a_death_queued(
             .await;
     }
     assert!(coord.is_leader());
-    commit_tail(&mut coord).await;
     coord
 }
 
@@ -961,6 +960,7 @@ async fn a_new_leader_waits_out_the_batch_window_before_a_queued_failover() {
     let start = 1_790_000_000_000u64;
     let node1 = NodeId::validated(1).unwrap();
     let mut coord = new_leader_of_five_with_a_death_queued(MockTransport::new(node1), start).await;
+    commit_tail(&mut coord).await;
 
     coord.tick(start + 1_200).await;
     coord.handle_node_death(node5).await;
@@ -982,10 +982,11 @@ async fn a_new_leader_without_a_quorum_of_links_keeps_the_failover_queued() {
     let transport = MockTransport::new(NodeId::validated(1).unwrap());
     let links = Arc::clone(&transport.links);
     let mut coord = new_leader_of_five_with_a_death_queued(transport, start).await;
+    coord.tick(start + 1_200).await;
+    commit_tail(&mut coord).await;
     *links.lock().unwrap() = Some(Vec::new());
     let before = coord.last_log_index();
 
-    coord.tick(start + 1_200).await;
     coord.tick(start + 4_000).await;
     assert_eq!(coord.last_log_index(), before);
 
