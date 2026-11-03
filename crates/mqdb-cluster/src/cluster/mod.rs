@@ -173,9 +173,20 @@ impl PartitionMapExt for PartitionMap {
         }
 
         let epoch = Epoch::new(u64::from(update.epoch));
+        let current = self.get(partition);
+        let primary_since = if current.primary == Some(primary) {
+            current.primary_since
+        } else {
+            epoch
+        };
         self.set(
             partition,
-            PartitionAssignment::new(primary, replicas, epoch),
+            PartitionAssignment {
+                primary: Some(primary),
+                replicas,
+                epoch,
+                primary_since,
+            },
         );
         true
     }

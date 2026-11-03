@@ -179,8 +179,6 @@ pub(crate) fn filter_and_extract_cascade(
     }
     (filtered, queue)
 }
-
-#[allow(clippy::missing_errors_doc)]
 pub async fn collect_recursive_cascade<T: ClusterTransport>(
     controller: &tokio::sync::RwLock<NodeController<T>>,
     deleted_entity: &str,
@@ -271,7 +269,6 @@ pub async fn collect_recursive_cascade<T: ClusterTransport>(
 }
 
 impl<T: ClusterTransport> NodeController<T> {
-    #[allow(clippy::missing_errors_doc)]
     /// Checks that all FK references in `data` point to existing target records.
     ///
     /// # TOCTOU Trade-off
@@ -309,6 +306,11 @@ impl<T: ClusterTransport> NodeController<T> {
             let primary = self.partition_map.primary(target_partition);
 
             if primary == Some(self.node_id) {
+                if self.waits_for_primary_data(target_partition) {
+                    return Err(format!(
+                        "FK check timeout for {target_entity} '{fk_value}': partition is not ready"
+                    ));
+                }
                 if self.stores.db_get(target_entity, &fk_value).is_none() {
                     return Err(format!(
                         "FK constraint violation: referenced {target_entity} '{fk_value}' does not exist"
@@ -343,8 +345,6 @@ impl<T: ClusterTransport> NodeController<T> {
 
         Ok(FkExistenceResult { pending_remote })
     }
-
-    #[allow(clippy::missing_errors_doc)]
     pub async fn start_fk_reverse_lookup(
         &mut self,
         entity: &str,
@@ -354,6 +354,11 @@ impl<T: ClusterTransport> NodeController<T> {
         let referencing = self.stores.constraint_find_referencing(entity);
         if referencing.is_empty() {
             return Ok((Vec::new(), Vec::new()));
+        }
+        if self.waits_for_any_primary_data() {
+            return Err(format!(
+                "FK reverse lookup timeout for '{entity}': this node is waiting for partition data"
+            ));
         }
 
         let sender_str = sender.unwrap_or("");
@@ -542,6 +547,14 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     pub(crate) async fn handle_fk_check_request(&mut self, from: NodeId, req: &FkCheckRequest) {
+        let target = super::super::db::data_partition(req.entity_str(), req.id_str());
+        if self.waits_for_primary_data(target) {
+            tracing::debug!(
+                ?target,
+                "not answering an FK check while waiting for the data"
+            );
+            return;
+        }
         let exists = self.stores.db_get(req.entity_str(), req.id_str()).is_some();
         let response = FkCheckResponse::create(req.request_id, exists);
         let _ = self
@@ -555,6 +568,10 @@ impl<T: ClusterTransport> NodeController<T> {
         from: NodeId,
         req: &FkReverseLookupRequest,
     ) {
+        if self.waits_for_any_primary_data() {
+            tracing::debug!("not answering an FK reverse lookup while waiting for data");
+            return;
+        }
         let all_refs = self.stores.fk_reverse_lookup(
             req.target_entity_str(),
             req.target_id_str(),
@@ -575,8 +592,6 @@ impl<T: ClusterTransport> NodeController<T> {
             .send(from, ClusterMessage::FkReverseLookupResponse(response))
             .await;
     }
-
-    #[allow(clippy::missing_errors_doc)]
     pub(crate) fn collect_local_cascade(
         &self,
         deleted_entity: &str,

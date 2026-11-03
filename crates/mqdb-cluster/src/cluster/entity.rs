@@ -22,3 +22,4 @@ pub const DB_UNIQUE: &str = "_db_unique";
 pub const DB_FK: &str = "_db_fk";
 pub const DB_CONSTRAINT: &str = "_db_constraint";
 pub const CHANGE_EVENTS: &str = "_evt";
+pub const HELD_PRIMARY: &str = "_held_primary";

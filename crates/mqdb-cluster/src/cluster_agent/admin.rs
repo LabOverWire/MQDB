@@ -616,12 +616,7 @@ impl ClusteredAgent {
         let leader_exists = is_leader || raft_status.leader_id.is_some();
         let alive_nodes: Vec<u16> = ctrl.alive_nodes().iter().map(|n| n.get()).collect();
 
-        let mut partitions_ready = 0u16;
-        for partition in PartitionId::all() {
-            if ctrl.partition_map().get(partition).primary.is_some() {
-                partitions_ready += 1;
-            }
-        }
+        let partitions_ready = ctrl.partitions_ready();
 
         let ready = leader_exists && partitions_ready == NUM_PARTITIONS;
         let health_status = if partitions_ready == NUM_PARTITIONS && leader_exists {

@@ -98,7 +98,16 @@ impl<T: ClusterTransport> NodeController<T> {
         let partition = resp.partition;
         let responder = resp.responder_id;
 
-        if self.role(partition) != ReplicaRole::Replica {
+        let taking_from = self.catching_up_to_take_from(partition);
+        if taking_from.is_some_and(|source| source != responder) {
+            tracing::debug!(
+                ?partition,
+                responder = responder.get(),
+                "ignoring catchup response from a node this node did not ask"
+            );
+            return;
+        }
+        if taking_from.is_none() && self.role(partition) != ReplicaRole::Replica {
             tracing::debug!(
                 ?partition,
                 role = ?self.role(partition),
@@ -115,7 +124,8 @@ impl<T: ClusterTransport> NodeController<T> {
 
         if resp.writes.is_empty() {
             if let Some(asked_from) = self.catchup_asked_from(partition) {
-                if self.partition_map.primary(partition) != Some(responder) {
+                if taking_from.is_none() && self.partition_map.primary(partition) != Some(responder)
+                {
                     tracing::debug!(
                         ?partition,
                         responder = responder.get(),
@@ -156,6 +166,8 @@ impl<T: ClusterTransport> NodeController<T> {
                     "catchup response empty but replica has gap - switching to awaiting snapshot"
                 );
                 self.catch_up_by_snapshot(partition, responder).await;
+            } else if taking_from.is_some() {
+                self.take_role_after_catchup(partition).await;
             } else {
                 self.catchup_finished(partition);
             }
@@ -163,11 +175,23 @@ impl<T: ClusterTransport> NodeController<T> {
         }
 
         let mut writes: Vec<_> = resp.writes;
-        writes.sort_by_key(|w| w.sequence);
+        writes.sort_by_key(|w| (w.sequence, std::cmp::Reverse(w.epoch)));
 
         let mut applied_count = 0;
         let mut rejected_count = 0;
         for write in &writes {
+            if taking_from.is_some() {
+                if self
+                    .apply_catchup_write_while_taking(partition, write)
+                    .await
+                {
+                    applied_count += 1;
+                } else {
+                    rejected_count += 1;
+                    break;
+                }
+                continue;
+            }
             if let Some(state) = self.replicas.get_mut(&partition.get()) {
                 let sequence_before = state.sequence();
                 if state.already_holds(write) {
@@ -210,6 +234,33 @@ impl<T: ClusterTransport> NodeController<T> {
         } else {
             self.catchup_progressed(partition);
         }
+    }
+
+    async fn apply_catchup_write_while_taking(
+        &mut self,
+        partition: PartitionId,
+        write: &ReplicationWrite,
+    ) -> bool {
+        let held = self.sequence(partition).unwrap_or(0);
+        if write.sequence > 0 && write.sequence <= held {
+            return true;
+        }
+        if write.sequence > held + 1 {
+            return false;
+        }
+        if let Err(e) = self.apply_replicated_write(write) {
+            tracing::error!(?partition, ?e, "failed to apply catchup write to stores");
+            return false;
+        }
+        if write.sequence > 0
+            && let Some(state) = self.replicas.get_mut(&partition.get())
+        {
+            state.set_sequence(write.sequence);
+        }
+        self.sync_retained_to_broker(write).await;
+        self.write_log
+            .append(partition, write.sequence, write.clone());
+        true
     }
 
     async fn catch_up_by_snapshot(&mut self, partition: PartitionId, source: NodeId) {

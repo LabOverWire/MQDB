@@ -37,6 +37,7 @@ fn set_unique_group(
             primary: Some(primary),
             replicas: replicas.to_vec(),
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -65,6 +66,7 @@ struct MockTransport {
     refuse_sends: Arc<std::sync::atomic::AtomicBool>,
     queue_full: Arc<std::sync::atomic::AtomicBool>,
     full_peers: Arc<Mutex<std::collections::HashSet<NodeId>>>,
+    retained_refreshes: Arc<Mutex<Vec<String>>>,
 }
 
 impl MockTransport {
@@ -79,6 +81,7 @@ impl MockTransport {
             refuse_sends: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             queue_full: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             full_peers: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            retained_refreshes: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -190,7 +193,9 @@ impl ClusterTransport for MockTransport {
     }
 
     async fn queue_local_publish_retained(&self, _: String, _: Vec<u8>, _: u8) {}
-    async fn queue_retained_refresh(&self, _: String) {}
+    async fn queue_retained_refresh(&self, topic: String) {
+        self.retained_refreshes.lock().unwrap().push(topic);
+    }
 }
 
 fn forwarded_publish(origin: NodeId, topic: &str) -> ClusterMessage {
@@ -447,6 +452,7 @@ async fn reconcile_apply_skips_record_deleted_after_collection() {
                 primary: Some(node1),
                 replicas: vec![],
                 epoch: Epoch::new(1),
+                primary_since: Epoch::new(1),
             },
         );
     }
@@ -535,6 +541,7 @@ async fn project_reconcile_work_skips_key_deleted_after_gather() {
                 primary: Some(node1),
                 replicas: vec![],
                 epoch: Epoch::new(1),
+                primary_since: Epoch::new(1),
             },
         );
     }
@@ -596,6 +603,7 @@ async fn empty_voter_set_fails_closed_before_founding_in_multi_node_cluster() {
             primary: Some(node1),
             replicas: vec![node2],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -612,6 +620,7 @@ async fn empty_voter_set_fails_closed_before_founding_in_multi_node_cluster() {
             primary: Some(node1),
             replicas: vec![],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     solo_ctrl.update_partition_map(solo_map);
@@ -775,6 +784,7 @@ async fn fk_then_unique_defers_reserve_to_async_completion() {
                 primary: Some(node1),
                 replicas: vec![],
                 epoch: Epoch::new(1),
+                primary_since: Epoch::new(1),
             },
         );
     }
@@ -914,6 +924,7 @@ async fn empty_voter_seal_re_queues_then_completes_after_founding() {
             primary: Some(node1),
             replicas: vec![node2, node3],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -1167,6 +1178,7 @@ async fn broadcast_wildcard_writes_sends_to_replicas() {
             primary: Some(node1),
             replicas: vec![node2],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -1209,6 +1221,7 @@ async fn create_session_quorum_signals_completion_on_acks() {
             primary: Some(node1),
             replicas: vec![node2],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -1337,6 +1350,7 @@ async fn commit_offset_stores_locally_and_replicates() {
             primary: Some(node1),
             replicas: vec![node2],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -1442,6 +1456,7 @@ async fn db_create_stores_entity_and_replicates() {
             primary: Some(node1),
             replicas: vec![node2],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -1653,6 +1668,7 @@ fn setup_all_partitions_primary(ctrl: &mut NodeController<MockTransport>, node: 
                     primary: Some(node),
                     replicas: vec![],
                     epoch: Epoch::new(1),
+                    primary_since: Epoch::new(1),
                 },
             );
         }
@@ -1813,6 +1829,7 @@ fn make_all_primary(ctrl: &mut NodeController<MockTransport>, node: NodeId) {
                     primary: Some(node),
                     replicas: vec![],
                     epoch: Epoch::new(1),
+                    primary_since: Epoch::new(1),
                 },
             );
         }
@@ -1836,6 +1853,7 @@ fn setup_all_primary_except(
                         primary: Some(excluded_primary),
                         replicas: vec![node],
                         epoch: Epoch::new(1),
+                        primary_since: Epoch::new(1),
                     },
                 );
             } else {
@@ -1846,6 +1864,7 @@ fn setup_all_primary_except(
                         primary: Some(node),
                         replicas: vec![],
                         epoch: Epoch::new(1),
+                        primary_since: Epoch::new(1),
                     },
                 );
             }
@@ -2438,6 +2457,7 @@ async fn cascade_delete_fan_out_propagates_sender_to_remote_primary() {
             primary: Some(node2),
             replicas: vec![],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -2736,6 +2756,7 @@ async fn forwarded_write_without_a_response_topic_keeps_no_vault_decrypt() {
             primary: Some(node2),
             replicas: vec![],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     ctrl.update_partition_map(map);
@@ -2784,6 +2805,7 @@ fn three_node_map() -> PartitionMap {
             primary: NodeId::validated(1),
             replicas: vec![NodeId::validated(2).unwrap(), NodeId::validated(3).unwrap()],
             epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
         },
     );
     map
@@ -3149,10 +3171,13 @@ async fn forwarded_delete_cascade_events_carry_the_deleters_origin() {
 mod cascade_share;
 mod change_events;
 mod forwarded_write;
+mod lost_snapshot_request;
 mod missing_record;
 mod partition_map;
+mod promoted_transfer;
 mod remote_fk_unique;
 mod snapshot;
+mod stale_log;
 mod store_failure;
 
 #[tokio::test]

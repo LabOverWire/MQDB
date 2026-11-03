@@ -5,9 +5,9 @@ use super::super::entity;
 use super::super::protocol::{self, ChangeEventRecord, ReplicationAck, ReplicationWrite};
 use super::super::quorum::{QuorumResult, QuorumTracker};
 use super::super::replication::{ReplicaRole, ReplicaState};
-use super::super::store_manager::StoreManager;
+use super::super::store_manager::{HeldPrimaries, StoreManager};
 use super::super::transport::{ClusterMessage, ClusterTransport};
-use super::super::{Epoch, NodeId, PartitionId, PartitionMap};
+use super::super::{Epoch, NodeId, PartitionAssignment, PartitionId, PartitionMap};
 use super::{
     HELD_WRITE_CAPACITY, HELD_WRITE_TIMEOUT, HeldWrite, NodeController, NodeStatus,
     ReplicationError, WRITE_COUNTER, WRITE_RECEIVED, WRITE_REQUEST_SENT,
@@ -124,6 +124,10 @@ impl<T: ClusterTransport> NodeController<T> {
             self.hold_write_request(from, write).await;
             return;
         }
+        if self.waiting_to_take(partition) {
+            self.hold_write_request(from, write).await;
+            return;
+        }
         if self.is_primary_for_partition(partition) {
             self.apply_write_request(write).await;
             return;
@@ -175,18 +179,27 @@ impl<T: ClusterTransport> NodeController<T> {
         });
     }
 
-    async fn release_held_writes(&mut self) {
+    pub(super) async fn release_held_writes(&mut self) {
         let held = std::mem::take(&mut self.held_writes);
         for entry in held {
             let assignment_epoch = self.partition_map.get(entry.write.partition).epoch;
-            if entry.write.epoch <= assignment_epoch {
-                self.route_write_request(entry.from, entry.write).await;
+            let partition = entry.write.partition;
+            if entry.write.epoch <= assignment_epoch && !self.waiting_to_take(partition) {
+                if entry.from == self.node_id && !self.is_primary_for_partition(partition) {
+                    let mut write = entry.write;
+                    let event = write.event.take();
+                    if let Err(e) = self.write_or_forward_with_event(write, event, &[]).await {
+                        tracing::warn!(?partition, %e, "held write not forwarded");
+                    }
+                } else {
+                    self.route_write_request(entry.from, entry.write).await;
+                }
             } else if entry.since.elapsed() >= HELD_WRITE_TIMEOUT {
                 tracing::warn!(
                     partition = ?entry.write.partition,
                     from = entry.from.get(),
                     epoch = ?entry.write.epoch,
-                    "held write request dropped: assignment never applied"
+                    "held write request dropped: the assignment was not applied or the snapshot never arrived"
                 );
                 if let Some(record) = entry.write.event {
                     self.publish_unowned_change_event(entry.write.partition, record)
@@ -400,8 +413,12 @@ impl<T: ClusterTransport> NodeController<T> {
     pub async fn apply_raft_partition_map(&mut self, raft_map: PartitionMap) -> bool {
         if self.partition_map == raft_map {
             self.release_held_writes().await;
-            return false;
+            self.serve_deferred_snapshots().await;
+            return std::mem::take(&mut self.primary_taken_after_wait);
         }
+        let held = *self
+            .held_primaries
+            .get_or_insert_with(|| self.stores.held_primaries());
         let current_map = self.partition_map.clone();
         let mut became_primary = false;
         let mut changes = 0u32;
@@ -412,8 +429,18 @@ impl<T: ClusterTransport> NodeController<T> {
                 continue;
             }
             if new_assignment.primary == Some(self.node_id) {
-                self.become_primary(partition, new_assignment.epoch);
-                became_primary |= old_assignment.primary != Some(self.node_id);
+                if let Some(source) = self.source_needed_before_primary(
+                    partition,
+                    new_assignment,
+                    old_assignment,
+                    &held,
+                ) {
+                    self.await_snapshot(partition, new_assignment.epoch, source, true)
+                        .await;
+                } else {
+                    self.become_primary(partition, new_assignment.epoch);
+                    became_primary |= old_assignment.primary != Some(self.node_id);
+                }
             } else if new_assignment.replicas.contains(&self.node_id) {
                 if matches!(
                     self.role(partition),
@@ -424,6 +451,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 } else if let Some(primary) = new_assignment.primary {
                     self.become_replica_with_snapshot(partition, new_assignment.epoch, primary)
                         .await;
+                    self.remember_replaced_replica(partition, self.other_replica(old_assignment));
                 }
             } else {
                 self.step_down(partition);
@@ -434,9 +462,57 @@ impl<T: ClusterTransport> NodeController<T> {
                 tokio::task::yield_now().await;
             }
         }
+        self.held_primaries = Some(held.without_legacy());
         self.update_partition_map(raft_map);
         self.release_held_writes().await;
-        became_primary
+        self.serve_deferred_snapshots().await;
+        became_primary | std::mem::take(&mut self.primary_taken_after_wait)
+    }
+
+    fn waiting_to_take(&self, partition: PartitionId) -> bool {
+        self.partition_map.primary(partition) == Some(self.node_id)
+            && self.role(partition) == ReplicaRole::AwaitingSnapshot
+    }
+
+    fn source_needed_before_primary(
+        &self,
+        partition: PartitionId,
+        assignment: &PartitionAssignment,
+        old_assignment: &PartitionAssignment,
+        held: &HeldPrimaries,
+    ) -> Option<NodeId> {
+        let holds_data = matches!(
+            self.role(partition),
+            ReplicaRole::Primary | ReplicaRole::Replica
+        ) || held.trusts(partition, assignment);
+        if holds_data {
+            return None;
+        }
+        let current = self.other_replica(assignment);
+        if current.is_some_and(|node| old_assignment.all_nodes().contains(&node)) {
+            return current;
+        }
+        old_assignment
+            .primary
+            .filter(|node| {
+                *node != self.node_id
+                    && matches!(
+                        self.node_status(*node),
+                        NodeStatus::Alive | NodeStatus::Suspected
+                    )
+            })
+            .or_else(|| self.replaced_replica(partition))
+            .or_else(|| self.other_replica(old_assignment))
+            .filter(|node| self.source_is_alive(*node))
+            .or(current)
+    }
+
+    fn other_replica(&self, assignment: &PartitionAssignment) -> Option<NodeId> {
+        assignment
+            .replicas
+            .iter()
+            .copied()
+            .find(|node| *node != self.node_id)
     }
 
     pub async fn write_or_forward(&mut self, write: ReplicationWrite) {
@@ -519,7 +595,13 @@ impl<T: ClusterTransport> NodeController<T> {
             return Ok(());
         }
 
-        if self.is_primary_for_partition(partition) && self.role(partition) != ReplicaRole::Primary
+        if self.waiting_to_take(partition) && extra_outbox.is_empty() {
+            write.event = event;
+            let own = self.node_id;
+            self.hold_write_request(own, write).await;
+            Ok(())
+        } else if self.is_primary_for_partition(partition)
+            && self.role(partition) != ReplicaRole::Primary
         {
             tracing::warn!(
                 ?partition,

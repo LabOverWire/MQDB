@@ -31,6 +31,7 @@ pub struct RaftCoordinator<T: ClusterTransport> {
     pub(super) restored_map_held: bool,
     pub(super) death_since_last_tick: bool,
     pub(super) last_death_ms: u64,
+    pub(super) restored_map_unconfirmed: bool,
 }
 
 impl<T: ClusterTransport> RaftCoordinator<T> {
@@ -52,6 +53,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             restored_map_held: false,
             death_since_last_tick: false,
             last_death_ms: 0,
+            restored_map_unconfirmed: false,
         }
     }
 
@@ -82,6 +84,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             restored_map_held: false,
             death_since_last_tick: false,
             last_death_ms: 0,
+            restored_map_unconfirmed: false,
         };
 
         coordinator.rebuild_partition_map();
@@ -128,6 +131,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
     fn rebuild_partition_map(&mut self) {
         if let Some(snapshot) = self.node.take_restored_snapshot() {
             self.restore_snapshot(&snapshot);
+            self.restored_map_unconfirmed = true;
         }
         let outputs = self.node.take_committed();
         for output in outputs {
@@ -159,6 +163,11 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
 
     pub fn partition_map(&self) -> &PartitionMap {
         &self.partition_map
+    }
+
+    #[must_use]
+    pub fn publishable_partition_map(&self) -> Option<&PartitionMap> {
+        (!self.restored_map_unconfirmed || self.leader_ready()).then_some(&self.partition_map)
     }
 
     pub fn commit_index(&self) -> u64 {
