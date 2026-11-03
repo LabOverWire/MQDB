@@ -7,8 +7,8 @@
 (* Code each action abstracts (crates/mqdb-cluster/src/cluster):           *)
 (*   Fail      raft/coordinator/replication.rs                             *)
 (*             reassign_partitions_for_dead_node                           *)
-(*   FailTogether  two deaths reach the Raft task in one tick, in either   *)
-(*             order; the heartbeat check reports expected nodes together  *)
+(*   FailTogether  two deaths reach the Raft task within the batch window  *)
+(*             (1.5 s with no new death), in either order                  *)
 (*   Commit    the proposals reach the applied partition map               *)
 (*   LoseTail  leadership changes and the unapplied proposals are          *)
 (*             overwritten; the dead nodes stay out of the members         *)
@@ -29,8 +29,8 @@
 (*   ScanReplicas       FALSE: Scan looks at primaries only.                *)
 (*   AddReplicas        TRUE: a replica with no copy can be added and then  *)
 (*                      promoted, since the map does not record who synced. *)
-(*   Together           TRUE: two nodes can die in one tick.                *)
-(*   BatchDeaths        TRUE: deaths in one tick are all out of the alive   *)
+(*   Together           TRUE: two nodes can die within the window.          *)
+(*   BatchDeaths        TRUE: deaths in the window are all out of the alive *)
 (*                      set before any is processed. FALSE: the first is    *)
 (*                      processed while the second still counts as alive.   *)
 (*   KeepDeadReplica    TRUE: a dead replica entry stays while the primary  *)
@@ -54,7 +54,7 @@
 (*   _no_scan: fails Repaired, a lost failover is never redone              *)
 (*   _scan_primaries_only: fails Repaired, a lost replica entry stays       *)
 (*   _two_die_today: BatchDeaths and KeepDeadReplica off, fails HolderServes *)
-(*   _no_batch: fails HolderServes, promoted to a node dying in the same tick *)
+(*   _no_batch: fails HolderServes, promoted to a node dying in the window  *)
 (*   _no_keep: fails HolderServes, the replica returns first with no entry  *)
 (*   _current: passes InvServingPrimaryIsCurrent and HolderServes with no   *)
 (*       lost proposals; a lost tail makes the staleness rule over-approximate *)
@@ -62,9 +62,9 @@
 (* current[p] is the set of nodes holding every write of p: a holder that   *)
 (* dies while another stays alive counts as stale, since the survivor is or *)
 (* is about to be the primary, even if that promotion is then lost; holders *)
-(* dying in one tick all stay current. Catching up on return is not         *)
+(* dying in the window all stay current. Catching up on return is not       *)
 (* modelled, a returning replica of a live primary is current at once. So a *)
-(* second death in a later tick, before the first failover commits, is      *)
+(* second death after the window, before the first failover commits, is     *)
 (* outside HolderServes: the first holder has left the map and counts as    *)
 (* stale, and the partition stays at 503 until its last holder returns.     *)
 (***************************************************************************)
@@ -148,7 +148,7 @@ Fail(d) ==
     /\ current' = AfterDeaths({d})
     /\ UNCHANGED <<applied, lostLeft, deadTarget, returned>>
 
-\* Both deaths reach the task in one tick, d1 first.
+\* Both deaths reach the task within the window, d1 first.
 FailTogether(d1, d2) ==
     /\ Together
     /\ d1 # d2

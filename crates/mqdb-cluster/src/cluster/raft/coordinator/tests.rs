@@ -778,7 +778,7 @@ fn pair_on_nodes_4_and_5() -> Vec<RaftCommand> {
     ]
 }
 
-async fn two_holders_die_in_one_tick(
+async fn two_holders_die_together(
     order: [NodeId; 2],
     start: u64,
 ) -> RaftCoordinator<MockTransport> {
@@ -786,7 +786,7 @@ async fn two_holders_die_in_one_tick(
     coord.handle_node_death(order[0]).await;
     coord.handle_node_death(order[1]).await;
     coord.tick(start + 2_000).await;
-    coord.tick(start + 2_200).await;
+    coord.tick(start + 4_000).await;
     commit_tail(&mut coord).await;
     coord
 }
@@ -803,12 +803,12 @@ fn holders(
 }
 
 #[tokio::test]
-async fn both_holders_dying_in_one_tick_keep_both_entries_in_either_order() {
+async fn both_holders_dying_together_keep_both_entries_in_either_order() {
     let node4 = NodeId::validated(4).unwrap();
     let node5 = NodeId::validated(5).unwrap();
     let start = 1_790_000_000_000u64;
     for order in [[node4, node5], [node5, node4]] {
-        let mut coord = two_holders_die_in_one_tick(order, start).await;
+        let mut coord = two_holders_die_together(order, start).await;
         assert_eq!(holders(&coord, 0), (Some(node4), vec![node5]));
         assert_eq!(holders(&coord, 1), (Some(node5), vec![node4]));
 
@@ -825,7 +825,7 @@ async fn a_replica_returning_after_both_holders_died_is_promoted_with_no_manual_
     let node5 = NodeId::validated(5).unwrap();
     let start = 1_790_000_000_000u64;
     for order in [[node4, node5], [node5, node4]] {
-        let mut coord = two_holders_die_in_one_tick(order, start).await;
+        let mut coord = two_holders_die_together(order, start).await;
 
         coord.handle_node_alive(node5).await;
         coord.tick(start + 40_000).await;
@@ -837,7 +837,7 @@ async fn a_replica_returning_after_both_holders_died_is_promoted_with_no_manual_
 }
 
 #[tokio::test]
-async fn deaths_a_tick_apart_are_processed_together() {
+async fn deaths_a_heartbeat_apart_are_processed_together() {
     let node4 = NodeId::validated(4).unwrap();
     let node5 = NodeId::validated(5).unwrap();
     let start = 1_790_000_000_000u64;
@@ -846,26 +846,31 @@ async fn deaths_a_tick_apart_are_processed_together() {
 
     coord.handle_node_death(node5).await;
     coord.tick(start + 2_000).await;
+    coord.tick(start + 2_800).await;
     assert_eq!(coord.last_log_index(), before);
     coord.handle_node_death(node4).await;
-    coord.tick(start + 2_200).await;
+    coord.tick(start + 3_000).await;
+    coord.tick(start + 4_400).await;
     assert_eq!(coord.last_log_index(), before);
-    coord.tick(start + 2_400).await;
+    coord.tick(start + 4_600).await;
     commit_tail(&mut coord).await;
 
     assert_eq!(holders(&coord, 1), (Some(node5), vec![node4]));
 }
 
 #[tokio::test]
-async fn a_single_death_fails_over_on_the_tick_after_it_arrives() {
+async fn a_single_death_fails_over_once_the_batch_window_has_passed() {
     let node4 = NodeId::validated(4).unwrap();
     let node5 = NodeId::validated(5).unwrap();
     let start = 1_790_000_000_000u64;
     let mut coord = restarted_leader_of_five(&pair_on_nodes_4_and_5()).await;
+    let before = coord.last_log_index();
 
     coord.handle_node_death(node4).await;
     coord.tick(start + 2_000).await;
-    coord.tick(start + 2_200).await;
+    coord.tick(start + 3_400).await;
+    assert_eq!(coord.last_log_index(), before);
+    coord.tick(start + 3_600).await;
     commit_tail(&mut coord).await;
 
     assert_eq!(holders(&coord, 0), (Some(node5), Vec::new()));
@@ -1193,7 +1198,7 @@ async fn a_leader_without_a_quorum_of_links_proposes_no_failover() {
 
     coord.handle_node_death(node4).await;
     coord.tick(start + 2_200).await;
-    coord.tick(start + 2_300).await;
+    coord.tick(start + 4_000).await;
     assert_eq!(
         coord.last_log_index(),
         before,
@@ -1205,7 +1210,7 @@ async fn a_leader_without_a_quorum_of_links_proposes_no_failover() {
     );
 
     *links.lock().unwrap() = Some(vec![node2, node3]);
-    coord.tick(start + 2_400).await;
+    coord.tick(start + 4_200).await;
     commit_tail(&mut coord).await;
     assert_ne!(
         coord.partition_map().primary(PartitionId::new(0).unwrap()),
@@ -1229,7 +1234,7 @@ async fn a_stale_link_to_a_node_with_a_death_verdict_does_not_count_toward_quoru
     let before = coord.last_log_index();
     coord.handle_node_death(node2).await;
     coord.tick(start + 2_200).await;
-    coord.tick(start + 2_400).await;
+    coord.tick(start + 4_000).await;
 
     assert_eq!(
         coord.last_log_index(),
@@ -1253,6 +1258,7 @@ async fn a_node_back_before_its_queued_failover_runs_keeps_its_partitions() {
     coord.handle_node_alive(node4).await;
     *links.lock().unwrap() = Some(vec![node2, node3, node4]);
     coord.tick(start + 2_400).await;
+    coord.tick(start + 4_000).await;
     commit_tail(&mut coord).await;
 
     assert_eq!(

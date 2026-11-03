@@ -754,10 +754,11 @@ MQDB supports distributed clustering with automatic failover and partition rebal
 > to them and answers 503, rather than move to a node with no copy and answer 404. When its primary
 > returns it serves at once, and when its replica returns it is promoted within 30 seconds. If you
 > know the holders are never coming back, `mqdb cluster rebalance` gives those partitions to a live
-> node, which starts them empty. Deaths detected less than a Raft tick apart (200 ms) count as
-> together. If the second holder dies later than that, the first has left the map, and the partition
-> stays at 503 until the second returns, since the first may lack later writes. A leader without
-> links to a majority proposes no failover at all until it has them again.
+> node, which starts them empty. Failover waits until 1.5 seconds have passed with no new death, so
+> deaths detected closer together than that count as one. If the second holder dies later, the first
+> has left the map, and the partition stays at 503 until the second returns, since the first may
+> lack later writes. A leader without links to a majority proposes no failover at all until it has
+> them again.
 >
 > This does not stop every disruption. A returning node with links to a majority that excludes the
 > leader can still raise the term and depose it (#314). Voter sets are not committed membership

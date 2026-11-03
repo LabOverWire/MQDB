@@ -12,16 +12,19 @@ use crate::cluster::NodeId;
 use crate::cluster::transport::ClusterTransport;
 use std::collections::BTreeSet;
 
+const DEATH_BATCH_WINDOW_MS: u64 = 1_500;
+
 impl<T: ClusterTransport> RaftCoordinator<T> {
     pub async fn tick(&mut self, now_ms: u64) -> Vec<u64> {
         self.refresh_links().await;
         let outputs = self.node.tick(now_ms);
         self.process_outputs(outputs).await;
 
-        let death_this_tick = std::mem::take(&mut self.death_since_last_tick);
-        if death_this_tick {
+        if std::mem::take(&mut self.death_since_last_tick) {
             self.last_balance_check = now_ms;
+            self.last_death_ms = now_ms;
         }
+        let deaths_settled = now_ms.saturating_sub(self.last_death_ms) > DEATH_BATCH_WINDOW_MS;
 
         let ready = self.leader_ready();
         let just_became_ready = ready && !self.was_ready;
@@ -45,7 +48,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
 
         let can_commit = ready && self.node.can_reach_quorum();
 
-        if can_commit && !death_this_tick && !self.pending_dead_nodes.is_empty() {
+        if can_commit && deaths_settled && !self.pending_dead_nodes.is_empty() {
             return self.process_pending_dead_nodes().await;
         }
 
