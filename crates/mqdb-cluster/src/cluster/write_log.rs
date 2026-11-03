@@ -151,12 +151,6 @@ impl PartitionWriteLog {
 
     /// # Panics
     /// Panics if the internal lock is poisoned.
-    pub fn clear(&self, partition: PartitionId) {
-        self.logs.write().unwrap().remove(&partition.get());
-    }
-
-    /// # Panics
-    /// Panics if the internal lock is poisoned.
     pub fn append(&self, partition: PartitionId, sequence: u64, write: ReplicationWrite) {
         let mut logs = self.logs.write().unwrap();
         let log = logs.entry(partition.get()).or_insert_with(BoundedLog::new);
@@ -355,7 +349,7 @@ mod tests {
         log.append(partition(0), 1, write(1));
         log.append(partition(1), 1, write(1));
 
-        log.clear(partition(0));
+        log.clear_partition(partition(0));
 
         assert!(log.get_from(partition(0), 0).is_empty());
         assert_eq!(log.get_from(partition(1), 0).len(), 1);
