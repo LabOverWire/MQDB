@@ -266,7 +266,8 @@ async fn handle_node_death_reassigns_partitions() {
     assert_eq!(coord1.partition_map().primary(partition), Some(node2));
     assert_eq!(coord1.partition_map().replicas(partition), &[node3]);
 
-    let indices = coord1.handle_node_death(node2).await;
+    coord1.handle_node_death(node2).await;
+    let indices = coord1.process_pending_dead_nodes().await;
     assert!(!indices.is_empty());
 }
 
@@ -279,8 +280,9 @@ async fn handle_node_death_does_nothing_when_not_leader() {
     let mut coord = RaftCoordinator::new(node1, transport, test_config());
     coord.add_peer(node2);
 
-    let indices = coord.handle_node_death(node2).await;
-    assert!(indices.is_empty());
+    coord.handle_node_death(node2).await;
+    assert!(coord.tick(1).await.is_empty());
+    assert!(coord.tick(2).await.is_empty());
 }
 
 #[tokio::test]
@@ -492,6 +494,7 @@ async fn uncommitted_failover_tail_must_not_shrink_the_restored_voters() {
 
         leader.handle_node_death(node2).await;
         leader.handle_node_death(node3).await;
+        leader.process_pending_dead_nodes().await;
         assert_eq!(
             leader.commit_index(),
             tail,
@@ -569,6 +572,7 @@ async fn uncommitted_tail_after_second_failure_must_not_make_a_single_node_clust
         );
 
         leader.handle_node_death(node2).await;
+        leader.process_pending_dead_nodes().await;
         assert_eq!(
             leader.commit_index(),
             tail,
@@ -774,42 +778,97 @@ fn pair_on_nodes_4_and_5() -> Vec<RaftCommand> {
     ]
 }
 
+async fn two_holders_die_in_one_tick(
+    order: [NodeId; 2],
+    start: u64,
+) -> RaftCoordinator<MockTransport> {
+    let mut coord = restarted_leader_of_five(&pair_on_nodes_4_and_5()).await;
+    coord.handle_node_death(order[0]).await;
+    coord.handle_node_death(order[1]).await;
+    coord.tick(start + 2_000).await;
+    coord.tick(start + 2_200).await;
+    commit_tail(&mut coord).await;
+    coord
+}
+
+fn holders(
+    coord: &RaftCoordinator<MockTransport>,
+    partition: u16,
+) -> (Option<NodeId>, Vec<NodeId>) {
+    let id = PartitionId::new(partition).unwrap();
+    (
+        coord.partition_map().primary(id),
+        coord.partition_map().replicas(id).to_vec(),
+    )
+}
+
 #[tokio::test]
-async fn both_holders_lost_keeps_the_partition_on_a_holder_until_they_return() {
+async fn both_holders_dying_in_one_tick_keep_both_entries_in_either_order() {
     let node4 = NodeId::validated(4).unwrap();
     let node5 = NodeId::validated(5).unwrap();
     let start = 1_790_000_000_000u64;
     for order in [[node4, node5], [node5, node4]] {
-        let mut coord = restarted_leader_of_five(&pair_on_nodes_4_and_5()).await;
+        let mut coord = two_holders_die_in_one_tick(order, start).await;
+        assert_eq!(holders(&coord, 0), (Some(node4), vec![node5]));
+        assert_eq!(holders(&coord, 1), (Some(node5), vec![node4]));
 
-        coord.handle_node_death(order[0]).await;
-        coord.handle_node_death(order[1]).await;
+        coord.tick(start + 40_000).await;
         commit_tail(&mut coord).await;
-
-        for partition in [0u16, 1] {
-            let id = PartitionId::new(partition).unwrap();
-            assert_eq!(
-                coord.partition_map().primary(id),
-                Some(order[1]),
-                "partition {partition} must stay on the last holder"
-            );
-            assert!(coord.partition_map().replicas(id).is_empty());
-        }
-
-        coord.handle_node_alive(node4).await;
-        coord.handle_node_alive(node5).await;
-        commit_tail(&mut coord).await;
-        for elapsed in (20_000u64..=200_000).step_by(1_000) {
-            coord.tick(start + elapsed).await;
-            commit_tail(&mut coord).await;
-        }
-        for partition in [0u16, 1] {
-            let primary = coord
-                .partition_map()
-                .primary(PartitionId::new(partition).unwrap());
-            assert!(primary == Some(node4) || primary == Some(node5));
-        }
+        assert_eq!(holders(&coord, 0), (Some(node4), vec![node5]));
+        assert_eq!(holders(&coord, 1), (Some(node5), vec![node4]));
     }
+}
+
+#[tokio::test]
+async fn a_replica_returning_after_both_holders_died_is_promoted_with_no_manual_rebalance() {
+    let node4 = NodeId::validated(4).unwrap();
+    let node5 = NodeId::validated(5).unwrap();
+    let start = 1_790_000_000_000u64;
+    for order in [[node4, node5], [node5, node4]] {
+        let mut coord = two_holders_die_in_one_tick(order, start).await;
+
+        coord.handle_node_alive(node5).await;
+        coord.tick(start + 40_000).await;
+        commit_tail(&mut coord).await;
+
+        assert_eq!(holders(&coord, 0).0, Some(node5));
+        assert_eq!(holders(&coord, 1).0, Some(node5));
+    }
+}
+
+#[tokio::test]
+async fn deaths_a_tick_apart_are_processed_together() {
+    let node4 = NodeId::validated(4).unwrap();
+    let node5 = NodeId::validated(5).unwrap();
+    let start = 1_790_000_000_000u64;
+    let mut coord = restarted_leader_of_five(&pair_on_nodes_4_and_5()).await;
+    let before = coord.last_log_index();
+
+    coord.handle_node_death(node5).await;
+    coord.tick(start + 2_000).await;
+    assert_eq!(coord.last_log_index(), before);
+    coord.handle_node_death(node4).await;
+    coord.tick(start + 2_200).await;
+    assert_eq!(coord.last_log_index(), before);
+    coord.tick(start + 2_400).await;
+    commit_tail(&mut coord).await;
+
+    assert_eq!(holders(&coord, 1), (Some(node5), vec![node4]));
+}
+
+#[tokio::test]
+async fn a_single_death_fails_over_on_the_tick_after_it_arrives() {
+    let node4 = NodeId::validated(4).unwrap();
+    let node5 = NodeId::validated(5).unwrap();
+    let start = 1_790_000_000_000u64;
+    let mut coord = restarted_leader_of_five(&pair_on_nodes_4_and_5()).await;
+
+    coord.handle_node_death(node4).await;
+    coord.tick(start + 2_000).await;
+    coord.tick(start + 2_200).await;
+    commit_tail(&mut coord).await;
+
+    assert_eq!(holders(&coord, 0), (Some(node5), Vec::new()));
 }
 
 #[tokio::test]
@@ -819,6 +878,7 @@ async fn a_lost_node_with_a_live_replica_is_failed_over_to_it() {
     let mut coord = restarted_leader_of_five(&[assign(0, 3, 1, 1), assign(1, 2, 3, 1)]).await;
 
     coord.handle_node_death(node3).await;
+    coord.process_pending_dead_nodes().await;
     commit_tail(&mut coord).await;
 
     let id = PartitionId::new(0).unwrap();
@@ -841,6 +901,7 @@ async fn a_second_promotion_of_a_partition_uses_a_newer_epoch_than_the_first() {
 
     coord.handle_node_death(node4).await;
     coord.handle_node_death(node5).await;
+    coord.process_pending_dead_nodes().await;
     commit_tail(&mut coord).await;
 
     assert_eq!(
@@ -858,6 +919,7 @@ async fn a_forced_rebalance_adopts_a_partition_whose_holders_are_gone() {
     let mut coord = restarted_leader_of_five(&pair_on_nodes_4_and_5()).await;
     coord.handle_node_death(node4).await;
     coord.handle_node_death(node5).await;
+    coord.process_pending_dead_nodes().await;
     commit_tail(&mut coord).await;
 
     coord.force_rebalance().await;
@@ -878,6 +940,7 @@ async fn a_node_whose_partitions_are_being_moved_off_counts_as_having_none() {
     let mut coord = restarted_leader_of_five(&[assign(0, 4, 1, 1), assign(1, 1, 2, 1)]).await;
 
     coord.handle_node_death(node4).await;
+    coord.process_pending_dead_nodes().await;
     coord.handle_node_alive(node4).await;
 
     assert!(
@@ -894,6 +957,7 @@ async fn a_forced_rebalance_reads_the_unapplied_failover() {
             .await;
 
     coord.handle_node_death(node4).await;
+    coord.process_pending_dead_nodes().await;
     coord.force_rebalance().await;
     commit_tail(&mut coord).await;
 
@@ -912,6 +976,7 @@ async fn a_drain_reads_the_unapplied_failover() {
     let mut coord = restarted_leader_of_five(&[assign(0, 2, 4, 1), assign(1, 3, 1, 1)]).await;
 
     coord.handle_node_death(node4).await;
+    coord.process_pending_dead_nodes().await;
     coord.handle_drain_notification(node2).await;
     commit_tail(&mut coord).await;
 
@@ -935,6 +1000,7 @@ async fn the_scan_at_leader_start_does_not_repeat_a_failover_it_just_proposed() 
     )
     .unwrap();
     coord.handle_node_death(node4).await;
+    coord.process_pending_dead_nodes().await;
     let start = 1_790_000_000_000u64;
     coord.tick(start).await;
     coord.tick(start + 1_000).await;
@@ -995,6 +1061,7 @@ async fn a_late_member_returning_after_failovers_does_not_panic() {
 
     coord.handle_node_death(node4).await;
     coord.handle_node_death(node5).await;
+    coord.process_pending_dead_nodes().await;
     commit_tail(&mut coord).await;
     coord.handle_node_alive(node5).await;
     commit_tail(&mut coord).await;
@@ -1011,6 +1078,7 @@ async fn a_failover_lost_with_leadership_is_repaired_by_the_next_leader_term() {
     let start = 1_790_000_000_000u64;
 
     coord.handle_node_death(node4).await;
+    coord.process_pending_dead_nodes().await;
     assert!(coord.last_log_index() > committed);
     let term = coord.current_term();
     let entries = vec![crate::cluster::raft::LogEntry::create(
@@ -1093,6 +1161,7 @@ async fn the_periodic_check_adds_no_replica_soon_after_a_death() {
     assert!(coord.primaries_imbalanced());
 
     coord.handle_node_death(node5).await;
+    coord.process_pending_dead_nodes().await;
     commit_tail(&mut coord).await;
     coord.tick(start + 40_000).await;
     commit_tail(&mut coord).await;
@@ -1124,6 +1193,7 @@ async fn a_leader_without_a_quorum_of_links_proposes_no_failover() {
 
     coord.handle_node_death(node4).await;
     coord.tick(start + 2_200).await;
+    coord.tick(start + 2_300).await;
     assert_eq!(
         coord.last_log_index(),
         before,
@@ -1154,9 +1224,12 @@ async fn a_stale_link_to_a_node_with_a_death_verdict_does_not_count_toward_quoru
     coord.tick(start + 2_000).await;
 
     coord.handle_node_death(node3).await;
+    coord.process_pending_dead_nodes().await;
     commit_tail(&mut coord).await;
     let before = coord.last_log_index();
     coord.handle_node_death(node2).await;
+    coord.tick(start + 2_200).await;
+    coord.tick(start + 2_400).await;
 
     assert_eq!(
         coord.last_log_index(),
@@ -1400,7 +1473,8 @@ async fn proposals_from_every_path_are_counted_until_applied() {
     assert!(leader.partitions_initialized());
     assert_eq!(leader.pending_partition_proposals, 0);
 
-    let dead = leader.handle_node_death(node3).await;
+    leader.handle_node_death(node3).await;
+    let dead = leader.process_pending_dead_nodes().await;
     let drained = leader.handle_drain_notification(node2).await;
     assert!(!dead.is_empty());
     assert!(!drained.is_empty());

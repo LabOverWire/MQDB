@@ -194,14 +194,7 @@ impl<T: ClusterTransport> RaftTask<T> {
                 }
             }
             RaftEvent::NodeDead(node) => {
-                let proposed = self.raft.handle_node_death(node).await;
-                if !proposed.is_empty() {
-                    info!(
-                        ?node,
-                        proposals = proposed.len(),
-                        "Raft leader proposing partition reassignments for dead node"
-                    );
-                }
+                self.raft.handle_node_death(node).await;
             }
             RaftEvent::DrainNotification(node) => {
                 let proposed = self.raft.handle_drain_notification(node).await;

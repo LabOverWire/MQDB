@@ -120,26 +120,11 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         }
     }
 
-    pub async fn handle_node_death(&mut self, dead_node: NodeId) -> Vec<u64> {
+    pub async fn handle_node_death(&mut self, dead_node: NodeId) {
         self.cluster_members.retain(|&n| n != dead_node);
         self.death_since_last_tick = true;
         self.refresh_links().await;
-
-        if !self.leader_ready() || !self.node.can_reach_quorum() {
-            tracing::info!(
-                ?dead_node,
-                "no leader with a quorum here, queuing dead node for later processing"
-            );
-            self.pending_dead_nodes.insert(dead_node);
-            return Vec::new();
-        }
-
-        if !self.processed_dead_nodes.insert(dead_node) {
-            tracing::debug!(?dead_node, "already processed dead node, skipping");
-            return Vec::new();
-        }
-
-        self.reassign_partitions_for_dead_node(dead_node).await
+        self.pending_dead_nodes.insert(dead_node);
     }
 
     pub async fn handle_node_alive(&mut self, node: NodeId) -> Vec<u64> {
@@ -459,7 +444,10 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
                     }
                 }
                 PartitionRole::Replica => {
-                    if let Some(current_primary) = planned.primary(partition) {
+                    if let Some(current_primary) = planned
+                        .primary(partition)
+                        .filter(|primary| alive_nodes.contains(primary))
+                    {
                         tracing::info!(
                             ?partition,
                             ?dead_node,

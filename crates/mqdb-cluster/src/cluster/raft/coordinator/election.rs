@@ -18,7 +18,8 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         let outputs = self.node.tick(now_ms);
         self.process_outputs(outputs).await;
 
-        if std::mem::take(&mut self.death_since_last_tick) {
+        let death_this_tick = std::mem::take(&mut self.death_since_last_tick);
+        if death_this_tick {
             self.last_balance_check = now_ms;
         }
 
@@ -44,7 +45,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
 
         let can_commit = ready && self.node.can_reach_quorum();
 
-        if can_commit && !self.pending_dead_nodes.is_empty() {
+        if can_commit && !death_this_tick && !self.pending_dead_nodes.is_empty() {
             return self.process_pending_dead_nodes().await;
         }
 
