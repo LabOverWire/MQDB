@@ -3177,6 +3177,7 @@ mod partition_map;
 mod promoted_transfer;
 mod remote_fk_unique;
 mod snapshot;
+mod stale_log;
 mod store_failure;
 
 #[tokio::test]

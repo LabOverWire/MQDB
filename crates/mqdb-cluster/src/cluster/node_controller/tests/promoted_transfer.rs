@@ -765,3 +765,49 @@ async fn a_long_transfer_does_not_use_up_the_time_given_to_the_catchup() {
         *to == node(1) && matches!(message, ClusterMessage::CatchupRequest(_))
     }));
 }
+
+#[tokio::test]
+async fn the_newest_epoch_of_a_sequence_is_applied_first_while_taking() {
+    let (mut promoted, partition) = imported_and_catching_up_from_node_1().await;
+    let sequence = promoted.sequence(partition).unwrap_or(0) + 1;
+    let mut older = update_at(&promoted, sequence, 5);
+    older.epoch = Epoch::new(1);
+    let mut newer = update_at(&promoted, sequence, 6);
+    newer.epoch = Epoch::new(2);
+
+    answer_with(&mut promoted, partition, vec![older, newer]).await;
+
+    assert_eq!(counter(&promoted), Some(6));
+    assert_eq!(promoted.sequence(partition), Some(sequence));
+}
+
+#[tokio::test]
+async fn shares_on_a_node_that_left_the_partition_are_refused() {
+    let mut replica = waiting_owner_controller();
+    replica.become_replica(data_partition(ENTITY, ID), Epoch::new(1), 0);
+    replica
+        .apply_raft_partition_map(map_for(node(1), &[node(2)], 1))
+        .await;
+    replica
+        .apply_raft_partition_map(map_for(node(1), &[node(3)], 2))
+        .await;
+    assert_eq!(replica.role(data_partition(ENTITY, ID)), ReplicaRole::None);
+
+    let body: serde_json::Value =
+        serde_json::from_slice(&replica.handle_shares_local(ENTITY, ID, Some("admin"))).unwrap();
+
+    assert_eq!(body["code"], 503, "{body}");
+}
+
+#[tokio::test]
+async fn shares_of_a_waiting_partition_are_refused_before_the_owner_check() {
+    let mut ctrl = waiting_owner_controller();
+    ctrl.apply_raft_partition_map(map_for(node(2), &[node(3)], 1))
+        .await;
+
+    for sender in ["alice", "mallory", "admin"] {
+        let body: serde_json::Value =
+            serde_json::from_slice(&ctrl.handle_shares_local(ENTITY, ID, Some(sender))).unwrap();
+        assert_eq!(body["code"], 503, "{sender} {body}");
+    }
+}

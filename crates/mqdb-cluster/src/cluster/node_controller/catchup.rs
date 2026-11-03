@@ -175,7 +175,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
 
         let mut writes: Vec<_> = resp.writes;
-        writes.sort_by_key(|w| w.sequence);
+        writes.sort_by_key(|w| (w.sequence, std::cmp::Reverse(w.epoch)));
 
         let mut applied_count = 0;
         let mut rejected_count = 0;
