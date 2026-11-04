@@ -737,33 +737,51 @@ MQDB supports distributed clustering with automatic failover and partition rebal
 > report dead, starting at once and backing off to every 5 seconds, then every minute once the peer
 > has been gone for 5 minutes, so a restarted node re-links without a change to its `--peers`. A
 > learned address is replaced when the peer dials in from a new one, and any address is dropped if
-> a different node answers on it, which is then dialled there instead. A `--peers` address returns
-> on the next start.
+> a different node answers on it, which is then dialled there instead. An address that turns out to
+> be this node itself is dropped too, and that peer stays undialled until it dials in. A `--peers`
+> address returns on the next start.
 >
 > A node restarted with its data counts every node named in its stored partition map or Raft log
 > as a voter, whether or not that entry committed. It does not lead alone if any other node is
 > named, and it starts no election until it has links to a majority of them. It answers data
-> requests with a 503 until it has heard from a leader. If a majority of those nodes never returns
+> requests with a 503 until it has matched a leader's log up to that leader's commit point or taken
+> a snapshot from it, or has become leader and committed an entry of its own term. If a majority of those nodes never returns
 > it stays that way, and there is no option to force it to lead. Only a node whose stored state
 > names no other node leads alone, after 10 seconds: a single-node cluster, or an empty data
-> directory with no `--peers`. So point a node replacing a lost one at its peers. A restarted node
-> treats a named node it has not heard from within 30 seconds of starting as dead, so a node slower
-> than that has its partitions moved to their replicas, and gets partitions back from the rebalance.
+> directory with no `--peers`. So point a node replacing a lost one at its peers.
 >
-> Failover and rebalance move a partition only to a live replica, and that replica may itself have
-> no copy yet. It waits for one while a source it knows of is alive, and while the map still names
-> a replica, and otherwise takes the role empty. If both copies of a partition are gone it stays
-> mapped to them, rather than move to a node with no mapped copy and answer 404. Requests for it get
-> no response for about 30 seconds after the holders die, while the link to the dead primary is still
-> up, and a 503 from then on. When its primary
-> returns it serves at once if its copy is its own; if that copy came from a snapshot it waits like
-> a node with no copy, for the replica or until the map no longer names a dead one. When its replica
+> **Warning:** do not replace every node of a cluster and then restart them. In a test that replaced
+> all three nodes one at a time and restarted the new ones, nothing was missing before the restart
+> and most acked records read 404 after it, about 2250-2390 of 3500, unchanged 90 seconds later. The
+> cause is inferred from the pattern, not traced: a replica keeps an imported snapshot only in memory
+> (#287).
+>
+> A restarted node treats a named node it has not heard from within 30 seconds of starting as dead,
+> so a node slower than that has its partitions moved to their replicas, and gets partitions back
+> from the rebalance. Until its first heartbeat such a node is not a target: no failover, rebalance
+> or forced rebalance gives it a role. A partition whose only other holder is such a node stays
+> mapped until that node's first heartbeat, when the next failover pass promotes it, or until its
+> 30 second verdict, when the partition waits for a holder to return.
+>
+> Failover and rebalance move a partition only to a live replica, meaning one heard from and not yet
+> declared dead, which can be a node that has just died. That replica may itself have no copy yet.
+> It waits for one while a source it knows of is alive, and while the map still names a replica, and
+> otherwise takes the role empty. It also takes the role after 90 seconds on a source it never heard
+> from, and 30 seconds after an import with an unfinished catchup with what arrived, even with the
+> source alive. If both copies of a partition are gone it stays mapped to them, rather than move to
+> a node with no mapped copy and answer 404. Requests for it get no response for about 30 seconds
+> after the holders die, while the link to the dead primary is still up, and a 503 from then on. When
+> its primary returns it serves at once if its copy is its own; if that copy came from a snapshot it
+> waits like a node with no copy, including the 90 and 30 second limits above, for the replica or
+> until the map no longer names a dead one. When its replica
 > returns it is promoted at the next periodic check, up to 30 seconds later. Replication is
 > asynchronous, so a replica promoted this way can lack writes its primary acked, and those writes
 > are not merged back when the primary returns. If you know the holders are never coming back,
-> `mqdb cluster rebalance` gives those partitions to a live node, which starts them empty. Failover
-> waits until 1.5 seconds have passed with no new death, so deaths detected closer together than
-> that count as one. A partition that has lost one copy can stay on the other indefinitely (#327).
+> `mqdb cluster rebalance` on the Raft leader gives those partitions to a live node, which starts
+> them empty. Failover waits until 1.5 seconds have passed with no new death, so deaths detected
+> closer together than that count as one. Nodes killed together can be detected up to about a second
+> apart, which leaves about half a second of margin; if they split, the first failover promotes the
+> second holder and drops the first from the map. A partition that has lost one copy can stay on the other indefinitely (#327).
 > If that holder dies at any later time, the partition stays unavailable until that holder returns,
 > with the same wait if its copy came from a snapshot, or you run `mqdb cluster rebalance` on the
 > Raft leader; the holder that left the map earlier does not help when it returns. A leader without
@@ -777,7 +795,8 @@ MQDB supports distributed clustering with automatic failover and partition rebal
 > A restarted node that cannot reach a majority of its stored voters stays at 503 and acks nothing
 > until a majority returns, with no way to force it (#330). In a two-node cluster that means one
 > node alone serves nothing. Partitions on a node still missing after a full restart wait for the
-> 30 second rule above before they fail over. `mqdb cluster rebalance` after a restart can answer ok
+> 30 second rule above before they fail over. `mqdb cluster rebalance` on the Raft leader after a
+> restart can answer ok
 > and leave partitions at 503 for about 90 seconds while their new primaries wait for a silent
 > source, after which they start empty.
 >
@@ -785,8 +804,11 @@ MQDB supports distributed clustering with automatic failover and partition rebal
 > leader can still raise the term and depose it (#314). Voter sets are not committed membership
 > (#157): two nodes that were down while others joined can reach a majority of their old set.
 >
-> Run `mqdb cluster status` after starting or restarting a node — it reports any `UNLINKED` nodes —
-> and the broker logs a warning every minute while the mesh is incomplete.
+> Run `mqdb cluster status` after starting or restarting a node — it reports any `UNLINKED` nodes.
+> A link that dies without closing stays listed until it times out, about 30 seconds, so `UNLINKED`
+> misses it for that long. The broker logs a warning every minute while the mesh is incomplete, and
+> when a peer dial fails. These log at `WARN`: set `RUST_LOG=warn` or lower, since with `RUST_LOG`
+> unset the binary logs nothing.
 
 ### Cluster CLI Commands
 
