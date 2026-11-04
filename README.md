@@ -754,7 +754,8 @@ MQDB supports distributed clustering with automatic failover and partition rebal
 > no copy yet. It waits for one while a source it knows of is alive, and while the map still names
 > a replica, and otherwise takes the role empty. If both copies of a partition are gone it stays
 > mapped to them, rather than move to a node with no mapped copy and answer 404. Requests for it get
-> a 503, or no response when the request was queued to a link not yet dropped. When its primary
+> no response for about 30 seconds after the holders die, while the link to the dead primary is still
+> up, and a 503 from then on. When its primary
 > returns it serves at once if its copy is its own; if that copy came from a snapshot it waits like
 > a node with no copy, for the replica or until the map no longer names a dead one. When its replica
 > returns it is promoted at the next periodic check, up to 30 seconds later. Replication is
