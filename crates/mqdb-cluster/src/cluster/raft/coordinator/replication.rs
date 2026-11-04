@@ -228,9 +228,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
     }
 
     pub(super) async fn trigger_rebalance_for_new_node(&mut self) -> Vec<u64> {
-        let indices = self.trigger_rebalance_internal().await;
-        self.new_node_rebalanced_since_last_tick |= !indices.is_empty();
-        indices
+        self.trigger_rebalance_internal().await
     }
 
     pub(super) async fn initialize_partitions(&mut self) -> Vec<u64> {

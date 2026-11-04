@@ -35,7 +35,6 @@ pub struct RaftCoordinator<T: ClusterTransport> {
     pub(super) unheard_members: BTreeSet<NodeId>,
     pub(super) rescan_for_heard_voter: bool,
     pub(super) members_to_expect: Vec<NodeId>,
-    pub(super) new_node_rebalanced_since_last_tick: bool,
 }
 
 impl<T: ClusterTransport> RaftCoordinator<T> {
@@ -61,7 +60,6 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             unheard_members: BTreeSet::new(),
             rescan_for_heard_voter: false,
             members_to_expect: Vec::new(),
-            new_node_rebalanced_since_last_tick: false,
         }
     }
 
@@ -96,7 +94,6 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             unheard_members: BTreeSet::new(),
             rescan_for_heard_voter: false,
             members_to_expect: Vec::new(),
-            new_node_rebalanced_since_last_tick: false,
         };
 
         coordinator.rebuild_partition_map();

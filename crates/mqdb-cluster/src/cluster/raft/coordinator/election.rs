@@ -26,9 +26,6 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             self.last_balance_check = now_ms;
             self.last_death_ms = now_ms;
         }
-        if std::mem::take(&mut self.new_node_rebalanced_since_last_tick) {
-            self.last_balance_check = now_ms;
-        }
         let deaths_settled = now_ms.saturating_sub(self.last_death_ms) > DEATH_BATCH_WINDOW_MS;
 
         let ready = self.leader_ready();

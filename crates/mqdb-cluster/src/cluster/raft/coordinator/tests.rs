@@ -1354,25 +1354,18 @@ fn mostly_on_three_with_some_on_node4() -> Vec<RaftCommand> {
 }
 
 #[tokio::test]
-async fn the_periodic_check_waits_a_full_period_after_a_rebalance_for_a_returning_node() {
-    let node6 = NodeId::validated(6).unwrap();
+async fn a_holder_back_after_a_double_death_plans_nothing_on_its_return() {
+    let node4 = NodeId::validated(4).unwrap();
+    let node5 = NodeId::validated(5).unwrap();
     let start = 1_790_000_000_000u64;
-    let mut coord = restarted_leader_of_five(&mostly_on_three_with_some_on_node4()).await;
-    coord.tick(start + 1_300).await;
-    commit_tail(&mut coord).await;
+    let mut coord = two_holders_die_together([node4, node5], start).await;
+    let before = coord.last_log_index();
 
-    assert!(!coord.handle_node_alive(node6).await.is_empty());
-    commit_tail(&mut coord).await;
-    coord.tick(start + 25_000).await;
-    commit_tail(&mut coord).await;
-    let after_return = coord.last_log_index();
+    assert!(coord.handle_node_alive(node5).await.is_empty());
 
-    coord.tick(start + 31_500).await;
-    assert_eq!(coord.last_log_index(), after_return);
-    coord.tick(start + 54_000).await;
-    assert_eq!(coord.last_log_index(), after_return);
-    coord.tick(start + 55_100).await;
-    assert!(coord.last_log_index() > after_return);
+    assert_eq!(coord.last_log_index(), before);
+    assert_eq!(holders(&coord, 0), (Some(node4), vec![node5]));
+    assert_eq!(holders(&coord, 1), (Some(node5), vec![node4]));
 }
 
 #[tokio::test]
