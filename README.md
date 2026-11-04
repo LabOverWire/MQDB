@@ -768,6 +768,18 @@ MQDB supports distributed clustering with automatic failover and partition rebal
 > Raft leader; the holder that left the map earlier does not help when it returns. A leader without
 > links to a majority proposes no failover at all until it has them again.
 >
+> Do not reuse addresses with an old data directory under the same CA: a node dials the addresses in
+> its `peer_addrs` with no `--peers`, so an old node can join another cluster (#329). With a new id
+> it takes primaries there. With an id already in use it disrupts elections and acked records can
+> read 404. A wrong-peer check only fires when the ids differ.
+>
+> A restarted node that cannot reach a majority of its stored voters stays at 503 and acks nothing
+> until a majority returns, with no way to force it (#330). In a two-node cluster that means one
+> node alone serves nothing. Partitions on a node still missing after a full restart wait for the
+> 30 second rule above before they fail over. `mqdb cluster rebalance` after a restart can answer ok
+> and leave partitions at 503 for about 90 seconds while their new primaries wait for a silent
+> source, after which they start empty.
+>
 > This does not stop every disruption. A returning node with links to a majority that excludes the
 > leader can still raise the term and depose it (#314). Voter sets are not committed membership
 > (#157): two nodes that were down while others joined can reach a majority of their old set.
