@@ -1058,6 +1058,51 @@ async fn a_new_leader_plans_no_rebalance_for_a_new_node_while_a_death_is_queued(
     assert!(coord.last_log_index() > before);
 }
 
+fn mostly_on_three_with_some_on_node4() -> Vec<RaftCommand> {
+    PartitionId::all()
+        .map(|partition| {
+            let p = partition.get();
+            let (primary, replica) = if p.is_multiple_of(8) {
+                (4, 1)
+            } else {
+                (p % 3 + 1, (p + 1) % 3 + 1)
+            };
+            assign(p, primary, replica, 1)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_new_node_arriving_while_a_death_is_queued_is_rebalanced_after_the_death() {
+    let node4 = NodeId::validated(4).unwrap();
+    let node6 = NodeId::validated(6).unwrap();
+    let start = 1_790_000_000_000u64;
+    let mut coord = restarted_leader_of_five(&mostly_on_three_with_some_on_node4()).await;
+    coord.tick(start + 1_300).await;
+    commit_tail(&mut coord).await;
+
+    coord.handle_node_death(node4).await;
+    coord.tick(start + 1_400).await;
+    let before = coord.last_log_index();
+
+    assert!(coord.handle_node_alive(node6).await.is_empty());
+    assert_eq!(coord.last_log_index(), before);
+    assert!(coord.pending_new_nodes.contains(&node6));
+
+    coord.tick(start + 3_000).await;
+    commit_tail(&mut coord).await;
+    coord.tick(start + 3_200).await;
+    commit_tail(&mut coord).await;
+    assert!(coord.pending_dead_nodes.is_empty());
+    assert!(coord.pending_new_nodes.is_empty());
+    assert!(
+        PartitionId::all().any(
+            |p| coord.partition_map().role_for(p, node6) != crate::cluster::PartitionRole::None
+        ),
+        "the new node is not stranded once the death clears"
+    );
+}
+
 #[tokio::test]
 async fn a_lost_node_with_a_live_replica_is_failed_over_to_it() {
     let node1 = NodeId::validated(1).unwrap();

@@ -166,11 +166,11 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
 
         if needs_rebalance {
             self.processed_new_nodes.insert(node);
-            if self.pending_partition_proposals > 0 {
+            if self.pending_partition_proposals > 0 || !self.pending_dead_nodes.is_empty() {
                 tracing::info!(
                     ?node,
                     pending = self.pending_partition_proposals,
-                    "node needs partitions but rebalance in progress, queuing for later"
+                    "node needs partitions but a rebalance or a failover is in progress, queuing for later"
                 );
                 self.pending_new_nodes.insert(node);
                 return Vec::new();

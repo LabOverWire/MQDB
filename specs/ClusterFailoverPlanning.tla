@@ -11,7 +11,8 @@
 (*             (1.5 s with no new death), in either order                  *)
 (*   Commit    the proposals reach the applied partition map               *)
 (*   LoseTail  leadership changes and the unapplied proposals are          *)
-(*             overwritten; the dead nodes stay out of the members         *)
+(*             overwritten; this model keeps the members as they were,     *)
+(*             where a new leader in the code has its own view of them     *)
 (*   Scan      scan_partition_map_for_departed_nodes, at leader start and  *)
 (*             every 30 s                                                  *)
 (*   Rejoin    handle_node_alive, a member is back                         *)
@@ -20,15 +21,22 @@
 (*                                                                         *)
 (* Constants:                                                              *)
 (*   PlanFromProposals  TRUE: a failover reads the applied map plus         *)
-(*                      unapplied proposals. FALSE: the applied map.        *)
+(*                      unapplied proposals. FALSE: the applied map. It     *)
+(*                      has no effect on the main cfg, which passes with    *)
+(*                      it FALSE too, so this model is not evidence for     *)
+(*                      planned-map reads; unit tests cover those.          *)
 (*   HolderOnly         TRUE: promote only a live mapped replica, otherwise *)
 (*                      leave the partition on its holder. FALSE: fall back *)
 (*                      to the first alive node, which holds no copy.       *)
 (*   LiveTargetsOnly    TRUE: rebalance only targets a live replica.        *)
 (*   RepairScan         FALSE: Scan never runs.                             *)
 (*   ScanReplicas       FALSE: Scan looks at primaries only.                *)
-(*   AddReplicas        TRUE: a replica with no copy can be added and then  *)
-(*                      promoted, since the map does not record who synced. *)
+(*   AddReplicas        TRUE: L can replace a replica or fill an empty slot *)
+(*                      with no copy, with no death needed, as the          *)
+(*                      rebalancer does (rebalancer.rs:275-296), and can    *)
+(*                      then be promoted. The map does not record who       *)
+(*                      synced. The model has no replaced-replica source    *)
+(*                      (snapshot.rs:375-377): only the mapped holder.      *)
 (*   WaitForData        TRUE: TakeRole refuses a node mapped primary with   *)
 (*                      no copy while its mapped source is alive (gh #273). *)
 (*                      FALSE: it can serve at once. The code also takes    *)
@@ -42,12 +50,13 @@
 (*   KeepDeadReplica    TRUE: a dead replica entry stays while the primary  *)
 (*                      is also gone. FALSE: it is always removed.          *)
 (*                                                                         *)
-(* Abstractions: one leader identity; proposals applied in order; A and B   *)
-(* are the only nodes holding either partition, so InvPrimaryWasAHolder     *)
-(* reads as "never promote L". A holder is assumed to keep its copy, so     *)
-(* #287 is out of scope. Only L can lack a copy; ClusterEmptyPrimary and    *)
-(* ClusterPromotedTransfer model the transfer itself. The time a detection  *)
-(* takes is not modelled.                                                   *)
+(* Abstractions: one leader identity, L, which stands for a live majority: *)
+(* Commit, Scan and Fail run with L alone, and loss of a majority is not    *)
+(* covered. Proposals are applied in order. InvPrimaryWasAHolder means      *)
+(* "the primary is not L". A and B are assumed to keep their copies, and in *)
+(* this model only L can lack one; the code has other ways to lack one      *)
+(* (#287, a wiped disk). ClusterEmptyPrimary and ClusterPromotedTransfer    *)
+(* model the transfer itself. The time a detection takes is not modelled.   *)
 (*                                                                         *)
 (* Expected, verified for these constants only:                             *)
 (*   ClusterFailoverPlanning: all pass                                      *)
@@ -58,13 +67,19 @@
 (*   _departed: fails InvRebalanceTargetLive, the gh #280 panic             *)
 (*   _new_replica: fails InvPrimaryWasAHolder: the map can still name a node *)
 (*       with no copy.                                                      *)
-(*   _new_replica_nowait: WaitForData off, one failure, fails InvNoEmptyServe.*)
-(*   _new_replica_wait: one failure, passes InvNoEmptyTake.                 *)
-(*   _new_replica_source_dies: two failures, fails InvNoEmptyTake: the      *)
-(*       source dies during the wait and the node takes the role empty.     *)
+(*   _new_replica_nowait: WaitForData off, fails InvNoEmptyServe.           *)
+(*   _new_replica_wait: passes InvNoEmptyServe.                             *)
+(*   _new_replica_no_source: fails InvNoEmptyTake: L, a replica with no     *)
+(*       copy, is promoted after the source died, so it never waits and     *)
+(*       takes the role empty. The trace has no wait followed by the source *)
+(*       dying; that path is not separately shown.                          *)
 (*   _no_scan: fails Repaired, a lost failover is never redone              *)
 (*   _scan_primaries_only: fails Repaired, a lost replica entry stays       *)
-(*   _two_die_today: BatchDeaths and KeepDeadReplica off, fails HolderServes *)
+(*   _no_batch_no_keep: BatchDeaths and KeepDeadReplica off, fails           *)
+(*       HolderServes at the same state count as _no_batch, so KeepDeadReplica *)
+(*       adds nothing once batching is off. This is not main: main also has  *)
+(*       HolderOnly, PlanFromProposals and LiveTargetsOnly off.              *)
+(*   _holder_serves_fails3: MaxFails 3, fails HolderServes; see below.      *)
 (*   _no_batch: fails HolderServes, promoted to a node dying in the window  *)
 (*   _no_keep: fails HolderServes, the replica returns first with no entry  *)
 (*                                                                         *)
@@ -77,9 +92,14 @@
 (* InvServingPrimaryIsCurrent; a review refuted them as a measure of acked  *)
 (* writes and they are gone.                                                *)
 (*                                                                         *)
-(* A second death after the window is outside HolderServes: the first       *)
-(* holder has left the map and the partition stays at 503 until the second  *)
-(* returns or a forced rebalance.                                           *)
+(* Scope of HolderServes: two holders of an RF=2 partition dying together   *)
+(* as the first failure, with a live majority. It holds only because        *)
+(* MaxFails 2 makes FailTogether the only failure on that path, and named   *)
+(* never clears. A further failure breaks it (_holder_serves_fails3): a     *)
+(* holder that returns and dies again strands the partition on it. A second *)
+(* death after the window is also outside it: the first holder has left the *)
+(* map and the partition stays at 503 until the second returns or a forced  *)
+(* rebalance.                                                               *)
 (*                                                                         *)
 (* Model restriction: Rejoin requires proposals = <<>>, so a node does not  *)
 (* return while a proposal is unapplied. The code has no such guard.        *)
@@ -236,14 +256,14 @@ Rebalance(p) ==
           /\ proposals' = Append(proposals, [p |-> p, primary |-> a.replica, replica |-> a.primary])
     /\ UNCHANGED <<applied, members, failsLeft, lostLeft, named, returned, filled, takenEmpty>>
 
-\* add_missing_replicas gives a partition a new replica with no copy yet. L plays
-\* that node. The code waits 30 s after a death before doing this from the periodic
-\* check, which this untimed model cannot show, so _new_replica fails.
+\* The rebalancer gives a partition a new replica with no copy yet. L plays that node.
+\* _new_replica fails on the promotion that follows, with or without a failure first, so
+\* the 30 s hold after a death in the code, which is not modelled, would not stop it.
 AddReplica(p) ==
     /\ AddReplicas
     /\ proposalsLeft > 0
     /\ proposalsLeft' = proposalsLeft - 1
-    /\ Base[p].replica = None
+    /\ Base[p].replica # L
     /\ Base[p].primary \in members
     /\ Base[p].primary # L
     /\ proposals' = Append(proposals, [p |-> p, primary |-> Base[p].primary, replica |-> L])
@@ -284,7 +304,7 @@ Next ==
 
 Spec == Init /\ [][Next]_vars /\ WF_vars(Commit) /\ WF_vars(Scan)
 
-\* A partition is only ever served by a node that holds its records.
+\* The primary is not L, the node with no copy.
 InvPrimaryWasAHolder == \A p \in Partitions : applied[p].primary \in {A, B}
 
 \* Once a failover is applied and no proposal is lost, a partition does not rest
@@ -311,8 +331,8 @@ ServedByAHolderBack ==
     \A p \in Partitions :
         (named[p] \cap members # {}) => applied[p].primary \in members
 
-\* No manual rebalance is needed, in whichever order the holders died and returned.
-\* This is about the map only, not about acked writes.
+\* No manual rebalance is needed, in either order of the two deaths and either order of
+\* return, within the scope in the header. This is about the map only, not acked writes.
 HolderServes == <>[](ServedByAHolderBack \/ proposalsLeft < 2)
 
 \* No node with no copy takes the role while its source is alive.
