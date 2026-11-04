@@ -99,6 +99,16 @@ impl HeartbeatManager {
         }
     }
 
+    pub fn expect_again(&mut self, node_id: NodeId) {
+        let settled = self.nodes.get(&node_id.get()).is_some_and(|state| {
+            matches!(state.status, NodeStatus::Alive | NodeStatus::Suspected)
+                || (state.status == NodeStatus::Unknown && state.expected)
+        });
+        if !settled {
+            self.expect_node(node_id);
+        }
+    }
+
     pub fn expect_node(&mut self, node_id: NodeId) {
         if node_id != self.local_node {
             self.nodes.insert(

@@ -37,6 +37,7 @@ pub struct MessageProcessor {
     tx_main_queue: flume::Sender<InboundMessage>,
     rx_inbox: flume::Receiver<InboundMessage>,
     rx_tick: flume::Receiver<u64>,
+    rx_expected_members: flume::Receiver<NodeId>,
     last_batch_time: u64,
 }
 
@@ -63,8 +64,19 @@ impl MessageProcessor {
             tx_main_queue,
             rx_inbox,
             rx_tick,
+            rx_expected_members: flume::unbounded().1,
             last_batch_time: 0,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn receive_heartbeat_for_test(&mut self, from: NodeId, at: u64) {
+        self.heartbeat_manager
+            .receive_heartbeat(from, &Heartbeat::create(from, at), at);
+    }
+
+    pub fn expect_members_from(&mut self, rx_expected_members: flume::Receiver<NodeId>) {
+        self.rx_expected_members = rx_expected_members;
     }
 
     pub fn register_peer(&mut self, peer: NodeId) {
@@ -117,7 +129,7 @@ impl MessageProcessor {
         tracing::info!(node = self.node_id.get(), "message processor stopped");
     }
 
-    fn process_tick(&mut self, now: u64) -> ProcessingBatch {
+    pub(crate) fn process_tick(&mut self, now: u64) -> ProcessingBatch {
         let mut batch = ProcessingBatch::default();
         self.last_batch_time = now;
 
@@ -125,9 +137,13 @@ impl MessageProcessor {
             batch.heartbeat_to_send = Some(self.heartbeat_manager.build_heartbeat(now));
         }
 
+        for member in self.rx_expected_members.try_iter() {
+            self.heartbeat_manager.expect_again(member);
+        }
+
         let heartbeat_manager = &self.heartbeat_manager;
         self.death_verdicts.retry(&self.tx_raft_events, |node| {
-            heartbeat_manager.node_status(node) == NodeStatus::Alive
+            heartbeat_manager.node_status(node) != NodeStatus::Dead
         });
 
         batch.dead_nodes = self.heartbeat_manager.check_timeouts(now);

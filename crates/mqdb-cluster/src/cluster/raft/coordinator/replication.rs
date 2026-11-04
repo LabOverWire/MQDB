@@ -91,11 +91,14 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         if !self.cluster_members.contains(&own_id) {
             self.cluster_members.push(own_id);
         }
-        let joined = self
+        let joined: Vec<NodeId> = self
             .cluster_members
             .iter()
-            .filter(|node| **node != own_id && !previous_members.contains(node));
-        self.unheard_members.extend(joined);
+            .copied()
+            .filter(|node| *node != own_id && !previous_members.contains(node))
+            .collect();
+        self.unheard_members.extend(joined.iter().copied());
+        self.members_to_expect.extend(joined);
         let members = &self.cluster_members;
         self.unheard_members.retain(|node| members.contains(node));
     }
@@ -225,7 +228,9 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
     }
 
     pub(super) async fn trigger_rebalance_for_new_node(&mut self) -> Vec<u64> {
-        self.trigger_rebalance_internal().await
+        let indices = self.trigger_rebalance_internal().await;
+        self.new_node_rebalanced_since_last_tick |= !indices.is_empty();
+        indices
     }
 
     pub(super) async fn initialize_partitions(&mut self) -> Vec<u64> {

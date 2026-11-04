@@ -221,7 +221,6 @@ impl ClusteredAgent {
         let raft_partition_map = self.rx_partition_map.borrow().clone();
 
         let mut ctrl = self.controller.write().await;
-        ctrl.retry_death_verdicts();
         let became_primary = ctrl.apply_raft_partition_map(raft_partition_map).await;
         if became_primary {
             let stores = ctrl.stores();
@@ -579,6 +578,7 @@ impl ClusteredAgent {
         };
         let due = backoff.due(
             &quic.peers_needing_dial(&dead).await,
+            &dead,
             std::time::Instant::now(),
         );
         if !due.is_empty() {

@@ -34,6 +34,8 @@ pub struct RaftCoordinator<T: ClusterTransport> {
     pub(super) restored_map_unconfirmed: bool,
     pub(super) unheard_members: BTreeSet<NodeId>,
     pub(super) rescan_for_heard_voter: bool,
+    pub(super) members_to_expect: Vec<NodeId>,
+    pub(super) new_node_rebalanced_since_last_tick: bool,
 }
 
 impl<T: ClusterTransport> RaftCoordinator<T> {
@@ -58,6 +60,8 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             restored_map_unconfirmed: false,
             unheard_members: BTreeSet::new(),
             rescan_for_heard_voter: false,
+            members_to_expect: Vec::new(),
+            new_node_rebalanced_since_last_tick: false,
         }
     }
 
@@ -91,6 +95,8 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             restored_map_unconfirmed: false,
             unheard_members: BTreeSet::new(),
             rescan_for_heard_voter: false,
+            members_to_expect: Vec::new(),
+            new_node_rebalanced_since_last_tick: false,
         };
 
         coordinator.rebuild_partition_map();
@@ -115,6 +121,11 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             self.add_peer(node);
             self.unheard_members.insert(node);
         }
+    }
+
+    pub(crate) fn forward_members_to_expect(&mut self, tx: &flume::Sender<NodeId>) {
+        self.members_to_expect
+            .retain(|node| matches!(tx.try_send(*node), Err(flume::TrySendError::Full(_))));
     }
 
     pub(super) fn live_targets(&self) -> Vec<NodeId> {

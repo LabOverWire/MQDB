@@ -215,31 +215,123 @@ async fn a_node_that_saw_the_move_asks_the_replaced_replica_before_taking_the_ro
     assert_eq!(requests_to(&ctrl, REPLACED), 1);
 }
 
-#[test]
-fn a_death_verdict_refused_by_a_full_queue_is_sent_on_a_later_tick() {
+#[tokio::test]
+async fn a_held_verdict_does_not_land_after_the_node_is_back() {
+    use crate::cluster::message_processor::MessageProcessor;
     let peer = node(OLD_PRIMARY);
     let mut ctrl = controller(THIS);
-    let (tx_events, rx_events) = flume::bounded(1);
-    tx_events.try_send(RaftEvent::NodeAlive(peer)).unwrap();
-    ctrl.tx_raft_events = tx_events;
+    let (tx_events, rx_events) = flume::bounded(4);
+    ctrl.tx_raft_events = tx_events.clone();
     ctrl.heartbeat.register_node(peer);
-    ctrl.heartbeat.receive_heartbeat(
-        peer,
-        &crate::cluster::protocol::Heartbeat::create(peer, 0),
-        1_000,
+    let (tx_inbox, rx_inbox) = flume::unbounded();
+    let (tx_tick, rx_tick) = flume::unbounded();
+    let (tx_batch, rx_batch) = flume::unbounded();
+    let (tx_raft, _rx_raft) = flume::unbounded();
+    let (tx_main, _rx_main) = flume::unbounded();
+    let mut processor = MessageProcessor::new(
+        node(THIS),
+        TransportConfig {
+            heartbeat_interval_ms: 100,
+            heartbeat_timeout_ms: 500,
+            ack_timeout_ms: 50,
+        },
+        tx_raft,
+        tx_events.clone(),
+        tx_main,
+        rx_inbox,
+        rx_tick,
     );
+    processor.register_peer(peer);
+    tokio::spawn(processor.run(tx_batch));
+    let heartbeat_at = |at: u64| InboundMessage {
+        from: peer,
+        message: ClusterMessage::Heartbeat(crate::cluster::protocol::Heartbeat::create(peer, at)),
+        received_at: at,
+    };
 
-    ctrl.tick(1_000_000);
+    tx_inbox.send(heartbeat_at(1_000)).unwrap();
+    rx_events.recv_async().await.unwrap();
+    tx_tick.send(1_100).unwrap();
+    let batch = rx_batch.recv_async().await.unwrap();
+    ctrl.apply_heartbeat_updates(&batch.heartbeat_updates);
+
+    while tx_events.try_send(RaftEvent::NodeAlive(node(9))).is_ok() {}
+    tx_tick.send(2_000).unwrap();
+    let batch = rx_batch.recv_async().await.unwrap();
+    assert_eq!(batch.dead_nodes, [peer]);
+    ctrl.apply_dead_nodes(&batch.dead_nodes);
+    drop(rx_events.drain());
+
+    tx_inbox.send(heartbeat_at(2_050)).unwrap();
+    let revived = rx_events.recv_async().await.unwrap();
+    assert!(matches!(revived, RaftEvent::NodeAlive(node) if node == peer));
+
+    ctrl.tick(2_060);
+    tx_tick.send(2_100).unwrap();
+    rx_batch.recv_async().await.unwrap();
+
     assert!(
         !rx_events
-            .try_iter()
+            .drain()
+            .any(|event| matches!(event, RaftEvent::NodeDead(_)))
+    );
+}
+
+#[tokio::test]
+async fn a_verdict_refused_by_a_full_queue_is_sent_by_the_running_processor() {
+    use crate::cluster::message_processor::MessageProcessor;
+    let peer = node(OLD_PRIMARY);
+    let (tx_events, rx_events) = flume::bounded(2);
+    let (_tx_inbox, rx_inbox) = flume::unbounded();
+    let (tx_tick, rx_tick) = flume::unbounded();
+    let (tx_batch, rx_batch) = flume::unbounded();
+    let (tx_raft, _rx_raft) = flume::unbounded();
+    let (tx_main, _rx_main) = flume::unbounded();
+    let mut processor = MessageProcessor::new(
+        node(THIS),
+        TransportConfig {
+            heartbeat_interval_ms: 100,
+            heartbeat_timeout_ms: 500,
+            ack_timeout_ms: 50,
+        },
+        tx_raft,
+        tx_events.clone(),
+        tx_main,
+        rx_inbox,
+        rx_tick,
+    );
+    processor.expect_peer(peer);
+    tokio::spawn(processor.run(tx_batch));
+
+    tx_tick.send(1_000).unwrap();
+    rx_batch.recv_async().await.unwrap();
+    while tx_events.try_send(RaftEvent::NodeAlive(node(9))).is_ok() {}
+    tx_tick.send(5_000).unwrap();
+    assert_eq!(rx_batch.recv_async().await.unwrap().dead_nodes, [peer]);
+    assert!(
+        !rx_events
+            .drain()
             .any(|event| matches!(event, RaftEvent::NodeDead(_)))
     );
 
-    ctrl.retry_death_verdicts();
+    tx_tick.send(5_100).unwrap();
+    rx_batch.recv_async().await.unwrap();
+
     assert!(
         rx_events
-            .try_iter()
+            .drain()
             .any(|event| matches!(event, RaftEvent::NodeDead(dead) if dead == peer))
     );
+}
+
+#[test]
+fn applying_a_verdict_sends_nothing_to_raft() {
+    let peer = node(OLD_PRIMARY);
+    let mut ctrl = controller(THIS);
+    let (tx_events, rx_events) = flume::bounded(4);
+    ctrl.tx_raft_events = tx_events;
+
+    ctrl.apply_dead_nodes(&[peer]);
+
+    assert!(rx_events.is_empty());
 }

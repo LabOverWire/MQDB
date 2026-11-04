@@ -85,6 +85,7 @@ struct MessageProcessorChannels {
     tx_main_queue: flume::Sender<InboundMessage>,
     transport_inbox_rx: flume::Receiver<InboundMessage>,
     rx_tick: flume::Receiver<u64>,
+    rx_expected_members: flume::Receiver<NodeId>,
     tx_batch: flume::Sender<ProcessingBatch>,
 }
 
@@ -169,6 +170,7 @@ pub struct ClusteredAgent {
     #[allow(dead_code)]
     processor_executor: Option<DedicatedExecutor>,
     tx_tick: Option<flume::Sender<u64>>,
+    tx_expected_members: flume::Sender<NodeId>,
     rx_main_queue: Option<flume::Receiver<InboundMessage>>,
     rx_batch: Option<flume::Receiver<ProcessingBatch>>,
     ws_bind_address: Option<SocketAddr>,

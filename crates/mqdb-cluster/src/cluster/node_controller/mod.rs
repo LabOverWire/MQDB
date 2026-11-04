@@ -18,7 +18,6 @@ pub(crate) mod unique;
 #[cfg(test)]
 mod tests;
 
-use super::death_verdicts::DeathVerdicts;
 use super::entity;
 use super::heartbeat::{HeartbeatManager, NodeStatus};
 use super::migration::{MigrationManager, MigrationPhase};
@@ -451,7 +450,6 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) event_delivery: super::event_delivery::EventDelivery,
     pub(super) tx_raft_messages: flume::Sender<RaftMessage>,
     pub(super) tx_raft_events: flume::Sender<RaftEvent>,
-    death_verdicts: DeathVerdicts,
     pub(super) dead_nodes_for_session_update: VecDeque<NodeId>,
     pub(super) migration_manager: MigrationManager,
     pub(super) incoming_snapshots: HashMap<PartitionId, snapshot::IncomingSnapshot>,
@@ -534,7 +532,6 @@ impl<T: ClusterTransport> NodeController<T> {
             event_delivery: super::event_delivery::EventDelivery::default(),
             tx_raft_messages,
             tx_raft_events,
-            death_verdicts: DeathVerdicts::default(),
             dead_nodes_for_session_update: VecDeque::new(),
             migration_manager: MigrationManager::new(node_id),
             incoming_snapshots: HashMap::new(),
@@ -763,8 +760,6 @@ impl<T: ClusterTransport> NodeController<T> {
             output.heartbeat = Some(self.heartbeat.create_heartbeat(now));
         }
 
-        self.retry_death_verdicts();
-
         let dead = self.heartbeat.check_timeouts(now);
         for node in dead {
             self.handle_node_death(node);
@@ -785,13 +780,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
 
         output
-    }
-
-    pub fn retry_death_verdicts(&mut self) {
-        let heartbeat = &self.heartbeat;
-        self.death_verdicts.retry(&self.tx_raft_events, |node| {
-            heartbeat.node_status(node) == NodeStatus::Alive
-        });
     }
 
     pub async fn send_tick_output(&self, output: TickOutput) {
@@ -948,11 +936,22 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
+    fn handle_death_notice_message(&mut self, node: NodeId) {
+        self.heartbeat.handle_death_notice(node);
+        self.handle_node_death(node);
+        if self
+            .tx_raft_events
+            .try_send(RaftEvent::NodeDead(node))
+            .is_err()
+        {
+            tracing::warn!(?node, "raft event queue is full, dropping a death notice");
+        }
+    }
+
     fn handle_node_death(&mut self, dead_node: NodeId) {
         let start = std::time::Instant::now();
 
         tracing::warn!(?dead_node, "node death detected");
-        self.death_verdicts.report(&self.tx_raft_events, dead_node);
         self.dead_nodes_for_session_update.push_back(dead_node);
         self.change_events_node_gone(dead_node);
         self.snapshots_node_gone(dead_node);
@@ -1079,8 +1078,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 None
             }
             ClusterMessage::DeathNotice { node_id } => {
-                self.heartbeat.handle_death_notice(node_id);
-                self.handle_node_death(node_id);
+                self.handle_death_notice_message(node_id);
                 None
             }
             ClusterMessage::DrainNotification { node_id } => {
@@ -1179,8 +1177,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 self.handle_ack(ack).await;
             }
             ClusterMessage::DeathNotice { node_id } => {
-                self.heartbeat.handle_death_notice(node_id);
-                self.handle_node_death(node_id);
+                self.handle_death_notice_message(node_id);
             }
             ClusterMessage::DrainNotification { node_id } => {
                 tracing::info!(?node_id, "received drain notification");

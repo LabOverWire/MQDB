@@ -1052,6 +1052,16 @@ async fn a_forced_rebalance_does_not_adopt_onto_an_unheard_node() {
     assert_eq!(holders(&coord, 0).0, Some(node1));
 }
 
+fn assert_no_new_replica_role(before: &PartitionMap, after: &PartitionMap, node: NodeId) {
+    for partition in PartitionId::all() {
+        assert!(
+            !after.replicas(partition).contains(&node)
+                || before.replicas(partition).contains(&node),
+            "{partition:?} gained {node:?} as a replica"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_rebalance_gives_no_role_to_an_unheard_node() {
     let node5 = NodeId::validated(5).unwrap();
@@ -1065,13 +1075,17 @@ async fn a_rebalance_gives_no_role_to_an_unheard_node() {
         })
         .collect();
     let mut coord = restarted_leader_with_4_and_5_unheard(&log).await;
-    let replicas_before = coord.partition_map().replica_count(node5);
+    let before = coord.partition_map().clone();
 
     coord.force_rebalance().await;
     commit_tail(&mut coord).await;
 
+    assert!(
+        coord.last_log_index() > 256,
+        "the rebalance moved something"
+    );
     assert_eq!(coord.partition_map().primary_count(node5), 0);
-    assert!(coord.partition_map().replica_count(node5) <= replicas_before);
+    assert_no_new_replica_role(&before, coord.partition_map(), node5);
 }
 
 #[tokio::test]
@@ -1101,14 +1115,16 @@ async fn a_drain_gives_no_role_to_an_unheard_node() {
         assign(5, 5, 1, 1),
     ];
     let mut coord = restarted_leader_with_4_and_5_unheard(&log).await;
-    let replicas_before = coord.partition_map().replica_count(node5);
+    let before = coord.partition_map().clone();
 
     coord.handle_drain_notification(node2).await;
     commit_tail(&mut coord).await;
 
-    assert_eq!(coord.partition_map().primary_count(node5), 1);
+    assert_eq!(holders(&coord, 0), (Some(node2), vec![node5]));
+    assert_eq!(holders(&coord, 1).0, Some(NodeId::validated(3).unwrap()));
     assert_eq!(holders(&coord, 5).0, Some(node5));
-    assert!(coord.partition_map().replica_count(node5) <= replicas_before);
+    assert_eq!(coord.partition_map().primary_count(node5), 1);
+    assert_no_new_replica_role(&before, coord.partition_map(), node5);
 }
 
 #[tokio::test]
@@ -1335,6 +1351,28 @@ fn mostly_on_three_with_some_on_node4() -> Vec<RaftCommand> {
             assign(p, primary, replica, 1)
         })
         .collect()
+}
+
+#[tokio::test]
+async fn the_periodic_check_waits_a_full_period_after_a_rebalance_for_a_returning_node() {
+    let node6 = NodeId::validated(6).unwrap();
+    let start = 1_790_000_000_000u64;
+    let mut coord = restarted_leader_of_five(&mostly_on_three_with_some_on_node4()).await;
+    coord.tick(start + 1_300).await;
+    commit_tail(&mut coord).await;
+
+    assert!(!coord.handle_node_alive(node6).await.is_empty());
+    commit_tail(&mut coord).await;
+    coord.tick(start + 25_000).await;
+    commit_tail(&mut coord).await;
+    let after_return = coord.last_log_index();
+
+    coord.tick(start + 31_500).await;
+    assert_eq!(coord.last_log_index(), after_return);
+    coord.tick(start + 54_000).await;
+    assert_eq!(coord.last_log_index(), after_return);
+    coord.tick(start + 55_100).await;
+    assert!(coord.last_log_index() > after_return);
 }
 
 #[tokio::test]

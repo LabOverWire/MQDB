@@ -22,8 +22,9 @@ pub struct RedialBackoff {
 }
 
 impl RedialBackoff {
-    pub fn due(&mut self, unlinked: &[NodeId], now: Instant) -> Vec<NodeId> {
-        self.waiting.retain(|node, _| unlinked.contains(node));
+    pub fn due(&mut self, unlinked: &[NodeId], absent: &[NodeId], now: Instant) -> Vec<NodeId> {
+        self.waiting
+            .retain(|node, _| unlinked.contains(node) || absent.contains(node));
         let mut due = Vec::new();
         for node in unlinked {
             let Some(next) = self.waiting.get_mut(node) else {
@@ -71,7 +72,7 @@ mod tests {
         let start = Instant::now();
         let attempts: Vec<u64> = (0..=20_000)
             .step_by(1_000)
-            .filter(|elapsed| !backoff.due(&peer, after(start, *elapsed)).is_empty())
+            .filter(|elapsed| !backoff.due(&peer, &[], after(start, *elapsed)).is_empty())
             .collect();
         assert_eq!(
             attempts,
@@ -87,7 +88,7 @@ mod tests {
         let start = Instant::now();
         let attempts: Vec<u64> = (0..=500_000)
             .step_by(1_000)
-            .filter(|elapsed| !backoff.due(&peer, after(start, *elapsed)).is_empty())
+            .filter(|elapsed| !backoff.due(&peer, &[], after(start, *elapsed)).is_empty())
             .filter(|elapsed| *elapsed >= 290_000)
             .collect();
         let gaps: Vec<u64> = attempts.windows(2).map(|pair| pair[1] - pair[0]).collect();
@@ -104,21 +105,54 @@ mod tests {
         let mut backoff = RedialBackoff::default();
         let peer = [node(2)];
         let start = Instant::now();
-        assert_eq!(backoff.due(&peer, after(start, 0)), peer);
-        assert_eq!(backoff.due(&peer, after(start, 1_000)), peer);
-        assert!(backoff.due(&[], after(start, 2_000)).is_empty());
-        assert_eq!(backoff.due(&peer, after(start, 2_500)), peer);
+        assert_eq!(backoff.due(&peer, &[], after(start, 0)), peer);
+        assert_eq!(backoff.due(&peer, &[], after(start, 1_000)), peer);
+        assert!(backoff.due(&[], &[], after(start, 2_000)).is_empty());
+        assert_eq!(backoff.due(&peer, &[], after(start, 2_500)), peer);
     }
 
     #[test]
     fn peers_back_off_independently() {
         let mut backoff = RedialBackoff::default();
         let start = Instant::now();
-        assert_eq!(backoff.due(&[node(2)], after(start, 0)), [node(2)]);
+        assert_eq!(backoff.due(&[node(2)], &[], after(start, 0)), [node(2)]);
         assert_eq!(
-            backoff.due(&[node(2), node(3)], after(start, 500)),
+            backoff.due(&[node(2), node(3)], &[], after(start, 500)),
             [node(3)],
             "the new peer is due now while the first still waits"
         );
+    }
+
+    #[test]
+    fn a_silent_peer_that_answers_quic_reaches_the_long_absence_delay() {
+        let mut backoff = RedialBackoff::default();
+        let peer = [node(2)];
+        let start = Instant::now();
+        let mut linked_until = 0u64;
+        let mut dials = Vec::new();
+        for elapsed in (0..=600_000u64).step_by(1_000) {
+            let needing_dial: &[NodeId] = if elapsed < linked_until { &[] } else { &peer };
+            if !backoff
+                .due(needing_dial, &peer, after(start, elapsed))
+                .is_empty()
+            {
+                dials.push(elapsed);
+                linked_until = elapsed + 5_000;
+            }
+        }
+        let late = dials.iter().filter(|elapsed| **elapsed >= 400_000).count();
+        assert!(late <= 4, "{late} dials in 200 s, once a minute is 3 or 4");
+    }
+
+    #[test]
+    fn a_peer_heard_again_starts_over_when_it_goes_down_again() {
+        let mut backoff = RedialBackoff::default();
+        let peer = [node(2)];
+        let start = Instant::now();
+        assert_eq!(backoff.due(&peer, &peer, after(start, 0)), peer);
+        assert!(backoff.due(&[], &peer, after(start, 500)).is_empty());
+        assert!(backoff.due(&peer, &peer, after(start, 800)).is_empty());
+        assert!(backoff.due(&[], &[], after(start, 900)).is_empty());
+        assert_eq!(backoff.due(&peer, &peer, after(start, 950)), peer);
     }
 }
