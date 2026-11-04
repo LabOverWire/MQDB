@@ -21,7 +21,7 @@
 (*             below                                                       *)
 (*   Rebalance rebalancer.rs redistribute_primaries: move a primary to     *)
 (*             one of its replicas                                         *)
-(*   Hear      the first heartbeat from a restored voter: handle_node_alive *)
+(*   Hear      the first heartbeat from an unheard member: handle_node_alive *)
 (*             takes it out of unheard_members and asks for a rescan at the *)
 (*             next settled tick that can commit; Scan stands for that too *)
 (*                                                                         *)
@@ -83,20 +83,27 @@
 (*   KeepDeadReplica    TRUE: a dead replica entry stays while the primary *)
 (*                      is also gone. FALSE: it is always removed.         *)
 (*   RestoredUnheard    TRUE: B starts as a member not heard from. It      *)
-(*                      stays unheard until Hear, or Fail, which stands    *)
-(*                      for its 30 s verdict. The spec assumes one of them *)
-(*                      comes: the fairness on Hear or Fail. Without it    *)
-(*                      Repaired fails at 7432 states. In the code that    *)
-(*                      verdict covers restored voters (init.rs) and a     *)
-(*                      member a snapshot adds or lists again              *)
-(*                      (forward_members_to_expect, expect_again); that    *)
-(*                      path is shown by tests in raft_task.rs, not here.  *)
-(*                      The model has no votes. Only B starts unheard:     *)
-(*                      symmetry covers B against A, not one against two.  *)
-(*                      Run by hand with {A, B} unheard, the same          *)
-(*                      properties pass at 8269 states; no cfg ships it.   *)
-(*   SkipUnheard        TRUE: failover, scan and rebalance never target an *)
-(*                      unheard node (live_targets). FALSE: they can, which *)
+(*                      stays unheard until Hear, or Fail, which here      *)
+(*                      stands for the verdict on a node never heard from, *)
+(*                      30 s in the code. A node already heard gets 15 s,  *)
+(*                      and a DeathNotice is sooner; the model has no      *)
+(*                      timing. The spec assumes one of them comes: the    *)
+(*                      fairness on Hear or Fail. Without it Repaired      *)
+(*                      fails at 7432 states. That form is closer to the   *)
+(*                      code and changes no result: fairness on Hear alone *)
+(*                      gives the same 7432 states and 17410 transitions.  *)
+(*                      In the code that verdict covers restored voters    *)
+(*                      (init.rs) and a member a snapshot adds or lists    *)
+(*                      again (forward_members_to_expect, expect_again);   *)
+(*                      that path is shown by tests in raft_task.rs, not   *)
+(*                      here. The model has no votes. Only B starts        *)
+(*                      unheard. Symmetry between A and B is not exact:    *)
+(*                      with {A} unheard, run by hand, the same properties *)
+(*                      pass at 7454 states against 7432. With {A, B}      *)
+(*                      unheard they pass at 8269. No cfg ships either.    *)
+(*   SkipUnheard        TRUE: failover and scan never target an unheard    *)
+(*                      node (live_targets), and rebalance does not when   *)
+(*                      LiveTargetsOnly is also on. FALSE: they can, which *)
 (*                      is the defect found on 2b5c1a6.                    *)
 (*   MaxFails, MaxLost  budgets of failures and of lost tails.             *)
 (*   MaxProposals       budget of proposals across the whole behaviour, to *)
@@ -204,7 +211,8 @@
 (* restate guards, so their passes add no evidence; only the cfgs that     *)
 (* turn the guard off show anything. InvNoPromotionOfUnheard shows no cost *)
 (* of promoting an unheard node: with SkipUnheard off and only this        *)
-(* invariant removed, everything else passes (6850 states). It does not    *)
+(* invariant removed from _restored_unheard, everything else passes (6850  *)
+(* states). It does not                                                    *)
 (* see Rebalance either: with LiveTargetsOnly off and it alone checked, it *)
 (* passes. The evidence for not targeting an unheard node is the unit      *)
 (* tests. InvNoStrandedPrimary gives none on the unheard path: it treats   *)
@@ -219,8 +227,8 @@
 (* L never dies. takenEmpty is one-shot and global across both partitions, *)
 (* so the model stops looking at takes after the first. Transfer can fire  *)
 (* after a take, which the code does not rely on. An unheard voter comes   *)
-(* only from restart here; in the code a member first named by a snapshot  *)
-(* from the leader is unheard too.                                         *)
+(* only from restart here; in the code a member a snapshot from the leader *)
+(* first names, or lists again after its verdict, is unheard too.          *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -289,7 +297,7 @@ Repair(map, p, d, alive) ==
 
 Repairs(map, d, alive) == {Repair(map, p, d, alive) : p \in Partitions} \ {None}
 
-\* A promotion target: a member, except a restored voter not heard from yet.
+\* A promotion target: a member, except one not heard from yet.
 Targets(nodes) == IF SkipUnheard THEN nodes \ unheard ELSE nodes
 
 \* Whether a batch of repairs promotes a node not heard from.
@@ -488,7 +496,7 @@ LivePrimaryIfNamedNodeBack ==
 \* return, within the scope in the header. This is about the map only, not acked writes.
 NamedNodeBackGivesLivePrimary == <>[](LivePrimaryIfNamedNodeBack \/ proposalsLeft < 2)
 
-\* No failover or scan promotes a restored voter not heard from.
+\* No failover or scan promotes a member not heard from.
 InvNoPromotionOfUnheard == ~promotedUnheard
 
 \* No node with no copy takes the role while a source is alive. This restates the guard.
