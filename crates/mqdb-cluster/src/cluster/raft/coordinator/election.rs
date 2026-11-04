@@ -8,25 +8,41 @@ use super::super::rpc::{
 use super::super::state::RaftCommand;
 use super::CoordinatorError;
 use super::RaftCoordinator;
+use crate::cluster::NodeId;
 use crate::cluster::transport::ClusterTransport;
-use crate::cluster::{NodeId, PartitionId};
+use std::collections::BTreeSet;
+
+const DEATH_BATCH_WINDOW_MS: u64 = 1_500;
 
 impl<T: ClusterTransport> RaftCoordinator<T> {
     pub async fn tick(&mut self, now_ms: u64) -> Vec<u64> {
+        self.refresh_links().await;
         let outputs = self.node.tick(now_ms);
         self.process_outputs(outputs).await;
+
+        self.last_balance_check = self.last_balance_check.min(now_ms);
+        self.last_death_ms = self.last_death_ms.min(now_ms);
+        if std::mem::take(&mut self.death_since_last_tick) {
+            self.last_balance_check = now_ms;
+            self.last_death_ms = now_ms;
+        }
+        let deaths_settled = now_ms.saturating_sub(self.last_death_ms) > DEATH_BATCH_WINDOW_MS;
 
         let ready = self.leader_ready();
         let just_became_ready = ready && !self.was_ready;
         self.was_ready = ready;
+        let can_commit = ready && self.node.can_reach_quorum();
 
         if just_became_ready {
             self.last_balance_check = now_ms;
             self.pending_partition_proposals = 0;
             tracing::info!("Raft leader caught up, processing pending nodes");
-            let mut indices = self.process_pending_dead_nodes().await;
+            let mut indices = Vec::new();
+            if can_commit && deaths_settled {
+                indices.extend(self.process_pending_dead_nodes().await);
+            }
             indices.extend(self.process_pending_draining_nodes().await);
-            if self.partitions_initialized() {
+            if self.partitions_initialized() && self.pending_dead_nodes.is_empty() {
                 indices.extend(self.process_pending_new_nodes().await);
             }
             return indices;
@@ -36,9 +52,17 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             return self.initialize_partitions().await;
         }
 
+        if can_commit
+            && deaths_settled
+            && (!self.pending_dead_nodes.is_empty() || self.rescan_for_heard_voter)
+        {
+            return self.process_pending_dead_nodes().await;
+        }
+
         if ready
             && self.pending_partition_proposals == 0
             && !self.pending_new_nodes.is_empty()
+            && self.pending_dead_nodes.is_empty()
             && self.partitions_initialized()
         {
             tracing::info!(
@@ -48,18 +72,32 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             return self.process_pending_new_nodes().await;
         }
 
-        if ready
+        if can_commit
             && self.pending_partition_proposals == 0
             && now_ms.saturating_sub(self.last_balance_check) > 30_000
             && self.partitions_initialized()
-            && self.primaries_imbalanced()
         {
             self.last_balance_check = now_ms;
-            tracing::info!("periodic balance check: primaries imbalanced, triggering rebalance");
-            return self.trigger_rebalance_internal().await;
+            let mut indices = Vec::new();
+            self.scan_partition_map_for_departed_nodes(&mut indices)
+                .await;
+            if self.primaries_imbalanced() {
+                tracing::info!(
+                    "periodic balance check: primaries imbalanced, triggering rebalance"
+                );
+                indices.extend(self.trigger_rebalance_internal().await);
+            }
+            return indices;
         }
 
         Vec::new()
+    }
+
+    pub(super) async fn refresh_links(&mut self) {
+        if let Some(mut links) = self.transport.direct_peers().await {
+            links.retain(|node| self.cluster_members.contains(node));
+            self.node.observe_links(&links);
+        }
     }
 
     pub(super) async fn process_pending_draining_nodes(&mut self) -> Vec<u64> {
@@ -92,6 +130,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
     }
 
     pub(super) async fn process_pending_dead_nodes(&mut self) -> Vec<u64> {
+        self.rescan_for_heard_voter = false;
         let mut proposed_indices = Vec::new();
         let pending: Vec<NodeId> = self.pending_dead_nodes.drain().collect();
 
@@ -102,29 +141,27 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             }
         }
 
-        self.scan_partition_map_for_dead_primaries(&mut proposed_indices)
+        self.scan_partition_map_for_departed_nodes(&mut proposed_indices)
             .await;
 
         proposed_indices
     }
 
-    pub(super) async fn scan_partition_map_for_dead_primaries(
+    pub(super) async fn scan_partition_map_for_departed_nodes(
         &mut self,
         proposed_indices: &mut Vec<u64>,
     ) {
-        let alive_nodes: Vec<NodeId> = self.cluster_members.clone();
-
-        for partition in PartitionId::all() {
-            if let Some(primary) = self.partition_map.primary(partition)
-                && !alive_nodes.contains(&primary)
-                && !self.pending_dead_nodes.contains(&primary)
-                && !self.processed_dead_nodes.contains(&primary)
-            {
-                tracing::warn!(?partition, ?primary, "found stale primary in partition map");
-                self.processed_dead_nodes.insert(primary);
-                let indices = self.reassign_partitions_for_dead_node(primary).await;
-                proposed_indices.extend(indices);
-            }
+        let departed: BTreeSet<NodeId> = self
+            .planned_map()
+            .all_nodes()
+            .into_iter()
+            .filter(|node| !self.cluster_members.contains(node))
+            .collect();
+        for node in departed {
+            tracing::warn!(?node, "found partitions on a departed node");
+            self.processed_dead_nodes.insert(node);
+            let indices = self.reassign_partitions_for_dead_node(node).await;
+            proposed_indices.extend(indices);
         }
     }
 

@@ -6,6 +6,8 @@ use super::transport::{ClusterMessage, TransportConfig};
 use super::{NodeId, PartitionMap, PartitionRole};
 use std::collections::{BTreeSet, HashMap};
 
+const EXPECTED_NODE_BOOT_FACTOR: u64 = 2;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeStatus {
     Unknown,
@@ -20,6 +22,7 @@ struct NodeState {
     status: NodeStatus,
     missed_count: u32,
     delivers_acked_events: bool,
+    expected: bool,
 }
 
 #[derive(Debug)]
@@ -90,6 +93,32 @@ impl HeartbeatManager {
                     status: NodeStatus::Unknown,
                     missed_count: 0,
                     delivers_acked_events: false,
+                    expected: false,
+                },
+            );
+        }
+    }
+
+    pub fn expect_again(&mut self, node_id: NodeId) {
+        let settled = self.nodes.get(&node_id.get()).is_some_and(|state| {
+            matches!(state.status, NodeStatus::Alive | NodeStatus::Suspected)
+                || (state.status == NodeStatus::Unknown && state.expected)
+        });
+        if !settled {
+            self.expect_node(node_id);
+        }
+    }
+
+    pub fn expect_node(&mut self, node_id: NodeId) {
+        if node_id != self.local_node {
+            self.nodes.insert(
+                node_id.get(),
+                NodeState {
+                    last_heartbeat: 0,
+                    status: NodeStatus::Unknown,
+                    missed_count: 0,
+                    delivers_acked_events: false,
+                    expected: true,
                 },
             );
         }
@@ -169,6 +198,7 @@ impl HeartbeatManager {
                     status: NodeStatus::Alive,
                     missed_count: 0,
                     delivers_acked_events: heartbeat.delivers_acked_events(),
+                    expected: false,
                 },
             );
         }
@@ -232,13 +262,23 @@ impl HeartbeatManager {
         let suspect_threshold = timeout / 2;
 
         for (&node_id, state) in &mut self.nodes {
-            if state.status == NodeStatus::Dead || state.status == NodeStatus::Unknown {
+            if state.status == NodeStatus::Dead
+                || (state.status == NodeStatus::Unknown && !state.expected)
+            {
                 continue;
+            }
+            if state.last_heartbeat == 0 {
+                state.last_heartbeat = now;
             }
 
             let elapsed = now.saturating_sub(state.last_heartbeat);
+            let allowed = if state.status == NodeStatus::Unknown {
+                timeout * EXPECTED_NODE_BOOT_FACTOR
+            } else {
+                timeout
+            };
 
-            if elapsed > timeout {
+            if elapsed > allowed {
                 tracing::debug!(
                     node_id,
                     elapsed,
@@ -446,5 +486,80 @@ mod tests {
 
         mgr.handle_death_notice(node2);
         assert_eq!(mgr.node_status(node2), NodeStatus::Dead);
+    }
+
+    #[test]
+    fn an_expected_node_with_no_heartbeat_dies_after_the_timeout_from_the_first_check() {
+        let local = NodeId::validated(1).unwrap();
+        let expected = NodeId::validated(2).unwrap();
+        let mut manager = HeartbeatManager::new(local, config());
+        manager.expect_node(expected);
+
+        assert!(manager.check_timeouts(1_000_000).is_empty());
+        assert_eq!(manager.node_status(expected), NodeStatus::Unknown);
+        assert!(manager.check_timeouts(1_000_900).is_empty());
+        assert_eq!(manager.check_timeouts(1_001_100), vec![expected]);
+        assert!(manager.check_timeouts(1_001_200).is_empty());
+    }
+
+    #[test]
+    fn an_expected_node_that_sends_a_heartbeat_is_not_failed_over() {
+        let local = NodeId::validated(1).unwrap();
+        let expected = NodeId::validated(2).unwrap();
+        let mut manager = HeartbeatManager::new(local, config());
+        manager.expect_node(expected);
+        manager.check_timeouts(1_000_000);
+
+        let heartbeat = Heartbeat::create(expected, 1_000_300);
+        manager.receive_heartbeat(expected, &heartbeat, 1_000_300);
+
+        assert_eq!(manager.node_status(expected), NodeStatus::Alive);
+        assert!(manager.check_timeouts(1_000_600).is_empty());
+    }
+
+    #[test]
+    fn a_registered_peer_with_no_heartbeat_never_times_out() {
+        let local = NodeId::validated(1).unwrap();
+        let peer = NodeId::validated(2).unwrap();
+        let mut manager = HeartbeatManager::new(local, config());
+        manager.register_node(peer);
+
+        assert!(manager.check_timeouts(1_000_000).is_empty());
+        assert!(manager.check_timeouts(9_000_000).is_empty());
+    }
+
+    #[test]
+    fn a_node_with_only_expected_peers_sends_heartbeats() {
+        let local = NodeId::validated(1).unwrap();
+        let mut manager = HeartbeatManager::new(local, config());
+        assert!(!manager.should_send(1_000));
+        manager.expect_node(NodeId::validated(2).unwrap());
+        assert!(manager.should_send(1_000));
+    }
+
+    #[test]
+    fn expecting_a_node_again_keeps_the_clock_already_running() {
+        let (local, peer) = (NodeId::validated(1).unwrap(), NodeId::validated(2).unwrap());
+        let mut manager = HeartbeatManager::new(local, TransportConfig::default());
+        manager.expect_node(peer);
+        assert!(manager.check_timeouts(1_000_000).is_empty());
+
+        manager.expect_again(peer);
+
+        assert!(manager.check_timeouts(1_020_000).is_empty());
+        assert_eq!(manager.check_timeouts(1_031_000), [peer]);
+    }
+
+    #[test]
+    fn expecting_a_suspected_node_again_keeps_its_heartbeat_timeout() {
+        let (local, peer) = (NodeId::validated(1).unwrap(), NodeId::validated(2).unwrap());
+        let mut manager = HeartbeatManager::new(local, TransportConfig::default());
+        manager.receive_heartbeat(peer, &Heartbeat::create(peer, 0), 1_000_000);
+        assert!(manager.check_timeouts(1_008_000).is_empty());
+        assert_eq!(manager.node_status(peer), NodeStatus::Suspected);
+
+        manager.expect_again(peer);
+
+        assert_eq!(manager.check_timeouts(1_016_000), [peer]);
     }
 }

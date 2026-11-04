@@ -664,6 +664,10 @@ impl<T: ClusterTransport> NodeController<T> {
         self.heartbeat.alive_nodes()
     }
 
+    pub fn dead_nodes(&self) -> Vec<NodeId> {
+        self.heartbeat.dead_nodes()
+    }
+
     pub fn alive_or_suspected_nodes(&self) -> Vec<NodeId> {
         self.heartbeat.alive_or_suspected_nodes()
     }
@@ -932,11 +936,22 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
+    fn handle_death_notice_message(&mut self, node: NodeId) {
+        self.heartbeat.handle_death_notice(node);
+        self.handle_node_death(node);
+        if self
+            .tx_raft_events
+            .try_send(RaftEvent::NodeDead(node))
+            .is_err()
+        {
+            tracing::warn!(?node, "raft event queue is full, dropping a death notice");
+        }
+    }
+
     fn handle_node_death(&mut self, dead_node: NodeId) {
         let start = std::time::Instant::now();
 
         tracing::warn!(?dead_node, "node death detected");
-        let _ = self.tx_raft_events.try_send(RaftEvent::NodeDead(dead_node));
         self.dead_nodes_for_session_update.push_back(dead_node);
         self.change_events_node_gone(dead_node);
         self.snapshots_node_gone(dead_node);
@@ -1063,8 +1078,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 None
             }
             ClusterMessage::DeathNotice { node_id } => {
-                self.heartbeat.handle_death_notice(node_id);
-                self.handle_node_death(node_id);
+                self.handle_death_notice_message(node_id);
                 None
             }
             ClusterMessage::DrainNotification { node_id } => {
@@ -1163,8 +1177,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 self.handle_ack(ack).await;
             }
             ClusterMessage::DeathNotice { node_id } => {
-                self.heartbeat.handle_death_notice(node_id);
-                self.handle_node_death(node_id);
+                self.handle_death_notice_message(node_id);
             }
             ClusterMessage::DrainNotification { node_id } => {
                 tracing::info!(?node_id, "received drain notification");

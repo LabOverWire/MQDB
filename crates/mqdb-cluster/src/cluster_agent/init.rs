@@ -21,6 +21,8 @@ use tracing::info;
 
 use super::PeerConfig;
 
+const PEER_ADDRESSES_FILE: &str = "peer_addrs";
+
 impl ClusteredAgent {
     fn open_stores_backend(
         config: &ClusterConfig,
@@ -68,7 +70,10 @@ impl ClusteredAgent {
         #[cfg(not(feature = "mqtt-bridge"))]
         let _ = config.quic.direct;
 
-        let quic_transport = QuicDirectTransport::new(node_id);
+        let quic_transport = QuicDirectTransport::remembering_addresses_in(
+            node_id,
+            config.db_path.join(PEER_ADDRESSES_FILE),
+        );
         #[cfg(feature = "dev-insecure")]
         quic_transport.set_insecure(config.quic.insecure);
         if let Some(ca_path) = &config.quic.ca_file {
@@ -103,8 +108,32 @@ impl ClusteredAgent {
         node_id: NodeId,
         transport_config: TransportConfig,
         peers: &[PeerConfig],
+        restored_voters: &[NodeId],
         channels: MessageProcessorChannels,
     ) -> DedicatedExecutor {
+        let tx_batch = channels.tx_batch.clone();
+        let processor = Self::build_message_processor(
+            node_id,
+            transport_config,
+            peers,
+            restored_voters,
+            channels,
+        );
+        let executor = DedicatedExecutor::new("msg-processor", 2);
+        executor.handle().spawn(async move {
+            Box::pin(processor.run(tx_batch)).await;
+        });
+        info!("started message processor on dedicated executor");
+        executor
+    }
+
+    fn build_message_processor(
+        node_id: NodeId,
+        transport_config: TransportConfig,
+        peers: &[PeerConfig],
+        restored_voters: &[NodeId],
+        channels: MessageProcessorChannels,
+    ) -> MessageProcessor {
         let mut processor = MessageProcessor::new(
             node_id,
             transport_config,
@@ -114,17 +143,16 @@ impl ClusteredAgent {
             channels.transport_inbox_rx,
             channels.rx_tick,
         );
+        processor.expect_members_from(channels.rx_expected_members);
         for peer in peers {
             if let Some(peer_node_id) = NodeId::validated(peer.node_id) {
                 processor.register_peer(peer_node_id);
             }
         }
-        let executor = DedicatedExecutor::new("msg-processor", 2);
-        executor.handle().spawn(async move {
-            Box::pin(processor.run(channels.tx_batch)).await;
-        });
-        info!("started message processor on dedicated executor");
-        executor
+        for voter in restored_voters {
+            processor.expect_peer(*voter);
+        }
+        processor
     }
 
     /// # Errors
@@ -191,6 +219,7 @@ impl ClusteredAgent {
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
 
         let (tx_tick, rx_tick) = flume::bounded(1);
+        let (tx_expected_members, rx_expected_members) = flume::bounded(RAFT_CHANNEL_CAPACITY);
         let (tx_main_queue, rx_main_queue) = flume::bounded(MAIN_QUEUE_CAPACITY);
         let (tx_batch, rx_batch) = flume::bounded(BATCH_QUEUE_CAPACITY);
 
@@ -200,12 +229,14 @@ impl ClusteredAgent {
             tx_main_queue,
             transport_inbox_rx,
             rx_tick,
+            rx_expected_members,
             tx_batch,
         };
         let processor_executor = Self::spawn_message_processor(
             node_id,
             transport_config,
             &config.peers,
+            raft.voters(),
             processor_channels,
         );
 
@@ -241,6 +272,7 @@ impl ClusteredAgent {
             bridge_executor: None,
             processor_executor: Some(processor_executor),
             tx_tick: Some(tx_tick),
+            tx_expected_members,
             rx_main_queue: Some(rx_main_queue),
             rx_batch: Some(rx_batch),
             ws_bind_address: config.ws_bind_address,
@@ -290,6 +322,7 @@ impl ClusteredAgent {
                 .rx_raft_admin
                 .take()
                 .ok_or("run() called twice: rx_raft_admin already taken")?,
+            tx_expected_members: self.tx_expected_members.clone(),
             tx_partition_map: self
                 .tx_partition_map
                 .take()
@@ -377,5 +410,87 @@ impl ClusteredAgent {
                 tracing::error!("HTTP server error: {e}");
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restored_voters_are_expected_and_a_never_seen_one_gets_a_death_verdict() {
+        let node = NodeId::validated(1).unwrap();
+        let voter = NodeId::validated(2).unwrap();
+        let (tx_raft_messages, _rx_raft_messages) = flume::bounded(1);
+        let (tx_raft_events, _rx_raft_events) = flume::bounded(1);
+        let (tx_main_queue, _rx_main_queue) = flume::bounded(1);
+        let (_tx_inbox, transport_inbox_rx) = flume::bounded(1);
+        let (_tx_tick, rx_tick) = flume::bounded(1);
+        let (tx_batch, _rx_batch) = flume::bounded(1);
+        let mut processor = ClusteredAgent::build_message_processor(
+            node,
+            TransportConfig::default(),
+            &[],
+            &[voter],
+            MessageProcessorChannels {
+                tx_raft_messages,
+                tx_raft_events,
+                tx_main_queue,
+                transport_inbox_rx,
+                rx_tick,
+                rx_expected_members: flume::unbounded().1,
+                tx_batch,
+            },
+        );
+
+        assert!(processor.check_timeouts(1_000_000).is_empty());
+        assert_eq!(processor.check_timeouts(1_031_000), [voter]);
+    }
+
+    #[test]
+    fn a_built_processor_expects_the_members_raft_forwards() {
+        let node = NodeId::validated(1).unwrap();
+        let member = NodeId::validated(2).unwrap();
+        let (tx_expected, rx_expected_members) = flume::unbounded();
+        let (tx_raft_events, rx_raft_events) = flume::unbounded();
+        let mut processor = ClusteredAgent::build_message_processor(
+            node,
+            TransportConfig::default(),
+            &[],
+            &[],
+            MessageProcessorChannels {
+                tx_raft_messages: flume::unbounded().0,
+                tx_raft_events,
+                tx_main_queue: flume::unbounded().0,
+                transport_inbox_rx: flume::unbounded().1,
+                rx_tick: flume::unbounded().1,
+                rx_expected_members,
+                tx_batch: flume::unbounded().0,
+            },
+        );
+
+        tx_expected.send(member).unwrap();
+
+        assert!(processor.process_tick(1_000_000).dead_nodes.is_empty());
+        assert_eq!(processor.process_tick(1_031_000).dead_nodes, [member]);
+        assert!(rx_raft_events.drain().any(
+            |event| matches!(event, crate::cluster::RaftEvent::NodeDead(dead) if dead == member)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_node_reads_its_remembered_peer_addresses_from_its_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(PEER_ADDRESSES_FILE), "2 127.0.0.1:2000\n").unwrap();
+        let node = NodeId::validated(1).unwrap();
+        let config = ClusterConfig::new(1, dir.path().to_path_buf(), Vec::new());
+
+        let (transport, _inbox) = ClusteredAgent::build_transport(node, &config);
+
+        let quic = transport.as_quic().unwrap();
+        assert_eq!(
+            quic.peers_needing_dial(&[]).await,
+            [NodeId::validated(2).unwrap()]
+        );
     }
 }

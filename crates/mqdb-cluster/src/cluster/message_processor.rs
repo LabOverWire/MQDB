@@ -1,6 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use super::death_verdicts::DeathVerdicts;
 use super::heartbeat::{HeartbeatManager, NodeStatus};
 use super::protocol::{ForwardedPublish, Heartbeat};
 use super::raft_task::RaftEvent;
@@ -32,9 +33,11 @@ pub struct MessageProcessor {
     pending_heartbeat_updates: Vec<HeartbeatUpdate>,
     tx_raft_messages: flume::Sender<RaftMessage>,
     tx_raft_events: flume::Sender<RaftEvent>,
+    death_verdicts: DeathVerdicts,
     tx_main_queue: flume::Sender<InboundMessage>,
     rx_inbox: flume::Receiver<InboundMessage>,
     rx_tick: flume::Receiver<u64>,
+    rx_expected_members: flume::Receiver<NodeId>,
     last_batch_time: u64,
 }
 
@@ -57,15 +60,36 @@ impl MessageProcessor {
             pending_heartbeat_updates: Vec::new(),
             tx_raft_messages,
             tx_raft_events,
+            death_verdicts: DeathVerdicts::default(),
             tx_main_queue,
             rx_inbox,
             rx_tick,
+            rx_expected_members: flume::unbounded().1,
             last_batch_time: 0,
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn receive_heartbeat_for_test(&mut self, from: NodeId, at: u64) {
+        self.heartbeat_manager
+            .receive_heartbeat(from, &Heartbeat::create(from, at), at);
+    }
+
+    pub fn expect_members_from(&mut self, rx_expected_members: flume::Receiver<NodeId>) {
+        self.rx_expected_members = rx_expected_members;
+    }
+
     pub fn register_peer(&mut self, peer: NodeId) {
         self.heartbeat_manager.register_node(peer);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn check_timeouts(&mut self, now: u64) -> Vec<NodeId> {
+        self.heartbeat_manager.check_timeouts(now)
+    }
+
+    pub fn expect_peer(&mut self, peer: NodeId) {
+        self.heartbeat_manager.expect_node(peer);
     }
 
     pub fn update_partition_map(&mut self, map: PartitionMap) {
@@ -105,7 +129,7 @@ impl MessageProcessor {
         tracing::info!(node = self.node_id.get(), "message processor stopped");
     }
 
-    fn process_tick(&mut self, now: u64) -> ProcessingBatch {
+    pub(crate) fn process_tick(&mut self, now: u64) -> ProcessingBatch {
         let mut batch = ProcessingBatch::default();
         self.last_batch_time = now;
 
@@ -113,11 +137,20 @@ impl MessageProcessor {
             batch.heartbeat_to_send = Some(self.heartbeat_manager.build_heartbeat(now));
         }
 
+        for member in self.rx_expected_members.try_iter() {
+            self.heartbeat_manager.expect_again(member);
+        }
+
+        let heartbeat_manager = &self.heartbeat_manager;
+        self.death_verdicts.retry(&self.tx_raft_events, |node| {
+            heartbeat_manager.node_status(node) != NodeStatus::Dead
+        });
+
         batch.dead_nodes = self.heartbeat_manager.check_timeouts(now);
         batch.heartbeat_updates = std::mem::take(&mut self.pending_heartbeat_updates);
 
         for dead in &batch.dead_nodes {
-            let _ = self.tx_raft_events.try_send(RaftEvent::NodeDead(*dead));
+            self.death_verdicts.report(&self.tx_raft_events, *dead);
         }
 
         batch
@@ -247,6 +280,79 @@ mod tests {
             heartbeat_timeout_ms: 500,
             ack_timeout_ms: 50,
         }
+    }
+
+    fn processor_with_a_full_event_queue(
+        peer: NodeId,
+    ) -> (MessageProcessor, flume::Receiver<RaftEvent>) {
+        let (tx_events, rx_events) = flume::bounded(1);
+        let mut processor = MessageProcessor::new(
+            NodeId::validated(1).unwrap(),
+            test_config(),
+            flume::unbounded().0,
+            tx_events.clone(),
+            flume::unbounded().0,
+            flume::unbounded().1,
+            flume::unbounded().1,
+        );
+        processor.register_peer(peer);
+        processor.heartbeat_manager.receive_heartbeat(
+            peer,
+            &crate::cluster::protocol::Heartbeat::create(peer, 0),
+            1_000,
+        );
+        tx_events.try_send(RaftEvent::NodeAlive(peer)).unwrap();
+        (processor, rx_events)
+    }
+
+    fn verdict_arrives(rx_events: &flume::Receiver<RaftEvent>, peer: NodeId) -> bool {
+        rx_events
+            .try_iter()
+            .any(|event| matches!(event, RaftEvent::NodeDead(node) if node == peer))
+    }
+
+    #[test]
+    fn a_death_verdict_refused_by_a_full_queue_is_sent_on_a_later_tick() {
+        let peer = NodeId::validated(2).unwrap();
+        let (mut processor, rx_events) = processor_with_a_full_event_queue(peer);
+
+        assert_eq!(processor.process_tick(2_000).dead_nodes, [peer]);
+        assert!(!verdict_arrives(&rx_events, peer));
+
+        assert!(processor.process_tick(2_100).dead_nodes.is_empty());
+        assert!(verdict_arrives(&rx_events, peer));
+    }
+
+    #[test]
+    fn a_held_death_verdict_is_dropped_when_the_node_is_back() {
+        let peer = NodeId::validated(2).unwrap();
+        let (mut processor, rx_events) = processor_with_a_full_event_queue(peer);
+
+        processor.process_tick(2_000);
+        assert!(!verdict_arrives(&rx_events, peer));
+        processor.heartbeat_manager.receive_heartbeat(
+            peer,
+            &crate::cluster::protocol::Heartbeat::create(peer, 0),
+            2_050,
+        );
+
+        processor.process_tick(2_100);
+        assert!(!verdict_arrives(&rx_events, peer));
+    }
+
+    #[test]
+    fn a_held_verdict_gives_way_to_a_new_expectation_of_that_node() {
+        let peer = NodeId::validated(2).unwrap();
+        let (mut processor, rx_events) = processor_with_a_full_event_queue(peer);
+        let (tx_expected, rx_expected) = flume::unbounded();
+        processor.expect_members_from(rx_expected);
+
+        assert_eq!(processor.process_tick(2_000).dead_nodes, [peer]);
+        assert!(!verdict_arrives(&rx_events, peer));
+        tx_expected.send(peer).unwrap();
+
+        assert!(processor.process_tick(2_100).dead_nodes.is_empty());
+        assert!(!verdict_arrives(&rx_events, peer));
     }
 
     #[test]

@@ -10,7 +10,7 @@ use crate::cluster::rebalancer::{
     compute_removal_assignments,
 };
 use crate::cluster::transport::{ClusterMessage, ClusterTransport};
-use crate::cluster::{Epoch, NodeId, PartitionId, PartitionMapExt, PartitionRole};
+use crate::cluster::{Epoch, NodeId, PartitionId, PartitionMap, PartitionMapExt, PartitionRole};
 
 impl<T: ClusterTransport> RaftCoordinator<T> {
     pub(super) async fn process_outputs(&mut self, outputs: Vec<RaftOutput>) {
@@ -85,11 +85,22 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
     pub(super) fn restore_snapshot(&mut self, snapshot: &RaftSnapshot) {
         self.partition_map = snapshot.partition_map();
         self.pending_partition_proposals = 0;
-        self.cluster_members.clone_from(&snapshot.members);
+        let previous_members =
+            std::mem::replace(&mut self.cluster_members, snapshot.members.clone());
         let own_id = self.node.node_id();
         if !self.cluster_members.contains(&own_id) {
             self.cluster_members.push(own_id);
         }
+        let joined: Vec<NodeId> = self
+            .cluster_members
+            .iter()
+            .copied()
+            .filter(|node| *node != own_id && !previous_members.contains(node))
+            .collect();
+        self.unheard_members.extend(joined.iter().copied());
+        self.members_to_expect.extend(joined);
+        let members = &self.cluster_members;
+        self.unheard_members.retain(|node| members.contains(node));
     }
 
     pub(super) fn apply_command_local(&mut self, command: &RaftCommand) {
@@ -120,24 +131,12 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         }
     }
 
-    pub async fn handle_node_death(&mut self, dead_node: NodeId) -> Vec<u64> {
+    pub async fn handle_node_death(&mut self, dead_node: NodeId) {
         self.cluster_members.retain(|&n| n != dead_node);
-
-        if !self.leader_ready() {
-            tracing::info!(
-                ?dead_node,
-                "not leader, queuing dead node for later processing"
-            );
-            self.pending_dead_nodes.insert(dead_node);
-            return Vec::new();
-        }
-
-        if !self.processed_dead_nodes.insert(dead_node) {
-            tracing::debug!(?dead_node, "already processed dead node, skipping");
-            return Vec::new();
-        }
-
-        self.reassign_partitions_for_dead_node(dead_node).await
+        self.unheard_members.remove(&dead_node);
+        self.death_since_last_tick = true;
+        self.refresh_links().await;
+        self.pending_dead_nodes.insert(dead_node);
     }
 
     pub async fn handle_node_alive(&mut self, node: NodeId) -> Vec<u64> {
@@ -153,6 +152,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             tracing::info!(?node, "added new cluster member");
         }
         self.node.add_peer(node);
+        self.rescan_for_heard_voter |= self.unheard_members.remove(&node);
 
         let node_has_partitions = self.node_has_partitions(node);
         let partitions_initialized = self.partitions_initialized();
@@ -170,7 +170,9 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         let needs_rebalance = !node_has_partitions && partitions_initialized && not_yet_processed;
 
         if !self.leader_ready() {
-            if needs_rebalance {
+            let applied_names_node = PartitionId::all()
+                .any(|p| self.partition_map.role_for(p, node) != PartitionRole::None);
+            if partitions_initialized && not_yet_processed && !applied_names_node {
                 tracing::info!(?node, "not leader, queuing node for later rebalance");
                 self.pending_new_nodes.insert(node);
             }
@@ -179,15 +181,16 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
 
         if needs_rebalance {
             self.processed_new_nodes.insert(node);
-            if self.pending_partition_proposals > 0 {
+            if self.pending_partition_proposals > 0 || !self.pending_dead_nodes.is_empty() {
                 tracing::info!(
                     ?node,
                     pending = self.pending_partition_proposals,
-                    "node needs partitions but rebalance in progress, queuing for later"
+                    "node needs partitions but a rebalance or a failover is in progress, queuing for later"
                 );
                 self.pending_new_nodes.insert(node);
                 return Vec::new();
             }
+            self.pending_new_nodes.remove(&node);
             tracing::info!(?node, "node has no partitions, triggering rebalance");
             return self.trigger_rebalance_for_new_node().await;
         }
@@ -214,8 +217,9 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
     }
 
     fn node_has_partitions(&self, node: NodeId) -> bool {
+        let planned = self.planned_map();
         for partition in PartitionId::all() {
-            let role = self.partition_map.role_for(partition, node);
+            let role = planned.role_for(partition, node);
             if role != PartitionRole::None {
                 return true;
             }
@@ -228,7 +232,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
     }
 
     pub(super) async fn initialize_partitions(&mut self) -> Vec<u64> {
-        let mut members = self.cluster_members.clone();
+        let mut members = self.live_targets();
         members.sort_by_key(|n| n.get());
         tracing::info!(?members, "initializing partitions for fresh cluster");
         let new_map =
@@ -257,8 +261,8 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             return Vec::new();
         }
         let reassignments = compute_incremental_assignments(
-            &self.partition_map,
-            &self.cluster_members,
+            &self.planned_map(),
+            &self.live_targets(),
             &RebalanceConfig::default(),
         );
         self.propose_reassignments(reassignments).await
@@ -313,20 +317,58 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             "forcing partition rebalance"
         );
 
-        self.trigger_rebalance_internal().await
+        let mut indices = self.adopt_partitions_without_a_live_holder().await;
+        indices.extend(self.trigger_rebalance_internal().await);
+        indices
+    }
+
+    async fn adopt_partitions_without_a_live_holder(&mut self) -> Vec<u64> {
+        let planned = self.planned_map();
+        let Some(adopter) = self.live_targets().first().copied() else {
+            return Vec::new();
+        };
+        let mut indices = Vec::new();
+        for partition in PartitionId::all() {
+            let Some(primary) = planned.primary(partition) else {
+                continue;
+            };
+            let holder_alive = self.cluster_members.contains(&primary)
+                || planned
+                    .replicas(partition)
+                    .iter()
+                    .any(|replica| self.cluster_members.contains(replica));
+            if holder_alive {
+                continue;
+            }
+            tracing::warn!(
+                ?partition,
+                ?primary,
+                ?adopter,
+                "forced rebalance gives up on the holders of this partition, its records stay on them"
+            );
+            let cmd = RaftCommand::update_partition(
+                partition,
+                adopter,
+                &[],
+                planned.epoch(partition).next(),
+            );
+            if let Ok(index) = self.propose_partition_update(cmd).await {
+                indices.push(index);
+            }
+        }
+        indices
     }
 
     pub(super) async fn trigger_drain_rebalance(&mut self, draining_node: NodeId) -> Vec<u64> {
         let remaining_nodes: Vec<NodeId> = self
-            .cluster_members
-            .iter()
-            .filter(|&&n| n != draining_node)
-            .copied()
+            .live_targets()
+            .into_iter()
+            .filter(|&n| n != draining_node)
             .collect();
 
         let config = RebalanceConfig::default();
         let reassignments = compute_removal_assignments(
-            &self.partition_map,
+            &self.planned_map(),
             &remaining_nodes,
             draining_node,
             &config,
@@ -367,29 +409,30 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         &mut self,
         dead_node: NodeId,
     ) -> Vec<u64> {
+        let planned = self.planned_map();
         let mut proposed_indices = Vec::new();
         let alive_nodes: Vec<NodeId> = self
-            .cluster_members
-            .iter()
-            .filter(|&&n| n != dead_node)
-            .copied()
+            .live_targets()
+            .into_iter()
+            .filter(|&n| n != dead_node)
             .collect();
 
         for partition in PartitionId::all() {
-            let role = self.partition_map.role_for(partition, dead_node);
+            let role = planned.role_for(partition, dead_node);
 
             match role {
                 PartitionRole::Primary => {
-                    if let Some(new_primary) = self.select_new_primary(partition, &alive_nodes) {
+                    if let Some(new_primary) =
+                        Self::select_new_primary(&planned, partition, &alive_nodes)
+                    {
                         tracing::info!(
                             ?partition,
                             ?dead_node,
                             ?new_primary,
                             "promoting replica to primary"
                         );
-                        let epoch = self.partition_map.epoch(partition).next();
-                        let remaining_replicas: Vec<NodeId> = self
-                            .partition_map
+                        let epoch = planned.epoch(partition).next();
+                        let remaining_replicas: Vec<NodeId> = planned
                             .replicas(partition)
                             .iter()
                             .filter(|&&n| n != dead_node && n != new_primary)
@@ -407,19 +450,25 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
                             proposed_indices.push(idx);
                         }
                     } else {
-                        tracing::error!(?partition, ?dead_node, "no replica available to promote");
+                        tracing::warn!(
+                            ?partition,
+                            ?dead_node,
+                            "no live replica heard from holds this partition, leaving it unavailable until a holder is heard"
+                        );
                     }
                 }
                 PartitionRole::Replica => {
-                    if let Some(current_primary) = self.partition_map.primary(partition) {
+                    if let Some(current_primary) = planned
+                        .primary(partition)
+                        .filter(|primary| alive_nodes.contains(primary))
+                    {
                         tracing::info!(
                             ?partition,
                             ?dead_node,
                             "removing dead replica from partition"
                         );
-                        let epoch = self.partition_map.epoch(partition).next();
-                        let remaining_replicas: Vec<NodeId> = self
-                            .partition_map
+                        let epoch = planned.epoch(partition).next();
+                        let remaining_replicas: Vec<NodeId> = planned
                             .replicas(partition)
                             .iter()
                             .filter(|&&n| n != dead_node)
@@ -445,13 +494,13 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         proposed_indices
     }
 
-    fn select_new_primary(&self, partition: PartitionId, alive_nodes: &[NodeId]) -> Option<NodeId> {
-        let replicas = self.partition_map.replicas(partition);
-        replicas
-            .iter()
-            .find(|r| alive_nodes.contains(r))
-            .copied()
-            .or_else(|| alive_nodes.first().copied())
+    fn select_new_primary(
+        planned: &PartitionMap,
+        partition: PartitionId,
+        alive_nodes: &[NodeId],
+    ) -> Option<NodeId> {
+        let replicas = planned.replicas(partition);
+        replicas.iter().find(|r| alive_nodes.contains(r)).copied()
     }
 
     pub(super) fn primaries_imbalanced(&self) -> bool {

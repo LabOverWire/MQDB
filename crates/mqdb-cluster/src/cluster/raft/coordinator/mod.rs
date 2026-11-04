@@ -7,10 +7,11 @@ mod replication;
 mod tests;
 
 use super::node::{RaftConfig, RaftNode, RaftOutput};
+use super::state::RaftCommand;
 use crate::cluster::transport::{ClusterMessage, ClusterTransport, TransportError};
-use crate::cluster::{NodeId, PartitionId, PartitionMap};
+use crate::cluster::{NodeId, PartitionId, PartitionMap, PartitionMapExt};
 use mqdb_core::storage::StorageBackend;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
 pub struct RaftCoordinator<T: ClusterTransport> {
@@ -27,7 +28,13 @@ pub struct RaftCoordinator<T: ClusterTransport> {
     pub(super) was_ready: bool,
     pub(super) pending_partition_proposals: usize,
     pub(super) last_balance_check: u64,
+    pub(super) restored_map_held: bool,
+    pub(super) death_since_last_tick: bool,
+    pub(super) last_death_ms: u64,
     pub(super) restored_map_unconfirmed: bool,
+    pub(super) unheard_members: BTreeSet<NodeId>,
+    pub(super) rescan_for_heard_voter: bool,
+    pub(super) members_to_expect: Vec<NodeId>,
 }
 
 impl<T: ClusterTransport> RaftCoordinator<T> {
@@ -46,7 +53,13 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             was_ready: false,
             pending_partition_proposals: 0,
             last_balance_check: 0,
+            restored_map_held: false,
+            death_since_last_tick: false,
+            last_death_ms: 0,
             restored_map_unconfirmed: false,
+            unheard_members: BTreeSet::new(),
+            rescan_for_heard_voter: false,
+            members_to_expect: Vec::new(),
         }
     }
 
@@ -74,11 +87,68 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             was_ready: false,
             pending_partition_proposals: 0,
             last_balance_check: 0,
+            restored_map_held: false,
+            death_since_last_tick: false,
+            last_death_ms: 0,
             restored_map_unconfirmed: false,
+            unheard_members: BTreeSet::new(),
+            rescan_for_heard_voter: false,
+            members_to_expect: Vec::new(),
         };
 
         coordinator.rebuild_partition_map();
+        coordinator.restore_voters();
         Ok(coordinator)
+    }
+
+    fn restore_voters(&mut self) {
+        let own_id = self.node.node_id();
+        let mut named: BTreeSet<NodeId> = self.cluster_members.iter().copied().collect();
+        named.extend(self.partition_map.all_nodes());
+        for command in self.node.persisted_commands() {
+            if let RaftCommand::UpdatePartition(update) = command {
+                let mut assignment = PartitionMap::new();
+                assignment.apply_update(&update);
+                named.extend(assignment.all_nodes());
+            }
+        }
+        named.remove(&own_id);
+        self.restored_map_held = !named.is_empty();
+        for node in named {
+            self.add_peer(node);
+            self.unheard_members.insert(node);
+        }
+    }
+
+    pub(crate) fn forward_members_to_expect(&mut self, tx: &flume::Sender<NodeId>) {
+        self.members_to_expect
+            .retain(|node| matches!(tx.try_send(*node), Err(flume::TrySendError::Full(_))));
+    }
+
+    pub(super) fn live_targets(&self) -> Vec<NodeId> {
+        self.cluster_members
+            .iter()
+            .filter(|node| !self.unheard_members.contains(node))
+            .copied()
+            .collect()
+    }
+
+    pub fn voters(&self) -> &[NodeId] {
+        self.node.peers()
+    }
+
+    pub(super) fn planned_map(&self) -> PartitionMap {
+        let mut planned = self.partition_map.clone();
+        for command in self.node.unapplied_commands() {
+            if let RaftCommand::UpdatePartition(update) = command {
+                planned.apply_update(&update);
+            }
+        }
+        planned
+    }
+
+    pub fn holds_restored_map(&self) -> bool {
+        self.restored_map_held && !self.node.map_is_current()
     }
 
     fn rebuild_partition_map(&mut self) {
