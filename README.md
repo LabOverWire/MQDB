@@ -750,19 +750,19 @@ MQDB supports distributed clustering with automatic failover and partition rebal
 > treats a named node it has not heard from within 30 seconds of starting as dead, so a node slower
 > than that has its partitions moved to their replicas, and gets partitions back from the rebalance.
 >
-> A partition moves only to a live replica. If both copies of a partition are gone it stays mapped
-> to them and answers 503, rather than move to a node with no copy and answer 404. When its primary
-> returns it serves at once, and when its replica returns it is promoted at the next periodic check,
-> about 30 seconds later.
-> Replication is asynchronous, so a replica promoted this way can lack writes its primary acked, and
-> those writes are not merged back when the primary returns. If you
-> know the holders are never coming back, `mqdb cluster rebalance` gives those partitions to a live
-> node, which starts them empty. Failover waits until 1.5 seconds have passed with no new death, so
-> deaths detected closer together than that count as one. A partition that has lost one copy can
-> stay on the other indefinitely (#327). If that holder dies at any later time, the first has left
-> the map, so the partition answers 503 until a holder returns or you run `mqdb cluster rebalance`
-> on the Raft leader. A leader without links to a majority proposes no failover at all until it has
-> them again.
+> A partition moves only to a live replica, and that replica may itself have no copy yet: if its
+> source has died it takes the role empty. If both copies of a partition are gone it stays mapped to
+> them and answers 503, rather than move to a node with no mapped copy and answer 404. When its
+> primary returns it serves at once, and when its replica returns it is promoted at the next
+> periodic check, up to 30 seconds later. Replication is asynchronous, so a replica promoted this
+> way can lack writes its primary acked, and those writes are not merged back when the primary
+> returns. If you know the holders are never coming back, `mqdb cluster rebalance` gives those
+> partitions to a live node, which starts them empty. Failover waits until 1.5 seconds have passed
+> with no new death, so deaths detected closer together than that count as one. A partition that
+> has lost one copy can stay on the other indefinitely (#327). If that holder dies at any later
+> time, the partition answers 503 until that holder returns or you run `mqdb cluster rebalance` on
+> the Raft leader; the holder that left the map earlier does not help when it returns. A leader
+> without links to a majority proposes no failover at all until it has them again.
 >
 > This does not stop every disruption. A returning node with links to a majority that excludes the
 > leader can still raise the term and depose it (#314). Voter sets are not committed membership
