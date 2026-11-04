@@ -266,7 +266,6 @@ async fn a_held_verdict_does_not_land_after_the_node_is_back() {
     let revived = rx_events.recv_async().await.unwrap();
     assert!(matches!(revived, RaftEvent::NodeAlive(node) if node == peer));
 
-    ctrl.tick(2_060);
     tx_tick.send(2_100).unwrap();
     rx_batch.recv_async().await.unwrap();
 
@@ -322,6 +321,19 @@ async fn a_verdict_refused_by_a_full_queue_is_sent_by_the_running_processor() {
             .drain()
             .any(|event| matches!(event, RaftEvent::NodeDead(dead) if dead == peer))
     );
+}
+
+#[test]
+fn a_verdict_on_a_node_never_registered_here_is_not_in_the_dead_list() {
+    let peer = node(OLD_PRIMARY);
+    let mut ctrl = controller(THIS);
+
+    ctrl.apply_dead_nodes(&[peer]);
+    assert!(ctrl.dead_nodes().is_empty());
+
+    ctrl.heartbeat.register_node(peer);
+    ctrl.apply_dead_nodes(&[peer]);
+    assert_eq!(ctrl.dead_nodes(), [peer]);
 }
 
 #[test]

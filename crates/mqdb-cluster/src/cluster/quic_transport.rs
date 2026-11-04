@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::address_book::AddressBook;
+use super::redial_backoff::RedialBackoff;
 use super::transport::{
     ClusterMessage, ClusterTransport, InboundMessage, RoutedPublish, TransportError,
 };
@@ -407,6 +408,15 @@ impl QuicDirectTransport {
                 })
             })
             .collect()
+    }
+
+    pub async fn down_peers_due(
+        &self,
+        backoff: &mut RedialBackoff,
+        dead: &[NodeId],
+        now: Instant,
+    ) -> Vec<NodeId> {
+        backoff.due(&self.peers_needing_dial(dead).await, dead, now)
     }
 
     pub async fn connect_configured_peers(

@@ -345,6 +345,21 @@ mod tests {
     }
 
     #[test]
+    fn a_held_verdict_gives_way_to_a_new_expectation_of_that_node() {
+        let peer = NodeId::validated(2).unwrap();
+        let (mut processor, rx_events) = processor_with_a_full_event_queue(peer);
+        let (tx_expected, rx_expected) = flume::unbounded();
+        processor.expect_members_from(rx_expected);
+
+        assert_eq!(processor.process_tick(2_000).dead_nodes, [peer]);
+        assert!(!verdict_arrives(&rx_events, peer));
+        tx_expected.send(peer).unwrap();
+
+        assert!(processor.process_tick(2_100).dead_nodes.is_empty());
+        assert!(!verdict_arrives(&rx_events, peer));
+    }
+
+    #[test]
     fn processor_forward_dedup() {
         let node_id = NodeId::validated(1).unwrap();
         let (tx_raft, _rx_raft) = flume::unbounded();

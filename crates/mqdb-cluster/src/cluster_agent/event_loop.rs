@@ -576,11 +576,9 @@ impl ClusteredAgent {
         let Some(quic) = quic else {
             return;
         };
-        let due = backoff.due(
-            &quic.peers_needing_dial(&dead).await,
-            &dead,
-            std::time::Instant::now(),
-        );
+        let due = quic
+            .down_peers_due(backoff, &dead, std::time::Instant::now())
+            .await;
         if !due.is_empty() {
             tokio::spawn(async move {
                 quic.redial(&due).await;

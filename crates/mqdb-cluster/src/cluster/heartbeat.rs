@@ -536,4 +536,30 @@ mod tests {
         manager.expect_node(NodeId::validated(2).unwrap());
         assert!(manager.should_send(1_000));
     }
+
+    #[test]
+    fn expecting_a_node_again_keeps_the_clock_already_running() {
+        let (local, peer) = (NodeId::validated(1).unwrap(), NodeId::validated(2).unwrap());
+        let mut manager = HeartbeatManager::new(local, TransportConfig::default());
+        manager.expect_node(peer);
+        assert!(manager.check_timeouts(1_000_000).is_empty());
+
+        manager.expect_again(peer);
+
+        assert!(manager.check_timeouts(1_020_000).is_empty());
+        assert_eq!(manager.check_timeouts(1_031_000), [peer]);
+    }
+
+    #[test]
+    fn expecting_a_suspected_node_again_keeps_its_heartbeat_timeout() {
+        let (local, peer) = (NodeId::validated(1).unwrap(), NodeId::validated(2).unwrap());
+        let mut manager = HeartbeatManager::new(local, TransportConfig::default());
+        manager.receive_heartbeat(peer, &Heartbeat::create(peer, 0), 1_000_000);
+        assert!(manager.check_timeouts(1_008_000).is_empty());
+        assert_eq!(manager.node_status(peer), NodeStatus::Suspected);
+
+        manager.expect_again(peer);
+
+        assert_eq!(manager.check_timeouts(1_016_000), [peer]);
+    }
 }
