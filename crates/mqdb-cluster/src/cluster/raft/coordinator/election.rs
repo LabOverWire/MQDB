@@ -20,6 +20,8 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         let outputs = self.node.tick(now_ms);
         self.process_outputs(outputs).await;
 
+        self.last_balance_check = self.last_balance_check.min(now_ms);
+        self.last_death_ms = self.last_death_ms.min(now_ms);
         if std::mem::take(&mut self.death_since_last_tick) {
             self.last_balance_check = now_ms;
             self.last_death_ms = now_ms;

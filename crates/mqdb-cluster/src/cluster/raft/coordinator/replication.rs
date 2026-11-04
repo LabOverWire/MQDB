@@ -157,7 +157,9 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         let needs_rebalance = !node_has_partitions && partitions_initialized && not_yet_processed;
 
         if !self.leader_ready() {
-            if needs_rebalance {
+            let applied_names_node = PartitionId::all()
+                .any(|p| self.partition_map.role_for(p, node) != PartitionRole::None);
+            if partitions_initialized && not_yet_processed && !applied_names_node {
                 tracing::info!(?node, "not leader, queuing node for later rebalance");
                 self.pending_new_nodes.insert(node);
             }

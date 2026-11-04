@@ -1103,6 +1103,132 @@ async fn a_new_node_arriving_while_a_death_is_queued_is_rebalanced_after_the_dea
     );
 }
 
+fn all_partitions_on_nodes_1_and_2() -> Vec<RaftCommand> {
+    PartitionId::all()
+        .map(|partition| {
+            let (primary, replica) = if partition.get().is_multiple_of(2) {
+                (1, 2)
+            } else {
+                (2, 1)
+            };
+            assign(partition.get(), primary, replica, 1)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_node_named_only_by_a_lost_tail_is_rebalanced_when_this_node_leads() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node3 = NodeId::validated(3).unwrap();
+    let start = 1_790_000_000_000u64;
+    let log = all_partitions_on_nodes_1_and_2();
+    let mut coord = RaftCoordinator::new_with_storage(
+        node1,
+        MockTransport::new(node1),
+        grace_config(),
+        disk_with_log(3, &log),
+    )
+    .unwrap();
+    let tail = u64::try_from(log.len()).unwrap();
+    let beat = crate::cluster::raft::AppendEntriesRequest::create(3, 2, tail, 3, Vec::new(), tail);
+    assert!(
+        coord
+            .handle_append_entries(node2, beat, start)
+            .await
+            .is_success()
+    );
+    let entry = crate::cluster::raft::LogEntry::create(tail + 1, 4, assign(0, 1, 3, 2));
+    let append =
+        crate::cluster::raft::AppendEntriesRequest::create(4, 2, tail, 3, vec![entry], tail);
+    assert!(
+        coord
+            .handle_append_entries(node2, append, start + 10)
+            .await
+            .is_success()
+    );
+
+    coord.handle_node_alive(node3).await;
+    assert!(coord.pending_new_nodes.contains(&node3));
+
+    let replaced = crate::cluster::raft::LogEntry::create(tail + 1, 5, RaftCommand::Noop);
+    let overwrite =
+        crate::cluster::raft::AppendEntriesRequest::create(5, 2, tail, 3, vec![replaced], tail + 1);
+    assert!(
+        coord
+            .handle_append_entries(node2, overwrite, start + 20)
+            .await
+            .is_success()
+    );
+    for elapsed in (1_000u64..=8_000).step_by(100) {
+        coord.tick(start + elapsed).await;
+        if coord.node.role() == crate::cluster::raft::RaftRole::Candidate {
+            break;
+        }
+    }
+    let term = coord.current_term();
+    coord
+        .handle_request_vote_response(
+            node2,
+            crate::cluster::raft::rpc::RequestVoteResponse::granted(term),
+        )
+        .await;
+    assert!(coord.is_leader());
+    commit_tail(&mut coord).await;
+    coord.tick(start + 8_200).await;
+    commit_tail(&mut coord).await;
+    assert!(
+        PartitionId::all().any(
+            |p| coord.partition_map().role_for(p, node3) != crate::cluster::PartitionRole::None
+        ),
+        "the rebalance runs at catch-up, not on a later periodic check"
+    );
+}
+
+#[tokio::test]
+async fn a_leader_rebalances_no_node_named_by_its_own_unapplied_tail() {
+    let node3 = NodeId::validated(3).unwrap();
+    let start = 1_790_000_000_000u64;
+    let mut coord = restarted_leader_of_five(&all_partitions_on_nodes_1_and_2()).await;
+    coord.tick(start + 1_300).await;
+    commit_tail(&mut coord).await;
+    let cmd = assign(0, 1, 3, 2);
+    coord.propose_partition_update(cmd).await.unwrap();
+    coord.pending_partition_proposals = 0;
+    coord.processed_new_nodes.remove(&node3);
+    let before = coord.last_log_index();
+    assert!(coord.handle_node_alive(node3).await.is_empty());
+    assert_eq!(coord.last_log_index(), before);
+}
+
+#[tokio::test]
+async fn a_clock_moving_back_does_not_hold_a_queued_failover() {
+    let node4 = NodeId::validated(4).unwrap();
+    let node5 = NodeId::validated(5).unwrap();
+    let start = 1_790_000_000_000u64;
+    let mut coord = restarted_leader_of_five(&pair_on_nodes_4_and_5()).await;
+    coord.handle_node_death(node4).await;
+    coord.tick(start + 100_000).await;
+    coord.tick(start + 50_000).await;
+    coord.tick(start + 51_600).await;
+    commit_tail(&mut coord).await;
+    assert_eq!(holders(&coord, 0), (Some(node5), Vec::new()));
+}
+
+#[tokio::test]
+async fn a_clock_moving_back_does_not_hold_the_periodic_scan() {
+    let node4 = NodeId::validated(4).unwrap();
+    let node5 = NodeId::validated(5).unwrap();
+    let start = 1_790_000_000_000u64;
+    let mut coord = two_holders_die_together([node4, node5], start).await;
+    coord.tick(start + 500_000).await;
+    coord.handle_node_alive(node5).await;
+    coord.tick(start + 100_000).await;
+    coord.tick(start + 131_000).await;
+    commit_tail(&mut coord).await;
+    assert_eq!(holders(&coord, 0), (Some(node5), Vec::new()));
+}
+
 #[tokio::test]
 async fn a_lost_node_with_a_live_replica_is_failed_over_to_it() {
     let node1 = NodeId::validated(1).unwrap();
