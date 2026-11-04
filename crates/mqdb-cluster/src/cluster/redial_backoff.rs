@@ -3,16 +3,17 @@
 
 use super::NodeId;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
-const FIRST_DELAY_MS: u64 = 1_000;
-const MAX_DELAY_MS: u64 = 5_000;
-const LONG_ABSENCE_MS: u64 = 300_000;
-const LONG_ABSENCE_DELAY_MS: u64 = 60_000;
+const FIRST_DELAY: Duration = Duration::from_secs(1);
+const MAX_DELAY: Duration = Duration::from_secs(5);
+const LONG_ABSENCE: Duration = Duration::from_secs(300);
+const LONG_ABSENCE_DELAY: Duration = Duration::from_secs(60);
 
 struct NextDial {
-    unlinked_since_ms: u64,
-    at_ms: u64,
-    delay_ms: u64,
+    unlinked_since: Instant,
+    at: Instant,
+    delay: Duration,
 }
 
 #[derive(Default)]
@@ -21,7 +22,7 @@ pub struct RedialBackoff {
 }
 
 impl RedialBackoff {
-    pub fn due(&mut self, unlinked: &[NodeId], now_ms: u64) -> Vec<NodeId> {
+    pub fn due(&mut self, unlinked: &[NodeId], now: Instant) -> Vec<NodeId> {
         self.waiting.retain(|node, _| unlinked.contains(node));
         let mut due = Vec::new();
         for node in unlinked {
@@ -29,22 +30,21 @@ impl RedialBackoff {
                 self.waiting.insert(
                     *node,
                     NextDial {
-                        unlinked_since_ms: now_ms,
-                        at_ms: now_ms + FIRST_DELAY_MS,
-                        delay_ms: FIRST_DELAY_MS,
+                        unlinked_since: now,
+                        at: now + FIRST_DELAY,
+                        delay: FIRST_DELAY,
                     },
                 );
                 due.push(*node);
                 continue;
             };
-            if now_ms >= next.at_ms {
-                next.delay_ms = if now_ms.saturating_sub(next.unlinked_since_ms) >= LONG_ABSENCE_MS
-                {
-                    LONG_ABSENCE_DELAY_MS
+            if now >= next.at {
+                next.delay = if now.duration_since(next.unlinked_since) >= LONG_ABSENCE {
+                    LONG_ABSENCE_DELAY
                 } else {
-                    (next.delay_ms * 2).min(MAX_DELAY_MS)
+                    (next.delay * 2).min(MAX_DELAY)
                 };
-                next.at_ms = now_ms + next.delay_ms;
+                next.at = now + next.delay;
                 due.push(*node);
             }
         }
@@ -60,13 +60,18 @@ mod tests {
         NodeId::validated(id).unwrap()
     }
 
+    fn after(start: Instant, elapsed_ms: u64) -> Instant {
+        start + Duration::from_millis(elapsed_ms)
+    }
+
     #[test]
     fn a_peer_is_dialled_at_once_then_backs_off_to_the_cap() {
         let mut backoff = RedialBackoff::default();
         let peer = [node(2)];
+        let start = Instant::now();
         let attempts: Vec<u64> = (0..=20_000)
             .step_by(1_000)
-            .filter(|now| !backoff.due(&peer, *now).is_empty())
+            .filter(|elapsed| !backoff.due(&peer, after(start, *elapsed)).is_empty())
             .collect();
         assert_eq!(
             attempts,
@@ -79,10 +84,11 @@ mod tests {
     fn a_peer_absent_for_minutes_is_dialled_once_a_minute() {
         let mut backoff = RedialBackoff::default();
         let peer = [node(2)];
+        let start = Instant::now();
         let attempts: Vec<u64> = (0..=500_000)
             .step_by(1_000)
-            .filter(|now| !backoff.due(&peer, *now).is_empty())
-            .filter(|now| *now >= 290_000)
+            .filter(|elapsed| !backoff.due(&peer, after(start, *elapsed)).is_empty())
+            .filter(|elapsed| *elapsed >= 290_000)
             .collect();
         let gaps: Vec<u64> = attempts.windows(2).map(|pair| pair[1] - pair[0]).collect();
         assert_eq!(
@@ -97,18 +103,20 @@ mod tests {
     fn a_relinked_peer_starts_over_when_it_goes_down_again() {
         let mut backoff = RedialBackoff::default();
         let peer = [node(2)];
-        assert_eq!(backoff.due(&peer, 0), peer);
-        assert_eq!(backoff.due(&peer, 1_000), peer);
-        assert!(backoff.due(&[], 2_000).is_empty());
-        assert_eq!(backoff.due(&peer, 2_500), peer);
+        let start = Instant::now();
+        assert_eq!(backoff.due(&peer, after(start, 0)), peer);
+        assert_eq!(backoff.due(&peer, after(start, 1_000)), peer);
+        assert!(backoff.due(&[], after(start, 2_000)).is_empty());
+        assert_eq!(backoff.due(&peer, after(start, 2_500)), peer);
     }
 
     #[test]
     fn peers_back_off_independently() {
         let mut backoff = RedialBackoff::default();
-        assert_eq!(backoff.due(&[node(2)], 0), [node(2)]);
+        let start = Instant::now();
+        assert_eq!(backoff.due(&[node(2)], after(start, 0)), [node(2)]);
         assert_eq!(
-            backoff.due(&[node(2), node(3)], 500),
+            backoff.due(&[node(2), node(3)], after(start, 500)),
             [node(3)],
             "the new peer is due now while the first still waits"
         );

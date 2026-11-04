@@ -8,6 +8,7 @@ pub mod db;
 mod db_handler;
 pub mod db_protocol;
 mod db_topic;
+mod death_verdicts;
 mod dedicated_executor;
 pub mod entity;
 mod event_delivery;

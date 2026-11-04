@@ -214,3 +214,32 @@ async fn a_node_that_saw_the_move_asks_the_replaced_replica_before_taking_the_ro
     assert!(!ctrl.can_serve_reads(partition));
     assert_eq!(requests_to(&ctrl, REPLACED), 1);
 }
+
+#[test]
+fn a_death_verdict_refused_by_a_full_queue_is_sent_on_a_later_tick() {
+    let peer = node(OLD_PRIMARY);
+    let mut ctrl = controller(THIS);
+    let (tx_events, rx_events) = flume::bounded(1);
+    tx_events.try_send(RaftEvent::NodeAlive(peer)).unwrap();
+    ctrl.tx_raft_events = tx_events;
+    ctrl.heartbeat.register_node(peer);
+    ctrl.heartbeat.receive_heartbeat(
+        peer,
+        &crate::cluster::protocol::Heartbeat::create(peer, 0),
+        1_000,
+    );
+
+    ctrl.tick(1_000_000);
+    assert!(
+        !rx_events
+            .try_iter()
+            .any(|event| matches!(event, RaftEvent::NodeDead(_)))
+    );
+
+    ctrl.retry_death_verdicts();
+    assert!(
+        rx_events
+            .try_iter()
+            .any(|event| matches!(event, RaftEvent::NodeDead(dead) if dead == peer))
+    );
+}

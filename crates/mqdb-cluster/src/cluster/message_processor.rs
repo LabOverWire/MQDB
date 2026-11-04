@@ -1,6 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use super::death_verdicts::DeathVerdicts;
 use super::heartbeat::{HeartbeatManager, NodeStatus};
 use super::protocol::{ForwardedPublish, Heartbeat};
 use super::raft_task::RaftEvent;
@@ -32,6 +33,7 @@ pub struct MessageProcessor {
     pending_heartbeat_updates: Vec<HeartbeatUpdate>,
     tx_raft_messages: flume::Sender<RaftMessage>,
     tx_raft_events: flume::Sender<RaftEvent>,
+    death_verdicts: DeathVerdicts,
     tx_main_queue: flume::Sender<InboundMessage>,
     rx_inbox: flume::Receiver<InboundMessage>,
     rx_tick: flume::Receiver<u64>,
@@ -57,6 +59,7 @@ impl MessageProcessor {
             pending_heartbeat_updates: Vec::new(),
             tx_raft_messages,
             tx_raft_events,
+            death_verdicts: DeathVerdicts::default(),
             tx_main_queue,
             rx_inbox,
             rx_tick,
@@ -122,11 +125,16 @@ impl MessageProcessor {
             batch.heartbeat_to_send = Some(self.heartbeat_manager.build_heartbeat(now));
         }
 
+        let heartbeat_manager = &self.heartbeat_manager;
+        self.death_verdicts.retry(&self.tx_raft_events, |node| {
+            heartbeat_manager.node_status(node) == NodeStatus::Alive
+        });
+
         batch.dead_nodes = self.heartbeat_manager.check_timeouts(now);
         batch.heartbeat_updates = std::mem::take(&mut self.pending_heartbeat_updates);
 
         for dead in &batch.dead_nodes {
-            let _ = self.tx_raft_events.try_send(RaftEvent::NodeDead(*dead));
+            self.death_verdicts.report(&self.tx_raft_events, *dead);
         }
 
         batch
@@ -256,6 +264,68 @@ mod tests {
             heartbeat_timeout_ms: 500,
             ack_timeout_ms: 50,
         }
+    }
+
+    fn processor_with_a_full_event_queue(
+        peer: NodeId,
+    ) -> (MessageProcessor, flume::Receiver<RaftEvent>) {
+        let (tx_raft, _rx_raft) = flume::unbounded();
+        let (tx_events, rx_events) = flume::bounded(1);
+        let (tx_main, _rx_main) = flume::unbounded();
+        let (_tx_inbox, rx_inbox) = flume::unbounded();
+        let (_tx_tick, rx_tick) = flume::unbounded();
+        let mut processor = MessageProcessor::new(
+            NodeId::validated(1).unwrap(),
+            test_config(),
+            tx_raft,
+            tx_events.clone(),
+            tx_main,
+            rx_inbox,
+            rx_tick,
+        );
+        processor.register_peer(peer);
+        processor.heartbeat_manager.receive_heartbeat(
+            peer,
+            &crate::cluster::protocol::Heartbeat::create(peer, 0),
+            1_000,
+        );
+        tx_events.try_send(RaftEvent::NodeAlive(peer)).unwrap();
+        (processor, rx_events)
+    }
+
+    fn verdict_arrives(rx_events: &flume::Receiver<RaftEvent>, peer: NodeId) -> bool {
+        rx_events
+            .try_iter()
+            .any(|event| matches!(event, RaftEvent::NodeDead(node) if node == peer))
+    }
+
+    #[test]
+    fn a_death_verdict_refused_by_a_full_queue_is_sent_on_a_later_tick() {
+        let peer = NodeId::validated(2).unwrap();
+        let (mut processor, rx_events) = processor_with_a_full_event_queue(peer);
+
+        assert_eq!(processor.process_tick(2_000).dead_nodes, [peer]);
+        assert!(!verdict_arrives(&rx_events, peer));
+
+        assert!(processor.process_tick(2_100).dead_nodes.is_empty());
+        assert!(verdict_arrives(&rx_events, peer));
+    }
+
+    #[test]
+    fn a_held_death_verdict_is_dropped_when_the_node_is_back() {
+        let peer = NodeId::validated(2).unwrap();
+        let (mut processor, rx_events) = processor_with_a_full_event_queue(peer);
+
+        processor.process_tick(2_000);
+        assert!(!verdict_arrives(&rx_events, peer));
+        processor.heartbeat_manager.receive_heartbeat(
+            peer,
+            &crate::cluster::protocol::Heartbeat::create(peer, 0),
+            2_050,
+        );
+
+        processor.process_tick(2_100);
+        assert!(!verdict_arrives(&rx_events, peer));
     }
 
     #[test]
