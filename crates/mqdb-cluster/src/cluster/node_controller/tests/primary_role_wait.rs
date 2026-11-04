@@ -1,0 +1,216 @@
+// Copyright 2025-2026 LabOverWire. All rights reserved.
+// SPDX-License-Identifier: AGPL-3.0-only
+
+use super::*;
+use crate::cluster::db::data_partition;
+use crate::cluster::{PartitionAssignment, PartitionMap};
+
+const ENTITY: &str = "item";
+const ID: &str = "role-wait";
+const THIS: u16 = 1;
+const OLD_PRIMARY: u16 = 2;
+const REPLACED: u16 = 3;
+
+fn node(id: u16) -> NodeId {
+    NodeId::validated(id).unwrap()
+}
+
+fn controller(id: u16) -> NodeController<MockTransport> {
+    create_test_controller(node(id), MockTransport::new(node(id)))
+}
+
+fn map_with(primary: u16, replicas: &[u16], epoch: u64) -> PartitionMap {
+    let mut map = PartitionMap::default();
+    map.set(
+        data_partition(ENTITY, ID),
+        PartitionAssignment::new(
+            node(primary),
+            replicas.iter().map(|id| node(*id)).collect(),
+            Epoch::new(epoch),
+        ),
+    );
+    map
+}
+
+fn heard(ctrl: &mut NodeController<MockTransport>, from: u16) {
+    ctrl.heartbeat.receive_heartbeat(
+        node(from),
+        &crate::cluster::protocol::Heartbeat::create(node(from), 0),
+        0,
+    );
+}
+
+fn requests_to(ctrl: &NodeController<MockTransport>, to: u16) -> usize {
+    ctrl.transport
+        .sent_messages()
+        .into_iter()
+        .filter(|(target, message)| {
+            *target == node(to) && matches!(message, ClusterMessage::SnapshotRequest(_))
+        })
+        .count()
+}
+
+fn on_backend(
+    id: u16,
+    backend: &Arc<crate::cluster::test_support::FaultyBackend>,
+) -> NodeController<MockTransport> {
+    let storage: Arc<dyn mqdb_core::storage::StorageBackend> = backend.clone();
+    NodeController::new_with_storage(
+        node(id),
+        MockTransport::new(node(id)),
+        TransportConfig::default(),
+        Some(storage),
+        flume::unbounded().0,
+        flume::unbounded().0,
+    )
+}
+
+async fn primary_built_from_a_snapshot(backend: &Arc<crate::cluster::test_support::FaultyBackend>) {
+    let partition = data_partition(ENTITY, ID);
+    let mut holder = controller(REPLACED);
+    holder.become_primary(partition, Epoch::new(1));
+    holder
+        .apply_raft_partition_map(map_with(REPLACED, &[OLD_PRIMARY], 1))
+        .await;
+    holder
+        .db_create(ENTITY, ID, br#"{"id":"role-wait"}"#, 1)
+        .await
+        .unwrap();
+    holder
+        .apply_raft_partition_map(map_with(THIS, &[REPLACED], 2))
+        .await;
+    holder.transport.take_sent();
+    let mut first = on_backend(THIS, backend);
+    first
+        .apply_raft_partition_map(map_with(THIS, &[REPLACED], 2))
+        .await;
+    holder.transport.inject_message(
+        node(THIS),
+        ClusterMessage::SnapshotRequest(crate::cluster::snapshot::SnapshotRequest::create(
+            partition,
+            node(THIS),
+        )),
+    );
+    holder.process_messages().await;
+    for (to, message) in holder.transport.take_sent() {
+        if to == node(THIS) && matches!(message, ClusterMessage::SnapshotChunk(_)) {
+            first.transport.inject_message(node(REPLACED), message);
+        }
+    }
+    first.process_messages().await;
+    for (to, message) in first.transport.take_sent() {
+        if to == node(REPLACED) && matches!(message, ClusterMessage::CatchupRequest(_)) {
+            holder.transport.inject_message(node(THIS), message);
+        }
+    }
+    holder.process_messages().await;
+    for (to, message) in holder.transport.take_sent() {
+        if to == node(THIS) && matches!(message, ClusterMessage::CatchupResponse(_)) {
+            first.transport.inject_message(node(REPLACED), message);
+        }
+    }
+    first.process_messages().await;
+    assert_eq!(first.role(partition), ReplicaRole::Primary);
+}
+
+#[tokio::test]
+async fn a_dead_named_source_keeps_the_wait_until_the_map_changes() {
+    let partition = data_partition(ENTITY, ID);
+    let mut ctrl = controller(THIS);
+    heard(&mut ctrl, REPLACED);
+    ctrl.apply_raft_partition_map(map_with(THIS, &[REPLACED], 1))
+        .await;
+    ctrl.apply_dead_nodes(&[node(REPLACED)]);
+    for now in (1_000u64..400_000).step_by(6_000) {
+        ctrl.drive_snapshots(now).await;
+    }
+    assert_eq!(ctrl.role(partition), ReplicaRole::AwaitingSnapshot);
+    assert!(!ctrl.can_serve_reads(partition));
+
+    ctrl.apply_raft_partition_map(map_with(THIS, &[], 2)).await;
+
+    assert_eq!(ctrl.role(partition), ReplicaRole::Primary);
+    assert!(ctrl.can_serve_reads(partition));
+}
+
+#[tokio::test]
+async fn a_primary_built_from_a_snapshot_waits_for_a_replica_never_heard_from() {
+    let partition = data_partition(ENTITY, ID);
+    let backend = crate::cluster::test_support::FaultyBackend::shared();
+    primary_built_from_a_snapshot(&backend).await;
+
+    let mut restarted = on_backend(THIS, &backend);
+    restarted.stores().recover().unwrap();
+    restarted
+        .apply_raft_partition_map(map_with(THIS, &[REPLACED], 2))
+        .await;
+    assert_eq!(restarted.role(partition), ReplicaRole::AwaitingSnapshot);
+    assert!(!restarted.can_serve_reads(partition));
+
+    restarted.drive_snapshots(1).await;
+    restarted.drive_snapshots(60_000).await;
+    assert_eq!(restarted.role(partition), ReplicaRole::AwaitingSnapshot);
+
+    restarted.drive_snapshots(100_000).await;
+    assert_eq!(restarted.role(partition), ReplicaRole::Primary);
+}
+
+#[tokio::test]
+async fn a_primary_built_from_a_snapshot_waits_for_the_map_when_its_replica_is_dead() {
+    let partition = data_partition(ENTITY, ID);
+    let backend = crate::cluster::test_support::FaultyBackend::shared();
+    primary_built_from_a_snapshot(&backend).await;
+
+    let mut restarted = on_backend(THIS, &backend);
+    restarted.stores().recover().unwrap();
+    heard(&mut restarted, REPLACED);
+    restarted
+        .apply_raft_partition_map(map_with(THIS, &[REPLACED], 2))
+        .await;
+    restarted.apply_dead_nodes(&[node(REPLACED)]);
+    for now in (1_000u64..200_000).step_by(6_000) {
+        restarted.drive_snapshots(now).await;
+    }
+    assert_eq!(restarted.role(partition), ReplicaRole::AwaitingSnapshot);
+
+    restarted
+        .apply_raft_partition_map(map_with(THIS, &[], 3))
+        .await;
+    assert_eq!(restarted.role(partition), ReplicaRole::Primary);
+}
+
+#[tokio::test]
+async fn a_node_whose_first_map_is_the_move_takes_the_role_with_the_replaced_replica_alive() {
+    let partition = data_partition(ENTITY, ID);
+    let mut ctrl = controller(THIS);
+    heard(&mut ctrl, OLD_PRIMARY);
+    heard(&mut ctrl, REPLACED);
+    ctrl.apply_raft_partition_map(map_with(OLD_PRIMARY, &[THIS], 2))
+        .await;
+    ctrl.apply_dead_nodes(&[node(OLD_PRIMARY)]);
+
+    ctrl.apply_raft_partition_map(map_with(THIS, &[], 3)).await;
+
+    assert_eq!(ctrl.role(partition), ReplicaRole::Primary);
+    assert!(ctrl.can_serve_reads(partition));
+    assert_eq!(requests_to(&ctrl, REPLACED), 0);
+}
+
+#[tokio::test]
+async fn a_node_that_saw_the_move_asks_the_replaced_replica_before_taking_the_role() {
+    let partition = data_partition(ENTITY, ID);
+    let mut ctrl = controller(THIS);
+    heard(&mut ctrl, OLD_PRIMARY);
+    heard(&mut ctrl, REPLACED);
+    ctrl.apply_raft_partition_map(map_with(OLD_PRIMARY, &[REPLACED], 1))
+        .await;
+    ctrl.apply_raft_partition_map(map_with(OLD_PRIMARY, &[THIS], 2))
+        .await;
+    ctrl.apply_dead_nodes(&[node(OLD_PRIMARY)]);
+
+    ctrl.apply_raft_partition_map(map_with(THIS, &[], 3)).await;
+
+    assert_eq!(ctrl.role(partition), ReplicaRole::AwaitingSnapshot);
+    assert!(!ctrl.can_serve_reads(partition));
+    assert_eq!(requests_to(&ctrl, REPLACED), 1);
+}

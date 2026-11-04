@@ -1230,6 +1230,19 @@ async fn a_clock_moving_back_does_not_hold_the_periodic_scan() {
 }
 
 #[tokio::test]
+async fn a_replica_returning_just_before_the_periodic_check_is_promoted_by_it() {
+    let node4 = NodeId::validated(4).unwrap();
+    let node5 = NodeId::validated(5).unwrap();
+    let start = 1_790_000_000_000u64;
+    let mut coord = two_holders_die_together([node4, node5], start).await;
+    coord.tick(start + 29_000).await;
+    coord.handle_node_alive(node5).await;
+    coord.tick(start + 32_100).await;
+    commit_tail(&mut coord).await;
+    assert_eq!(holders(&coord, 0), (Some(node5), Vec::new()));
+}
+
+#[tokio::test]
 async fn a_lost_node_with_a_live_replica_is_failed_over_to_it() {
     let node1 = NodeId::validated(1).unwrap();
     let node3 = NodeId::validated(3).unwrap();
