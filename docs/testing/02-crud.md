@@ -89,6 +89,29 @@ mqdb delete users <id>
 }
 ```
 
+### Names Near the Event Namespace
+
+The entity name `events` and ids that merely start with `events` work like any other, in agent and cluster mode:
+
+```bash
+mqdb list events --user admin --pass admin123
+mqdb create events --data '{"id": "e1", "a": 1}' --user admin --pass admin123
+mqdb read events e1 --user admin --pass admin123
+mqdb create notes --data '{"id": "events-1", "a": 1}' --user admin --pass admin123
+mqdb read notes events-1 --user admin --pass admin123
+mqdb constraint add events --unique a --user admin --pass admin123
+```
+
+**Expected:** every command answers `"status": "ok"`.
+
+The exact id `events` is refused, because `$DB/notes/events` belongs to the change event namespace:
+
+```bash
+mqdb create notes --data '{"id": "events", "a": 1}' --user admin --pass admin123
+```
+
+**Expected:** `"status": "error"`, `"code": 400`, and a message saying the id is reserved. The record is not stored.
+
 ### Output Formats
 
 **JSON format (default):**

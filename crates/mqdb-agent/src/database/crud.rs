@@ -43,8 +43,35 @@ pub struct CallerContext<'a> {
 }
 
 impl Database {
-    #[tracing::instrument(skip(self, data, constraint_data, scope_config), fields(entity = %entity_name))]
     pub async fn create(
+        &self,
+        entity_name: String,
+        mut data: Value,
+        constraint_data: Option<Value>,
+        sender: Option<&str>,
+        client_id: Option<&str>,
+        scope_config: &ScopeConfig,
+    ) -> Result<Value> {
+        self.schema_registry
+            .read()
+            .await
+            .apply_defaults(&entity_name, &mut data)?;
+        if let Some(message) = mqdb_core::protocol::reserved_record_id_message(&data) {
+            return Err(Error::Validation(message));
+        }
+        self.create_record(
+            entity_name,
+            data,
+            constraint_data,
+            sender,
+            client_id,
+            scope_config,
+        )
+        .await
+    }
+
+    #[tracing::instrument(skip(self, data, constraint_data, scope_config), fields(entity = %entity_name))]
+    pub(super) async fn create_record(
         &self,
         entity_name: String,
         mut data: Value,

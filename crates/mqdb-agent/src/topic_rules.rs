@@ -1,6 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use mqdb_core::protocol::parse_admin_topic;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +147,15 @@ pub fn matches_pattern(topic: &str, pattern: &str) -> bool {
     }
 
     t_idx == topic_parts.len()
+}
+
+#[must_use]
+pub fn is_change_event_topic(topic: &str) -> bool {
+    let Some(levels) = topic.strip_prefix("$DB/") else {
+        return false;
+    };
+    levels.split('/').skip(1).any(|level| level == "events")
+        && !(levels.starts_with("_admin/") && parse_admin_topic(topic).is_some())
 }
 
 fn find_matching_rule(topic: &str) -> Option<&'static TopicRule> {
@@ -394,6 +404,100 @@ mod tests {
             check_topic_access("$DB/users/events/created", true, true),
             Err(BlockReason::ReadOnlyTopic)
         );
+        for topic in [
+            "$DB/ok/events",
+            "$DB/ok/events/update",
+            "$DB/events/events/e1",
+            "$DB/events/events/p3/e1",
+        ] {
+            assert_eq!(
+                check_topic_access(topic, true, true),
+                Err(BlockReason::ReadOnlyTopic),
+                "{topic}"
+            );
+            assert_eq!(check_topic_access(topic, false, false), Ok(()), "{topic}");
+        }
+        for topic in ["$DB/events/list", "$DB/events/e1", "$DB/ok/events-1/update"] {
+            assert_eq!(check_topic_access(topic, true, false), Ok(()), "{topic}");
+        }
+    }
+
+    #[test]
+    fn every_emitted_event_topic_is_a_change_event_topic() {
+        use mqdb_core::events::ChangeEvent;
+        use serde_json::json;
+
+        let scope_of = |entity: &str, value: &str| Some((entity.to_string(), value.to_string()));
+        for entity in ["users", "events", "events2", "_identities"] {
+            for id in ["u1", "events", "update", "delete", "p3", "events-1", "a/b"] {
+                let create = || ChangeEvent::create(entity.into(), id.into(), json!({}));
+                let topics = [
+                    create().event_topic(0),
+                    create().event_topic(8),
+                    create().with_scope(scope_of(entity, "L1")).event_topic(8),
+                    create()
+                        .with_scope(scope_of(entity, "events"))
+                        .event_topic(0),
+                    create().with_scope(scope_of(entity, "a/b")).event_topic(0),
+                    create().with_scope(scope_of("lists", "L1")).event_topic(8),
+                    create().with_scope(scope_of("events", "L1")).event_topic(8),
+                    create()
+                        .with_scope(scope_of("lists", "events"))
+                        .event_topic(0),
+                    create().with_scope(scope_of("lists", "a/b")).event_topic(0),
+                ];
+                for topic in topics {
+                    assert!(is_change_event_topic(&topic), "{topic}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn requests_are_not_change_event_topics() {
+        for topic in [
+            "$DB/events/create",
+            "$DB/events/list",
+            "$DB/events/shared",
+            "$DB/events/e1",
+            "$DB/events/e1/update",
+            "$DB/events/e1/delete",
+            "$DB/events/e1/share",
+            "$DB/events/e1/unshare",
+            "$DB/events/e1/shares",
+            "$DB/events2/list",
+            "$DB/ok/events-1",
+            "$DB/ok/events-1/update",
+            "$DB/ok/eventsabc/delete",
+            "$DB/ok/event",
+            "$DB/ok/myevents",
+            "$DB/ok/Events",
+            "$DB/_admin/schema/events/set",
+            "$DB/_admin/schema/events/get",
+            "$DB/_admin/constraint/events/add",
+            "$DB/_admin/constraint/events/list",
+            "$DB/_admin/index/events/add",
+            "$DB/_admin/consumer-groups/events",
+            "$DB/_health",
+            "app/events",
+        ] {
+            assert!(!is_change_event_topic(topic), "{topic}");
+        }
+    }
+
+    #[test]
+    fn a_topic_under_the_event_level_is_never_a_request() {
+        for topic in [
+            "$DB/ok/events",
+            "$DB/ok/events/update",
+            "$DB/ok/events/delete",
+            "$DB/events/events/update",
+            "$DB/_admin/events/delete",
+            "$DB/_sub/events/heartbeat",
+            "$DB/u/alice/events/ok/r1",
+        ] {
+            assert!(is_change_event_topic(topic), "{topic}");
+        }
     }
 
     #[test]

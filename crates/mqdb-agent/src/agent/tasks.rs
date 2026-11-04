@@ -452,3 +452,36 @@ async fn wait_for_broker(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::event_publish_topics;
+    use crate::database::Database;
+    use crate::topic_rules::is_change_event_topic;
+    use mqdb_core::events::ChangeEvent;
+    use mqdb_core::types::OwnershipConfig;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn per_user_event_topics_are_change_event_topics() {
+        let tmp = TempDir::new().unwrap();
+        let db = Database::open_without_background_tasks(tmp.path())
+            .await
+            .unwrap();
+        for (entity, id) in [("notes", "n1"), ("events", "update"), ("notes", "events")] {
+            let mut event = ChangeEvent::create(entity.into(), id.into(), json!({}));
+            event.recipients = Some(vec!["alice".to_string(), "events".to_string()]);
+
+            let topics =
+                event_publish_topics(&db, &OwnershipConfig::default(), true, 8, &event).await;
+
+            let topics = topics.unwrap();
+            assert_eq!(topics.len(), 2);
+            assert_eq!(topics[0], format!("$DB/u/alice/events/{entity}/{id}"));
+            for topic in topics {
+                assert!(is_change_event_topic(&topic), "{topic}");
+            }
+        }
+    }
+}

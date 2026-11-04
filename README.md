@@ -402,6 +402,8 @@ ready_rx.changed().await?; // wait until broker + handler are ready
 | `$DB/{entity}/list` | List entities (payload: filters, sort, projection) |
 | `$DB/{entity}/events/#` | Subscribe to change events |
 
+The record id `events` is reserved. `$DB/{entity}/events` belongs to the change event namespace, which clients cannot publish to, so a record with that id could not be read, updated or deleted by id. A create with that id gets a 400 in agent and cluster mode. The entity name `events` and ids such as `events-1` work like any other. A record stored under the id `events` by an older version, or restored from a backup with `Database::restore_logical`, stays unreachable by id and appears only in `list`.
+
 #### Sharing Operations
 
 An owner can share any ownership-enabled entity (the motivating case is diagrams) with a named user at `view` or `edit`. Grants are stored in a server-managed `_shares` entity that is **not** reachable via generic CRUD — mutate them only through these topics. Agent and cluster mode both support them (see the cluster notes below); the embedded WASM build rejects these operations. Design: [docs/design/diagram-sharing.md](docs/design/diagram-sharing.md); manual tests: [docs/testing/17-sharing.md](docs/testing/17-sharing.md).

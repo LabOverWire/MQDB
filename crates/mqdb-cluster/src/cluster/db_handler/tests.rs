@@ -4416,6 +4416,69 @@ async fn json_create_refuses_an_id_longer_than_the_record_id_limit() {
 }
 
 #[tokio::test]
+async fn json_create_refuses_the_id_reserved_for_the_event_namespace() {
+    let mut ctrl = setup_controller_all_partitions();
+
+    for entity in ["items", "events"] {
+        let json = json_create(&mut ctrl, entity, &serde_json::json!({"id": "events"})).await;
+        assert_eq!(json["status"], "error", "{entity}: {json}");
+        assert_eq!(json["code"], 400, "{entity}: {json}");
+        assert!(
+            json["message"].as_str().unwrap().contains("reserved"),
+            "{entity}: {json}"
+        );
+        assert!(ctrl.db_get(entity, "events").is_none(), "{entity}");
+    }
+
+    for id in ["events-1", "eventsabc", "Events", "event"] {
+        let json = json_create(&mut ctrl, "items", &serde_json::json!({"id": id})).await;
+        assert_eq!(json["status"], "ok", "{id}: {json}");
+    }
+}
+
+#[tokio::test]
+async fn forwarded_create_refuses_the_id_reserved_for_the_event_namespace() {
+    use super::super::protocol::{JsonDbOp, JsonDbRequest};
+
+    let mut ctrl = setup_controller_all_partitions();
+    let request = JsonDbRequest {
+        request_id: 7,
+        op: JsonDbOp::Create,
+        entity: "items".to_string(),
+        id: None,
+        payload: serde_json::to_vec(&serde_json::json!({"id": "events"})).unwrap(),
+        response_topic: "resp/forwarded".to_string(),
+        correlation_data: None,
+        sender: None,
+        client_id: None,
+    };
+
+    ctrl.handle_json_db_request(
+        NodeId::validated(2).unwrap(),
+        data_partition("items", "events"),
+        &request,
+    )
+    .await;
+
+    assert!(ctrl.db_get("items", "events").is_none());
+    let replies: Vec<serde_json::Value> = ctrl
+        .transport()
+        .outbox
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|(_, message)| match message {
+            ClusterMessage::JsonDbResponse(response) => {
+                Some(parse_json_response(&response.payload))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert_eq!(replies[0]["code"], 400, "{replies:?}");
+}
+
+#[tokio::test]
 async fn json_create_refuses_a_unique_value_too_large_to_store() {
     use super::super::db::ClusterConstraint;
 

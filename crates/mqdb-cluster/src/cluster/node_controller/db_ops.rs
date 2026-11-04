@@ -1759,7 +1759,7 @@ impl<T: ClusterTransport> NodeController<T> {
             Err(_) => return (Self::json_error(400, "invalid JSON payload"), None),
         };
 
-        if let Some(message) = super::db::oversized_create_message(entity, &data) {
+        if let Some(message) = super::db::refused_create_message(entity, &data) {
             return (Self::json_error(400, &message), None);
         }
 

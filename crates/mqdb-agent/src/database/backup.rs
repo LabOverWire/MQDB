@@ -151,7 +151,7 @@ impl Database {
                 .ok_or_else(|| Error::BackupFailed("entity missing _data field".to_string()))?
                 .clone();
 
-            self.create(
+            self.create_record(
                 entity_name,
                 entity_data,
                 None,
