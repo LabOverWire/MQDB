@@ -82,10 +82,19 @@
 (*                      processed while the second still counts as alive.  *)
 (*   KeepDeadReplica    TRUE: a dead replica entry stays while the primary *)
 (*                      is also gone. FALSE: it is always removed.         *)
-(*   RestoredUnheard    TRUE: B starts as a restored voter not heard from. *)
-(*                      It votes and counts as a member, but until Hear or *)
-(*                      its death verdict it is unheard. L and A are heard *)
-(*                      from the start, by symmetry of A and B in the map. *)
+(*   RestoredUnheard    TRUE: B starts as a member not heard from. It      *)
+(*                      stays unheard until Hear, or Fail, which stands    *)
+(*                      for its 30 s verdict. The spec assumes one of them *)
+(*                      comes: the fairness on Hear or Fail. Without it    *)
+(*                      Repaired fails at 7432 states. In the code that    *)
+(*                      verdict covers restored voters (init.rs) and a     *)
+(*                      member a snapshot adds or lists again              *)
+(*                      (forward_members_to_expect, expect_again); that    *)
+(*                      path is shown by tests in raft_task.rs, not here.  *)
+(*                      The model has no votes. Only B starts unheard:     *)
+(*                      symmetry covers B against A, not one against two.  *)
+(*                      Run by hand with {A, B} unheard, the same          *)
+(*                      properties pass at 8269 states; no cfg ships it.   *)
 (*   SkipUnheard        TRUE: failover, scan and rebalance never target an *)
 (*                      unheard node (live_targets). FALSE: they can, which *)
 (*                      is the defect found on 2b5c1a6.                    *)
@@ -149,11 +158,15 @@
 (*   _restored_unheard: passes with B unheard at the start and every        *)
 (*       property checked, InvNoPromotionOfUnheard included. Off that cfg:  *)
 (*       BatchDeaths or KeepDeadReplica off fails                           *)
-(*       NamedNodeBackGivesLivePrimary, RepairScan off fails Repaired, so   *)
-(*       each still matters with an unheard voter. This shows the map only, *)
-(*       with no timing: not the 30 s verdict or how fast Hear comes.       *)
+(*       NamedNodeBackGivesLivePrimary, but those traces take B out of      *)
+(*       unheard in the first step and repeat _no_batch and _no_keep, so    *)
+(*       they add nothing about an unheard voter. RepairScan off fails      *)
+(*       Repaired and does use the unheard path, but Scan stands for both   *)
+(*       the rescan on Hear and the periodic check, so it cannot separate   *)
+(*       them. This shows the map only, with no timing.                     *)
 (*   _promotes_unheard: SkipUnheard off, fails InvNoPromotionOfUnheard: A   *)
-(*       dies and B is proposed primary with no heartbeat from it.          *)
+(*       dies and B is proposed primary with no heartbeat from it. That     *)
+(*       invariant restates the guard: see below.                           *)
 (*                                                                         *)
 (* This model has no writes, so it says nothing about who holds an acked   *)
 (* write. Replication is asynchronous: a primary acks before its replica   *)
@@ -187,9 +200,17 @@
 (* does not list it; checked alone there, it fails at 194 states even with *)
 (* the guard. Hear has no such guard: it marks the planned map instead.    *)
 (*                                                                         *)
-(* InvRebalanceTargetLive and InvNoEmptyServe restate guards, so their     *)
-(* passes add no evidence; only the cfgs that turn the guard off show      *)
-(* anything. LiveTargetsOnly is what protects InvRebalanceTargetLive. At   *)
+(* InvRebalanceTargetLive, InvNoEmptyServe and InvNoPromotionOfUnheard     *)
+(* restate guards, so their passes add no evidence; only the cfgs that     *)
+(* turn the guard off show anything. InvNoPromotionOfUnheard shows no cost *)
+(* of promoting an unheard node: with SkipUnheard off and only this        *)
+(* invariant removed, everything else passes (6850 states). It does not    *)
+(* see Rebalance either: with LiveTargetsOnly off and it alone checked, it *)
+(* passes. The evidence for not targeting an unheard node is the unit      *)
+(* tests. InvNoStrandedPrimary gives none on the unheard path: it treats   *)
+(* an unheard replica as not there, so it says nothing about one, and it   *)
+(* fails at 3 states if that exclusion is removed. LiveTargetsOnly is what *)
+(* protects InvRebalanceTargetLive. At                                     *)
 (* _departed's other settings, MaxLost 0, it also takes PlanFromProposals  *)
 (* off for a failure to appear; at MaxLost 1 it fails either way.          *)
 (*                                                                         *)
@@ -408,7 +429,7 @@ TakeRole(p) ==
           /\ takenEmpty' = IF sourceLive THEN "source_alive" ELSE "source_dead"
     /\ UNCHANGED <<applied, proposals, members, failsLeft, proposalsLeft, lostLeft, deadTarget, named, returned, filled, replaced, unheard, promotedUnheard>>
 
-\* A restored voter's first heartbeat. The code rescans at the next settled tick.
+\* A member's first heartbeat. The code rescans at the next settled tick.
 Hear(n) ==
     /\ n \in unheard
     /\ n \in members
@@ -430,13 +451,14 @@ Next ==
     \/ \E n \in Nodes : Rejoin(n)
     \/ \E p \in Partitions : Rebalance(p)
 
-Spec == Init /\ [][Next]_vars /\ WF_vars(Commit) /\ WF_vars(Scan) /\ WF_vars(\E n \in Nodes : Hear(n))
+Spec == Init /\ [][Next]_vars /\ WF_vars(Commit) /\ WF_vars(Scan) /\ WF_vars(\E n \in unheard : Hear(n) \/ Fail(n))
 
 \* The primary is not L, the node with no copy.
 InvPrimaryWasAHolder == \A p \in Partitions : applied[p].primary \in {A, B}
 
 \* Once a failover is applied and no proposal is lost, a partition does not rest on a
-\* departed node while its mapped replica is alive, except a replica that returned since.
+\* departed node while its mapped replica is a member heard from, except a replica that
+\* returned or was first heard since.
 \* This holds only under the Rejoin restriction in the header; the code can reach that
 \* state until the next scan. No shipped cfg fails it.
 InvNoStrandedPrimary ==
