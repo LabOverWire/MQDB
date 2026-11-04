@@ -733,13 +733,15 @@ MQDB supports distributed clustering with automatic failover and partition rebal
 > A node dials the nodes in its `--peers` and the nodes that have dialled it, whose addresses it
 > keeps in `peer_addrs` in its `--db` directory. It never dials a node it has only heard about, so
 > list the nodes started before it, as above; the links to nodes started afterwards are created when
-> *those* nodes dial in. A node keeps redialling a known peer that has no link, or that its
-> heartbeats report dead, starting at once and backing off to every 5 seconds, then every minute once
-> the peer has been gone for 5 minutes. A separate check once a minute also dials every known peer
-> not heard from lately, so a long silent peer that still accepts connections can see up to two dials
-> a minute, and a node never heard from since this one started that accepts a connection but sends no
-> heartbeats sees only that once a minute dial, so a restarted node re-links without a change to its `--peers`. A
-> learned address is replaced when the peer dials in from a new one, and any address is dropped if
+> *those* nodes dial in. A node keeps redialling a known peer that has no link, or that it holds
+> dead, starting at once and backing off to every 5 seconds, then every minute once the peer has been
+> gone for 5 minutes, so a restarted node re-links without a change to its `--peers`. A separate check
+> once a minute also dials every known peer not heard from lately, so a long silent peer that still
+> accepts connections can see up to two dials a minute. A peer that accepts a connection, has sent no
+> heartbeat and is not held dead sees only that once a minute dial: a `--peers` node with no verdict,
+> because only restored voters get one before a first heartbeat, and a restored voter not in
+> `--peers`, whose verdict does not reach the list the fast redial reads. A restored voter in
+> `--peers` gets its verdict and the fast redial. A learned address is replaced when the peer dials in from a new one, and any address is dropped if
 > a different node answers on it, which is then dialled there instead. An address that turns out to
 > be this node itself is dropped too, and that peer is relinked only when it dials in. A `--peers`
 > address returns on the next start.

@@ -226,8 +226,6 @@ async fn a_held_verdict_does_not_land_after_the_node_is_back() {
     let (tx_inbox, rx_inbox) = flume::unbounded();
     let (tx_tick, rx_tick) = flume::unbounded();
     let (tx_batch, rx_batch) = flume::unbounded();
-    let (tx_raft, _rx_raft) = flume::unbounded();
-    let (tx_main, _rx_main) = flume::unbounded();
     let mut processor = MessageProcessor::new(
         node(THIS),
         TransportConfig {
@@ -235,9 +233,9 @@ async fn a_held_verdict_does_not_land_after_the_node_is_back() {
             heartbeat_timeout_ms: 500,
             ack_timeout_ms: 50,
         },
-        tx_raft,
+        flume::unbounded().0,
         tx_events.clone(),
-        tx_main,
+        flume::unbounded().0,
         rx_inbox,
         rx_tick,
     );
@@ -281,11 +279,9 @@ async fn a_verdict_refused_by_a_full_queue_is_sent_by_the_running_processor() {
     use crate::cluster::message_processor::MessageProcessor;
     let peer = node(OLD_PRIMARY);
     let (tx_events, rx_events) = flume::bounded(2);
-    let (_tx_inbox, rx_inbox) = flume::unbounded();
+    let (tx_inbox, rx_inbox) = flume::unbounded::<InboundMessage>();
     let (tx_tick, rx_tick) = flume::unbounded();
     let (tx_batch, rx_batch) = flume::unbounded();
-    let (tx_raft, _rx_raft) = flume::unbounded();
-    let (tx_main, _rx_main) = flume::unbounded();
     let mut processor = MessageProcessor::new(
         node(THIS),
         TransportConfig {
@@ -293,9 +289,9 @@ async fn a_verdict_refused_by_a_full_queue_is_sent_by_the_running_processor() {
             heartbeat_timeout_ms: 500,
             ack_timeout_ms: 50,
         },
-        tx_raft,
+        flume::unbounded().0,
         tx_events.clone(),
-        tx_main,
+        flume::unbounded().0,
         rx_inbox,
         rx_tick,
     );
@@ -321,6 +317,7 @@ async fn a_verdict_refused_by_a_full_queue_is_sent_by_the_running_processor() {
             .drain()
             .any(|event| matches!(event, RaftEvent::NodeDead(dead) if dead == peer))
     );
+    drop(tx_inbox);
 }
 
 #[test]

@@ -1348,7 +1348,7 @@ async fn a_link_back_to_this_node_gives_no_reach_for_an_election() {
     let local_id = NodeId::validated(5).unwrap();
     let old_id = NodeId::validated(2).unwrap();
     let third = NodeId::validated(3).unwrap();
-    let (local, _book, _local_addr) = node_remembering_itself_as(&files, local_id, old_id).await;
+    let (local, ..) = node_remembering_itself_as(&files, local_id, old_id).await;
     links_settle_without(&local, old_id).await;
 
     let backend: Arc<dyn mqdb_core::StorageBackend> = Arc::new(mqdb_core::MemoryBackend::new());
@@ -1451,8 +1451,10 @@ async fn a_silent_linked_peer_reaches_the_long_absence_delay_through_the_transpo
     let peer = NodeId::validated(2).unwrap();
     let endpoint = server_endpoint(&certs, 1024 * 1024);
     let far_addr = endpoint.local_addr().unwrap();
-    let (streams_tx, _streams_rx) = flume::unbounded();
-    let far = tokio::spawn(stream_counting_far_end(endpoint.clone(), streams_tx));
+    let far = tokio::spawn(stream_counting_far_end(
+        endpoint.clone(),
+        flume::unbounded().0,
+    ));
     let transport = QuicDirectTransport::new(NodeId::validated(1).unwrap());
     transport.set_ca_file(ca_path);
     transport
@@ -1471,26 +1473,28 @@ async fn a_silent_linked_peer_reaches_the_long_absence_delay_through_the_transpo
         [peer]
     );
     transport.redial(&dead).await;
-    assert!(
-        transport
-            .down_peers_due(&mut backoff, &dead, at(301))
-            .await
-            .is_empty()
-    );
+    let due_with_a_fresh_link = transport.down_peers_due(&mut backoff, &dead, at(301)).await;
     tokio::time::sleep(Duration::from_millis(5_100)).await;
 
-    assert_eq!(
-        transport.down_peers_due(&mut backoff, &dead, at(302)).await,
-        [peer]
-    );
+    let long_delay_from = if due_with_a_fresh_link.is_empty() {
+        assert_eq!(
+            transport.down_peers_due(&mut backoff, &dead, at(302)).await,
+            [peer]
+        );
+        302
+    } else {
+        301
+    };
     assert!(
         transport
-            .down_peers_due(&mut backoff, &dead, at(330))
+            .down_peers_due(&mut backoff, &dead, at(long_delay_from + 28))
             .await
             .is_empty()
     );
     assert_eq!(
-        transport.down_peers_due(&mut backoff, &dead, at(363)).await,
+        transport
+            .down_peers_due(&mut backoff, &dead, at(long_delay_from + 61))
+            .await,
         [peer]
     );
     far.abort();

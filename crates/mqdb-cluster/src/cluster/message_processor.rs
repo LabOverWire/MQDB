@@ -285,19 +285,15 @@ mod tests {
     fn processor_with_a_full_event_queue(
         peer: NodeId,
     ) -> (MessageProcessor, flume::Receiver<RaftEvent>) {
-        let (tx_raft, _rx_raft) = flume::unbounded();
         let (tx_events, rx_events) = flume::bounded(1);
-        let (tx_main, _rx_main) = flume::unbounded();
-        let (_tx_inbox, rx_inbox) = flume::unbounded();
-        let (_tx_tick, rx_tick) = flume::unbounded();
         let mut processor = MessageProcessor::new(
             NodeId::validated(1).unwrap(),
             test_config(),
-            tx_raft,
+            flume::unbounded().0,
             tx_events.clone(),
-            tx_main,
-            rx_inbox,
-            rx_tick,
+            flume::unbounded().0,
+            flume::unbounded().1,
+            flume::unbounded().1,
         );
         processor.register_peer(peer);
         processor.heartbeat_manager.receive_heartbeat(

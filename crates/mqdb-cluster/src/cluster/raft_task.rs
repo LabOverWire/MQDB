@@ -802,7 +802,7 @@ mod tests {
         let nodes = three_nodes_and_a_silent_one();
         let [node1, node2, node3, silent] = nodes;
         let start = 1_790_000_000_000u64;
-        let (mut task, mut processor, _events) = task_with_channels(node1);
+        let (mut task, mut processor, ..) = task_with_channels(node1);
         task.raft.handle_node_alive(node2).await;
         task.raft.handle_node_alive(node3).await;
         processor.receive_heartbeat_for_test(silent, start);
