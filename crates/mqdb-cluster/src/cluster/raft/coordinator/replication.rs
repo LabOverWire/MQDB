@@ -85,11 +85,19 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
     pub(super) fn restore_snapshot(&mut self, snapshot: &RaftSnapshot) {
         self.partition_map = snapshot.partition_map();
         self.pending_partition_proposals = 0;
-        self.cluster_members.clone_from(&snapshot.members);
+        let previous_members =
+            std::mem::replace(&mut self.cluster_members, snapshot.members.clone());
         let own_id = self.node.node_id();
         if !self.cluster_members.contains(&own_id) {
             self.cluster_members.push(own_id);
         }
+        let joined = self
+            .cluster_members
+            .iter()
+            .filter(|node| **node != own_id && !previous_members.contains(node));
+        self.unheard_members.extend(joined);
+        let members = &self.cluster_members;
+        self.unheard_members.retain(|node| members.contains(node));
     }
 
     pub(super) fn apply_command_local(&mut self, command: &RaftCommand) {
@@ -122,6 +130,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
 
     pub async fn handle_node_death(&mut self, dead_node: NodeId) {
         self.cluster_members.retain(|&n| n != dead_node);
+        self.unheard_members.remove(&dead_node);
         self.death_since_last_tick = true;
         self.refresh_links().await;
         self.pending_dead_nodes.insert(dead_node);
@@ -140,6 +149,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             tracing::info!(?node, "added new cluster member");
         }
         self.node.add_peer(node);
+        self.rescan_for_heard_voter |= self.unheard_members.remove(&node);
 
         let node_has_partitions = self.node_has_partitions(node);
         let partitions_initialized = self.partitions_initialized();
@@ -219,7 +229,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
     }
 
     pub(super) async fn initialize_partitions(&mut self) -> Vec<u64> {
-        let mut members = self.cluster_members.clone();
+        let mut members = self.live_targets();
         members.sort_by_key(|n| n.get());
         tracing::info!(?members, "initializing partitions for fresh cluster");
         let new_map =
@@ -249,7 +259,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         }
         let reassignments = compute_incremental_assignments(
             &self.planned_map(),
-            &self.cluster_members,
+            &self.live_targets(),
             &RebalanceConfig::default(),
         );
         self.propose_reassignments(reassignments).await
@@ -311,7 +321,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
 
     async fn adopt_partitions_without_a_live_holder(&mut self) -> Vec<u64> {
         let planned = self.planned_map();
-        let Some(adopter) = self.cluster_members.first().copied() else {
+        let Some(adopter) = self.live_targets().first().copied() else {
             return Vec::new();
         };
         let mut indices = Vec::new();
@@ -348,10 +358,9 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
 
     pub(super) async fn trigger_drain_rebalance(&mut self, draining_node: NodeId) -> Vec<u64> {
         let remaining_nodes: Vec<NodeId> = self
-            .cluster_members
-            .iter()
-            .filter(|&&n| n != draining_node)
-            .copied()
+            .live_targets()
+            .into_iter()
+            .filter(|&n| n != draining_node)
             .collect();
 
         let config = RebalanceConfig::default();
@@ -400,10 +409,9 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         let planned = self.planned_map();
         let mut proposed_indices = Vec::new();
         let alive_nodes: Vec<NodeId> = self
-            .cluster_members
-            .iter()
-            .filter(|&&n| n != dead_node)
-            .copied()
+            .live_targets()
+            .into_iter()
+            .filter(|&n| n != dead_node)
             .collect();
 
         for partition in PartitionId::all() {
@@ -442,7 +450,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
                         tracing::warn!(
                             ?partition,
                             ?dead_node,
-                            "no live replica holds this partition, leaving it unavailable until a holder returns"
+                            "no live replica heard from holds this partition, leaving it unavailable until a holder is heard"
                         );
                     }
                 }

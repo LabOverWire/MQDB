@@ -32,6 +32,8 @@ pub struct RaftCoordinator<T: ClusterTransport> {
     pub(super) death_since_last_tick: bool,
     pub(super) last_death_ms: u64,
     pub(super) restored_map_unconfirmed: bool,
+    pub(super) unheard_members: BTreeSet<NodeId>,
+    pub(super) rescan_for_heard_voter: bool,
 }
 
 impl<T: ClusterTransport> RaftCoordinator<T> {
@@ -54,6 +56,8 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             death_since_last_tick: false,
             last_death_ms: 0,
             restored_map_unconfirmed: false,
+            unheard_members: BTreeSet::new(),
+            rescan_for_heard_voter: false,
         }
     }
 
@@ -85,6 +89,8 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             death_since_last_tick: false,
             last_death_ms: 0,
             restored_map_unconfirmed: false,
+            unheard_members: BTreeSet::new(),
+            rescan_for_heard_voter: false,
         };
 
         coordinator.rebuild_partition_map();
@@ -107,7 +113,16 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
         self.restored_map_held = !named.is_empty();
         for node in named {
             self.add_peer(node);
+            self.unheard_members.insert(node);
         }
+    }
+
+    pub(super) fn live_targets(&self) -> Vec<NodeId> {
+        self.cluster_members
+            .iter()
+            .filter(|node| !self.unheard_members.contains(node))
+            .copied()
+            .collect()
     }
 
     pub fn voters(&self) -> &[NodeId] {

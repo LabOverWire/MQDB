@@ -351,7 +351,13 @@ pub fn compute_removal_assignments(
                         .map(|(n, _)| *n);
                     least.unwrap_or(remaining_nodes[0])
                 } else {
-                    valid_replicas[0]
+                    let Some(live_replica) = valid_replicas
+                        .iter()
+                        .find(|replica| remaining_nodes.contains(replica))
+                    else {
+                        continue;
+                    };
+                    *live_replica
                 }
             } else {
                 assignment.primary.unwrap_or(remaining_nodes[0])

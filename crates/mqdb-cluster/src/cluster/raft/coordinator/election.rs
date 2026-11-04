@@ -52,7 +52,10 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
             return self.initialize_partitions().await;
         }
 
-        if can_commit && deaths_settled && !self.pending_dead_nodes.is_empty() {
+        if can_commit
+            && deaths_settled
+            && (!self.pending_dead_nodes.is_empty() || self.rescan_for_heard_voter)
+        {
             return self.process_pending_dead_nodes().await;
         }
 
@@ -127,6 +130,7 @@ impl<T: ClusterTransport> RaftCoordinator<T> {
     }
 
     pub(super) async fn process_pending_dead_nodes(&mut self) -> Vec<u64> {
+        self.rescan_for_heard_voter = false;
         let mut proposed_indices = Vec::new();
         let pending: Vec<NodeId> = self.pending_dead_nodes.drain().collect();
 

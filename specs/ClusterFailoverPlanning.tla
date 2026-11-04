@@ -21,6 +21,9 @@
 (*             below                                                       *)
 (*   Rebalance rebalancer.rs redistribute_primaries: move a primary to     *)
 (*             one of its replicas                                         *)
+(*   Hear      the first heartbeat from a restored voter: handle_node_alive *)
+(*             takes it out of unheard_members and asks for a rescan at the *)
+(*             next settled tick that can commit; Scan stands for that too *)
 (*                                                                         *)
 (* Constants:                                                              *)
 (*   PlanFromProposals  TRUE: a failover reads the applied map plus        *)
@@ -28,8 +31,10 @@
 (*                      main cfg gives the same verdict with it FALSE, at  *)
 (*                      9016 states instead of 4440, so this model is not  *)
 (*                      evidence for planned-map reads in general; unit    *)
-(*                      tests cover those. _departed does depend on it:    *)
-(*                      with it TRUE that cfg passes.                      *)
+(*                      tests cover those. _departed passes with it TRUE   *)
+(*                      only at MaxLost 0 (795 states); at MaxLost 1 it     *)
+(*                      fails at 29 states. LiveTargetsOnly is what        *)
+(*                      protects.                                          *)
 (*   HolderOnly         TRUE: promote only a live mapped replica, otherwise *)
 (*                      leave the partition on its holder. FALSE: fall back *)
 (*                      to the first alive node, which holds no copy.      *)
@@ -77,6 +82,13 @@
 (*                      processed while the second still counts as alive.  *)
 (*   KeepDeadReplica    TRUE: a dead replica entry stays while the primary *)
 (*                      is also gone. FALSE: it is always removed.         *)
+(*   RestoredUnheard    TRUE: B starts as a restored voter not heard from. *)
+(*                      It votes and counts as a member, but until Hear or *)
+(*                      its death verdict it is unheard. L and A are heard *)
+(*                      from the start, by symmetry of A and B in the map. *)
+(*   SkipUnheard        TRUE: failover, scan and rebalance never target an *)
+(*                      unheard node (live_targets). FALSE: they can, which *)
+(*                      is the defect found on 2b5c1a6.                    *)
 (*   MaxFails, MaxLost  budgets of failures and of lost tails.             *)
 (*   MaxProposals       budget of proposals across the whole behaviour, to *)
 (*                      keep the state space finite. Repaired and          *)
@@ -107,8 +119,7 @@
 (*       matters for epochs, which this model lacks; see the unit tests    *)
 (*   _departed: fails InvRebalanceTargetLive, the gh #280 panic            *)
 (*   _new_replica: fails InvPrimaryWasAHolder: the map can still name a    *)
-(*       node with no copy.                                                 *)
-(*       with no copy.                                                     *)
+(*       node with no copy.                                                *)
 (*   _new_replica_nowait: WaitForData off and MaxFails 1, where _wait has  *)
 (*       2, fails InvNoEmptyServe.                                         *)
 (*   _new_replica_wait: passes InvNoEmptyServe, which restates the guard.  *)
@@ -135,6 +146,14 @@
 (*       dying in the window                                                *)
 (*   _no_keep: fails NamedNodeBackGivesLivePrimary, the replica returns     *)
 (*       first with no entry                                                *)
+(*   _restored_unheard: passes with B unheard at the start and every        *)
+(*       property checked, InvNoPromotionOfUnheard included. Off that cfg:  *)
+(*       BatchDeaths or KeepDeadReplica off fails                           *)
+(*       NamedNodeBackGivesLivePrimary, RepairScan off fails Repaired, so   *)
+(*       each still matters with an unheard voter. This shows the map only, *)
+(*       with no timing: not the 30 s verdict or how fast Hear comes.       *)
+(*   _promotes_unheard: SkipUnheard off, fails InvNoPromotionOfUnheard: A   *)
+(*       dies and B is proposed primary with no heartbeat from it.          *)
 (*                                                                         *)
 (* This model has no writes, so it says nothing about who holds an acked   *)
 (* write. Replication is asynchronous: a primary acks before its replica   *)
@@ -142,8 +161,9 @@
 (* lose acked writes. NamedNodeBackGivesLivePrimary only says a partition  *)
 (* whose map entries named a node when both holders died has a live mapped *)
 (* primary once that node is back. It does not say that primary holds the  *)
-(* partition: the main cfg with only HolderOnly FALSE passes it, by        *)
-(* promoting L. The holder rule is needed only for InvPrimaryWasAHolder.   *)
+(* partition: the main cfg with HolderOnly FALSE and InvPrimaryWasAHolder *)
+(* dropped from the check passes it, by promoting L. The holder rule is    *)
+(* needed only for InvPrimaryWasAHolder.                                   *)
 (* An earlier version tracked current[p] and InvServingPrimaryIsCurrent; a *)
 (* review refuted them as a measure of acked writes and they are gone.     *)
 (*                                                                         *)
@@ -157,31 +177,42 @@
 (* holder returns or a forced rebalance.                                   *)
 (*                                                                         *)
 (* Model restriction: Rejoin requires proposals = <<>>, so a node does not *)
-(* return while a proposal is unapplied. The code has no such guard, and   *)
-(* InvNoStrandedPrimary holds only because of it: in the code a partition  *)
-(* can rest on a departed primary with its replica back until the next     *)
-(* scan. No shipped cfg fails InvNoStrandedPrimary.                        *)
+(* return while a proposal is unapplied. The code has no such guard: there *)
+(* a partition can rest on a departed primary with its replica back until  *)
+(* the next scan. With InvNoStrandedPrimary checked alone and the guard    *)
+(* dropped, it fails on the main cfg, _stale, _restored_unheard,           *)
+(* _promotes_unheard, _live_primary_fails3 and _no_scan_live_primary; it   *)
+(* passes on the other _no_* and _new_replica cfgs, so it depends on the   *)
+(* guard only for those six. As shipped no cfg fails it, but _departed     *)
+(* does not list it; checked alone there, it fails at 194 states even with *)
+(* the guard. Hear has no such guard: it marks the planned map instead.    *)
 (*                                                                         *)
 (* InvRebalanceTargetLive and InvNoEmptyServe restate guards, so their     *)
 (* passes add no evidence; only the cfgs that turn the guard off show      *)
-(* anything. _departed needs PlanFromProposals off as well as              *)
-(* LiveTargetsOnly off.                                                    *)
+(* anything. LiveTargetsOnly is what protects InvRebalanceTargetLive. At   *)
+(* _departed's other settings, MaxLost 0, it also takes PlanFromProposals  *)
+(* off for a failure to appear; at MaxLost 1 it fails either way.          *)
 (*                                                                         *)
 (* Not covered: data, acked writes, what a 503 answers, repeat failures,   *)
 (* loss of a majority, timing, and more than two partitions or holders.    *)
+(* L never dies. takenEmpty is one-shot and global across both partitions, *)
+(* so the model stops looking at takes after the first. Transfer can fire  *)
+(* after a take, which the code does not rely on. An unheard voter comes   *)
+(* only from restart here; in the code a member first named by a snapshot  *)
+(* from the leader is unheard too.                                         *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS L, A, B,
           PlanFromProposals, HolderOnly, LiveTargetsOnly, RepairScan, ScanReplicas, AddReplicas,
-          Together, BatchDeaths, KeepDeadReplica, WaitForData,
+          Together, BatchDeaths, KeepDeadReplica, WaitForData, RestoredUnheard, SkipUnheard,
           MaxFails, MaxProposals, MaxLost
 
 VARIABLES applied, proposals, members, failsLeft, proposalsLeft, lostLeft, deadTarget, named, returned,
-          filled, takenEmpty, replaced
+          filled, takenEmpty, replaced, unheard, promotedUnheard
 
 vars == <<applied, proposals, members, failsLeft, proposalsLeft, lostLeft, deadTarget, named, returned,
-          filled, takenEmpty, replaced>>
+          filled, takenEmpty, replaced, unheard, promotedUnheard>>
 
 Nodes == {L, A, B}
 Partitions == {1, 2}
@@ -219,6 +250,8 @@ Init ==
     /\ takenEmpty = "no"
     /\ filled = [p \in Partitions |-> FALSE]
     /\ replaced = [p \in Partitions |-> None]
+    /\ unheard = IF RestoredUnheard THEN {B} ELSE {}
+    /\ promotedUnheard = FALSE
 
 \* The repair one departed node d needs on partition p, or None.
 Repair(map, p, d, alive) ==
@@ -235,17 +268,26 @@ Repair(map, p, d, alive) ==
 
 Repairs(map, d, alive) == {Repair(map, p, d, alive) : p \in Partitions} \ {None}
 
+\* A promotion target: a member, except a restored voter not heard from yet.
+Targets(nodes) == IF SkipUnheard THEN nodes \ unheard ELSE nodes
+
+\* Whether a batch of repairs promotes a node not heard from.
+PromotesUnheard(map, repairs) ==
+    \E r \in repairs : r.primary # map[r.p].primary /\ r.primary \in unheard
+
 Fail(d) ==
     /\ d \in members
     /\ d # L
     /\ failsLeft > 0
     /\ failsLeft' = failsLeft - 1
-    /\ LET alive == members \ {d}
+    /\ LET alive == Targets(members \ {d})
            repairs == Repairs(Base, d, alive)
        IN /\ Cardinality(repairs) <= proposalsLeft
           /\ proposalsLeft' = proposalsLeft - Cardinality(repairs)
           /\ proposals' = proposals \o SetToSeq(repairs)
-          /\ members' = alive
+          /\ members' = members \ {d}
+          /\ promotedUnheard' = (promotedUnheard \/ PromotesUnheard(Base, repairs))
+    /\ unheard' = unheard \ {d}
     /\ UNCHANGED <<applied, lostLeft, deadTarget, named, returned, filled, takenEmpty, replaced>>
 
 \* Both deaths reach the task within the window, d1 first.
@@ -256,15 +298,17 @@ FailTogether(d1, d2) ==
     /\ L \notin {d1, d2}
     /\ failsLeft >= 2
     /\ failsLeft' = failsLeft - 2
-    /\ LET alive == members \ {d1, d2}
-           first == Repairs(Base, d1, IF BatchDeaths THEN alive ELSE members \ {d1})
+    /\ LET alive == Targets(members \ {d1, d2})
+           first == Repairs(Base, d1, IF BatchDeaths THEN alive ELSE Targets(members \ {d1}))
            afterFirst == IF PlanFromProposals THEN Replay(Base, SetToSeq(first)) ELSE Base
            second == Repairs(afterFirst, d2, alive)
            count == Cardinality(first) + Cardinality(second)
        IN /\ count <= proposalsLeft
           /\ proposalsLeft' = proposalsLeft - count
           /\ proposals' = proposals \o SetToSeq(first) \o SetToSeq(second)
-          /\ members' = alive
+          /\ members' = members \ {d1, d2}
+          /\ promotedUnheard' = (promotedUnheard \/ PromotesUnheard(Base, first) \/ PromotesUnheard(afterFirst, second))
+    /\ unheard' = unheard \ {d1, d2}
     /\ named' = [p \in Partitions |->
                     IF {Base[p].primary, Base[p].replica} = {d1, d2} THEN {d1, d2} ELSE named[p]]
     /\ UNCHANGED <<applied, lostLeft, deadTarget, returned, filled, takenEmpty, replaced>>
@@ -275,7 +319,7 @@ Commit ==
     /\ proposals' = Tail(proposals)
     /\ returned' = [p \in Partitions |->
                        returned[p] /\ applied'[p].primary \notin members /\ applied'[p].replica \in members]
-    /\ UNCHANGED <<members, failsLeft, proposalsLeft, lostLeft, deadTarget, named, filled, takenEmpty, replaced>>
+    /\ UNCHANGED <<members, failsLeft, proposalsLeft, lostLeft, deadTarget, named, filled, takenEmpty, replaced, unheard, promotedUnheard>>
 
 LoseTail ==
     /\ proposals # <<>>
@@ -283,7 +327,7 @@ LoseTail ==
     /\ lostLeft' = lostLeft - 1
     /\ proposals' = <<>>
     /\ replaced' = [p \in Partitions |-> None]
-    /\ UNCHANGED <<applied, members, failsLeft, proposalsLeft, deadTarget, named, returned, filled, takenEmpty>>
+    /\ UNCHANGED <<applied, members, failsLeft, proposalsLeft, deadTarget, named, returned, filled, takenEmpty, unheard, promotedUnheard>>
 
 Departed(n) == n \in Nodes /\ n \notin members
 
@@ -293,7 +337,7 @@ ScanTargets ==
             Planned[p].primary = n \/ (ScanReplicas /\ Planned[p].replica = n)}
 
 ScanRepairs ==
-    {r \in UNION {Repairs(Planned, n, members) : n \in ScanTargets} :
+    {r \in UNION {Repairs(Planned, n, Targets(members)) : n \in ScanTargets} :
         ScanReplicas \/ Planned[r.p].primary \in ScanTargets}
 
 Scan ==
@@ -303,7 +347,8 @@ Scan ==
     /\ Cardinality(ScanRepairs) <= proposalsLeft
     /\ proposalsLeft' = proposalsLeft - Cardinality(ScanRepairs)
     /\ proposals' = SetToSeq(ScanRepairs)
-    /\ UNCHANGED <<applied, members, failsLeft, lostLeft, deadTarget, named, returned, filled, takenEmpty, replaced>>
+    /\ promotedUnheard' = (promotedUnheard \/ PromotesUnheard(Planned, ScanRepairs))
+    /\ UNCHANGED <<applied, members, failsLeft, lostLeft, deadTarget, named, returned, filled, takenEmpty, replaced, unheard>>
 
 Rejoin(n) ==
     /\ Departed(n)
@@ -311,7 +356,7 @@ Rejoin(n) ==
     /\ members' = members \cup {n}
     /\ returned' = [p \in Partitions |->
                        returned[p] \/ (applied[p].replica = n /\ applied[p].primary \notin members)]
-    /\ UNCHANGED <<applied, proposals, failsLeft, proposalsLeft, lostLeft, deadTarget, named, filled, takenEmpty, replaced>>
+    /\ UNCHANGED <<applied, proposals, failsLeft, proposalsLeft, lostLeft, deadTarget, named, filled, takenEmpty, replaced, unheard, promotedUnheard>>
 
 Rebalance(p) ==
     /\ proposalsLeft > 0
@@ -319,10 +364,10 @@ Rebalance(p) ==
     /\ LET a == Base[p]
        IN /\ a.replica # None
           /\ a.primary \in members
-          /\ (LiveTargetsOnly => a.replica \in members)
+          /\ (LiveTargetsOnly => a.replica \in Targets(members))
           /\ deadTarget' = (deadTarget \/ a.replica \notin members)
           /\ proposals' = Append(proposals, [p |-> p, primary |-> a.replica, replica |-> a.primary])
-    /\ UNCHANGED <<applied, members, failsLeft, lostLeft, named, returned, filled, takenEmpty, replaced>>
+    /\ UNCHANGED <<applied, members, failsLeft, lostLeft, named, returned, filled, takenEmpty, replaced, unheard, promotedUnheard>>
 
 \* The rebalancer gives a partition a new replica with no copy yet. L plays that node.
 \* _new_replica fails on the promotion that follows, with or without a failure first, so
@@ -337,7 +382,7 @@ AddReplica(p) ==
     /\ Base[p].primary # L
     /\ proposals' = Append(proposals, [p |-> p, primary |-> Base[p].primary, replica |-> L])
     /\ replaced' = IF Base[p].replica = None THEN replaced ELSE [replaced EXCEPT ![p] = Base[p].replica]
-    /\ UNCHANGED <<applied, members, failsLeft, lostLeft, deadTarget, named, returned, filled, takenEmpty>>
+    /\ UNCHANGED <<applied, members, failsLeft, lostLeft, deadTarget, named, returned, filled, takenEmpty, unheard, promotedUnheard>>
 
 \* The snapshot for a node with no copy arrives from a live mapped holder. Only a node
 \* mapped primary, waiting to take the role, asks its replaced replica.
@@ -348,7 +393,7 @@ Transfer(p) ==
     /\ (({applied[p].primary, applied[p].replica}
          \cup IF applied[p].primary = L THEN {replaced[p]} ELSE {}) \ {L}) \cap members # {}
     /\ filled' = [filled EXCEPT ![p] = TRUE]
-    /\ UNCHANGED <<applied, proposals, members, failsLeft, proposalsLeft, lostLeft, deadTarget, named, returned, takenEmpty, replaced>>
+    /\ UNCHANGED <<applied, proposals, members, failsLeft, proposalsLeft, lostLeft, deadTarget, named, returned, takenEmpty, replaced, unheard, promotedUnheard>>
 
 \* A node mapped primary with no copy takes the role. takenEmpty records whether a source
 \* was alive at that moment. With WaitForData it needs the map to name no replica: a dead
@@ -361,9 +406,19 @@ TakeRole(p) ==
     /\ LET sourceLive == ({applied[p].replica, replaced[p]} \ {L}) \cap members # {}
        IN /\ (WaitForData => (~sourceLive /\ applied[p].replica = None))
           /\ takenEmpty' = IF sourceLive THEN "source_alive" ELSE "source_dead"
-    /\ UNCHANGED <<applied, proposals, members, failsLeft, proposalsLeft, lostLeft, deadTarget, named, returned, filled, replaced>>
+    /\ UNCHANGED <<applied, proposals, members, failsLeft, proposalsLeft, lostLeft, deadTarget, named, returned, filled, replaced, unheard, promotedUnheard>>
+
+\* A restored voter's first heartbeat. The code rescans at the next settled tick.
+Hear(n) ==
+    /\ n \in unheard
+    /\ n \in members
+    /\ unheard' = unheard \ {n}
+    /\ returned' = [p \in Partitions |->
+                       returned[p] \/ (Planned[p].replica = n /\ Planned[p].primary \notin members)]
+    /\ UNCHANGED <<applied, proposals, members, failsLeft, proposalsLeft, lostLeft, deadTarget, named, filled, takenEmpty, replaced, promotedUnheard>>
 
 Next ==
+    \/ \E n \in Nodes : Hear(n)
     \/ \E p \in Partitions : TakeRole(p)
     \/ \E p \in Partitions : Transfer(p)
     \/ \E p \in Partitions : AddReplica(p)
@@ -375,7 +430,7 @@ Next ==
     \/ \E n \in Nodes : Rejoin(n)
     \/ \E p \in Partitions : Rebalance(p)
 
-Spec == Init /\ [][Next]_vars /\ WF_vars(Commit) /\ WF_vars(Scan)
+Spec == Init /\ [][Next]_vars /\ WF_vars(Commit) /\ WF_vars(Scan) /\ WF_vars(\E n \in Nodes : Hear(n))
 
 \* The primary is not L, the node with no copy.
 InvPrimaryWasAHolder == \A p \in Partitions : applied[p].primary \in {A, B}
@@ -387,7 +442,7 @@ InvPrimaryWasAHolder == \A p \in Partitions : applied[p].primary \in {A, B}
 InvNoStrandedPrimary ==
     (proposals = <<>> /\ lostLeft = MaxLost) =>
         \A p \in Partitions :
-            (Departed(applied[p].primary) /\ ~returned[p]) => applied[p].replica \notin members
+            (Departed(applied[p].primary) /\ ~returned[p]) => applied[p].replica \notin (members \ unheard)
 
 \* Rebalance never moves a primary to a replica outside the members (gh #280).
 InvRebalanceTargetLive == ~deadTarget
@@ -395,7 +450,7 @@ InvRebalanceTargetLive == ~deadTarget
 NothingToRepair ==
     /\ proposals = <<>>
     /\ \A p \in Partitions :
-        /\ Departed(applied[p].primary) => applied[p].replica \notin members
+        /\ Departed(applied[p].primary) => applied[p].replica \notin (members \ unheard)
         /\ ~Departed(applied[p].replica) \/ (KeepDeadReplica /\ Departed(applied[p].primary))
 
 \* After failures stop, every repairable entry is repaired, whatever was lost.
@@ -410,6 +465,9 @@ LivePrimaryIfNamedNodeBack ==
 \* No manual rebalance is needed, in either order of the two deaths and either order of
 \* return, within the scope in the header. This is about the map only, not acked writes.
 NamedNodeBackGivesLivePrimary == <>[](LivePrimaryIfNamedNodeBack \/ proposalsLeft < 2)
+
+\* No failover or scan promotes a restored voter not heard from.
+InvNoPromotionOfUnheard == ~promotedUnheard
 
 \* No node with no copy takes the role while a source is alive. This restates the guard.
 InvNoEmptyServe == takenEmpty # "source_alive"

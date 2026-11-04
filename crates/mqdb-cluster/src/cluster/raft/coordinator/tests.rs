@@ -721,7 +721,9 @@ async fn a_restored_snapshot_member_without_partitions_is_a_voter() {
     assert!(coord.voters().contains(&node4));
 }
 
-async fn restarted_leader_of_five(log: &[RaftCommand]) -> RaftCoordinator<MockTransport> {
+async fn restarted_leader_with_4_and_5_unheard(
+    log: &[RaftCommand],
+) -> RaftCoordinator<MockTransport> {
     let node1 = NodeId::validated(1).unwrap();
     let node2 = NodeId::validated(2).unwrap();
     let node3 = NodeId::validated(3).unwrap();
@@ -751,6 +753,14 @@ async fn restarted_leader_of_five(log: &[RaftCommand]) -> RaftCoordinator<MockTr
     commit_tail(&mut coord).await;
     coord.handle_node_alive(node2).await;
     coord.handle_node_alive(node3).await;
+    coord
+}
+
+async fn restarted_leader_of_five(log: &[RaftCommand]) -> RaftCoordinator<MockTransport> {
+    let mut coord = restarted_leader_with_4_and_5_unheard(log).await;
+    for voter in coord.voters().to_vec() {
+        coord.handle_node_alive(voter).await;
+    }
     coord
 }
 
@@ -877,6 +887,257 @@ async fn a_single_death_fails_over_once_the_batch_window_has_passed() {
 }
 
 #[tokio::test]
+async fn a_failover_does_not_promote_a_restored_voter_never_heard_from() {
+    let node4 = NodeId::validated(4).unwrap();
+    let node5 = NodeId::validated(5).unwrap();
+    let start = 1_790_000_000_000u64;
+    let mut coord = restarted_leader_with_4_and_5_unheard(&pair_on_nodes_4_and_5()).await;
+    coord.handle_node_alive(node4).await;
+    let before = coord.last_log_index();
+
+    coord.handle_node_death(node4).await;
+    coord.tick(start + 2_000).await;
+    coord.tick(start + 3_600).await;
+    assert_eq!(coord.last_log_index(), before);
+    assert_eq!(holders(&coord, 0), (Some(node4), vec![node5]));
+    assert_eq!(holders(&coord, 1), (Some(node5), vec![node4]));
+
+    coord.handle_node_death(node5).await;
+    coord.tick(start + 30_000).await;
+    coord.tick(start + 32_000).await;
+    assert_eq!(coord.last_log_index(), before);
+    assert_eq!(holders(&coord, 0), (Some(node4), vec![node5]));
+    assert_eq!(holders(&coord, 1), (Some(node5), vec![node4]));
+
+    coord.handle_node_alive(node4).await;
+    coord.tick(start + 70_000).await;
+    commit_tail(&mut coord).await;
+    coord.tick(start + 110_000).await;
+    commit_tail(&mut coord).await;
+
+    assert_eq!(holders(&coord, 0).0, Some(node4));
+    assert_eq!(holders(&coord, 1).0, Some(node4));
+}
+
+#[tokio::test]
+async fn a_restored_voter_heard_after_a_death_is_promoted_at_the_next_settled_tick() {
+    let node4 = NodeId::validated(4).unwrap();
+    let node5 = NodeId::validated(5).unwrap();
+    let start = 1_790_000_000_000u64;
+    let mut coord = restarted_leader_with_4_and_5_unheard(&pair_on_nodes_4_and_5()).await;
+    let before = coord.last_log_index();
+
+    coord.handle_node_death(node4).await;
+    coord.tick(start + 2_000).await;
+    coord.tick(start + 3_600).await;
+    assert_eq!(coord.last_log_index(), before);
+
+    coord.handle_node_alive(node5).await;
+    coord.tick(start + 3_800).await;
+    commit_tail(&mut coord).await;
+
+    assert_eq!(holders(&coord, 0), (Some(node5), Vec::new()));
+    assert_eq!(holders(&coord, 1), (Some(node5), Vec::new()));
+}
+
+#[tokio::test]
+async fn a_restored_voter_heard_inside_the_batch_window_is_promoted_when_it_settles() {
+    let node4 = NodeId::validated(4).unwrap();
+    let node5 = NodeId::validated(5).unwrap();
+    let start = 1_790_000_000_000u64;
+    let mut coord = restarted_leader_with_4_and_5_unheard(&pair_on_nodes_4_and_5()).await;
+    let before = coord.last_log_index();
+
+    coord.handle_node_death(node4).await;
+    coord.tick(start + 2_000).await;
+    coord.handle_node_alive(node5).await;
+    coord.tick(start + 3_400).await;
+    assert_eq!(coord.last_log_index(), before);
+    coord.tick(start + 3_600).await;
+    commit_tail(&mut coord).await;
+
+    assert_eq!(holders(&coord, 0), (Some(node5), Vec::new()));
+}
+
+#[tokio::test]
+async fn hearing_a_restored_voter_rescans_once() {
+    let node5 = NodeId::validated(5).unwrap();
+    let start = 1_790_000_000_000u64;
+    let mut coord = restarted_leader_with_4_and_5_unheard(&pair_on_nodes_4_and_5()).await;
+    coord.handle_node_alive(node5).await;
+    assert!(coord.rescan_for_heard_voter);
+    coord.tick(start + 3_000).await;
+    assert!(!coord.rescan_for_heard_voter);
+    coord.handle_node_alive(node5).await;
+    assert!(!coord.rescan_for_heard_voter);
+}
+
+#[tokio::test]
+async fn a_forced_rebalance_leaves_a_partition_whose_holder_is_unheard_on_it() {
+    let node4 = NodeId::validated(4).unwrap();
+    let node5 = NodeId::validated(5).unwrap();
+    let start = 1_790_000_000_000u64;
+    let mut coord = restarted_leader_with_4_and_5_unheard(&pair_on_nodes_4_and_5()).await;
+    coord.handle_node_death(node4).await;
+    coord.tick(start + 2_000).await;
+    coord.tick(start + 3_600).await;
+
+    coord.force_rebalance().await;
+    commit_tail(&mut coord).await;
+
+    assert_eq!(holders(&coord, 0).0, Some(node4));
+    assert_eq!(holders(&coord, 1).0, Some(node5));
+}
+
+fn restored_from_a_snapshot_with_node_5_listed_first(
+    map: &PartitionMap,
+) -> RaftCoordinator<MockTransport> {
+    let members: Vec<NodeId> = [5u16, 1, 2, 3]
+        .map(|node| NodeId::validated(node).unwrap())
+        .to_vec();
+    let node1 = NodeId::validated(1).unwrap();
+    let backend: Arc<dyn mqdb_core::StorageBackend> = Arc::new(mqdb_core::MemoryBackend::new());
+    let storage = crate::cluster::raft::RaftStorage::new(Arc::clone(&backend));
+    storage.persist_state(3, None).unwrap();
+    storage
+        .install_snapshot(
+            &crate::cluster::raft::RaftSnapshot::capture(10, 1, map, &members),
+            false,
+        )
+        .unwrap();
+    RaftCoordinator::new_with_storage(node1, MockTransport::new(node1), grace_config(), backend)
+        .unwrap()
+}
+
+async fn lead_with_nodes_2_and_3(coord: &mut RaftCoordinator<MockTransport>, start: u64) {
+    coord.tick(start).await;
+    coord.tick(start + 1_000).await;
+    let term = coord.current_term();
+    for voter in [2u16, 3] {
+        coord
+            .handle_request_vote_response(
+                NodeId::validated(voter).unwrap(),
+                crate::cluster::raft::rpc::RequestVoteResponse::granted(term),
+            )
+            .await;
+    }
+    assert!(coord.is_leader());
+    commit_tail(coord).await;
+    coord.tick(start + 1_200).await;
+    commit_tail(coord).await;
+    coord.handle_node_alive(NodeId::validated(2).unwrap()).await;
+    coord.handle_node_alive(NodeId::validated(3).unwrap()).await;
+}
+
+#[tokio::test]
+async fn a_forced_rebalance_does_not_adopt_onto_an_unheard_node() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node4 = NodeId::validated(4).unwrap();
+    let start = 1_790_000_000_000u64;
+    let mut map = PartitionMap::new();
+    map.set(
+        PartitionId::new(0).unwrap(),
+        crate::cluster::PartitionAssignment::new(node4, Vec::new(), Epoch::new(1)),
+    );
+    let mut coord = restored_from_a_snapshot_with_node_5_listed_first(&map);
+    assert_eq!(coord.cluster_members().first().map(|n| n.get()), Some(5));
+    lead_with_nodes_2_and_3(&mut coord, start).await;
+    coord.handle_node_death(node4).await;
+    coord.tick(start + 2_000).await;
+    coord.tick(start + 4_000).await;
+
+    coord.force_rebalance().await;
+    commit_tail(&mut coord).await;
+
+    assert_eq!(holders(&coord, 0).0, Some(node1));
+}
+
+#[tokio::test]
+async fn a_rebalance_gives_no_role_to_an_unheard_node() {
+    let node5 = NodeId::validated(5).unwrap();
+    let log: Vec<RaftCommand> = PartitionId::all()
+        .map(|partition| {
+            if partition.get().is_multiple_of(2) {
+                assign(partition.get(), 1, 5, 1)
+            } else {
+                assign(partition.get(), 2, 3, 1)
+            }
+        })
+        .collect();
+    let mut coord = restarted_leader_with_4_and_5_unheard(&log).await;
+    let replicas_before = coord.partition_map().replica_count(node5);
+
+    coord.force_rebalance().await;
+    commit_tail(&mut coord).await;
+
+    assert_eq!(coord.partition_map().primary_count(node5), 0);
+    assert!(coord.partition_map().replica_count(node5) <= replicas_before);
+}
+
+#[tokio::test]
+async fn a_first_map_gives_no_role_to_an_unheard_node() {
+    let node5 = NodeId::validated(5).unwrap();
+    let start = 1_790_000_000_000u64;
+    let mut coord = restored_from_a_snapshot_with_node_5_listed_first(&PartitionMap::new());
+    lead_with_nodes_2_and_3(&mut coord, start).await;
+    coord.tick(start + 1_400).await;
+    commit_tail(&mut coord).await;
+
+    assert!(coord.partitions_initialized());
+    assert_eq!(coord.partition_map().primary_count(node5), 0);
+    assert_eq!(coord.partition_map().replica_count(node5), 0);
+}
+
+#[tokio::test]
+async fn a_drain_gives_no_role_to_an_unheard_node() {
+    let node2 = NodeId::validated(2).unwrap();
+    let node5 = NodeId::validated(5).unwrap();
+    let log = vec![
+        assign(0, 2, 5, 1),
+        assign(1, 2, 3, 1),
+        assign(2, 3, 2, 1),
+        assign(3, 1, 3, 1),
+        assign(4, 3, 1, 1),
+        assign(5, 5, 1, 1),
+    ];
+    let mut coord = restarted_leader_with_4_and_5_unheard(&log).await;
+    let replicas_before = coord.partition_map().replica_count(node5);
+
+    coord.handle_drain_notification(node2).await;
+    commit_tail(&mut coord).await;
+
+    assert_eq!(coord.partition_map().primary_count(node5), 1);
+    assert_eq!(holders(&coord, 5).0, Some(node5));
+    assert!(coord.partition_map().replica_count(node5) <= replicas_before);
+}
+
+#[tokio::test]
+async fn a_snapshot_from_the_leader_does_not_make_an_unheard_member_a_target() {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let node5 = NodeId::validated(5).unwrap();
+    let mut coord = RaftCoordinator::new(node1, MockTransport::new(node1), test_config());
+    coord.handle_node_alive(node2).await;
+    let mut map = PartitionMap::new();
+    map.set(
+        PartitionId::new(0).unwrap(),
+        crate::cluster::PartitionAssignment::new(node2, vec![node5], Epoch::new(1)),
+    );
+
+    coord.restore_snapshot(&crate::cluster::raft::RaftSnapshot::capture(
+        10,
+        1,
+        &map,
+        &[node1, node2, node5],
+    ));
+
+    assert!(coord.live_targets().contains(&node2));
+    assert!(!coord.live_targets().contains(&node5));
+    coord.handle_node_alive(node5).await;
+    assert!(coord.live_targets().contains(&node5));
+}
+
+#[tokio::test]
 async fn a_node_rebalanced_on_return_is_not_rebalanced_again_when_the_leader_catches_up() {
     let node1 = NodeId::validated(1).unwrap();
     let node2 = NodeId::validated(2).unwrap();
@@ -909,6 +1170,7 @@ async fn a_node_rebalanced_on_return_is_not_rebalanced_again_when_the_leader_cat
         )
         .await;
     assert!(coord.is_leader());
+    coord.handle_node_alive(node2).await;
 
     assert!(coord.handle_node_alive(node3).await.is_empty());
     commit_tail(&mut coord).await;
@@ -930,6 +1192,7 @@ async fn new_leader_of_five_with_a_death_queued(
 ) -> RaftCoordinator<MockTransport> {
     let node1 = NodeId::validated(1).unwrap();
     let node4 = NodeId::validated(4).unwrap();
+    let node5 = NodeId::validated(5).unwrap();
     let mut coord = RaftCoordinator::new_with_storage(
         node1,
         transport,
@@ -939,6 +1202,7 @@ async fn new_leader_of_five_with_a_death_queued(
     .unwrap();
     coord.tick(start).await;
     coord.tick(start + 1_000).await;
+    coord.handle_node_alive(node5).await;
     coord.handle_node_death(node4).await;
     let term = coord.current_term();
     for voter in [2u16, 3] {
@@ -1020,6 +1284,7 @@ async fn a_new_leader_plans_no_rebalance_for_a_new_node_while_a_death_is_queued(
     .unwrap();
     coord.tick(start).await;
     coord.tick(start + 1_000).await;
+    coord.handle_node_alive(NodeId::validated(5).unwrap()).await;
     coord.handle_node_death(NodeId::validated(4).unwrap()).await;
     coord.handle_node_alive(node6).await;
     let term = coord.current_term();
@@ -1148,6 +1413,7 @@ async fn a_node_named_only_by_a_lost_tail_is_rebalanced_when_this_node_leads() {
             .is_success()
     );
 
+    coord.handle_node_alive(node2).await;
     coord.handle_node_alive(node3).await;
     assert!(coord.pending_new_nodes.contains(&node3));
 
