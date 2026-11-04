@@ -157,6 +157,10 @@ fn add_missing_replicas(
 ) {
     let reassigned: std::collections::HashSet<u16> =
         reassignments.iter().map(|r| r.partition.get()).collect();
+    let mut replica_counts: std::collections::HashMap<NodeId, usize> = all_nodes
+        .iter()
+        .map(|node| (*node, current.replica_count(*node)))
+        .collect();
 
     for partition in PartitionId::all() {
         if reassigned.contains(&partition.get()) {
@@ -174,14 +178,17 @@ fn add_missing_replicas(
         }
 
         let mut new_replicas = assignment.replicas.clone();
-        for node in all_nodes {
-            if *node == primary || new_replicas.contains(node) {
-                continue;
-            }
-            new_replicas.push(*node);
-            if new_replicas.len() >= desired_replica_count {
+        while new_replicas.len() < desired_replica_count {
+            let Some(least_loaded) = all_nodes
+                .iter()
+                .copied()
+                .filter(|node| *node != primary && !new_replicas.contains(node))
+                .min_by_key(|node| replica_counts.get(node).copied().unwrap_or(0))
+            else {
                 break;
-            }
+            };
+            new_replicas.push(least_loaded);
+            *replica_counts.entry(least_loaded).or_insert(0) += 1;
         }
 
         if new_replicas.len() > assignment.replicas.len() {
@@ -628,6 +635,90 @@ mod tests {
             "expected ~{expected_per_node} replicas after 3 steps, got {}",
             map4.replica_count(node(3))
         );
+    }
+
+    fn apply(map: &mut PartitionMap, moves: &[PartitionReassignment]) {
+        for change in moves {
+            map.set(change.partition, change.to_assignment());
+        }
+    }
+
+    fn after_a_failover_of(map: &PartitionMap, dead: NodeId) -> PartitionMap {
+        let mut after = PartitionMap::new();
+        for partition in PartitionId::all() {
+            let assignment = map.get(partition);
+            let replicas: Vec<NodeId> = assignment
+                .replicas
+                .iter()
+                .copied()
+                .filter(|replica| *replica != dead)
+                .collect();
+            let primary = assignment.primary.filter(|primary| *primary != dead);
+            let (primary, replicas) = match primary {
+                Some(primary) => (primary, replicas),
+                None => (replicas[0], replicas[1..].to_vec()),
+            };
+            after.set(
+                partition,
+                PartitionAssignment::new(primary, replicas, Epoch::new(2)),
+            );
+        }
+        after
+    }
+
+    fn rounds_until_returned(count: u16, done: impl Fn(&PartitionMap, &[NodeId]) -> bool) -> usize {
+        let nodes: Vec<NodeId> = (1..=count).map(node).collect();
+        let balanced =
+            compute_balanced_assignments(&nodes, &RebalanceConfig::default(), Epoch::ZERO);
+        let mut map = after_a_failover_of(&balanced, node(count));
+        for round in 1..=10 {
+            let moves = compute_incremental_assignments(&map, &nodes, &RebalanceConfig::default());
+            apply(&mut map, &moves);
+            if done(&map, &nodes) {
+                return round;
+            }
+        }
+        11
+    }
+
+    #[test]
+    fn a_returned_node_is_a_replica_after_the_first_rebalance() {
+        for count in [3u16, 5, 7] {
+            let rounds = rounds_until_returned(count, |map, nodes| {
+                nodes
+                    .last()
+                    .is_some_and(|last| map.replica_count(*last) > 0)
+            });
+            assert_eq!(rounds, 1, "{count} nodes");
+        }
+    }
+
+    #[test]
+    fn a_returned_node_nearly_holds_its_share_of_primaries_after_the_second_rebalance() {
+        for count in [3u16, 5, 7] {
+            let share = NUM_PARTITIONS as usize / usize::from(count);
+            let rounds = rounds_until_returned(count, |map, nodes| {
+                nodes
+                    .last()
+                    .is_some_and(|last| map.primary_count(*last) + 2 >= share)
+            });
+            assert_eq!(rounds, 2, "{count} nodes");
+        }
+    }
+
+    #[test]
+    fn primaries_are_within_one_after_the_fourth_rebalance_of_a_returned_node() {
+        for (count, expected) in [(3u16, 2), (5, 4), (7, 4)] {
+            let rounds = rounds_until_returned(count, |map, nodes| {
+                let counts: Vec<usize> = nodes.iter().map(|n| map.primary_count(*n)).collect();
+                counts
+                    .iter()
+                    .max()
+                    .zip(counts.iter().min())
+                    .is_some_and(|(max, min)| max - min <= 1)
+            });
+            assert_eq!(rounds, expected, "{count} nodes");
+        }
     }
 
     #[test]
