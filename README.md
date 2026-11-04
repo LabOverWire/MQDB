@@ -735,10 +735,10 @@ MQDB supports distributed clustering with automatic failover and partition rebal
 > list the nodes started before it, as above; the links to nodes started afterwards are created when
 > *those* nodes dial in. A node keeps redialling a known peer that has no link, or that heartbeats
 > report dead, starting at once and backing off to every 5 seconds, then every minute once the peer
-> has been gone for 5 minutes, so a restarted node re-links without a change to its `--peers`. A
+> has been gone for 5 minutes, including one that accepts a connection but sends no heartbeats, so a restarted node re-links without a change to its `--peers`. A
 > learned address is replaced when the peer dials in from a new one, and any address is dropped if
 > a different node answers on it, which is then dialled there instead. An address that turns out to
-> be this node itself is dropped too, and that peer stays undialled until it dials in. A `--peers`
+> be this node itself is dropped too, and that peer is relinked only when it dials in. A `--peers`
 > address returns on the next start.
 >
 > A node restarted with its data counts every node named in its stored partition map or Raft log
@@ -761,7 +761,13 @@ MQDB supports distributed clustering with automatic failover and partition rebal
 > from the rebalance. Until its first heartbeat such a node is not a target: no failover, rebalance
 > or forced rebalance gives it a role. A partition whose only other holder is such a node stays
 > mapped until that node's first heartbeat, when the next failover pass promotes it, or until its
-> 30 second verdict, when the partition waits for a holder to return.
+> 30 second verdict, when the partition waits for a holder to return. A member first named by a
+> snapshot from the leader, or named again after its verdict, gets the same 30 seconds.
+>
+> A node back after that verdict holds no partitions. The rebalance on its return makes it a replica,
+> and the periodic check at least 30 seconds later moves primaries to it, with smaller moves on later
+> checks. So it serves its share later than a node that returned before the verdict, which keeps
+> its partitions, though the cluster answered for those partitions in the meantime.
 >
 > Failover and rebalance move a partition only to a live replica, meaning one heard from and not yet
 > declared dead, which can be a node that has just died. That replica may itself have no copy yet.
@@ -781,7 +787,8 @@ MQDB supports distributed clustering with automatic failover and partition rebal
 > them empty. Failover waits until 1.5 seconds have passed with no new death, so deaths detected
 > closer together than that count as one. Nodes killed together can be detected up to about a second
 > apart, which leaves about half a second of margin; if they split, the first failover promotes the
-> second holder and drops the first from the map. A partition that has lost one copy can stay on the other indefinitely (#327).
+> second holder and drops the first from the map. A restored holder not yet heard from gets its 30
+> second verdict on its own clock, so that margin does not apply to it. A partition that has lost one copy can stay on the other indefinitely (#327).
 > If that holder dies at any later time, the partition stays unavailable until that holder returns,
 > with the same wait if its copy came from a snapshot, or you run `mqdb cluster rebalance` on the
 > Raft leader; the holder that left the map earlier does not help when it returns. A leader without
