@@ -1,19 +1,21 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use super::address_book::AddressBook;
+use super::redial_backoff::RedialBackoff;
 use super::transport::{
     ClusterMessage, ClusterTransport, InboundMessage, RoutedPublish, TransportError,
 };
 use super::{NodeId, PartitionId};
-use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig};
+use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig, VarInt};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::BufReader;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::sync::{Notify, RwLock};
 use tracing::{debug, error, info, trace, warn};
 
@@ -22,6 +24,9 @@ const PEER_CONTROL_QUEUE_CAPACITY: usize = 256;
 const PEER_BULK_QUEUE_CAPACITY: usize = 1024;
 const PEER_SNAPSHOT_QUEUE_CAPACITY: usize = 64;
 const REDIAL_DIAL_TIMEOUT: Duration = Duration::from_secs(5);
+const NEW_LINK_SETTLE: Duration = Duration::from_secs(5);
+
+const DIALLED_ITSELF_CLOSE_CODE: u32 = 0x5e1f;
 
 struct PeerConnection {
     connection: Connection,
@@ -30,6 +35,7 @@ struct PeerConnection {
     bulk_queued: AtomicU64,
     snapshot_tx: flume::Sender<SnapshotFrame>,
     generation: u64,
+    linked_at: Instant,
 }
 
 struct SnapshotFrame {
@@ -73,7 +79,9 @@ pub struct QuicDirectTransport {
     node_id: NodeId,
     endpoint: Arc<RwLock<Option<Endpoint>>>,
     peers: Arc<RwLock<HashMap<NodeId, PeerConnection>>>,
-    peer_addrs: Arc<RwLock<HashMap<NodeId, SocketAddr>>>,
+    address_book: Arc<AddressBook>,
+    dialing: Arc<Mutex<HashSet<NodeId>>>,
+    client_config: Arc<OnceLock<quinn::ClientConfig>>,
     generation: Arc<AtomicU64>,
     inbox_tx: flume::Sender<InboundMessage>,
     inbox_rx: flume::Receiver<InboundMessage>,
@@ -104,7 +112,9 @@ impl Clone for QuicDirectTransport {
             node_id: self.node_id,
             endpoint: self.endpoint.clone(),
             peers: self.peers.clone(),
-            peer_addrs: self.peer_addrs.clone(),
+            address_book: self.address_book.clone(),
+            dialing: self.dialing.clone(),
+            client_config: self.client_config.clone(),
             generation: self.generation.clone(),
             inbox_tx: self.inbox_tx.clone(),
             inbox_rx: self.inbox_rx.clone(),
@@ -126,6 +136,15 @@ impl Clone for QuicDirectTransport {
 impl QuicDirectTransport {
     #[must_use]
     pub fn new(node_id: NodeId) -> Self {
+        Self::with_address_book(node_id, AddressBook::in_memory())
+    }
+
+    #[must_use]
+    pub fn remembering_addresses_in(node_id: NodeId, path: std::path::PathBuf) -> Self {
+        Self::with_address_book(node_id, AddressBook::load(path))
+    }
+
+    fn with_address_book(node_id: NodeId, address_book: AddressBook) -> Self {
         let (inbox_tx, inbox_rx) = flume::bounded(INBOX_CHANNEL_CAPACITY);
         let (local_publish_tx, local_publish_rx) = flume::bounded(100_000);
 
@@ -133,7 +152,9 @@ impl QuicDirectTransport {
             node_id,
             endpoint: Arc::new(RwLock::new(None)),
             peers: Arc::new(RwLock::new(HashMap::new())),
-            peer_addrs: Arc::new(RwLock::new(HashMap::new())),
+            address_book: Arc::new(address_book),
+            dialing: Arc::new(Mutex::new(HashSet::new())),
+            client_config: Arc::new(OnceLock::new()),
             generation: Arc::new(AtomicU64::new(0)),
             inbox_tx,
             inbox_rx,
@@ -217,30 +238,28 @@ impl QuicDirectTransport {
         let local_node = self.node_id;
         let peers = self.peers.clone();
         let generation = self.generation.clone();
+        let address_book = self.address_book.clone();
 
         tokio::spawn(async move {
-            acceptor_task(endpoint, inbox_tx, notify, local_node, peers, generation).await;
+            acceptor_task(
+                endpoint,
+                inbox_tx,
+                notify,
+                local_node,
+                peers,
+                generation,
+                address_book,
+            )
+            .await;
         });
 
         Ok(())
     }
 
-    /// Connect to a peer node via QUIC.
-    ///
-    /// # Errors
-    /// Returns an error if the connection fails or the stream cannot be opened.
-    pub async fn connect_to_peer(
-        &self,
-        peer_id: NodeId,
-        peer_addr: SocketAddr,
-    ) -> Result<(), TransportError> {
-        self.peer_addrs.write().await.insert(peer_id, peer_addr);
-
-        let endpoint_guard = self.endpoint.read().await;
-        let endpoint = endpoint_guard
-            .as_ref()
-            .ok_or(TransportError::NotConnected)?;
-
+    fn client_config(&self) -> Result<quinn::ClientConfig, TransportError> {
+        if let Some(config) = self.client_config.get() {
+            return Ok(config.clone());
+        }
         let ca_file = self.ca_file.read().ok().and_then(|g| g.clone());
         let client_cert = self.cert_file.read().ok().and_then(|g| g.clone());
         let client_key = self.key_file.read().ok().and_then(|g| g.clone());
@@ -260,12 +279,31 @@ impl QuicDirectTransport {
             client_cert.as_deref(),
             client_key.as_deref(),
         )?;
+        Ok(self.client_config.get_or_init(|| client_config).clone())
+    }
+
+    async fn dial(&self, peer_id: NodeId, peer_addr: SocketAddr) -> Result<(), TransportError> {
+        let endpoint_guard = self.endpoint.read().await;
+        let endpoint = endpoint_guard
+            .as_ref()
+            .ok_or(TransportError::NotConnected)?;
+
+        let client_config = self.client_config()?;
 
         let connection = endpoint
             .connect_with(client_config, peer_addr, "localhost")
             .map_err(|e| TransportError::SendFailed(format!("failed to connect to peer: {e}")))?
             .await
             .map_err(|e| TransportError::SendFailed(format!("connection to peer failed: {e}")))?;
+
+        if self.has_fresh_link(peer_id).await {
+            debug!(
+                peer = peer_id.get(),
+                "peer linked first, dropping this redial"
+            );
+            connection.close(0u32.into(), b"already linked");
+            return Ok(());
+        }
 
         #[cfg(feature = "dev-insecure")]
         info!(
@@ -303,8 +341,15 @@ impl QuicDirectTransport {
             bulk_queued: AtomicU64::new(0),
             snapshot_tx,
             generation,
+            linked_at: Instant::now(),
         };
-        self.peers.write().await.insert(peer_id, peer_conn);
+        let replaced = self.peers.write().await.insert(peer_id, peer_conn);
+        if let Some(old_link) = replaced.filter(|link| link.linked_at.elapsed() >= NEW_LINK_SETTLE)
+        {
+            old_link
+                .connection
+                .close(0u32.into(), b"replaced by a newer link");
+        }
 
         tokio::spawn(peer_writer_task(
             send_stream,
@@ -318,46 +363,134 @@ impl QuicDirectTransport {
         let notify = self.message_notify.clone();
         let local_node = self.node_id;
 
+        let dialled = DialledLink {
+            connection,
+            addr: peer_addr,
+            generation,
+            peers: self.peers.clone(),
+            address_book: self.address_book.clone(),
+        };
         tokio::spawn(async move {
-            receiver_task(recv_stream, peer_id, inbox_tx, notify, local_node).await;
+            receiver_task(
+                recv_stream,
+                peer_id,
+                inbox_tx,
+                notify,
+                local_node,
+                Some(dialled),
+            )
+            .await;
         });
 
         Ok(())
     }
 
-    /// Re-dial every configured peer that is not currently alive.
-    ///
-    /// Driven by the heartbeat liveness view rather than the transport peer
-    /// map, so a stale entry that has not yet been removed by a send failure
-    /// does not stop reconnection. `connect_to_peer` replaces any stale entry.
     pub async fn redial_unlinked(&self, linked: &[NodeId]) {
-        let targets: Vec<(NodeId, SocketAddr)> = {
-            let addrs = self.peer_addrs.read().await;
-            addrs
-                .iter()
-                .filter(|&(node, _)| *node != self.node_id && !linked.contains(node))
-                .map(|(node, addr)| (*node, *addr))
-                .collect()
-        };
+        let targets: Vec<NodeId> = self
+            .address_book
+            .nodes()
+            .await
+            .into_iter()
+            .filter(|node| *node != self.node_id && !linked.contains(node))
+            .collect();
+        self.redial(&targets).await;
+    }
 
-        let mut dials = tokio::task::JoinSet::new();
-        for (node, addr) in targets {
+    pub async fn peers_needing_dial(&self, dead: &[NodeId]) -> Vec<NodeId> {
+        let known = self.address_book.nodes().await;
+        let peers = self.peers.read().await;
+        known
+            .into_iter()
+            .filter(|node| *node != self.node_id)
+            .filter(|node| {
+                peers.get(node).is_none_or(|link| {
+                    dead.contains(node) && link.linked_at.elapsed() >= NEW_LINK_SETTLE
+                })
+            })
+            .collect()
+    }
+
+    pub async fn down_peers_due(
+        &self,
+        backoff: &mut RedialBackoff,
+        dead: &[NodeId],
+        now: Instant,
+    ) -> Vec<NodeId> {
+        backoff.due(&self.peers_needing_dial(dead).await, dead, now)
+    }
+
+    pub async fn connect_configured_peers(
+        &self,
+        peers: &[(NodeId, SocketAddr)],
+    ) -> Vec<(NodeId, String)> {
+        for (node, addr) in peers {
+            self.address_book.configure(*node, *addr).await;
+        }
+        let nodes: Vec<NodeId> = peers.iter().map(|(node, _)| *node).collect();
+        self.redial(&nodes).await
+    }
+
+    pub async fn redial(&self, targets: &[NodeId]) -> Vec<(NodeId, String)> {
+        let mut dials_running = tokio::task::JoinSet::new();
+        for node in targets.iter().copied() {
+            let Some(addr) = self.address_book.addr(node).await else {
+                continue;
+            };
+            if !self.start_dial(node) {
+                continue;
+            }
             let transport = self.clone();
-            dials.spawn(async move {
-                match tokio::time::timeout(REDIAL_DIAL_TIMEOUT, transport.connect_to_peer(node, addr))
-                    .await
+            dials_running.spawn(async move {
+                let failure = match tokio::time::timeout(
+                    REDIAL_DIAL_TIMEOUT,
+                    transport.dial(node, addr),
+                )
+                .await
                 {
-                    Ok(Ok(())) => info!(peer = node.get(), addr = %addr, "redialled peer"),
+                    Ok(Ok(())) => {
+                        debug!(peer = node.get(), addr = %addr, "redial to peer finished");
+                        None
+                    }
                     Ok(Err(e)) => {
                         debug!(peer = node.get(), addr = %addr, error = %e, "redial to peer failed, will retry");
+                        Some((node, e.to_string()))
                     }
                     Err(_) => {
                         debug!(peer = node.get(), addr = %addr, "redial to peer timed out, will retry");
+                        Some((node, "timed out".to_string()))
                     }
-                }
+                };
+                transport.finish_dial(node);
+                failure
             });
         }
-        while dials.join_next().await.is_some() {}
+        let mut failures = Vec::new();
+        while let Some(finished) = dials_running.join_next().await {
+            if let Ok(Some(failure)) = finished {
+                failures.push(failure);
+            }
+        }
+        failures
+    }
+
+    async fn has_fresh_link(&self, node: NodeId) -> bool {
+        self.peers
+            .read()
+            .await
+            .get(&node)
+            .is_some_and(|link| link.linked_at.elapsed() < NEW_LINK_SETTLE)
+    }
+
+    fn start_dial(&self, node: NodeId) -> bool {
+        self.dialing
+            .lock()
+            .is_ok_and(|mut dialing| dialing.insert(node))
+    }
+
+    fn finish_dial(&self, node: NodeId) {
+        if let Ok(mut dialing) = self.dialing.lock() {
+            dialing.remove(&node);
+        }
     }
 
     #[must_use]
@@ -626,6 +759,7 @@ async fn acceptor_task(
     local_node: NodeId,
     peers: Arc<RwLock<HashMap<NodeId, PeerConnection>>>,
     generation: Arc<AtomicU64>,
+    address_book: Arc<AddressBook>,
 ) {
     info!(node = local_node.get(), "QUIC acceptor task started");
 
@@ -642,10 +776,17 @@ async fn acceptor_task(
         let notify = notify.clone();
         let peers = peers.clone();
         let generation = generation.clone();
+        let address_book = address_book.clone();
 
         tokio::spawn(async move {
             if let Err(e) = handle_incoming_connection(
-                connection, inbox_tx, notify, local_node, peers, generation,
+                connection,
+                inbox_tx,
+                notify,
+                local_node,
+                peers,
+                generation,
+                address_book,
             )
             .await
             {
@@ -662,6 +803,7 @@ async fn handle_incoming_connection(
     local_node: NodeId,
     peers: Arc<RwLock<HashMap<NodeId, PeerConnection>>>,
     generation: Arc<AtomicU64>,
+    address_book: Arc<AddressBook>,
 ) -> Result<(), TransportError> {
     let (send_stream, mut recv_stream) = connection
         .accept_bi()
@@ -678,7 +820,18 @@ async fn handle_incoming_connection(
     let peer_node = NodeId::validated(peer_node_id)
         .ok_or_else(|| TransportError::SendFailed("invalid peer node ID".to_string()))?;
 
+    if peer_node == local_node {
+        connection.close(
+            DIALLED_ITSELF_CLOSE_CODE.into(),
+            b"this node dialled itself",
+        );
+        return Ok(());
+    }
+
     info!(peer = peer_node.get(), "accepted incoming QUIC connection");
+    address_book
+        .learn(peer_node, connection.remote_address())
+        .await;
 
     let (control_tx, control_rx) = flume::bounded(PEER_CONTROL_QUEUE_CAPACITY);
     let (bulk_tx, bulk_rx) = flume::bounded(PEER_BULK_QUEUE_CAPACITY);
@@ -692,6 +845,7 @@ async fn handle_incoming_connection(
             bulk_queued: AtomicU64::new(0),
             snapshot_tx,
             generation: peer_generation,
+            linked_at: Instant::now(),
         };
         peers.write().await.insert(peer_node, peer_conn);
     }
@@ -704,7 +858,7 @@ async fn handle_incoming_connection(
         peer_generation,
     ));
 
-    receiver_task(recv_stream, peer_node, inbox_tx, notify, local_node).await;
+    receiver_task(recv_stream, peer_node, inbox_tx, notify, local_node, None).await;
     Ok(())
 }
 
@@ -824,12 +978,65 @@ async fn remove_peer_generation(
     }
 }
 
+struct DialledLink {
+    connection: Connection,
+    addr: SocketAddr,
+    generation: u64,
+    peers: Arc<RwLock<HashMap<NodeId, PeerConnection>>>,
+    address_book: Arc<AddressBook>,
+}
+
+impl DialledLink {
+    async fn forget_if_it_was_this_node(self, dialled: NodeId) {
+        let answered_as_this_node = matches!(
+            self.connection.close_reason(),
+            Some(quinn::ConnectionError::ApplicationClosed(close))
+                if close.error_code == VarInt::from_u32(DIALLED_ITSELF_CLOSE_CODE)
+        );
+        if !answered_as_this_node {
+            return;
+        }
+        warn!(
+            dialled = dialled.get(),
+            addr = %self.addr,
+            "the address of this peer is now this node, forgetting it"
+        );
+        self.address_book.forget(dialled, self.addr).await;
+        let mut peers = self.peers.write().await;
+        if peers
+            .get(&dialled)
+            .is_some_and(|peer| peer.generation == self.generation)
+        {
+            peers.remove(&dialled);
+        }
+    }
+
+    async fn drop_wrong_peer(self, dialled: NodeId, actual: NodeId) {
+        warn!(
+            dialled = dialled.get(),
+            actual = actual.get(),
+            addr = %self.addr,
+            "the address of this peer now belongs to another node, forgetting it"
+        );
+        self.address_book.forget(dialled, self.addr).await;
+        self.address_book.learn(actual, self.addr).await;
+        let mut peers = self.peers.write().await;
+        if peers
+            .get(&dialled)
+            .is_some_and(|peer| peer.generation == self.generation)
+        {
+            peers.remove(&dialled);
+        }
+    }
+}
+
 async fn receiver_task(
     mut recv_stream: RecvStream,
     peer_node: NodeId,
     inbox_tx: flume::Sender<InboundMessage>,
     notify: Arc<Notify>,
     local_node: NodeId,
+    mut dialled: Option<DialledLink>,
 ) {
     trace!(peer = peer_node.get(), "receiver task started");
 
@@ -853,6 +1060,11 @@ async fn receiver_task(
         }
 
         if let Some(msg) = parse_message(&buf, local_node) {
+            if msg.from != peer_node
+                && let Some(link) = dialled.take()
+            {
+                link.drop_wrong_peer(peer_node, msg.from).await;
+            }
             if let Err(flume::TrySendError::Full(dropped)) = inbox_tx.try_send(msg) {
                 let msg_type = match &dropped.message {
                     ClusterMessage::Heartbeat(_) => "Heartbeat",
@@ -884,6 +1096,9 @@ async fn receiver_task(
         }
     }
 
+    if let Some(link) = dialled {
+        link.forget_if_it_was_this_node(peer_node).await;
+    }
     debug!(peer = peer_node.get(), "receiver task ended");
 }
 

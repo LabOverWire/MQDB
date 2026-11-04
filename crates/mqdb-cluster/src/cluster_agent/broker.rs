@@ -465,6 +465,7 @@ impl ClusteredAgent {
             .map_err(|e| format!("failed to bind QUIC transport: {e}"))?;
         info!(addr = %cluster_addr, "QUIC direct transport bound");
 
+        let mut configured = Vec::new();
         for peer in &self.peers {
             if let Some(peer_node_id) = NodeId::validated(peer.node_id) {
                 let peer_addr: SocketAddr = match peer.address.parse() {
@@ -487,15 +488,11 @@ impl ClusteredAgent {
                         continue;
                     }
                 };
-                if let Err(e) = quic_transport
-                    .connect_to_peer(peer_node_id, peer_cluster_addr)
-                    .await
-                {
-                    warn!(peer = peer_node_id.get(), addr = %peer_cluster_addr, error = %e, "failed to connect to peer via QUIC");
-                } else {
-                    info!(peer = peer_node_id.get(), addr = %peer_cluster_addr, "connected to peer via QUIC");
-                }
+                configured.push((peer_node_id, peer_cluster_addr));
             }
+        }
+        for (peer, error) in quic_transport.connect_configured_peers(&configured).await {
+            warn!(peer = peer.get(), %error, "failed to connect to peer via QUIC, will retry");
         }
 
         info!(broker_addr = %broker_addr, "creating separate MQTT client for admin");

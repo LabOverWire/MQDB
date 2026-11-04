@@ -28,6 +28,7 @@ const TTL_CLEANUP_INTERVAL_SECS: u64 = 60;
 const UNIQUE_RECONCILE_INTERVAL_SECS: u64 = 10;
 const RETAINED_SYNC_CLEANUP_INTERVAL_SECS: u64 = 30;
 const MESH_CHECK_INTERVAL_SECS: u64 = 60;
+const REDIAL_CHECK_INTERVAL_SECS: u64 = 1;
 const RETAINED_ECHO_MAX_AGE_SECS: u64 = 5;
 
 const RAFT_CHANNEL_CAPACITY: usize = 4096;
@@ -84,6 +85,7 @@ struct MessageProcessorChannels {
     tx_main_queue: flume::Sender<InboundMessage>,
     transport_inbox_rx: flume::Receiver<InboundMessage>,
     rx_tick: flume::Receiver<u64>,
+    rx_expected_members: flume::Receiver<NodeId>,
     tx_batch: flume::Sender<ProcessingBatch>,
 }
 
@@ -168,6 +170,7 @@ pub struct ClusteredAgent {
     #[allow(dead_code)]
     processor_executor: Option<DedicatedExecutor>,
     tx_tick: Option<flume::Sender<u64>>,
+    tx_expected_members: flume::Sender<NodeId>,
     rx_main_queue: Option<flume::Receiver<InboundMessage>>,
     rx_batch: Option<flume::Receiver<ProcessingBatch>>,
     ws_bind_address: Option<SocketAddr>,
