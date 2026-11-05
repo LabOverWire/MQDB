@@ -246,8 +246,10 @@ async fn change_events_leave_the_record_named_events_alone(partitions: u8) {
     let backups = TempDir::new().unwrap();
 
     for entity in ["ok", "events"] {
-        restore_record(&db, backups.path(), entity, "events").await;
         let events = watch(&client, &format!("$DB/{entity}/events/#")).await;
+        restore_record(&db, backups.path(), entity, "events").await;
+        let restored = next_topic(&events).await;
+        assert!(restored.ends_with("/events"), "{restored}");
 
         for id in ["update", "delete", "share", "unshare", "shares"] {
             let created = request(
