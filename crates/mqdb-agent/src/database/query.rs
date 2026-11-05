@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::Database;
+use super::crud::VisibleChildren;
 use mqdb_core::entity::Entity;
 use mqdb_core::error::{Error, Result};
 use mqdb_core::keys;
@@ -12,6 +13,33 @@ use std::future::Future;
 use std::pin::Pin;
 
 type RangeBounds = (String, Option<RangeBound>, Option<RangeBound>);
+
+pub(crate) struct ListQuery {
+    pub(crate) entity: String,
+    pub(crate) filters: Vec<Filter>,
+    pub(crate) sort: Vec<SortOrder>,
+    pub(crate) pagination: Option<Pagination>,
+    pub(crate) includes: Vec<String>,
+    pub(crate) projection: Option<Vec<String>>,
+}
+
+pub(crate) enum RowScope<'a> {
+    All,
+    VisibleChildren(VisibleChildren<'a>),
+}
+
+impl RowScope<'_> {
+    fn is_all(&self) -> bool {
+        matches!(self, Self::All)
+    }
+
+    fn admits(&mut self, db: &Database, row: &Value) -> Result<bool> {
+        match self {
+            Self::All => Ok(true),
+            Self::VisibleChildren(children) => children.admits(db, row),
+        }
+    }
+}
 
 impl Database {
     /// # Errors
@@ -69,6 +97,35 @@ impl Database {
         includes: Vec<String>,
         projection: Option<Vec<String>>,
     ) -> Result<Vec<Value>> {
+        self.list_scoped(
+            ListQuery {
+                entity: entity_name,
+                filters,
+                sort,
+                pagination,
+                includes,
+                projection,
+            },
+            RowScope::All,
+        )
+        .await
+    }
+
+    /// # Errors
+    /// Returns an error if scanning, filtering, or deserialization fails.
+    pub(crate) async fn list_scoped(
+        &self,
+        query: ListQuery,
+        mut scope: RowScope<'_>,
+    ) -> Result<Vec<Value>> {
+        let ListQuery {
+            entity: entity_name,
+            filters,
+            sort,
+            pagination,
+            includes,
+            projection,
+        } = query;
         if filters.len() > MAX_FILTERS {
             return Err(Error::Validation(format!(
                 "too many filters: {} exceeds maximum of {MAX_FILTERS}",
@@ -84,13 +141,17 @@ impl Database {
 
         let (mut results, early_pagination_applied) = if filters.is_empty() && sort.is_empty() {
             (
-                self.list_with_early_pagination(&entity_name, pagination.as_ref())?,
+                self.list_with_early_pagination(&entity_name, pagination.as_ref(), &mut scope)?,
                 true,
             )
         } else if filters.is_empty() {
-            (self.scan_all_entities(&entity_name)?, false)
+            (self.scan_all_entities(&entity_name, &mut scope)?, false)
         } else {
-            (self.list_with_filters(&entity_name, &filters).await?, false)
+            (
+                self.list_with_filters(&entity_name, &filters, &mut scope)
+                    .await?,
+                false,
+            )
         };
 
         if !sort.is_empty() {
@@ -124,6 +185,7 @@ impl Database {
         &self,
         entity_name: &str,
         pagination: Option<&Pagination>,
+        scope: &mut RowScope<'_>,
     ) -> Result<Vec<Value>> {
         let requested_limit = pagination.map_or(usize::MAX, |p| p.limit);
         let limit = self
@@ -132,7 +194,11 @@ impl Database {
             .map_or(requested_limit, |max| requested_limit.min(max));
         let offset = pagination.map_or(0, |p| p.offset);
         let prefix = format!("data/{entity_name}/");
-        let batch_size = offset.saturating_add(limit);
+        let batch_size = if scope.is_all() {
+            offset.saturating_add(limit).min(1000)
+        } else {
+            1000
+        };
 
         let mut results = Vec::new();
         let mut after_key: Option<Vec<u8>> = None;
@@ -141,13 +207,18 @@ impl Database {
         loop {
             let items = self.storage.prefix_scan_batch(
                 prefix.as_bytes(),
-                batch_size.min(1000),
+                batch_size,
                 after_key.as_deref(),
             )?;
             if items.is_empty() {
                 break;
             }
             for (key, value) in &items {
+                if !scope.is_all()
+                    && !scope.admits(self, &Self::row_json(entity_name, key, value)?)?
+                {
+                    continue;
+                }
                 if skipped < offset {
                     skipped += 1;
                     continue;
@@ -155,11 +226,9 @@ impl Database {
                 if results.len() >= limit {
                     return Ok(results);
                 }
-                let (_, id) = keys::decode_data_key(key)?;
-                let entity = Entity::deserialize(entity_name.to_string(), id, value)?;
-                results.push(entity.to_json());
+                results.push(Self::row_json(entity_name, key, value)?);
             }
-            if items.len() < batch_size.min(1000) {
+            if items.len() < batch_size {
                 break;
             }
             after_key = items.last().map(|(k, _)| k.clone());
@@ -167,7 +236,18 @@ impl Database {
         Ok(results)
     }
 
-    async fn list_with_filters(&self, entity_name: &str, filters: &[Filter]) -> Result<Vec<Value>> {
+    fn row_json(entity_name: &str, key: &[u8], value: &[u8]) -> Result<Value> {
+        let (_, id) = keys::decode_data_key(key)?;
+        let entity = Entity::deserialize(entity_name.to_string(), id, value)?;
+        Ok(entity.to_json())
+    }
+
+    async fn list_with_filters(
+        &self,
+        entity_name: &str,
+        filters: &[Filter],
+        scope: &mut RowScope<'_>,
+    ) -> Result<Vec<Value>> {
         let index_manager = self.index_manager.read().await;
 
         for filter in filters {
@@ -184,7 +264,8 @@ impl Database {
                 return if ids.is_empty() {
                     Ok(vec![])
                 } else {
-                    self.list_from_index_ids(entity_name, &ids, filters).await
+                    self.list_from_index_ids(entity_name, &ids, filters, scope)
+                        .await
                 };
             }
         }
@@ -200,11 +281,14 @@ impl Database {
                 upper.as_ref().map(|(v, inc)| (v.as_slice(), *inc)),
             )?;
             if !ids.is_empty() {
-                return self.list_from_index_ids(entity_name, &ids, filters).await;
+                return self
+                    .list_from_index_ids(entity_name, &ids, filters, scope)
+                    .await;
             }
         }
 
-        self.scan_filtered_entities(entity_name, filters)
+        let max_results = self.config.max_list_results.unwrap_or(usize::MAX);
+        self.scan_filtered_entities(entity_name, filters, max_results, scope)
     }
 
     fn collect_range_bounds(
@@ -230,6 +314,7 @@ impl Database {
         entity_name: &str,
         ids: &[String],
         filters: &[Filter],
+        scope: &mut RowScope<'_>,
     ) -> Result<Vec<Value>> {
         let max_results = self.config.max_list_results.unwrap_or(usize::MAX);
         let mut results = Vec::new();
@@ -242,7 +327,9 @@ impl Database {
                 .await
             {
                 Ok(entity_data) => {
-                    if Self::matches_filters(&entity_data, filters) {
+                    if Self::matches_filters(&entity_data, filters)
+                        && scope.admits(self, &entity_data)?
+                    {
                         results.push(entity_data);
                     }
                 }
@@ -334,7 +421,7 @@ impl Database {
         )
     }
 
-    fn scan_all_entities(&self, entity_name: &str) -> Result<Vec<Value>> {
+    fn scan_all_entities(&self, entity_name: &str, scope: &mut RowScope<'_>) -> Result<Vec<Value>> {
         let max_results = self.config.max_sort_buffer;
         let prefix = format!("data/{entity_name}/");
         let items = self.storage.prefix_scan(prefix.as_bytes())?;
@@ -345,13 +432,21 @@ impl Database {
             }
             let (_, id) = keys::decode_data_key(&key)?;
             let entity = Entity::deserialize(entity_name.to_string(), id, &value)?;
-            results.push(entity.to_json());
+            let row = entity.to_json();
+            if scope.admits(self, &row)? {
+                results.push(row);
+            }
         }
         Ok(results)
     }
 
-    fn scan_filtered_entities(&self, entity_name: &str, filters: &[Filter]) -> Result<Vec<Value>> {
-        let max_results = self.config.max_list_results.unwrap_or(usize::MAX);
+    pub(super) fn scan_filtered_entities(
+        &self,
+        entity_name: &str,
+        filters: &[Filter],
+        max_results: usize,
+        scope: &mut RowScope<'_>,
+    ) -> Result<Vec<Value>> {
         let prefix = format!("data/{entity_name}/");
         let items = self.storage.prefix_scan(prefix.as_bytes())?;
         let mut results = Vec::new();
@@ -362,7 +457,7 @@ impl Database {
             let (_, id) = keys::decode_data_key(&key)?;
             let entity = Entity::deserialize(entity_name.to_string(), id, &value)?;
             let entity_data = entity.to_json();
-            if Self::matches_filters(&entity_data, filters) {
+            if Self::matches_filters(&entity_data, filters) && scope.admits(self, &entity_data)? {
                 results.push(entity_data);
             }
         }
@@ -495,9 +590,6 @@ mod stale_index_tests {
         .await
         .unwrap();
 
-        // A row created after BOTH add_index calls must be indexed on the FIRST
-        // field too — under the old replace-not-merge bug, `email` was de-registered
-        // and only `username` would be indexed for new rows.
         let email_value = keys::encode_value_for_index(&json!("a@x.com")).unwrap();
         let email_key = keys::encode_index_key("users", "email", &email_value, "u1");
         assert!(

@@ -10,6 +10,7 @@ mod sharing;
 mod subscriptions;
 
 pub use crud::{CallerContext, DerivedAccess, UpdatePrecondition};
+pub(crate) use query::{ListQuery, RowScope};
 pub use sharing::{GranteeIdentity, ShareActor};
 
 use crate::consumer_group::ConsumerGroup;

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::Database;
+use super::query::RowScope;
 use mqdb_core::entity::Entity;
 use mqdb_core::error::{Error, Result};
 use mqdb_core::events::ChangeEvent;
@@ -9,6 +10,7 @@ use mqdb_core::keys;
 use mqdb_core::types::ScopeConfig;
 use mqdb_core::{Filter, FilterOp};
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 
 use mqdb_core::types::{AccessLevel, OwnershipConfig, SHARES_ENTITY, owner_change_refusal};
 
@@ -52,6 +54,36 @@ pub struct DerivedAccess<'a> {
     pub fk_field: &'a str,
     pub sender: &'a str,
     pub required: AccessLevel,
+}
+
+pub(crate) struct VisibleChildren<'a> {
+    parent_entity: &'a str,
+    fk_field: &'a str,
+    sender: &'a str,
+    parent_owner_field: Option<&'a str>,
+    shared_parents: HashSet<String>,
+    decided: HashMap<String, bool>,
+}
+
+impl VisibleChildren<'_> {
+    pub(super) fn admits(&mut self, db: &Database, row: &Value) -> Result<bool> {
+        let Some(parent_id) = row.get(self.fk_field).and_then(Value::as_str) else {
+            return Ok(false);
+        };
+        let Some(owner_field) = self.parent_owner_field else {
+            return Ok(true);
+        };
+        if let Some(visible) = self.decided.get(parent_id) {
+            return Ok(*visible);
+        }
+        let visible = match db.is_owner(self.parent_entity, parent_id, owner_field, self.sender) {
+            Ok(owned) => owned || self.shared_parents.contains(parent_id),
+            Err(Error::NotFound { .. }) => false,
+            Err(e) => return Err(e),
+        };
+        self.decided.insert(parent_id.to_string(), visible);
+        Ok(visible)
+    }
 }
 
 pub struct CallerContext<'a> {
@@ -726,23 +758,12 @@ impl Database {
         id: &str,
         sender: &str,
     ) -> Result<Option<AccessLevel>> {
-        let filters = vec![
-            Filter::new(
-                "resource_entity".to_string(),
-                FilterOp::Eq,
-                Value::String(entity_name.to_string()),
-            ),
-            Filter::new(
-                "resource_id".to_string(),
-                FilterOp::Eq,
-                Value::String(id.to_string()),
-            ),
-            Filter::new(
-                "grantee".to_string(),
-                FilterOp::Eq,
-                Value::String(sender.to_string()),
-            ),
-        ];
+        let mut filters = Self::grantee_filters(entity_name, sender);
+        filters.push(Filter::new(
+            "resource_id".to_string(),
+            FilterOp::Eq,
+            Value::String(id.to_string()),
+        ));
         let records = self
             .list_core(
                 SHARES_ENTITY.to_string(),
@@ -753,17 +774,67 @@ impl Database {
                 None,
             )
             .await?;
-        let mut best: Option<AccessLevel> = None;
-        for rec in &records {
-            if let Some(level) = rec
-                .get("permission")
-                .and_then(Value::as_str)
-                .and_then(AccessLevel::parse)
-            {
-                best = Some(best.map_or(level, |b| b.max(level)));
-            }
-        }
-        Ok(best)
+        Ok(records.iter().filter_map(Self::granted_level).max())
+    }
+
+    fn grantee_filters(entity_name: &str, sender: &str) -> Vec<Filter> {
+        vec![
+            Filter::new(
+                "resource_entity".to_string(),
+                FilterOp::Eq,
+                Value::String(entity_name.to_string()),
+            ),
+            Filter::new(
+                "grantee".to_string(),
+                FilterOp::Eq,
+                Value::String(sender.to_string()),
+            ),
+        ]
+    }
+
+    fn granted_level(record: &Value) -> Option<AccessLevel> {
+        record
+            .get("permission")
+            .and_then(Value::as_str)
+            .and_then(AccessLevel::parse)
+    }
+
+    fn shared_resources(&self, entity_name: &str, sender: &str) -> Result<HashSet<String>> {
+        let records = self.scan_filtered_entities(
+            SHARES_ENTITY,
+            &Self::grantee_filters(entity_name, sender),
+            usize::MAX,
+            &mut RowScope::All,
+        )?;
+        Ok(records
+            .iter()
+            .filter(|record| Self::granted_level(record).is_some())
+            .filter_map(|record| record.get("resource_id").and_then(Value::as_str))
+            .map(String::from)
+            .collect())
+    }
+
+    pub(crate) fn visible_children<'a>(
+        &self,
+        parent_entity: &'a str,
+        fk_field: &'a str,
+        sender: &'a str,
+        ownership: &'a OwnershipConfig,
+    ) -> Result<VisibleChildren<'a>> {
+        let parent_owner_field = ownership.owner_field(parent_entity);
+        let shared_parents = if parent_owner_field.is_some() {
+            self.shared_resources(parent_entity, sender)?
+        } else {
+            HashSet::new()
+        };
+        Ok(VisibleChildren {
+            parent_entity,
+            fk_field,
+            sender,
+            parent_owner_field,
+            shared_parents,
+            decided: HashMap::new(),
+        })
     }
 
     pub async fn check_access(

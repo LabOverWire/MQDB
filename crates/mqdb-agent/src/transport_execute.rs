@@ -1,7 +1,9 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::database::{CallerContext, Database, DerivedAccess, UpdatePrecondition};
+use crate::database::{
+    CallerContext, Database, DerivedAccess, ListQuery, RowScope, UpdatePrecondition,
+};
 use mqdb_core::transport::{Request, Response, VaultConstraintData};
 use mqdb_core::types::{AccessLevel, OwnershipConfig, OwnershipDecision, ScopeConfig};
 use serde_json::Value;
@@ -311,21 +313,37 @@ impl Database {
                 {
                     return e.into();
                 }
-                if let OwnershipDecision::Check {
-                    owner_field,
-                    sender: uid,
-                } = ownership.evaluate(&entity, sender)
-                {
-                    filters.push(mqdb_core::Filter::new(
-                        owner_field.to_string(),
-                        mqdb_core::FilterOp::Eq,
-                        Value::String(uid.to_string()),
-                    ));
-                }
-                match self
-                    .list_core(entity, filters, sort, pagination, includes, projection)
-                    .await
-                {
+                let scope = match ownership.evaluate(&entity, sender) {
+                    OwnershipDecision::Check {
+                        owner_field,
+                        sender: uid,
+                    } => {
+                        filters.push(mqdb_core::Filter::new(
+                            owner_field.to_string(),
+                            mqdb_core::FilterOp::Eq,
+                            Value::String(uid.to_string()),
+                        ));
+                        RowScope::All
+                    }
+                    OwnershipDecision::Derive {
+                        parent_entity,
+                        fk_field,
+                        sender: uid,
+                    } => match self.visible_children(parent_entity, fk_field, uid, ownership) {
+                        Ok(children) => RowScope::VisibleChildren(children),
+                        Err(e) => return e.into(),
+                    },
+                    OwnershipDecision::Allowed => RowScope::All,
+                };
+                let query = ListQuery {
+                    entity,
+                    filters,
+                    sort,
+                    pagination,
+                    includes,
+                    projection,
+                };
+                match self.list_scoped(query, scope).await {
                     Ok(v) => Response::ok(value_from_vec(v)),
                     Err(e) => e.into(),
                 }
