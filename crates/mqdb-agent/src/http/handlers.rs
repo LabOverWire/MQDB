@@ -3054,7 +3054,6 @@ mod reset_credentials_tests {
     use tempfile::TempDir;
 
     const SERVICE_USER: &str = "reset-service";
-    const SERVICE_PASSWORD: &str = "reset-service-password";
 
     struct Broker {
         db: Database,
@@ -3082,6 +3081,7 @@ mod reset_credentials_tests {
         let db = Database::open_with_config(config).await.unwrap();
         let passwd = dir.path().join("passwd.txt");
         std::fs::write(&passwd, "").unwrap();
+        let service_password = uuid::Uuid::new_v4().to_string();
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -3089,7 +3089,7 @@ mod reset_credentials_tests {
             .port();
         let (handle, mut ready, shutdown) = MqdbAgent::new(db.clone())
             .with_password_file(passwd)
-            .with_service_credentials(SERVICE_USER.to_string(), SERVICE_PASSWORD.to_string())
+            .with_service_credentials(SERVICE_USER.to_string(), service_password.clone())
             .with_bind_address(SocketAddr::from(([127, 0, 0, 1], port)))
             .start()
             .await
@@ -3101,7 +3101,7 @@ mod reset_credentials_tests {
         let client_id = format!("reset-test-{port}");
         let client = MqttClient::new(client_id.clone());
         let options = mqtt5::types::ConnectOptions::new(client_id)
-            .with_credentials(SERVICE_USER, SERVICE_PASSWORD);
+            .with_credentials(SERVICE_USER, service_password);
         Box::pin(client.connect_with_options(&format!("127.0.0.1:{port}"), options))
             .await
             .unwrap();
