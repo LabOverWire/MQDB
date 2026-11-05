@@ -108,6 +108,7 @@ async fn forwarded_response(
         correlation_data: None,
         sender: Some(sender.to_string()),
         client_id: None,
+        requested_owner: None,
     };
     let already_sent = forwarded_replies(ctrl).len();
     ctrl.handle_json_db_request(node(2), data_partition("docs", id), &request)
@@ -633,6 +634,7 @@ async fn internal_forwarded_code(
         correlation_data: None,
         sender: None,
         client_id: None,
+        requested_owner: None,
     };
     let already_sent = forwarded_replies(ctrl).len();
     ctrl.handle_json_db_request(node(2), data_partition("docs", id), &request)

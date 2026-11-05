@@ -4,6 +4,8 @@
 
 Transfer ownership of an entity from one user to another.
 
+Until this exists, an ordinary update that would change the ownership field is refused with 403 for owners and users with an `edit` share, in agent and cluster mode. An admin can change the field with an ordinary update. See [frontend-ownership.md](frontend-ownership.md).
+
 ## Topic
 
 ```

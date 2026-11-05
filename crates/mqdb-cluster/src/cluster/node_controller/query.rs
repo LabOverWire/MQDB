@@ -136,6 +136,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 correlation_data: None,
                 sender: None,
                 client_id: None,
+                requested_owner: None,
             };
 
             let msg = ClusterMessage::JsonDbRequest {

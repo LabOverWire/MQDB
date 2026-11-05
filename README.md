@@ -406,6 +406,8 @@ The record id `events` is reserved. `$DB/{entity}/events` belongs to the change 
 
 #### Sharing Operations
 
+An update can't change a record's owner field unless it comes from an admin: an owner or `edit` grantee gets a 403 and nothing is applied, while a value equal to the stored one is allowed.
+
 An owner can share any ownership-enabled entity (the motivating case is diagrams) with a named user at `view` or `edit`. Grants are stored in a server-managed `_shares` entity that is **not** reachable via generic CRUD — mutate them only through these topics. Agent and cluster mode both support them (see the cluster notes below); the embedded WASM build rejects these operations. Design: [docs/design/diagram-sharing.md](docs/design/diagram-sharing.md); manual tests: [docs/testing/17-sharing.md](docs/testing/17-sharing.md).
 
 | Topic | Action |

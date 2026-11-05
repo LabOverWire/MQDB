@@ -2748,6 +2748,7 @@ async fn forwarded_read_response(
         correlation_data: None,
         sender: Some(sender.to_string()),
         client_id: None,
+        requested_owner: None,
     };
     ctrl.handle_json_db_request(from, partition, &req).await;
     let (_, msg) = outbox.lock().unwrap().pop().expect("a response was sent");
@@ -3837,6 +3838,7 @@ async fn forwarded_write_without_a_response_topic_is_applied_without_a_reply() {
         correlation_data: None,
         sender: None,
         client_id: None,
+        requested_owner: None,
     };
     ctrl.handle_json_db_request(node2, partition, &request)
         .await;
@@ -3890,6 +3892,7 @@ async fn a_forwarded_create_on_a_node_that_lost_the_partition_is_refused() {
         correlation_data: None,
         sender: None,
         client_id: None,
+        requested_owner: None,
     };
     ctrl.handle_json_db_request(node2, partition, &request)
         .await;
@@ -4061,6 +4064,7 @@ fn forwarded_request(
         correlation_data: None,
         sender: sender.map(str::to_string),
         client_id: None,
+        requested_owner: None,
     }
 }
 
@@ -4451,6 +4455,7 @@ async fn forwarded_create_refuses_the_id_reserved_for_the_event_namespace() {
         correlation_data: None,
         sender: None,
         client_id: None,
+        requested_owner: None,
     };
 
     ctrl.handle_json_db_request(

@@ -344,6 +344,7 @@ async fn forwarded_shares_of_a_waiting_partition_are_refused() {
                 correlation_data: None,
                 sender: Some("admin".to_string()),
                 client_id: None,
+                requested_owner: None,
             },
         },
     );

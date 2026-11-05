@@ -1,7 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::database::{CallerContext, Database, DerivedAccess};
+use crate::database::{CallerContext, Database, DerivedAccess, UpdatePrecondition};
 use mqdb_core::transport::{Request, Response, VaultConstraintData};
 use mqdb_core::types::{AccessLevel, OwnershipConfig, OwnershipDecision, ScopeConfig};
 use serde_json::Value;
@@ -151,7 +151,7 @@ impl Database {
                 mut fields,
                 expected_version,
             } => {
-                match ownership.evaluate(&entity, sender) {
+                let frozen_owner_field = match ownership.evaluate(&entity, sender) {
                     OwnershipDecision::Check {
                         owner_field,
                         sender: uid,
@@ -162,9 +162,7 @@ impl Database {
                         {
                             return e.into();
                         }
-                        if let Value::Object(ref mut map) = fields {
-                            map.remove(owner_field);
-                        }
+                        Some(owner_field)
                     }
                     OwnershipDecision::Derive {
                         parent_entity,
@@ -190,9 +188,10 @@ impl Database {
                         if let Value::Object(ref mut map) = fields {
                             map.remove(fk_field);
                         }
+                        None
                     }
-                    OwnershipDecision::Allowed => {}
-                }
+                    OwnershipDecision::Allowed => None,
+                };
                 let update_constraint = match vault_constraint {
                     Some(VaultConstraintData::Update(new_data, old_data)) => {
                         Some((new_data, old_data))
@@ -205,12 +204,15 @@ impl Database {
                     scope_config,
                 };
                 match self
-                    .update_with_expected(
+                    .update_with_precondition(
                         entity,
                         id,
                         fields,
                         update_constraint,
-                        expected_version,
+                        UpdatePrecondition {
+                            expected_version,
+                            frozen_owner_field,
+                        },
                         &caller,
                     )
                     .await

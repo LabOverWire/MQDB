@@ -15,6 +15,7 @@ pub struct JsonDbRequest {
     pub correlation_data: Option<Vec<u8>>,
     pub sender: Option<String>,
     pub client_id: Option<String>,
+    pub requested_owner: Option<serde_json::Value>,
 }
 
 impl JsonDbRequest {
@@ -71,6 +72,11 @@ impl JsonDbRequest {
         push_length_prefixed(&mut buf, correlation, false)?;
         push_length_prefixed(&mut buf, sender, narrow)?;
         push_length_prefixed(&mut buf, client_id, false)?;
+        if let Some(requested_owner) = &self.requested_owner {
+            let encoded = serde_json::to_vec(requested_owner).ok()?;
+            buf.extend_from_slice(&u32::try_from(encoded.len()).ok()?.to_be_bytes());
+            buf.extend_from_slice(&encoded);
+        }
         Some(buf)
     }
 
@@ -109,6 +115,12 @@ impl JsonDbRequest {
             let client_id_len = reader.length(true)?;
             Some(reader.text(client_id_len)?).filter(|c| !c.is_empty())
         };
+        let requested_owner = if reader.is_exhausted() {
+            None
+        } else {
+            let owner_len = usize::try_from(reader.u32()?).ok()?;
+            Some(serde_json::from_slice(reader.take(owner_len)?).ok()?)
+        };
 
         Some(Self {
             request_id,
@@ -120,6 +132,7 @@ impl JsonDbRequest {
             correlation_data,
             sender,
             client_id,
+            requested_owner,
         })
     }
 }
@@ -240,6 +253,7 @@ mod tests {
             correlation_data: Some(b"corr".to_vec()),
             sender: Some("alice".to_string()),
             client_id: None,
+            requested_owner: None,
         };
         let bytes = req.to_bytes().unwrap();
         let decoded = JsonDbRequest::from_bytes(&bytes).unwrap();
@@ -264,6 +278,7 @@ mod tests {
             correlation_data: None,
             sender: Some("alice".to_string()),
             client_id: Some("editor-1".to_string()),
+            requested_owner: None,
         };
         let bytes = req.to_bytes().unwrap();
         let decoded = JsonDbRequest::from_bytes(&bytes).unwrap();
@@ -274,6 +289,65 @@ mod tests {
         let decoded = JsonDbRequest::from_bytes(from_older_node).unwrap();
         assert_eq!(decoded.sender.as_deref(), Some("alice"));
         assert!(decoded.client_id.is_none());
+    }
+
+    #[test]
+    fn request_carries_the_requested_owner_after_the_client_id_and_decodes_without_it() {
+        let request_with = |entity: String, requested_owner| JsonDbRequest {
+            request_id: 7,
+            op: JsonDbOp::Update,
+            entity,
+            id: Some("d1".to_string()),
+            payload: b"{}".to_vec(),
+            response_topic: "resp".to_string(),
+            correlation_data: None,
+            sender: Some("alice".to_string()),
+            client_id: Some("editor-1".to_string()),
+            requested_owner,
+        };
+        for entity in ["docs".to_string(), "e".repeat(300)] {
+            for owner in [
+                serde_json::json!("bob"),
+                serde_json::Value::Null,
+                serde_json::json!({"nested": [1, 2]}),
+            ] {
+                let bytes = request_with(entity.clone(), Some(owner.clone()))
+                    .to_bytes()
+                    .unwrap();
+                let decoded = JsonDbRequest::from_bytes(&bytes).unwrap();
+                assert_eq!(decoded.requested_owner, Some(owner));
+                assert_eq!(decoded.client_id.as_deref(), Some("editor-1"));
+                assert_eq!(decoded.entity, entity);
+            }
+            let bytes = request_with(entity.clone(), None).to_bytes().unwrap();
+            assert!(
+                JsonDbRequest::from_bytes(&bytes)
+                    .unwrap()
+                    .requested_owner
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn request_with_a_broken_requested_owner_does_not_decode() {
+        let mut bytes = JsonDbRequest {
+            request_id: 7,
+            op: JsonDbOp::Update,
+            entity: "docs".to_string(),
+            id: Some("d1".to_string()),
+            payload: b"{}".to_vec(),
+            response_topic: "resp".to_string(),
+            correlation_data: None,
+            sender: Some("alice".to_string()),
+            client_id: None,
+            requested_owner: None,
+        }
+        .to_bytes()
+        .unwrap();
+        bytes.extend_from_slice(&2u32.to_be_bytes());
+        bytes.extend_from_slice(b"{{");
+        assert!(JsonDbRequest::from_bytes(&bytes).is_none());
     }
 
     #[test]
@@ -288,6 +362,7 @@ mod tests {
             correlation_data: Some(b"corr".to_vec()),
             sender: Some("s".repeat(sender_len)),
             client_id: Some("editor-1".to_string()),
+            requested_owner: None,
         };
         for (id_len, sender_len, version) in [
             (3, 255, JsonDbRequest::VERSION),
@@ -318,6 +393,7 @@ mod tests {
             correlation_data: None,
             sender: None,
             client_id: None,
+            requested_owner: None,
         };
         assert!(!request.fits_wire());
         assert!(request.to_bytes().is_none());
@@ -335,6 +411,7 @@ mod tests {
             correlation_data: None,
             sender: None,
             client_id: None,
+            requested_owner: None,
         };
         let bytes = req.to_bytes().unwrap();
         let decoded = JsonDbRequest::from_bytes(&bytes).unwrap();

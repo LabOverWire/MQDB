@@ -149,6 +149,9 @@ Run through this checklist to verify MQDB works completely:
 - [ ] Non-owner delete returns 403 Forbidden
 - [ ] Owner update succeeds
 - [ ] Owner delete succeeds
+- [ ] Owner or editor update that changes the owner field returns 403 and applies nothing
+- [ ] Update with the owner field equal to the stored value succeeds
+- [ ] Admin update can change the owner field
 - [ ] Internal (no sender) bypasses ownership
 - [ ] Ownership works across cluster nodes
 

@@ -530,3 +530,116 @@ async fn admin_disable_clears_vault_state() {
     assert_eq!(outcome.body["vault_enabled"], false);
     assert_eq!(outcome.body["unlocked"], false);
 }
+
+async fn vault_update(
+    db: &Database,
+    backend: &VaultBackendImpl,
+    ownership: &OwnershipConfig,
+    sender: &str,
+    fields: serde_json::Value,
+) -> Result<Request, VaultError> {
+    let request = Request::Update {
+        entity: "notes".to_string(),
+        id: "note-1".to_string(),
+        fields,
+        expected_version: None,
+    };
+    backend
+        .encrypt_request(db, "notes", ownership, Some(sender), request)
+        .await
+        .map(|(request, _)| request)
+}
+
+#[tokio::test]
+async fn vault_update_refuses_a_change_of_the_ownership_field() {
+    let (_td, db, ownership, backend) = setup(0).await;
+    let ownership =
+        ownership.with_admin_users(std::collections::HashSet::from(["root".to_string()]));
+    for user in ["u1", "root"] {
+        seed_identity(&db, user).await;
+        backend
+            .admin_enable(&db, &ownership, user, "pw")
+            .await
+            .expect("enable");
+    }
+    db.create(
+        "notes".to_string(),
+        json!({"id": "note-1", "userId": "u1", "title": "plain"}),
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .expect("create");
+
+    for sender in ["u1", "root"] {
+        for fields in [
+            json!({"userId": "bob"}),
+            json!({"userId": "bob", "title": "changed"}),
+            json!({"userId": null}),
+            json!({"userId": 7}),
+        ] {
+            let refused = vault_update(&db, &backend, &ownership, sender, fields).await;
+            assert!(
+                matches!(&refused, Err(VaultError::Forbidden(message))
+                    if message == "the ownership field 'userId' cannot be changed"),
+                "{sender}: {refused:?}"
+            );
+        }
+
+        let same = vault_update(
+            &db,
+            &backend,
+            &ownership,
+            sender,
+            json!({"userId": "u1", "title": "changed"}),
+        )
+        .await
+        .expect("an equal owner is allowed");
+        let Request::Update { fields, .. } = same else {
+            panic!("expected Update");
+        };
+        assert!(fields.get("userId").is_none(), "{fields}");
+    }
+
+    let non_owner = vault_update(
+        &db,
+        &backend,
+        &ownership,
+        "u2",
+        json!({"userId": "u1", "title": "no key"}),
+    )
+    .await
+    .expect("a user without an unlocked vault passes through unchanged");
+    let Request::Update { fields, .. } = non_owner else {
+        panic!("expected Update");
+    };
+    assert_eq!(fields["userId"], "u1");
+}
+
+#[tokio::test]
+async fn vault_update_by_a_non_owner_still_answers_bad_request() {
+    let (_td, db, ownership, backend) = setup(0).await;
+    seed_identity(&db, "u1").await;
+    backend
+        .admin_enable(&db, &ownership, "u1", "pw")
+        .await
+        .expect("enable");
+    db.create(
+        "notes".to_string(),
+        json!({"id": "note-1", "userId": "bob", "title": "plain"}),
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .expect("create");
+
+    let refused = vault_update(&db, &backend, &ownership, "u1", json!({"userId": "bob"})).await;
+    assert!(
+        matches!(&refused, Err(VaultError::BadRequest(message)) if message == "forbidden"),
+        "{refused:?}"
+    );
+}

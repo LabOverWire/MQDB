@@ -62,7 +62,7 @@ function or file, not line numbers, because the line numbers have moved.
 |------|-----------------|--------|
 | Ownership config | per-entity `--ownership diagrams=userId`, single owner field | `mqdb-core/src/types.rs` `OwnershipConfig` |
 | Read | **ownership-enforced** (403 for non-owner) | `transport_execute.rs` `execute_with_sender`, `Request::Read` arm |
-| Update | owner-checked; owner field stripped from payload | `transport_execute.rs` `execute_with_sender`, `Request::Update` arm |
+| Update | owner-checked; owner field stripped from payload (now refused when it would change the owner, #334) | `transport_execute.rs` `execute_with_sender`, `Request::Update` arm |
 | Delete | owner-checked | `transport_execute.rs` `execute_with_sender`, `Request::Delete` arm |
 | List | injects mandatory `owner_field = sender` (single AND filter; no OR/contains) | `transport_execute.rs` `execute_with_sender`, `Request::List` arm |
 | Owner check | exact string compare of owner value and sender | `database/crud.rs` `is_owner` |

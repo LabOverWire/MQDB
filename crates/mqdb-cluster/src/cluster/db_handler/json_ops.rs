@@ -171,6 +171,7 @@ impl DbRequestHandler {
                                     response_topic,
                                     correlation_data,
                                     origin: EventOrigin::new(sender, mqtt_ctx.client_id),
+                                    requested_owner: None,
                                 },
                             )
                             .await;
@@ -195,29 +196,23 @@ impl DbRequestHandler {
                 if let Some(err) = Self::refuse_until_primary_role(controller, partition) {
                     return JsonOpResult::Response(err);
                 }
-                let stripped_payload;
-                let effective_payload = if let OwnershipDecision::Check { owner_field, .. } =
-                    self.ownership.evaluate(entity, sender)
-                {
-                    if controller.is_primary_for_partition(partition)
-                        && let Some(err) = controller.check_local_share_access(
-                            entity,
-                            id,
-                            owner_field,
-                            sender,
-                            AccessLevel::Edit,
-                        )
-                    {
-                        return JsonOpResult::Response(err);
-                    }
-                    stripped_payload = Self::strip_field_from_payload(payload, owner_field);
-                    stripped_payload.as_deref().unwrap_or(payload)
-                } else {
-                    payload
+                let owner_field = match self.ownership.evaluate(entity, sender) {
+                    OwnershipDecision::Check { owner_field, .. } => Some(owner_field),
+                    _ => None,
                 };
                 if !controller.is_primary_for_partition(partition) {
-                    let forward_payload =
-                        self.vault_encrypt_update_delta(entity, id, effective_payload, sender);
+                    let moved_owner =
+                        owner_field.and_then(|field| Self::take_field_from_payload(payload, field));
+                    let (fields, requested_owner) = match moved_owner {
+                        Some((fields, requested)) => (Some(fields), Some(requested)),
+                        None => (None, None),
+                    };
+                    let forward_payload = self.vault_encrypt_update_delta(
+                        entity,
+                        id,
+                        fields.as_deref().unwrap_or(payload),
+                        sender,
+                    );
                     let forwarded = controller
                         .forward_json_db_request(
                             partition,
@@ -229,6 +224,7 @@ impl DbRequestHandler {
                                 response_topic,
                                 correlation_data,
                                 origin: EventOrigin::new(sender, mqtt_ctx.client_id),
+                                requested_owner,
                             },
                         )
                         .await;
@@ -241,8 +237,24 @@ impl DbRequestHandler {
                         ))
                     };
                 }
+                if let Some(owner_field) = owner_field {
+                    if let Some(err) = controller.check_local_share_access(
+                        entity,
+                        id,
+                        owner_field,
+                        sender,
+                        AccessLevel::Edit,
+                    ) {
+                        return JsonOpResult::Response(err);
+                    }
+                    if let Some(err) =
+                        controller.refuse_owner_change_in_payload(entity, id, owner_field, payload)
+                    {
+                        return JsonOpResult::Response(err);
+                    }
+                }
                 let result = self
-                    .handle_json_update(controller, entity, id, effective_payload, mqtt_ctx)
+                    .handle_json_update(controller, entity, id, payload, mqtt_ctx)
                     .await;
                 match result {
                     JsonOpResult::Response(payload) => JsonOpResult::Response(
@@ -281,6 +293,7 @@ impl DbRequestHandler {
                                 response_topic,
                                 correlation_data,
                                 origin: EventOrigin::new(sender, mqtt_ctx.client_id),
+                                requested_owner: None,
                             },
                         )
                         .await;
@@ -415,6 +428,7 @@ impl DbRequestHandler {
                     response_topic,
                     correlation_data: mqtt_ctx.correlation_data,
                     origin: EventOrigin::new(sender, mqtt_ctx.client_id),
+                    requested_owner: None,
                 },
             )
             .await;
@@ -509,14 +523,10 @@ impl DbRequestHandler {
         }
     }
 
-    fn strip_field_from_payload(payload: &[u8], field: &str) -> Option<Vec<u8>> {
+    fn take_field_from_payload(payload: &[u8], field: &str) -> Option<(Vec<u8>, Value)> {
         let mut data: Value = serde_json::from_slice(payload).ok()?;
-        if let Value::Object(ref mut map) = data
-            && map.remove(field).is_some()
-        {
-            return serde_json::to_vec(&data).ok();
-        }
-        None
+        let taken = data.as_object_mut()?.remove(field)?;
+        Some((serde_json::to_vec(&data).ok()?, taken))
     }
 
     fn refuse_until_primary_role<T: ClusterTransport>(
@@ -640,6 +650,7 @@ impl DbRequestHandler {
                     response_topic: mqtt_ctx.response_topic.unwrap_or(""),
                     correlation_data: mqtt_ctx.correlation_data,
                     origin: EventOrigin::new(mqtt_ctx.sender, mqtt_ctx.client_id),
+                    requested_owner: None,
                 },
             )
             .await;
@@ -857,6 +868,7 @@ impl DbRequestHandler {
                         response_topic,
                         correlation_data,
                         origin: EventOrigin::new(sender, mqtt_ctx.client_id),
+                        requested_owner: None,
                     },
                 )
                 .await;
