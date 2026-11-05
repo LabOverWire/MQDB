@@ -402,6 +402,8 @@ ready_rx.changed().await?; // wait until broker + handler are ready
 | `$DB/{entity}/list` | List entities (payload: filters, sort, projection) |
 | `$DB/{entity}/events/#` | Subscribe to change events |
 
+A create on an id that already exists is refused with 409 `entity already exists`, in agent and cluster mode, for every sender, admin users included. The record is left as it was and no change event is emitted, so a client that retries a create after losing the response gets this 409 and can read the record back. To change a record, use update.
+
 The record id `events` is reserved. `$DB/{entity}/events` belongs to the change event namespace, which clients cannot publish to, so a record with that id could not be read, updated or deleted by id. A create with that id gets a 400 in agent and cluster mode. The entity name `events` and ids such as `events-1` work like any other. A record stored under the id `events` by an older version, or restored from a backup with `Database::restore_logical`, stays unreachable by id and appears only in `list`.
 
 #### Sharing Operations

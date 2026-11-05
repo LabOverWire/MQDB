@@ -89,6 +89,16 @@ mqdb delete users <id>
 }
 ```
 
+### Create on an Existing ID
+
+```bash
+mqdb create users --data '{"id": "fixed-1", "name": "First"}'
+mqdb create users --data '{"id": "fixed-1", "name": "Second"}'
+mqdb read users fixed-1
+```
+
+**Expected:** The second create is refused with 409 `entity already exists`, for every sender, admin users included. The read returns `First` with `_version` 1, and no change event is emitted for the refused create. After a delete, the id can be created again.
+
 ### Names Near the Event Namespace
 
 The entity name `events` and ids that merely start with `events` work like any other, in agent and cluster mode:
