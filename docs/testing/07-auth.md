@@ -435,7 +435,7 @@ user's identity. When `--ownership entity=field` is configured, the broker:
 
 - **List:** Injects a mandatory filter `field = sender` so users only see their own records
 - **Read:** Allowed when `record.data.field == sender` or with a `view` or `edit` share grant; otherwise 403
-- **Update:** Allowed when `record.data.field == sender` or with an `edit` share grant; otherwise 403. An update from either of them that would change `field` also gets 403 and nothing is applied; a value equal to the stored one is allowed. An admin can change `field`
+- **Update:** Allowed when `record.data.field == sender` or with an `edit` share grant; otherwise 403. An update from either of them that would change `field` also gets 403 and nothing is applied; a value equal to the stored one is allowed. An admin can change `field`, except an agent admin with an unlocked vault, who gets the 403. An agent `edit` grantee with an unlocked vault gets 400 `forbidden` for any update
 - **Delete:** Allowed only when `record.data.field == sender`; otherwise 403
 - **Create:** Not restricted
 - **No sender (internal):** Bypasses all ownership checks (for replication, outbox, etc.)
@@ -568,7 +568,8 @@ mqdb dev start-cluster --nodes 3 --clean \
 - [ ] Delete by owner succeeds
 - [ ] Update that would change the owner field returns 403 for the owner and an `edit` grantee, with `_version` and the record unchanged and no change event
 - [ ] Update with the owner field equal to the stored value succeeds
-- [ ] Admin update can change the owner field
+- [ ] Admin update can change the owner field; in agent mode with the admin's vault unlocked it returns 403
+- [ ] Agent `edit` grantee with an unlocked vault gets 400 `forbidden`, whatever owner value is sent
 - [ ] Internal operations (no sender) bypass ownership checks
 
 **Cluster mode:**

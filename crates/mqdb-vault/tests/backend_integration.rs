@@ -637,9 +637,61 @@ async fn vault_update_by_a_non_owner_still_answers_bad_request() {
     .await
     .expect("create");
 
-    let refused = vault_update(&db, &backend, &ownership, "u1", json!({"userId": "bob"})).await;
+    for fields in [
+        json!({"userId": "bob"}),
+        json!({"userId": "u1"}),
+        json!({"title": "no owner field"}),
+    ] {
+        let refused = vault_update(&db, &backend, &ownership, "u1", fields).await;
+        assert!(
+            matches!(&refused, Err(VaultError::BadRequest(message)) if message == "forbidden"),
+            "{refused:?}"
+        );
+    }
+
+    let missing = Request::Update {
+        entity: "notes".to_string(),
+        id: "never-created".to_string(),
+        fields: json!({"userId": "u1"}),
+        expected_version: None,
+    };
+    let refused = backend
+        .encrypt_request(&db, "notes", &ownership, Some("u1"), missing)
+        .await;
     assert!(
-        matches!(&refused, Err(VaultError::BadRequest(message)) if message == "forbidden"),
-        "{refused:?}"
+        matches!(&refused, Err(VaultError::BadRequest(message)) if message.starts_with("not found")),
+        "{:?}",
+        refused.map(|(request, _)| request)
     );
+}
+
+#[tokio::test]
+async fn an_admin_whose_vault_is_locked_passes_the_owner_field_through() {
+    let (_td, db, ownership, backend) = setup(0).await;
+    let ownership =
+        ownership.with_admin_users(std::collections::HashSet::from(["root".to_string()]));
+    seed_identity(&db, "root").await;
+    backend
+        .admin_enable(&db, &ownership, "root", "pw")
+        .await
+        .expect("enable");
+    backend.admin_lock("root").await.expect("lock");
+    db.create(
+        "notes".to_string(),
+        json!({"id": "note-1", "userId": "u1", "title": "plain"}),
+        None,
+        None,
+        None,
+        &ScopeConfig::default(),
+    )
+    .await
+    .expect("create");
+
+    let passed = vault_update(&db, &backend, &ownership, "root", json!({"userId": "bob"}))
+        .await
+        .expect("a locked vault does not refuse");
+    let Request::Update { fields, .. } = passed else {
+        panic!("expected Update");
+    };
+    assert_eq!(fields["userId"], "bob");
 }

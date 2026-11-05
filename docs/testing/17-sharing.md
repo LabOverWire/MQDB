@@ -150,7 +150,7 @@ mqdb read docs "$D2" --broker 127.0.0.1:1884          # dave: ok
 ## Verification Checklist
 
 - [ ] View grant allows read, denies update; edit grant allows update; delete stays owner-only
-- [ ] Edit grantee's update that changes the owner field returns 403 and applies nothing; the same value as the stored owner is allowed
+- [ ] Edit grantee's update that changes the owner field returns 403 and applies nothing; the same value as the stored owner is allowed (agent mode with the grantee's vault unlocked: 400 `forbidden` for any update)
 - [ ] Only the owner or an admin can share or list `shares`; `shared` returns the granted records
 - [ ] Cascade grants the referenced record; `--no-cascade` grants only the named record
 - [ ] Cascade skips a referenced record the sharer does not own (`resources_skipped`), unless the sharer is an admin; a non-admin's cascading unshare leaves its grants alone
