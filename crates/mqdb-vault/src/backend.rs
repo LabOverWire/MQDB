@@ -18,7 +18,7 @@ use mqdb_agent::vault_backend::{
 };
 use mqdb_core::protocol::DbOp;
 use mqdb_core::transport::{Request, Response, VaultConstraintData};
-use mqdb_core::types::{OwnershipConfig, OwnershipDecision};
+use mqdb_core::types::{OwnershipConfig, OwnershipDecision, owner_change_refusal};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tracing::{debug, error, warn};
@@ -73,14 +73,18 @@ async fn pre_update_encrypt(
     delta: Value,
     expected_version: Option<u64>,
     skip: &[String],
-) -> Result<(Request, Option<(Value, Value)>), Response> {
+) -> VaultResult<(Request, Option<(Value, Value)>)> {
     if let OwnershipDecision::Check {
         owner_field,
         sender: uid,
     } = ownership.evaluate(entity, sender_uid)
         && let Err(e) = db.check_ownership(entity, id, owner_field, uid)
     {
-        return Err(e.into());
+        let refusal = match Response::from(e) {
+            Response::Error { message, .. } => message,
+            Response::Ok { .. } => "vault update rejected".to_string(),
+        };
+        return Err(VaultError::BadRequest(refusal));
     }
 
     let Ok(mut decrypted_existing) = db
@@ -97,6 +101,13 @@ async fn pre_update_encrypt(
             None,
         ));
     };
+
+    if let Some(owner_field) = ownership.owner_field(entity)
+        && let Some(requested) = delta.get(owner_field)
+        && let Some(message) = owner_change_refusal(&decrypted_existing, owner_field, requested)
+    {
+        return Err(VaultError::Forbidden(message));
+    }
 
     vault_decrypt_fields(crypto, entity, id, &mut decrypted_existing, skip);
 
@@ -190,7 +201,7 @@ impl VaultBackend for VaultBackendImpl {
                     fields: delta,
                     expected_version,
                 } => {
-                    match pre_update_encrypt(
+                    let (req, constraint) = pre_update_encrypt(
                         db,
                         &crypto,
                         &ent,
@@ -201,20 +212,13 @@ impl VaultBackend for VaultBackendImpl {
                         expected_version,
                         &skip,
                     )
-                    .await
-                    {
-                        Ok((req, Some((new_data, old_data)))) => {
-                            Ok((req, Some(VaultConstraintData::Update(new_data, old_data))))
-                        }
-                        Ok((req, None)) => Ok((req, None)),
-                        Err(err_resp) => {
-                            let msg = match &err_resp {
-                                Response::Error { message, .. } => message.clone(),
-                                Response::Ok { .. } => "vault update rejected".to_string(),
-                            };
-                            Err(VaultError::BadRequest(msg))
-                        }
-                    }
+                    .await?;
+                    Ok((
+                        req,
+                        constraint.map(|(new_data, old_data)| {
+                            VaultConstraintData::Update(new_data, old_data)
+                        }),
+                    ))
                 }
                 other => Ok((other, None)),
             }

@@ -216,6 +216,16 @@ pub enum OwnershipDecision<'a, 'b> {
     },
 }
 
+#[must_use]
+pub fn owner_change_refusal(
+    stored: &Value,
+    owner_field: &str,
+    requested: &Value,
+) -> Option<String> {
+    (stored.get(owner_field) != Some(requested))
+        .then(|| format!("the ownership field '{owner_field}' cannot be changed"))
+}
+
 pub const SHARES_ENTITY: &str = "_shares";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -487,6 +497,27 @@ pub fn project_fields(entity: Value, fields: &[String]) -> Value {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn owner_change_refusal_compares_the_stored_field_as_json() {
+        let refused = |stored: Value, requested: Value| {
+            owner_change_refusal(&stored, "owner", &requested).is_some()
+        };
+        assert!(!refused(json!({"owner": "alice"}), json!("alice")));
+        assert!(refused(json!({"owner": "alice"}), json!("bob")));
+        assert!(refused(json!({"owner": "alice"}), json!("ALICE")));
+        assert!(refused(json!({"owner": "alice"}), Value::Null));
+        assert!(refused(json!({"owner": "7"}), json!(7)));
+        assert!(!refused(json!({"owner": 7}), json!(7)));
+        assert!(refused(json!({"title": "x"}), json!("alice")));
+        assert!(refused(json!({"title": "x"}), Value::Null));
+        assert!(!refused(json!({"owner": null}), Value::Null));
+        assert!(refused(Value::Null, json!("alice")));
+        assert_eq!(
+            owner_change_refusal(&json!({"owner": "alice"}), "owner", &json!("bob")).as_deref(),
+            Some("the ownership field 'owner' cannot be changed")
+        );
+    }
 
     #[test]
     fn test_filter_neq_deserialization() {

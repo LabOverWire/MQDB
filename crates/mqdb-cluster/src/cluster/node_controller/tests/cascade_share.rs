@@ -96,6 +96,7 @@ async fn forwarded_share(
         correlation_data: None,
         sender: Some(sender.to_string()),
         client_id: None,
+        requested_owner: None,
     };
     let before = replies(ctrl).len();
     ctrl.handle_json_db_request(node(2), data_partition("diagrams", id), &request)

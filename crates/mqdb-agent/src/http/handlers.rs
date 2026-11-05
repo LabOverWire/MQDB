@@ -1413,6 +1413,7 @@ fn vault_error_to_http(err: &VaultError, cors: Option<&str>) -> HttpResponse {
         VaultError::Unavailable => (400, "vault not available".to_string()),
         VaultError::NotFound(m) => (404, m.clone()),
         VaultError::BadRequest(m) => (400, m.clone()),
+        VaultError::Forbidden(m) => (403, m.clone()),
         VaultError::Internal(m) => (500, m.clone()),
     };
     json_response_with_credentials(status, &json!({"error": msg}), cors)

@@ -1421,7 +1421,7 @@ async fn json_list_rejects_nonexistent_filter_field() {
 }
 
 #[tokio::test]
-async fn update_strips_ownership_field_for_non_admin() {
+async fn update_refuses_a_change_of_the_ownership_field_for_non_admin() {
     let node1 = NodeId::validated(1).unwrap();
     let mut ownership_fields = std::collections::HashMap::new();
     ownership_fields.insert("items".to_string(), "userId".to_string());
@@ -1453,9 +1453,14 @@ async fn update_strips_ownership_field_for_non_admin() {
 
     let resp = response.unwrap();
     let json = parse_json_response(&resp.payload);
-    assert_eq!(json["status"], "ok");
-    assert_eq!(json["data"]["userId"], "alice");
-    assert_eq!(json["data"]["name"], "gadget");
+    assert_eq!(json["code"], 403);
+    assert_eq!(
+        json["message"],
+        "the ownership field 'userId' cannot be changed"
+    );
+    let stored: serde_json::Value =
+        serde_json::from_slice(&ctrl.db_get("items", "i-1").unwrap().data).unwrap();
+    assert_eq!(stored, data);
 }
 
 #[tokio::test]
@@ -2748,6 +2753,7 @@ async fn forwarded_read_response(
         correlation_data: None,
         sender: Some(sender.to_string()),
         client_id: None,
+        requested_owner: None,
     };
     ctrl.handle_json_db_request(from, partition, &req).await;
     let (_, msg) = outbox.lock().unwrap().pop().expect("a response was sent");
@@ -3837,6 +3843,7 @@ async fn forwarded_write_without_a_response_topic_is_applied_without_a_reply() {
         correlation_data: None,
         sender: None,
         client_id: None,
+        requested_owner: None,
     };
     ctrl.handle_json_db_request(node2, partition, &request)
         .await;
@@ -3890,6 +3897,7 @@ async fn a_forwarded_create_on_a_node_that_lost_the_partition_is_refused() {
         correlation_data: None,
         sender: None,
         client_id: None,
+        requested_owner: None,
     };
     ctrl.handle_json_db_request(node2, partition, &request)
         .await;
@@ -4061,6 +4069,7 @@ fn forwarded_request(
         correlation_data: None,
         sender: sender.map(str::to_string),
         client_id: None,
+        requested_owner: None,
     }
 }
 
@@ -4451,6 +4460,7 @@ async fn forwarded_create_refuses_the_id_reserved_for_the_event_namespace() {
         correlation_data: None,
         sender: None,
         client_id: None,
+        requested_owner: None,
     };
 
     ctrl.handle_json_db_request(

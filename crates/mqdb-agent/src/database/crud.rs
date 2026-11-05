@@ -10,7 +10,7 @@ use mqdb_core::types::ScopeConfig;
 use mqdb_core::{Filter, FilterOp};
 use serde_json::Value;
 
-use mqdb_core::types::{AccessLevel, OwnershipConfig, SHARES_ENTITY};
+use mqdb_core::types::{AccessLevel, OwnershipConfig, SHARES_ENTITY, owner_change_refusal};
 
 const MAX_WRITE_ATTEMPTS: u32 = 32;
 
@@ -40,6 +40,12 @@ pub struct CallerContext<'a> {
     pub sender: Option<&'a str>,
     pub client_id: Option<&'a str>,
     pub scope_config: &'a ScopeConfig,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct UpdatePrecondition<'a> {
+    pub expected_version: Option<u64>,
+    pub frozen_owner_field: Option<&'a str>,
 }
 
 impl Database {
@@ -238,6 +244,29 @@ impl Database {
         expected_version: Option<u64>,
         caller: &CallerContext<'_>,
     ) -> Result<Value> {
+        self.update_with_precondition(
+            entity_name,
+            id,
+            fields,
+            update_constraint_data,
+            UpdatePrecondition {
+                expected_version,
+                frozen_owner_field: None,
+            },
+            caller,
+        )
+        .await
+    }
+
+    pub async fn update_with_precondition(
+        &self,
+        entity_name: String,
+        id: String,
+        fields: Value,
+        update_constraint_data: Option<(Value, Value)>,
+        precondition: UpdatePrecondition<'_>,
+        caller: &CallerContext<'_>,
+    ) -> Result<Value> {
         let retryable = update_constraint_data.is_none();
         let mut attempt = 1;
         loop {
@@ -247,7 +276,7 @@ impl Database {
                     &id,
                     fields.clone(),
                     update_constraint_data.clone(),
-                    expected_version,
+                    precondition,
                     caller,
                 )
                 .await;
@@ -266,7 +295,7 @@ impl Database {
         id: &str,
         fields: Value,
         update_constraint_data: Option<(Value, Value)>,
-        expected_version: Option<u64>,
+        precondition: UpdatePrecondition<'_>,
         caller: &CallerContext<'_>,
     ) -> Result<Value> {
         let key = keys::encode_data_key(entity_name, id);
@@ -277,6 +306,13 @@ impl Database {
 
         let existing_entity =
             Entity::deserialize(entity_name.to_string(), id.to_string(), &existing_data)?;
+        if let Some(owner_field) = precondition.frozen_owner_field
+            && let Some(requested) = fields.get(owner_field)
+            && let Some(message) =
+                owner_change_refusal(&existing_entity.data, owner_field, requested)
+        {
+            return Err(Error::OwnerChangeRefused(message));
+        }
         let mut updated_data = existing_entity.data.clone();
 
         if let (Value::Object(existing), Value::Object(updates)) = (&mut updated_data, fields) {
@@ -290,7 +326,7 @@ impl Database {
             .get("_version")
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        if let Some(expected) = expected_version
+        if let Some(expected) = precondition.expected_version
             && existing_version != expected
         {
             return Err(Error::PreconditionFailed(format!(

@@ -1143,6 +1143,7 @@ fn run_test_ownership(options: &DevTestOptions, ports: &[u16]) -> u32 {
     if alice_update != Some(true) {
         eprintln!("    output: {alice_update_out}");
     }
+    owner_field_checks(&exe, &entity, &id, ports, &mut passed, &mut failed);
     let (alice_delete, _) = run("alice", &["delete", &entity, &id]);
     record(
         &mut passed,
@@ -1153,6 +1154,114 @@ fn run_test_ownership(options: &DevTestOptions, ports: &[u16]) -> u32 {
 
     let stop_failures = cluster.finish();
     report(passed, failed + stop_failures)
+}
+
+fn owner_field_checks(
+    exe: &Path,
+    entity: &str,
+    id: &str,
+    ports: &[u16],
+    passed: &mut u32,
+    failed: &mut u32,
+) {
+    let first_broker = format!("127.0.0.1:{}", ports[0]);
+    let record_on = |broker: &str| -> serde_json::Value {
+        let (_, out) = run_as(exe, broker, "alice", &["read", entity, id]);
+        serde_json::from_str::<serde_json::Value>(&out).unwrap_or_default()["data"].clone()
+    };
+    let (shared, share_out) = run_as(
+        exe,
+        &first_broker,
+        "alice",
+        &["share", entity, id, "bob", "--permission", "edit"],
+    );
+    record(
+        passed,
+        failed,
+        "alice shares edit with bob",
+        shared == Some(true) && share_out.contains("shared"),
+    );
+    std::thread::sleep(Duration::from_millis(300));
+
+    let before = record_on(&first_broker);
+    for port in ports {
+        let broker = format!("127.0.0.1:{port}");
+        for sender in ["alice", "bob"] {
+            let changing = run_as(
+                exe,
+                &broker,
+                sender,
+                &[
+                    "update",
+                    entity,
+                    id,
+                    "-d",
+                    r#"{"userId": "bob", "title": "Changed Owner"}"#,
+                ],
+            );
+            record(
+                passed,
+                failed,
+                &format!("Owner change as {sender} via {port} (refused)"),
+                denied(&changing),
+            );
+        }
+    }
+    record(
+        passed,
+        failed,
+        "Refused owner changes applied nothing",
+        !before.is_null() && record_on(&first_broker) == before,
+    );
+
+    for port in ports {
+        let broker = format!("127.0.0.1:{port}");
+        for sender in ["alice", "bob"] {
+            let (same_owner, _) = run_as(
+                exe,
+                &broker,
+                sender,
+                &[
+                    "update",
+                    entity,
+                    id,
+                    "-d",
+                    r#"{"userId": "alice", "title": "Same Owner"}"#,
+                ],
+            );
+            record(
+                passed,
+                failed,
+                &format!("Same owner value as {sender} via {port}"),
+                same_owner == Some(true),
+            );
+        }
+    }
+
+    for port in ports {
+        let broker = format!("127.0.0.1:{port}");
+        for owner in ["bob", "alice"] {
+            let payload = format!(r#"{{"userId": "{owner}"}}"#);
+            let (changed, _) = run_as(
+                exe,
+                &broker,
+                "admin",
+                &["update", entity, id, "-d", &payload],
+            );
+            record(
+                passed,
+                failed,
+                &format!("Owner set to {owner} as admin via {port}"),
+                changed == Some(true),
+            );
+        }
+    }
+    record(
+        passed,
+        failed,
+        "Owner is alice after the admin changes",
+        record_on(&first_broker)["userId"] == "alice",
+    );
 }
 
 fn sharing_checks(exe: &Path, entity: &str, ports: &[u16], passed: &mut u32, failed: &mut u32) {

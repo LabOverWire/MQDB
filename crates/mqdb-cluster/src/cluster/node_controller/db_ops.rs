@@ -15,7 +15,7 @@ use crate::cluster::store_manager::outbox::{
 };
 use crate::cluster::{PublishRouter, RoutedPublish};
 use mqdb_core::events::ChangeEvent;
-use mqdb_core::types::{AccessLevel, MAX_LIST_RESULTS, OwnershipDecision};
+use mqdb_core::types::{AccessLevel, MAX_LIST_RESULTS, OwnershipDecision, owner_change_refusal};
 use serde_json::Value;
 use tokio::sync::oneshot;
 
@@ -88,6 +88,7 @@ pub(crate) struct ForwardedJsonRequest<'a> {
     pub(crate) response_topic: &'a str,
     pub(crate) correlation_data: Option<&'a [u8]>,
     pub(crate) origin: EventOrigin<'a>,
+    pub(crate) requested_owner: Option<Value>,
 }
 
 #[derive(Default)]
@@ -769,22 +770,58 @@ impl<T: ClusterTransport> NodeController<T> {
         let Ok(data) = serde_json::from_slice::<serde_json::Value>(&existing.data) else {
             return Some(Self::json_error(403, "permission denied"));
         };
-        if data.get(owner_field).and_then(serde_json::Value::as_str) == Some(uid) {
+        let is_owner = data.get(owner_field).and_then(serde_json::Value::as_str) == Some(uid);
+        if !is_owner {
+            let required = match request.op {
+                JsonDbOp::Read => AccessLevel::View,
+                JsonDbOp::Update => AccessLevel::Edit,
+                _ => return Some(Self::json_error(403, "permission denied")),
+            };
+            if !self
+                .cluster_share_level(&request.entity, id, uid)
+                .is_some_and(|granted| granted >= required)
+            {
+                return Some(Self::json_error(403, "permission denied"));
+            }
+        }
+        if request.op != JsonDbOp::Update {
             return None;
         }
-        let required = match request.op {
-            JsonDbOp::Read => AccessLevel::View,
-            JsonDbOp::Update => AccessLevel::Edit,
-            _ => return Some(Self::json_error(403, "permission denied")),
-        };
-        if self
-            .cluster_share_level(&request.entity, id, uid)
-            .is_some_and(|granted| granted >= required)
-        {
-            None
-        } else {
-            Some(Self::json_error(403, "permission denied"))
-        }
+        request
+            .requested_owner
+            .as_ref()
+            .and_then(|requested| Self::owner_change_refused(&data, owner_field, requested))
+            .or_else(|| {
+                self.refuse_owner_change_in_payload(
+                    &request.entity,
+                    id,
+                    owner_field,
+                    &request.payload,
+                )
+            })
+    }
+
+    fn owner_change_refused(
+        stored: &Value,
+        owner_field: &str,
+        requested: &Value,
+    ) -> Option<Vec<u8>> {
+        owner_change_refusal(stored, owner_field, requested)
+            .map(|message| Self::json_error(403, &message))
+    }
+
+    pub(crate) fn refuse_owner_change_in_payload(
+        &self,
+        entity: &str,
+        id: &str,
+        owner_field: &str,
+        payload: &[u8],
+    ) -> Option<Vec<u8>> {
+        let fields = serde_json::from_slice::<Value>(payload).ok()?;
+        let requested = fields.get(owner_field)?;
+        let record = self.stores.db_get(entity, id)?;
+        let stored = serde_json::from_slice::<Value>(&record.data).unwrap_or(Value::Null);
+        Self::owner_change_refused(&stored, owner_field, requested)
     }
 
     fn handle_json_read_local(&self, entity: &str, id: &str, payload: &[u8]) -> Vec<u8> {
@@ -1557,6 +1594,7 @@ impl<T: ClusterTransport> NodeController<T> {
             correlation_data: None,
             sender: origin.sender.map(String::from),
             client_id: origin.client_id.map(String::from),
+            requested_owner: None,
         };
         let _ = self
             .transport
@@ -1615,6 +1653,7 @@ impl<T: ClusterTransport> NodeController<T> {
             correlation_data: None,
             sender: None,
             client_id: client_id.map(String::from),
+            requested_owner: None,
         };
         let _ = self
             .transport
@@ -2361,6 +2400,7 @@ impl<T: ClusterTransport> NodeController<T> {
             response_topic,
             correlation_data,
             origin,
+            requested_owner,
         } = forwarded;
         let start = std::time::Instant::now();
         let node_id = self.node_id.get();
@@ -2400,6 +2440,7 @@ impl<T: ClusterTransport> NodeController<T> {
             correlation_data: correlation_data.map(<[u8]>::to_vec),
             sender: origin.sender.map(String::from),
             client_id: origin.client_id.map(String::from),
+            requested_owner,
         };
         if !request.fits_wire() {
             tracing::warn!(
@@ -2483,6 +2524,7 @@ impl<T: ClusterTransport> NodeController<T> {
             correlation_data: None,
             sender: None,
             client_id: None,
+            requested_owner: None,
         };
         let (result, _) = self
             .handle_json_update_local(entity, id, payload, &request, self.node_id)

@@ -429,6 +429,7 @@ fn vault_error_to_response(err: &VaultError) -> Response {
         }
         VaultError::NotFound(m) => Response::error(mqdb_core::ErrorCode::NotFound, m.as_str()),
         VaultError::BadRequest(m) => Response::error(mqdb_core::ErrorCode::BadRequest, m.as_str()),
+        VaultError::Forbidden(m) => Response::error(mqdb_core::ErrorCode::Forbidden, m.as_str()),
         VaultError::Internal(m) => Response::error(mqdb_core::ErrorCode::Internal, m.as_str()),
     }
 }

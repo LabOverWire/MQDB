@@ -435,7 +435,7 @@ user's identity. When `--ownership entity=field` is configured, the broker:
 
 - **List:** Injects a mandatory filter `field = sender` so users only see their own records
 - **Read:** Allowed when `record.data.field == sender` or with a `view` or `edit` share grant; otherwise 403
-- **Update:** Allowed when `record.data.field == sender` or with an `edit` share grant; otherwise 403
+- **Update:** Allowed when `record.data.field == sender` or with an `edit` share grant; otherwise 403. An update from either of them that would change `field` also gets 403 and nothing is applied; a value equal to the stored one is allowed. An admin can change `field`, except an agent admin with an unlocked vault, who gets the 403. An agent `edit` grantee with an unlocked vault gets 400 `forbidden` for any update
 - **Delete:** Allowed only when `record.data.field == sender`; otherwise 403
 - **Create:** Not restricted
 - **No sender (internal):** Bypasses all ownership checks (for replication, outbox, etc.)
@@ -474,7 +474,11 @@ This command:
 | 6 | List as admin | Sees 1 record (admin sees all) |
 | 7 | Update alice's record as admin | Success (admin bypass) |
 | 8 | Update alice's record as alice | Success (owner) |
-| 9 | Delete alice's record as alice | Success (owner) |
+| 9 | Alice shares the record with bob at `edit` | Success |
+| 10 | Update `userId` to `bob` as alice and as bob, through every node | Forbidden error, record unchanged |
+| 11 | Update with `userId: "alice"` as alice and as bob, through every node | Success |
+| 12 | Set `userId` to `bob` and back to `alice` as admin, through every node | Success |
+| 13 | Delete alice's record as alice | Success (owner) |
 
 ### Manual Testing
 
@@ -562,12 +566,17 @@ mqdb dev start-cluster --nodes 3 --clean \
 - [ ] Delete by non-owner returns 403 Forbidden
 - [ ] Update by owner succeeds
 - [ ] Delete by owner succeeds
+- [ ] Update that would change the owner field returns 403 for the owner and an `edit` grantee, with `_version` and the record unchanged and no change event
+- [ ] Update with the owner field equal to the stored value succeeds
+- [ ] Admin update can change the owner field; in agent mode with the admin's vault unlocked it returns 403
+- [ ] Agent `edit` grantee with an unlocked vault gets 400 `forbidden`, whatever owner value is sent
 - [ ] Internal operations (no sender) bypass ownership checks
 
 **Cluster mode:**
 - [ ] Ownership filters applied on local list path
 - [ ] Ownership filters included in scatter-gather queries to remote nodes
 - [ ] Write ownership checks work on partition primary nodes
+- [ ] Owner field refusal holds through a node that does not hold the record
 
 **Cascade delete + ownership:**
 - [ ] Cross-owner cascade: referencing entity owned by different user survives with FK set to null

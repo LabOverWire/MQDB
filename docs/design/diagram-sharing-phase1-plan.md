@@ -143,7 +143,7 @@ check_access(entity, id, owner_field, sender, required: AccessLevel) -> Result<(
 Wire-up in `transport_execute.rs`:
 
 - **Read** (`:72`) → `check_access(..., View)`.
-- **Update** (`:90`) → `check_access(..., Edit)`; keep stripping the owner field.
+- **Update** (`:90`) → `check_access(..., Edit)`; keep stripping the owner field (since replaced by a refusal when the update would change the owner, #334).
 - **Delete** (`:122`) → **unchanged** (keep `check_ownership` / owner-only, per
   Decision #1).
 - **List** (`:156`) → unchanged owner filter; discovery is the separate `/shared`.

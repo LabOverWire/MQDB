@@ -90,6 +90,9 @@ pub enum Error {
     #[error("forbidden: {0}")]
     Forbidden(String),
 
+    #[error("{0}")]
+    OwnerChangeRefused(String),
+
     #[error("precondition failed: {0}")]
     PreconditionFailed(String),
 

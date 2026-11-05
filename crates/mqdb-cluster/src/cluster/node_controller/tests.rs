@@ -2415,6 +2415,7 @@ fn delete_post_request(sender: Option<&str>) -> crate::cluster::protocol::JsonDb
         correlation_data: None,
         sender: sender.map(String::from),
         client_id: None,
+        requested_owner: None,
     }
 }
 
@@ -2772,7 +2773,8 @@ async fn forwarded_write_without_a_response_topic_keeps_no_vault_decrypt() {
                 payload: update,
                 response_topic: "",
                 correlation_data: None,
-                origin: EventOrigin::new(Some("alice"), None)
+                origin: EventOrigin::new(Some("alice"), None),
+                requested_owner: None,
             }
         )
         .await
@@ -2790,6 +2792,7 @@ async fn forwarded_write_without_a_response_topic_keeps_no_vault_decrypt() {
                 response_topic: "resp/t",
                 correlation_data: None,
                 origin: EventOrigin::new(Some("alice"), None),
+                requested_owner: None,
             },
         )
         .await
@@ -2957,6 +2960,7 @@ fn forwarded_request(
         correlation_data: None,
         sender: Some("alice".to_string()),
         client_id: Some("editor-1".to_string()),
+        requested_owner: None,
     };
     crate::cluster::protocol::JsonDbRequest::from_bytes(&request.to_bytes().unwrap()).unwrap()
 }
@@ -3173,6 +3177,7 @@ mod change_events;
 mod forwarded_write;
 mod lost_snapshot_request;
 mod missing_record;
+mod owner_field;
 mod partition_map;
 mod primary_role_wait;
 mod promoted_transfer;

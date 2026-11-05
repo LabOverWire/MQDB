@@ -201,6 +201,7 @@ impl From<Error> for Response {
                 format!("schema validation failed: {field} - {reason}"),
             ),
             Error::Forbidden(_) => (ErrorCode::Forbidden, "forbidden".to_string()),
+            Error::OwnerChangeRefused(message) => (ErrorCode::Forbidden, message.clone()),
             Error::ConstraintViolation(msg) => {
                 (ErrorCode::Conflict, format!("constraint violation: {msg}"))
             }

@@ -311,6 +311,7 @@ async fn a_forwarded_read_for_a_partition_not_held_is_refused() {
                 correlation_data: None,
                 sender: None,
                 client_id: None,
+                requested_owner: None,
             },
         },
     );

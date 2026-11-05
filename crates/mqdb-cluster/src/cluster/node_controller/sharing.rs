@@ -590,6 +590,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 correlation_data: None,
                 sender: None,
                 client_id: None,
+                requested_owner: None,
             };
             let msg = ClusterMessage::JsonDbRequest {
                 partition: PartitionId::ZERO,
@@ -691,6 +692,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     response_topic: &cont.response_topic,
                     correlation_data: cont.correlation_data.as_deref(),
                     origin: EventOrigin::new(Some(cont.granted_by.as_str()), None),
+                    requested_owner: None,
                 },
             )
             .await;

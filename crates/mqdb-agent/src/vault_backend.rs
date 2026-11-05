@@ -27,6 +27,8 @@ pub enum VaultError {
     #[error("{0}")]
     BadRequest(String),
     #[error("{0}")]
+    Forbidden(String),
+    #[error("{0}")]
     Internal(String),
 }
 
