@@ -170,6 +170,11 @@ impl OwnershipConfig {
     }
 
     #[must_use]
+    pub fn controls_any_access(&self) -> bool {
+        !self.entity_owner_fields.is_empty() || !self.derivations.is_empty()
+    }
+
+    #[must_use]
     pub fn is_admin(&self, user: &str) -> bool {
         self.admin_users.contains(user)
     }

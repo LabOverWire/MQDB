@@ -315,6 +315,7 @@ impl MqdbAgent {
                 .with_all_users_admin(config.allow_anonymous && config.admin_users.is_empty())
                 .with_scoped_events(config.scoped_events)
                 .with_event_scope_entity(Some(config.event_scope_entity.to_string()))
+                .with_ownership(Arc::clone(&config.scope_access.ownership))
                 .with_scope_access(config.scope_access)
                 .with_sparkplug_aware(config.sparkplug_aware);
         broker = broker.with_auth_provider(Arc::new(protected_provider));

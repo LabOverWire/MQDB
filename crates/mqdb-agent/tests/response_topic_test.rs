@@ -12,6 +12,7 @@ use mqtt5::client::MqttClient;
 use mqtt5::types::{ConnectOptions, PublishOptions, PublishProperties};
 use running_agent::RunningAgent;
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -90,9 +91,15 @@ async fn start_agent(users: &[&User]) -> RunningAgent {
     let db = Database::open_without_background_tasks(tmp.path().join("agent"))
         .await
         .unwrap();
+    let admins = HashSet::from(["root".to_string()]);
     let agent = MqdbAgent::new(db)
         .with_password_file(password_file)
-        .with_ownership_config(OwnershipConfig::parse("diagrams=userId").unwrap());
+        .with_admin_users(admins.clone())
+        .with_ownership_config(
+            OwnershipConfig::parse("diagrams=userId")
+                .unwrap()
+                .with_admin_users(admins),
+        );
     RunningAgent::start(agent, next_test_port(), tmp).await
 }
 
@@ -118,9 +125,11 @@ async fn wait_for_delivery(deliveries: &flume::Receiver<Vec<u8>>) {
 async fn responses_published_to_request_topics_are_not_executed() {
     let alice = User::new("alice");
     let bob = User::new("bob");
-    let agent = start_agent(&[&alice, &bob]).await;
+    let root = User::new("root");
+    let agent = start_agent(&[&alice, &bob, &root]).await;
 
     let bob_client = bob.connect(agent.port).await;
+    let root_client = root.connect(agent.port).await;
     let created = request(
         &bob_client,
         "$DB/diagrams/create",
@@ -138,7 +147,7 @@ async fn responses_published_to_request_topics_are_not_executed() {
     .await;
     assert_eq!(denied["status"], "error", "{denied}");
 
-    let delete_deliveries = watch(&bob_client, "$DB/diagrams/bobs-diagram/delete").await;
+    let delete_deliveries = watch(&root_client, "$DB/diagrams/bobs-diagram/delete").await;
     let create_deliveries = watch(&bob_client, "$DB/smuggled/create").await;
     publish_with_response_topic(
         &alice_client,
@@ -172,6 +181,7 @@ async fn responses_published_to_request_topics_are_not_executed() {
 
     alice_client.disconnect().await.unwrap();
     bob_client.disconnect().await.unwrap();
+    root_client.disconnect().await.unwrap();
     agent.stop().await;
 }
 
