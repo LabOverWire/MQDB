@@ -1421,7 +1421,7 @@ async fn json_list_rejects_nonexistent_filter_field() {
 }
 
 #[tokio::test]
-async fn update_strips_ownership_field_for_non_admin() {
+async fn update_refuses_a_change_of_the_ownership_field_for_non_admin() {
     let node1 = NodeId::validated(1).unwrap();
     let mut ownership_fields = std::collections::HashMap::new();
     ownership_fields.insert("items".to_string(), "userId".to_string());
@@ -1453,9 +1453,14 @@ async fn update_strips_ownership_field_for_non_admin() {
 
     let resp = response.unwrap();
     let json = parse_json_response(&resp.payload);
-    assert_eq!(json["status"], "ok");
-    assert_eq!(json["data"]["userId"], "alice");
-    assert_eq!(json["data"]["name"], "gadget");
+    assert_eq!(json["code"], 403);
+    assert_eq!(
+        json["message"],
+        "the ownership field 'userId' cannot be changed"
+    );
+    let stored: serde_json::Value =
+        serde_json::from_slice(&ctrl.db_get("items", "i-1").unwrap().data).unwrap();
+    assert_eq!(stored, data);
 }
 
 #[tokio::test]
