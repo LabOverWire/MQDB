@@ -177,7 +177,7 @@ async fn scoped_events_reach_only_users_who_can_view_the_scope() {
     assert_eq!(next_topic(&admin_events).await, expected);
 
     let notes = watch(&mallory_client, "$DB/notes/events/#").await.unwrap();
-    let admin_everything = watch(&root_client, "$DB/#").await.unwrap();
+    let admin_everything = watch(&root_client, "$DB/notes/#").await.unwrap();
     let unscoped = request(&alice_client, "$DB/notes/create", &json!({"id": "n1"})).await;
     assert_eq!(unscoped["status"], "ok", "{unscoped}");
     let broadcast_topic = next_topic(&notes).await;

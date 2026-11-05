@@ -1017,6 +1017,76 @@ fn suite_entity(kind: &str) -> String {
     format!("test_{kind}_{ts}")
 }
 
+fn subscribe_refused(port: u16, user: &str, filter: &str) -> Option<bool> {
+    let port = port.to_string();
+    Command::new("mosquitto_sub")
+        .args(["-V", "mqttv5", "-h", "127.0.0.1", "-p", &port])
+        .args(["-u", user, "-P", user, "-t", filter, "-W", "1"])
+        .output()
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output.stderr).contains("denied"))
+}
+
+fn request_subscribe_checks(entity: &str, ports: &[u16], passed: &mut u32, failed: &mut u32) {
+    let request_filters = [
+        format!("$DB/{entity}/create"),
+        format!("$DB/{entity}/#"),
+        format!("$share/g/$DB/{entity}/create"),
+    ];
+    let closed_to_admins_too = [
+        "$DB/_auth/#",
+        "$DB/_vault/#",
+        "$DB/#",
+        "$DB/+/#",
+        "$share/g/$DB/_vault/#",
+    ];
+    let event_filter = format!("$DB/{entity}/events/#");
+    for port in ports {
+        for filter in closed_to_admins_too {
+            for user in ["bob", "admin"] {
+                record(
+                    passed,
+                    failed,
+                    &format!("Subscribe to {filter} as {user} on {port} (refused)"),
+                    subscribe_refused(*port, user, filter) == Some(true),
+                );
+            }
+        }
+        record(
+            passed,
+            failed,
+            &format!("Subscribe to $share/g/$DB/_admin/# as bob on {port} (refused)"),
+            subscribe_refused(*port, "bob", "$share/g/$DB/_admin/#") == Some(true),
+        );
+        record(
+            passed,
+            failed,
+            &format!("Subscribe to $DB/+/create as bob on {port} (refused)"),
+            subscribe_refused(*port, "bob", "$DB/+/create") == Some(true),
+        );
+        for filter in &request_filters {
+            record(
+                passed,
+                failed,
+                &format!("Subscribe to {filter} as bob on {port} (refused)"),
+                subscribe_refused(*port, "bob", filter) == Some(true),
+            );
+            record(
+                passed,
+                failed,
+                &format!("Subscribe to {filter} as admin on {port} (allowed)"),
+                subscribe_refused(*port, "admin", filter) == Some(false),
+            );
+        }
+        record(
+            passed,
+            failed,
+            &format!("Subscribe to {event_filter} as bob on {port} (allowed)"),
+            subscribe_refused(*port, "bob", &event_filter) == Some(false),
+        );
+    }
+}
+
 fn run_test_ownership(options: &DevTestOptions, ports: &[u16]) -> u32 {
     println!(
         "=== Ownership Enforcement Test ({} nodes) ===\n",
@@ -1151,6 +1221,7 @@ fn run_test_ownership(options: &DevTestOptions, ports: &[u16]) -> u32 {
         "Delete as alice (owner)",
         alice_delete == Some(true),
     );
+    request_subscribe_checks(&entity, ports, &mut passed, &mut failed);
 
     let stop_failures = cluster.finish();
     report(passed, failed + stop_failures)

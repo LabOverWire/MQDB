@@ -833,3 +833,31 @@ mosquitto_pub -V mqttv5 -u mallory -P "$PW" -q 1 -t '$DB/collars/a/b/fixes/event
 - [ ] Events for scope value `a/b` arrive on `$DB/collars/a%2Fb/...`, and the owner of `a` does not receive them on `$DB/collars/a/#`
 - [ ] A forged publish is refused for any scope depth, for non-admins and for admins
 - [ ] After `unshare`, a live subscription keeps receiving (known limit), a new subscribe is refused, and a resumed persistent session receives nothing
+
+---
+
+## 32. Request Topic Subscriptions (`--ownership`, agent and cluster)
+
+Start with `--passwd`, `--admin-users root` and `--ownership notes=ownerId`. Users: `alice`, `mallory` (not an admin), `root`.
+
+```bash
+mosquitto_sub -V mqttv5 -u mallory -P "$PW" -t '$DB/notes/create'
+mosquitto_sub -V mqttv5 -u mallory -P "$PW" -t '$share/g/$DB/#'
+mosquitto_sub -V mqttv5 -u mallory -P "$PW" -t '$DB/notes/events/#'
+mosquitto_sub -V mqttv5 -u mallory -P "$PW" -t '$DB/clients/m1/#'
+```
+
+### Verification Checklist
+
+- [ ] `mallory` is refused every request form: `$DB/notes/create`, `/list`, `/shared`, `/n1`, `/n1/update`, `/n1/delete`, `/n1/share`, `/n1/unshare`, `/n1/shares`
+- [ ] `mallory` is refused `$DB/+/create`, `$DB/notes/+`, `$DB/notes/#`, `$DB/+/#`, `$DB/#`, and each form with `$share/{group}/` in front, also with an ACL granting `$DB/#`
+- [ ] `root` keeps the literal-entity filters and `$DB/+/create`, and receives request payloads in agent mode
+- [ ] Nobody, `root` included, can subscribe to `$DB/_auth/#`, `$DB/_vault/#`, `$DB/#`, `$DB/+/#`, `$DB/+/+` or `$DB/+/unlock`, with or without `--ownership` and with or without `$share/{group}/`
+- [ ] Publishing to `$DB/_auth/*` and `$DB/_vault/*` still gets a reply from the broker for `mallory` and `root`
+- [ ] `$share/{group}/$DB/_admin/#` is refused for `mallory` and allowed for `root`, and `$share/{group}/sensors/#` works for `mallory`
+- [ ] Without `--acl`, `$DB/_verify/#` is refused for `mallory` on subscribe and publish
+- [ ] `$DB/notes/events/#`, `mqdb watch notes`, `$DB/_presence/#` and `--scoped-events` per-user topics stay open
+- [ ] `$DB/clients/m1/#` and `$DB/notes/n1/replies/#` stay open and work as response topics in agent mode
+- [ ] With no `--ownership`, `$DB/notes/create` stays open and delivers, and `$DB/+/create` is refused
+- [ ] With `--event-scope lists=listId`, a viewer keeps `$DB/lists/L1/#`, and `$DB/+/L1/#` and a record named `create` with `$DB/lists/create/#` are refused
+- [ ] In a cluster, a will sent on `$DB/notes/n1/update` does not reach `mallory`, because her subscribe is refused

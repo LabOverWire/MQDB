@@ -290,7 +290,9 @@ impl ClusteredAgent {
         let protected_provider =
             TopicProtectionAuthProvider::new(current_provider, admin_users.clone())
                 .with_internal_service_username(service_username.cloned())
-                .with_event_scope_entity(Some(self.scope_config.scope_entity().to_string()));
+                .with_event_scope_entity(Some(self.scope_config.scope_entity().to_string()))
+                .with_ownership(Arc::clone(&self.ownership))
+                .with_acl_configured(self.acl_file.is_some());
         broker = broker.with_auth_provider(Arc::new(protected_provider));
         if admin_users.is_empty() {
             info!("topic protection enabled (no admin users configured)");

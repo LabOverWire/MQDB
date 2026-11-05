@@ -2,14 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::database::Database;
-use crate::topic_rules::{BlockReason, check_topic_access, is_change_event_topic};
+use crate::topic_rules::{BlockReason, check_topic_access, is_change_event_topic, matches_pattern};
 use mqdb_core::events::scope_value_from_level;
+use mqdb_core::protocol::RESERVED_RECORD_ID;
 use mqdb_core::types::OwnershipConfig;
 use mqtt5::broker::auth::{AuthProvider, AuthResult, EnhancedAuthResult};
 use mqtt5::error::Result;
 use mqtt5::packet::connect::ConnectPacket;
 use mqtt5::protocol::v5::reason_codes::ReasonCode;
-use mqtt5::validation::parse_shared_subscription;
+use mqtt5::validation::{parse_shared_subscription, topic_matches_filter};
 use std::collections::HashSet;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -29,6 +30,8 @@ pub struct TopicProtectionAuthProvider {
     internal_service_username: Option<String>,
     event_scope_entity: Option<String>,
     scope_access: Option<ScopeAccess>,
+    ownership: Arc<OwnershipConfig>,
+    acl_configured: bool,
     all_users_admin: bool,
     scoped_events: bool,
     sparkplug_aware: bool,
@@ -101,6 +104,73 @@ fn scoped_filter<'a>(filter: &'a str, scope_entity: &str) -> ScopedFilter<'a> {
     }
 }
 
+const COLLECTION_REQUEST_OPERATIONS: [&str; 3] = ["create", "list", "shared"];
+const RECORD_REQUEST_OPERATIONS: [&str; 5] = ["update", "delete", "share", "unshare", "shares"];
+
+fn filter_reaches_request(filter: &str, ownership: &OwnershipConfig) -> bool {
+    let mut levels = parse_shared_subscription(filter).0.split('/');
+    if levels.next() != Some("$DB") {
+        return false;
+    }
+    if !levels
+        .next()
+        .is_some_and(|entity| ownership.controls_access_to(entity))
+    {
+        return false;
+    }
+    match levels.next() {
+        Some("#") => true,
+        None | Some(RESERVED_RECORD_ID) => false,
+        Some(_) => {
+            filter_reaches_levels(levels.clone(), &[])
+                || RECORD_REQUEST_OPERATIONS
+                    .iter()
+                    .any(|operation| filter_reaches_levels(levels.clone(), &[Some(*operation)]))
+        }
+    }
+}
+
+const SECRET_REQUEST_TOPICS: [&str; 9] = [
+    "$DB/_auth/password/change",
+    "$DB/_auth/password/reset/start",
+    "$DB/_auth/password/reset/submit",
+    "$DB/_vault/enable",
+    "$DB/_vault/unlock",
+    "$DB/_vault/lock",
+    "$DB/_vault/status",
+    "$DB/_vault/change",
+    "$DB/_vault/disable",
+];
+const VERIFICATION_TOPICS: &str = "$DB/_verify/#";
+
+fn filter_reaches_secret_request(filter: &str) -> bool {
+    SECRET_REQUEST_TOPICS
+        .iter()
+        .any(|topic| topic_matches_filter(topic, filter))
+}
+
+fn filter_crosses_entities_outside_events(filter: &str) -> bool {
+    let mut levels = filter.split('/');
+    if levels.next() != Some("$DB") {
+        return false;
+    }
+    match levels.next() {
+        Some("#") => true,
+        Some("+") => {
+            let mut below_entity = levels.peekable();
+            below_entity.peek().is_some() && !below_entity.any(|level| level == "events")
+        }
+        _ => false,
+    }
+}
+
+fn is_scope_record_filter(filter: &str, scope_entity: &str) -> bool {
+    matches!(
+        scoped_filter(filter, scope_entity),
+        ScopedFilter::OneScope(level) if !COLLECTION_REQUEST_OPERATIONS.contains(&level)
+    )
+}
+
 fn user_scope_segment(topic: &str) -> Option<&str> {
     let mut parts = topic.split('/');
     if parts.next()? != "$DB" {
@@ -121,6 +191,8 @@ impl TopicProtectionAuthProvider {
             internal_service_username: None,
             event_scope_entity: None,
             scope_access: None,
+            ownership: Arc::default(),
+            acl_configured: false,
             all_users_admin: false,
             scoped_events: false,
             sparkplug_aware: false,
@@ -152,6 +224,18 @@ impl TopicProtectionAuthProvider {
     }
 
     #[must_use]
+    pub fn with_ownership(mut self, ownership: Arc<OwnershipConfig>) -> Self {
+        self.ownership = ownership;
+        self
+    }
+
+    #[must_use]
+    pub fn with_acl_configured(mut self, configured: bool) -> Self {
+        self.acl_configured = configured;
+        self
+    }
+
+    #[must_use]
     pub fn with_all_users_admin(mut self, enabled: bool) -> Self {
         self.all_users_admin = enabled;
         self
@@ -174,6 +258,10 @@ impl TopicProtectionAuthProvider {
         self.internal_service_username.is_some()
             && is_reserved_client_id(client_id)
             && !self.is_internal_service(user_id)
+    }
+
+    fn has_no_acl_grant(&self, topic: &str) -> bool {
+        !self.acl_configured && matches_pattern(topic, VERIFICATION_TOPICS)
     }
 
     fn is_admin_user(&self, user_id: Option<&str>) -> bool {
@@ -203,6 +291,15 @@ impl TopicProtectionAuthProvider {
                 .is_ok(),
             _ => false,
         }
+    }
+
+    fn may_receive_requests(&self, filter: &str) -> bool {
+        !filter_reaches_request(filter, &self.ownership)
+            || (self.scope_access.is_some()
+                && self
+                    .event_scope_entity
+                    .as_deref()
+                    .is_some_and(|scope_entity| is_scope_record_filter(filter, scope_entity)))
     }
 }
 
@@ -290,10 +387,11 @@ impl AuthProvider for TopicProtectionAuthProvider {
 
             if let Err(reason) = check_topic_access(topic, true, is_admin) {
                 if reason == BlockReason::AdminRequired {
-                    let allowed = self
-                        .inner
-                        .authorize_publish(&client_id_owned, user_id, topic)
-                        .await;
+                    let allowed = !self.has_no_acl_grant(topic)
+                        && self
+                            .inner
+                            .authorize_publish(&client_id_owned, user_id, topic)
+                            .await;
                     if !allowed {
                         debug!(
                             client_id = %client_id_owned,
@@ -333,6 +431,26 @@ impl AuthProvider for TopicProtectionAuthProvider {
                 return true;
             }
 
+            let plain_filter = parse_shared_subscription(topic_filter).0;
+
+            if filter_reaches_secret_request(plain_filter) {
+                debug!(
+                    client_id = %client_id_owned,
+                    topic_filter = %topic_filter,
+                    "subscribe to auth or vault requests denied"
+                );
+                return false;
+            }
+
+            if !is_admin && filter_crosses_entities_outside_events(plain_filter) {
+                debug!(
+                    client_id = %client_id_owned,
+                    topic_filter = %topic_filter,
+                    "subscribe across entities outside change events denied"
+                );
+                return false;
+            }
+
             if !is_admin && !self.may_receive_scope_events(user_id, topic_filter).await {
                 debug!(
                     client_id = %client_id_owned,
@@ -342,8 +460,17 @@ impl AuthProvider for TopicProtectionAuthProvider {
                 return false;
             }
 
+            if !is_admin && !self.may_receive_requests(topic_filter) {
+                debug!(
+                    client_id = %client_id_owned,
+                    topic_filter = %topic_filter,
+                    "subscribe to request topics of an entity with ownership denied"
+                );
+                return false;
+            }
+
             if self.scoped_events
-                && let Some(seg) = user_scope_segment(topic_filter)
+                && let Some(seg) = user_scope_segment(plain_filter)
                 && !(is_admin || user_id == Some(seg))
             {
                 debug!(
@@ -354,12 +481,13 @@ impl AuthProvider for TopicProtectionAuthProvider {
                 return false;
             }
 
-            if let Err(reason) = check_topic_access(topic_filter, false, is_admin) {
+            if let Err(reason) = check_topic_access(plain_filter, false, is_admin) {
                 if reason == BlockReason::AdminRequired {
-                    let allowed = self
-                        .inner
-                        .authorize_subscribe(&client_id_owned, user_id, topic_filter)
-                        .await;
+                    let allowed = !self.has_no_acl_grant(plain_filter)
+                        && self
+                            .inner
+                            .authorize_subscribe(&client_id_owned, user_id, topic_filter)
+                            .await;
                     if !allowed {
                         debug!(
                             client_id = %client_id_owned,
@@ -610,7 +738,7 @@ mod tests {
 
     #[tokio::test]
     async fn acl_grant_allows_admin_required_topics() {
-        let provider = create_test_provider(HashSet::new());
+        let provider = create_test_provider(HashSet::new()).with_acl_configured(true);
 
         let result = provider
             .authorize_publish(
@@ -1216,6 +1344,7 @@ mod tests {
         )
         .with_internal_service_username(Some("mqdb-internal".to_string()))
         .with_event_scope_entity(Some("lists".to_string()))
+        .with_ownership(Arc::new(ownership.clone()))
         .with_scope_access(ScopeAccess {
             db: Arc::new(db.clone()),
             ownership: Arc::new(ownership),
@@ -1230,7 +1359,6 @@ mod tests {
             "$DB/lists/L1/#",
             "$DB/lists/L1/events/#",
             "$DB/lists/L1/items/events/created",
-            "$DB/+/L1/#",
             "$share/g/$DB/lists/L1/#",
             "$DB/lists/a%2Fb/#",
         ] {
@@ -1343,17 +1471,14 @@ mod tests {
     async fn wildcards_across_scopes_are_admin_only() {
         let (_tmp, provider, _db) = scope_access_provider().await;
         for filter in [
-            "$DB/#",
-            "$DB/+/#",
             "$DB/lists/#",
             "$DB/lists/+/#",
-            "$DB/+/+/#",
+            "$DB/+/+/events/#",
             "$DB/lists/+/events/#",
             "$DB/lists/+/items/events/created",
             "$DB/+/+/+/events/#",
             "$DB/lists/+/+/+",
             "$share/g/$DB/lists/+/#",
-            "$share/g/$DB/#",
         ] {
             assert!(
                 !provider
@@ -1403,7 +1528,6 @@ mod tests {
             "$DB/lists/events/#",
             "$DB/u/alice/events/#",
             "resp/alice/1",
-            "$DB/lists/L1/update",
         ] {
             assert!(
                 provider
@@ -1424,7 +1548,7 @@ mod tests {
             db: Arc::new(db),
             ownership: Arc::new(OwnershipConfig::parse("items=ownerId").unwrap()),
         });
-        for filter in ["$DB/lists/L1/#", "$DB/lists/+/#", "$DB/#"] {
+        for filter in ["$DB/lists/L1/#", "$DB/lists/+/#", "$DB/lists/#"] {
             assert!(
                 provider.authorize_subscribe("c", Some("bob"), filter).await,
                 "{filter}"
@@ -1446,5 +1570,526 @@ mod tests {
                 "{topic} must be writable"
             );
         }
+    }
+
+    fn notes_ownership() -> Arc<OwnershipConfig> {
+        Arc::new(
+            OwnershipConfig::parse("notes=ownerId,events=ownerId")
+                .unwrap()
+                .with_derivations("items=noteId>notes")
+                .unwrap(),
+        )
+    }
+
+    fn request_protection_provider() -> TopicProtectionAuthProvider {
+        TopicProtectionAuthProvider::new(
+            Arc::new(AllowAllAuthProvider),
+            HashSet::from(["root".to_string()]),
+        )
+        .with_internal_service_username(Some("mqdb-internal".to_string()))
+        .with_ownership(notes_ownership())
+    }
+
+    const LITERAL_REQUEST_FILTERS: [&str; 18] = [
+        "$DB/notes/create",
+        "$DB/notes/list",
+        "$DB/notes/shared",
+        "$DB/notes/n1",
+        "$DB/notes/n1/update",
+        "$DB/notes/n1/delete",
+        "$DB/notes/n1/share",
+        "$DB/notes/n1/unshare",
+        "$DB/notes/n1/shares",
+        "$DB/notes/+",
+        "$DB/notes/#",
+        "$DB/notes/+/#",
+        "$DB/notes/+/update",
+        "$DB/notes/+/+",
+        "$DB/notes/n1/#",
+        "$DB/notes/n1/+",
+        "$DB/items/create",
+        "$DB/events/create",
+    ];
+    const ENTITY_WILDCARD_FILTERS: [&str; 6] = [
+        "$DB/+/create",
+        "$DB/+/list",
+        "$DB/+/n1",
+        "$DB/+/n1/update",
+        "$DB/+/+/share",
+        "$DB/+/n1/#",
+    ];
+    const SECRET_REACHING_FILTERS: [&str; 14] = [
+        "$DB/_auth/#",
+        "$DB/_auth/password/change",
+        "$DB/_auth/password/reset/+",
+        "$DB/_vault/#",
+        "$DB/_vault/unlock",
+        "$DB/_vault/+",
+        "$DB/#",
+        "$DB/+/#",
+        "$DB/+/+",
+        "$DB/+/+/+",
+        "$DB/+/unlock",
+        "$DB/+/password/#",
+        "$DB/+/+/change",
+        "$DB/+/+/reset/submit",
+    ];
+
+    async fn assert_subscribe(
+        provider: &TopicProtectionAuthProvider,
+        user: Option<&str>,
+        filter: &str,
+        expected: bool,
+    ) {
+        let shared = format!("$share/g/{filter}");
+        for candidate in [filter, shared.as_str()] {
+            assert_eq!(
+                provider.authorize_subscribe("c", user, candidate).await,
+                expected,
+                "{user:?} on {candidate}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn request_filters_are_refused_to_non_admins_on_any_acl() {
+        let provider = request_protection_provider();
+        for filter in LITERAL_REQUEST_FILTERS
+            .iter()
+            .chain(&ENTITY_WILDCARD_FILTERS)
+        {
+            for user in [Some("mallory"), None] {
+                assert_subscribe(&provider, user, filter, false).await;
+            }
+            for user in ["root", "mqdb-internal"] {
+                assert_subscribe(&provider, Some(user), filter, true).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn secret_requests_are_closed_to_every_client_but_the_service() {
+        let with_ownership = request_protection_provider();
+        let without_ownership = TopicProtectionAuthProvider::new(
+            Arc::new(AllowAllAuthProvider),
+            HashSet::from(["root".to_string()]),
+        )
+        .with_internal_service_username(Some("mqdb-internal".to_string()));
+        let all_admins =
+            TopicProtectionAuthProvider::new(Arc::new(AllowAllAuthProvider), HashSet::new())
+                .with_all_users_admin(true);
+        for filter in SECRET_REACHING_FILTERS {
+            for provider in [&with_ownership, &without_ownership] {
+                assert_subscribe(provider, Some("mallory"), filter, false).await;
+                assert_subscribe(provider, None, filter, false).await;
+                assert_subscribe(provider, Some("root"), filter, false).await;
+                assert_subscribe(provider, Some("mqdb-internal"), filter, true).await;
+            }
+            assert_subscribe(&all_admins, Some("anyone"), filter, false).await;
+        }
+        for topic in SECRET_REQUEST_TOPICS {
+            assert!(
+                without_ownership
+                    .authorize_publish("c", Some("mallory"), topic)
+                    .await,
+                "{topic} must stay publishable"
+            );
+            assert!(
+                without_ownership
+                    .authorize_publish("c", Some("root"), topic)
+                    .await,
+                "{topic} must stay publishable"
+            );
+        }
+    }
+
+    #[test]
+    fn the_secret_topic_list_names_every_auth_and_vault_operation() {
+        use mqdb_core::protocol::{AdminOperation, parse_admin_topic};
+        let mut seen = HashSet::new();
+        for topic in SECRET_REQUEST_TOPICS {
+            let operation = parse_admin_topic(topic);
+            let name = match operation {
+                Some(AdminOperation::PasswordChange) => "password change",
+                Some(AdminOperation::PasswordResetStart) => "reset start",
+                Some(AdminOperation::PasswordResetSubmit) => "reset submit",
+                Some(AdminOperation::VaultEnable) => "vault enable",
+                Some(AdminOperation::VaultUnlock) => "vault unlock",
+                Some(AdminOperation::VaultLock) => "vault lock",
+                Some(AdminOperation::VaultStatus) => "vault status",
+                Some(AdminOperation::VaultChange) => "vault change",
+                Some(AdminOperation::VaultDisable) => "vault disable",
+                _ => panic!("{topic} is not an auth or vault request"),
+            };
+            assert!(seen.insert(name), "{topic} is listed twice");
+        }
+        assert_eq!(seen.len(), SECRET_REQUEST_TOPICS.len());
+    }
+
+    #[tokio::test]
+    async fn every_protection_tier_applies_to_shared_subscriptions() {
+        let admins = HashSet::from(["root".to_string()]);
+        let provider = TopicProtectionAuthProvider::new(Arc::new(AllowAllAuthProvider), admins)
+            .with_internal_service_username(Some("mqdb-internal".to_string()))
+            .with_scoped_events(true);
+        let mut filters: Vec<String> = crate::topic_rules::PROTECTED_TOPICS
+            .iter()
+            .map(|rule| rule.pattern.replace("p+", "p3"))
+            .collect();
+        filters.extend(
+            [
+                "$DB/_admin/#",
+                "$DB/_sessions/list",
+                "$DB/_oauth_tokens/#",
+                "$DB/_identities/#",
+                "$DB/_identity_links/#",
+                "$DB/_credentials/#",
+                "$DB/_verification_challenges/#",
+                "$DB/_shares/#",
+                "$DB/u/alice/events/#",
+                "sensors/room1",
+                "sensors/#",
+            ]
+            .map(str::to_string),
+        );
+        for filter in &filters {
+            for user in [Some("mallory"), Some("root"), Some("mqdb-internal"), None] {
+                assert_eq!(
+                    provider
+                        .authorize_subscribe("c", user, &format!("$share/g/{filter}"))
+                        .await,
+                    provider.authorize_subscribe("c", user, filter).await,
+                    "{user:?} on {filter}"
+                );
+            }
+        }
+        assert!(
+            !provider
+                .authorize_subscribe("c", Some("mallory"), "$share/g/$DB/_admin/#")
+                .await
+        );
+        assert!(
+            !provider
+                .authorize_subscribe("c", Some("mallory"), "$share/g/$DB/u/alice/events/#")
+                .await
+        );
+        assert!(
+            provider
+                .authorize_subscribe("c", Some("mallory"), "$share/g/sensors/#")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn verification_topics_need_a_real_acl_grant() {
+        for (acl_configured, expected) in [(false, false), (true, true)] {
+            let provider = create_test_provider_with_internal("mqdb-internal")
+                .with_acl_configured(acl_configured);
+            for filter in ["$DB/_verify/#", "$DB/_verify/challenges/email"] {
+                assert_subscribe(&provider, Some("mallory"), filter, expected).await;
+                assert_subscribe(&provider, Some("mqdb-internal"), filter, true).await;
+            }
+            assert_eq!(
+                provider
+                    .authorize_publish("c", Some("mallory"), "$DB/_verify/receipts/r1")
+                    .await,
+                expected
+            );
+        }
+        let admin_provider = create_test_provider(HashSet::from(["root".to_string()]));
+        assert_subscribe(&admin_provider, Some("root"), "$DB/_verify/#", true).await;
+        assert_subscribe(
+            &admin_provider,
+            Some("mallory"),
+            "$SYS/mqdb/cluster/status",
+            true,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn entity_wildcards_reach_no_internal_traffic_without_ownership() {
+        let provider = create_test_provider(HashSet::new());
+        let internal_topics = [
+            "$DB/_verify/challenges/email",
+            "$DB/_verify/receipts/r1",
+            "$DB/_oauth_tokens/k1/update",
+            "$DB/_oauth_tokens/k1/delete",
+            "$DB/_identity_links/k1/update",
+            "$DB/_identity_links/k1/delete",
+            "$DB/_admin/users/add",
+            "$DB/_admin/acl/rules/add",
+            "$DB/_admin/schema/notes/set",
+            "$DB/_sub/subscribe",
+        ];
+        let filters = [
+            "$DB/#",
+            "$DB/+/#",
+            "$DB/+/+",
+            "$DB/+/+/+",
+            "$DB/+/+/+/+",
+            "$DB/+/+/#",
+            "$DB/+/k1/#",
+            "$DB/+/k1/update",
+            "$DB/+/+/update",
+            "$DB/+/+/delete",
+            "$DB/+/challenges/email",
+            "$DB/+/challenges/+",
+            "$DB/+/receipts/#",
+            "$DB/+/users/add",
+            "$DB/+/acl/#",
+            "$DB/+/schema/+/set",
+            "$DB/+/subscribe",
+        ];
+        for filter in filters {
+            assert!(
+                internal_topics
+                    .iter()
+                    .any(|topic| topic_matches_filter(topic, filter)),
+                "{filter} reaches nothing, so this check proves nothing"
+            );
+            assert_subscribe(&provider, Some("mallory"), filter, false).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn filters_that_reach_no_request_of_an_owned_entity_stay_open() {
+        let provider = request_protection_provider().with_scoped_events(true);
+        for filter in [
+            "$DB/notes/events/#",
+            "$DB/notes/events/+",
+            "$DB/notes/events/created",
+            "$DB/notes/events/p3/n1",
+            "$DB/notes/events",
+            "$DB/notes/+/events/#",
+            "$DB/notes/n1/events/#",
+            "$DB/notes/n1/items/events/created",
+            "$DB/notes/n1/replies/#",
+            "$DB/notes/replies/r1/x",
+            "$DB/notes",
+            "$DB/+",
+            "$DB/+/events/#",
+            "$DB/+/events/+",
+            "$DB/+/+/events/#",
+            "$DB/+/+/+/events/#",
+            "$DB/events/events/#",
+            "$DB/u/mallory/events/#",
+            "$DB/_presence/#",
+            "$DB/public/create",
+            "$DB/public/#",
+            "$DB/clients/mallory/#",
+            "$DB/events2/create",
+            "resp/mallory/1",
+            "resp/#",
+            "#",
+            "+/notes/create",
+            "+/+/+",
+        ] {
+            assert_subscribe(&provider, Some("mallory"), filter, true).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn literal_request_filters_stay_open_without_ownership() {
+        let provider = TopicProtectionAuthProvider::new(
+            Arc::new(AllowAllAuthProvider),
+            HashSet::from(["root".to_string()]),
+        );
+        for filter in LITERAL_REQUEST_FILTERS {
+            assert_subscribe(&provider, Some("mallory"), filter, true).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn derivation_alone_protects_requests() {
+        let provider = TopicProtectionAuthProvider::new(
+            Arc::new(AllowAllAuthProvider),
+            HashSet::from(["root".to_string()]),
+        )
+        .with_ownership(Arc::new(
+            OwnershipConfig::default()
+                .with_derivations("items=noteId>notes")
+                .unwrap(),
+        ));
+        assert_subscribe(&provider, Some("mallory"), "$DB/items/create", false).await;
+        assert_subscribe(&provider, Some("mallory"), "$DB/notes/create", true).await;
+    }
+
+    fn request_topics(entity: &str, id: &str) -> Vec<String> {
+        let mut topics = vec![
+            format!("$DB/{entity}/create"),
+            format!("$DB/{entity}/list"),
+            format!("$DB/{entity}/shared"),
+            format!("$DB/{entity}/{id}"),
+        ];
+        topics.extend(
+            RECORD_REQUEST_OPERATIONS
+                .iter()
+                .map(|operation| format!("$DB/{entity}/{id}/{operation}")),
+        );
+        topics
+    }
+
+    #[test]
+    fn filter_reach_agrees_with_the_broker_matcher_and_the_request_parser() {
+        use mqdb_core::protocol::parse_db_topic;
+
+        let ownership = notes_ownership();
+        let mut topics = vec![
+            "$DB/notes/events/created".to_string(),
+            "$DB/notes/events/p3/n1".to_string(),
+            "$DB/notes/n1/events/created".to_string(),
+            "$DB/notes/n1/items/events/created".to_string(),
+            "$DB/notes/replies/r1/x".to_string(),
+        ];
+        for entity in ["notes", "items", "events", "public"] {
+            for id in [
+                "n1", "create", "list", "shared", "events", "update", "x", "y",
+            ] {
+                topics.extend(request_topics(entity, id));
+            }
+        }
+
+        let first_levels = ["notes", "items", "events", "public", "+", "#"];
+        let second_levels = [
+            "create", "list", "shared", "n1", "events", "update", "+", "#",
+        ];
+        let tails = [
+            "update", "delete", "share", "unshare", "shares", "events", "x", "+", "#", "x/y",
+            "+/+", "+/#", "update/#", "events/#", "x/#",
+        ];
+        let mut filters = vec!["$DB".to_string(), "#".to_string(), "+/+/+".to_string()];
+        for first in first_levels {
+            filters.push(format!("$DB/{first}"));
+            if first == "#" {
+                continue;
+            }
+            for second in second_levels {
+                filters.push(format!("$DB/{first}/{second}"));
+                if second != "#" {
+                    filters.extend(
+                        tails
+                            .iter()
+                            .map(|tail| format!("$DB/{first}/{second}/{tail}")),
+                    );
+                }
+            }
+        }
+
+        let mut refused_filters = 0;
+        let mut open_filters = 0;
+        for filter in &filters {
+            let reaches_owned_request = topics.iter().any(|topic| {
+                topic_matches_filter(topic, filter)
+                    && !is_change_event_topic(topic)
+                    && parse_db_topic(topic)
+                        .is_some_and(|request| ownership.controls_access_to(&request.entity))
+            });
+            let refused = filter_reaches_request(filter, &ownership)
+                || filter_crosses_entities_outside_events(filter);
+            assert_eq!(
+                refused,
+                reaches_owned_request || filter_crosses_entities_outside_events(filter),
+                "{filter}"
+            );
+            assert_eq!(
+                filter_reaches_request(&format!("$share/g/{filter}"), &ownership),
+                filter_reaches_request(filter, &ownership),
+                "$share/g/{filter}"
+            );
+            if refused {
+                refused_filters += 1;
+            } else {
+                open_filters += 1;
+            }
+            assert!(
+                !filter_reaches_request(filter, &OwnershipConfig::default()),
+                "{filter}"
+            );
+        }
+        assert!(
+            refused_filters > 100 && open_filters > 100,
+            "{refused_filters} filters refused and {open_filters} left open"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_scope_viewer_keeps_the_record_filter_and_nothing_wider() {
+        let (_tmp, provider, db) = scope_access_provider().await;
+        for filter in [
+            "$DB/lists/L1/#",
+            "$DB/lists/L1/+/#",
+            "$DB/lists/L1/events/#",
+            "$DB/lists/L1/+/events/#",
+            "$share/g/$DB/lists/L1/#",
+        ] {
+            assert!(
+                provider
+                    .authorize_subscribe("c", Some("alice"), filter)
+                    .await,
+                "the owner must keep {filter}"
+            );
+        }
+        for filter in [
+            "$DB/lists/L1",
+            "$DB/lists/L1/update",
+            "$DB/lists/L1/+",
+            "$DB/+/L1/#",
+            "$share/g/$DB/+/L1/#",
+        ] {
+            assert!(
+                !provider
+                    .authorize_subscribe("c", Some("alice"), filter)
+                    .await,
+                "{filter} reaches requests the view check does not cover"
+            );
+            assert!(
+                provider
+                    .authorize_subscribe("c", Some("root"), filter)
+                    .await,
+                "{filter}"
+            );
+        }
+
+        for id in ["create", "list", "shared"] {
+            db.create(
+                "lists".to_string(),
+                serde_json::json!({"id": id, "ownerId": "mallory"}),
+                None,
+                None,
+                None,
+                &mqdb_core::types::ScopeConfig::default(),
+            )
+            .await
+            .unwrap();
+            assert!(
+                !provider
+                    .authorize_subscribe("c", Some("mallory"), &format!("$DB/lists/{id}/#"))
+                    .await,
+                "a record named {id} must not open everyone's {id} requests"
+            );
+            assert!(
+                provider
+                    .authorize_subscribe("c", Some("mallory"), &format!("$DB/lists/{id}/events/#"))
+                    .await,
+                "its owner must keep its events"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn without_a_view_check_the_record_filter_is_refused() {
+        let provider =
+            request_protection_provider().with_event_scope_entity(Some("notes".to_string()));
+        assert!(
+            !provider
+                .authorize_subscribe("c", Some("alice"), "$DB/notes/n1/#")
+                .await
+        );
+        assert!(
+            provider
+                .authorize_subscribe("c", Some("alice"), "$DB/notes/n1/events/#")
+                .await
+        );
     }
 }
