@@ -361,6 +361,7 @@ topics and is **not** wired into auth. This feature wires it into `resolve` for
 both auth and recipient computation.
 
 - Child **read** → `can_see(sender, parent)`.
+- Child **list** → the children a read would answer for the sender, applied before limit, offset and projection. Unlike a list of a parent, it includes children of a parent shared with the sender.
 - Child **update / create** → `can_edit(sender, parent)`. (Create also validates
   the FK as today.)
 - Child **delete** → `can_edit(sender, parent)` (an editor may delete nodes).

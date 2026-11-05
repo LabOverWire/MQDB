@@ -109,6 +109,31 @@ mqdb read docs d1                          # bob: 403
 }
 ```
 
+## Child Entities (agent mode)
+
+Restart the agent with a child mapping, on a new database:
+```bash
+mqdb agent start --db /tmp/mqdb-sharing-child --bind 127.0.0.1:1883 \
+    --passwd passwd --admin-users admin --ownership docs=userId \
+    --ownership-derive notes=docId>docs
+```
+
+```bash
+mqdb create docs -d '{"id":"d1","userId":"alice"}'             # alice
+mqdb create docs -d '{"id":"d2","userId":"bob"}'               # bob
+mqdb create notes -d '{"id":"n1","docId":"d1","text":"a"}'     # alice
+mqdb create notes -d '{"id":"n2","docId":"d2","text":"b"}'     # bob
+mqdb read notes n1                                             # carol: 403
+mqdb list notes                                                # carol: []
+mqdb list notes                                                # alice: n1
+mqdb list notes --projection text                              # alice: n1 only, without docId
+mqdb list notes                                                # admin: n1 and n2
+mqdb share docs d1 carol                                       # alice
+mqdb list notes                                                # carol: n1
+mqdb unshare docs d1 carol                                     # alice
+mqdb list notes                                                # carol: []
+```
+
 ## 52. Cluster
 
 Stop the agent from the setup first (Ctrl-C in its terminal), because node 1 of the cluster binds 127.0.0.1:1883. Start a 3-node cluster with the same password file, which must contain `admin` (`dev start-cluster` adds `--admin-users admin`). Then add the FK constraint:
@@ -156,4 +181,5 @@ mqdb read docs "$D2" --broker 127.0.0.1:1884          # dave: ok
 - [ ] Cascade skips a referenced record the sharer does not own (`resources_skipped`), unless the sharer is an admin; a non-admin's cascading unshare leaves its grants alone
 - [ ] Unshare revokes access (agent: across the cascade too)
 - [ ] A direct delete clears the record's grants
+- [ ] Agent: a list of a derived child returns only the children the sender can read, with or without a projection
 - [ ] Cluster: the same results across nodes, with the differences shown in section 52 (the full list of cluster gaps is in the [repository README](../../README.md#sharing-operations))
