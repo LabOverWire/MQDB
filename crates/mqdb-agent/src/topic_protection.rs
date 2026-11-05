@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::database::Database;
-use crate::topic_rules::{BlockReason, check_topic_access, is_change_event_topic};
+use crate::topic_rules::{BlockReason, check_topic_access, is_change_event_topic, matches_pattern};
 use mqdb_core::events::scope_value_from_level;
 use mqdb_core::protocol::RESERVED_RECORD_ID;
 use mqdb_core::types::OwnershipConfig;
@@ -10,7 +10,7 @@ use mqtt5::broker::auth::{AuthProvider, AuthResult, EnhancedAuthResult};
 use mqtt5::error::Result;
 use mqtt5::packet::connect::ConnectPacket;
 use mqtt5::protocol::v5::reason_codes::ReasonCode;
-use mqtt5::validation::parse_shared_subscription;
+use mqtt5::validation::{parse_shared_subscription, topic_matches_filter};
 use std::collections::HashSet;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -31,6 +31,7 @@ pub struct TopicProtectionAuthProvider {
     event_scope_entity: Option<String>,
     scope_access: Option<ScopeAccess>,
     ownership: Arc<OwnershipConfig>,
+    acl_configured: bool,
     all_users_admin: bool,
     scoped_events: bool,
     sparkplug_aware: bool,
@@ -111,11 +112,11 @@ fn filter_reaches_request(filter: &str, ownership: &OwnershipConfig) -> bool {
     if levels.next() != Some("$DB") {
         return false;
     }
-    match levels.next() {
-        Some("#") => return ownership.controls_any_access(),
-        Some("+") if ownership.controls_any_access() => {}
-        Some(entity) if ownership.controls_access_to(entity) => {}
-        _ => return false,
+    if !levels
+        .next()
+        .is_some_and(|entity| ownership.controls_access_to(entity))
+    {
+        return false;
     }
     match levels.next() {
         Some("#") => true,
@@ -129,16 +130,45 @@ fn filter_reaches_request(filter: &str, ownership: &OwnershipConfig) -> bool {
     }
 }
 
-fn is_literal_scope_record_filter(filter: &str, scope_entity: &str) -> bool {
-    let mut levels = parse_shared_subscription(filter).0.split('/').skip(1);
-    levels.next() == Some(scope_entity)
-        && levels
-            .next()
-            .is_some_and(|level| !COLLECTION_REQUEST_OPERATIONS.contains(&level))
-        && matches!(
-            scoped_filter(filter, scope_entity),
-            ScopedFilter::OneScope(_)
-        )
+const SECRET_REQUEST_TOPICS: [&str; 9] = [
+    "$DB/_auth/password/change",
+    "$DB/_auth/password/reset/start",
+    "$DB/_auth/password/reset/submit",
+    "$DB/_vault/enable",
+    "$DB/_vault/unlock",
+    "$DB/_vault/lock",
+    "$DB/_vault/status",
+    "$DB/_vault/change",
+    "$DB/_vault/disable",
+];
+const VERIFICATION_TOPICS: &str = "$DB/_verify/#";
+
+fn filter_reaches_secret_request(filter: &str) -> bool {
+    SECRET_REQUEST_TOPICS
+        .iter()
+        .any(|topic| topic_matches_filter(topic, filter))
+}
+
+fn filter_crosses_entities_outside_events(filter: &str) -> bool {
+    let mut levels = filter.split('/');
+    if levels.next() != Some("$DB") {
+        return false;
+    }
+    match levels.next() {
+        Some("#") => true,
+        Some("+") => {
+            let mut below_entity = levels.peekable();
+            below_entity.peek().is_some() && !below_entity.any(|level| level == "events")
+        }
+        _ => false,
+    }
+}
+
+fn is_scope_record_filter(filter: &str, scope_entity: &str) -> bool {
+    matches!(
+        scoped_filter(filter, scope_entity),
+        ScopedFilter::OneScope(level) if !COLLECTION_REQUEST_OPERATIONS.contains(&level)
+    )
 }
 
 fn user_scope_segment(topic: &str) -> Option<&str> {
@@ -162,6 +192,7 @@ impl TopicProtectionAuthProvider {
             event_scope_entity: None,
             scope_access: None,
             ownership: Arc::default(),
+            acl_configured: false,
             all_users_admin: false,
             scoped_events: false,
             sparkplug_aware: false,
@@ -199,6 +230,12 @@ impl TopicProtectionAuthProvider {
     }
 
     #[must_use]
+    pub fn with_acl_configured(mut self, configured: bool) -> Self {
+        self.acl_configured = configured;
+        self
+    }
+
+    #[must_use]
     pub fn with_all_users_admin(mut self, enabled: bool) -> Self {
         self.all_users_admin = enabled;
         self
@@ -221,6 +258,10 @@ impl TopicProtectionAuthProvider {
         self.internal_service_username.is_some()
             && is_reserved_client_id(client_id)
             && !self.is_internal_service(user_id)
+    }
+
+    fn has_no_acl_grant(&self, topic: &str) -> bool {
+        !self.acl_configured && matches_pattern(topic, VERIFICATION_TOPICS)
     }
 
     fn is_admin_user(&self, user_id: Option<&str>) -> bool {
@@ -258,9 +299,7 @@ impl TopicProtectionAuthProvider {
                 && self
                     .event_scope_entity
                     .as_deref()
-                    .is_some_and(|scope_entity| {
-                        is_literal_scope_record_filter(filter, scope_entity)
-                    }))
+                    .is_some_and(|scope_entity| is_scope_record_filter(filter, scope_entity)))
     }
 }
 
@@ -348,10 +387,11 @@ impl AuthProvider for TopicProtectionAuthProvider {
 
             if let Err(reason) = check_topic_access(topic, true, is_admin) {
                 if reason == BlockReason::AdminRequired {
-                    let allowed = self
-                        .inner
-                        .authorize_publish(&client_id_owned, user_id, topic)
-                        .await;
+                    let allowed = !self.has_no_acl_grant(topic)
+                        && self
+                            .inner
+                            .authorize_publish(&client_id_owned, user_id, topic)
+                            .await;
                     if !allowed {
                         debug!(
                             client_id = %client_id_owned,
@@ -391,6 +431,26 @@ impl AuthProvider for TopicProtectionAuthProvider {
                 return true;
             }
 
+            let plain_filter = parse_shared_subscription(topic_filter).0;
+
+            if filter_reaches_secret_request(plain_filter) {
+                debug!(
+                    client_id = %client_id_owned,
+                    topic_filter = %topic_filter,
+                    "subscribe to auth or vault requests denied"
+                );
+                return false;
+            }
+
+            if !is_admin && filter_crosses_entities_outside_events(plain_filter) {
+                debug!(
+                    client_id = %client_id_owned,
+                    topic_filter = %topic_filter,
+                    "subscribe across entities outside change events denied"
+                );
+                return false;
+            }
+
             if !is_admin && !self.may_receive_scope_events(user_id, topic_filter).await {
                 debug!(
                     client_id = %client_id_owned,
@@ -410,7 +470,7 @@ impl AuthProvider for TopicProtectionAuthProvider {
             }
 
             if self.scoped_events
-                && let Some(seg) = user_scope_segment(topic_filter)
+                && let Some(seg) = user_scope_segment(plain_filter)
                 && !(is_admin || user_id == Some(seg))
             {
                 debug!(
@@ -421,12 +481,13 @@ impl AuthProvider for TopicProtectionAuthProvider {
                 return false;
             }
 
-            if let Err(reason) = check_topic_access(topic_filter, false, is_admin) {
+            if let Err(reason) = check_topic_access(plain_filter, false, is_admin) {
                 if reason == BlockReason::AdminRequired {
-                    let allowed = self
-                        .inner
-                        .authorize_subscribe(&client_id_owned, user_id, topic_filter)
-                        .await;
+                    let allowed = !self.has_no_acl_grant(plain_filter)
+                        && self
+                            .inner
+                            .authorize_subscribe(&client_id_owned, user_id, topic_filter)
+                            .await;
                     if !allowed {
                         debug!(
                             client_id = %client_id_owned,
@@ -677,7 +738,7 @@ mod tests {
 
     #[tokio::test]
     async fn acl_grant_allows_admin_required_topics() {
-        let provider = create_test_provider(HashSet::new());
+        let provider = create_test_provider(HashSet::new()).with_acl_configured(true);
 
         let result = provider
             .authorize_publish(
@@ -1410,17 +1471,14 @@ mod tests {
     async fn wildcards_across_scopes_are_admin_only() {
         let (_tmp, provider, _db) = scope_access_provider().await;
         for filter in [
-            "$DB/#",
-            "$DB/+/#",
             "$DB/lists/#",
             "$DB/lists/+/#",
-            "$DB/+/+/#",
+            "$DB/+/+/events/#",
             "$DB/lists/+/events/#",
             "$DB/lists/+/items/events/created",
             "$DB/+/+/+/events/#",
             "$DB/lists/+/+/+",
             "$share/g/$DB/lists/+/#",
-            "$share/g/$DB/#",
         ] {
             assert!(
                 !provider
@@ -1490,7 +1548,7 @@ mod tests {
             db: Arc::new(db),
             ownership: Arc::new(OwnershipConfig::parse("items=ownerId").unwrap()),
         });
-        for filter in ["$DB/lists/L1/#", "$DB/lists/+/#", "$DB/#"] {
+        for filter in ["$DB/lists/L1/#", "$DB/lists/+/#", "$DB/lists/#"] {
             assert!(
                 provider.authorize_subscribe("c", Some("bob"), filter).await,
                 "{filter}"
@@ -1532,7 +1590,7 @@ mod tests {
         .with_ownership(notes_ownership())
     }
 
-    const REQUEST_FILTERS: [&str; 28] = [
+    const LITERAL_REQUEST_FILTERS: [&str; 18] = [
         "$DB/notes/create",
         "$DB/notes/list",
         "$DB/notes/shared",
@@ -1549,41 +1607,241 @@ mod tests {
         "$DB/notes/+/+",
         "$DB/notes/n1/#",
         "$DB/notes/n1/+",
-        "$DB/+/create",
-        "$DB/+/list",
-        "$DB/+/n1",
-        "$DB/+/+",
-        "$DB/+/n1/update",
-        "$DB/+/+/share",
-        "$DB/+/+/+",
-        "$DB/+/n1/#",
-        "$DB/+/#",
-        "$DB/#",
         "$DB/items/create",
         "$DB/events/create",
     ];
+    const ENTITY_WILDCARD_FILTERS: [&str; 6] = [
+        "$DB/+/create",
+        "$DB/+/list",
+        "$DB/+/n1",
+        "$DB/+/n1/update",
+        "$DB/+/+/share",
+        "$DB/+/n1/#",
+    ];
+    const SECRET_REACHING_FILTERS: [&str; 14] = [
+        "$DB/_auth/#",
+        "$DB/_auth/password/change",
+        "$DB/_auth/password/reset/+",
+        "$DB/_vault/#",
+        "$DB/_vault/unlock",
+        "$DB/_vault/+",
+        "$DB/#",
+        "$DB/+/#",
+        "$DB/+/+",
+        "$DB/+/+/+",
+        "$DB/+/unlock",
+        "$DB/+/password/#",
+        "$DB/+/+/change",
+        "$DB/+/+/reset/submit",
+    ];
+
+    async fn assert_subscribe(
+        provider: &TopicProtectionAuthProvider,
+        user: Option<&str>,
+        filter: &str,
+        expected: bool,
+    ) {
+        let shared = format!("$share/g/{filter}");
+        for candidate in [filter, shared.as_str()] {
+            assert_eq!(
+                provider.authorize_subscribe("c", user, candidate).await,
+                expected,
+                "{user:?} on {candidate}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn request_filters_are_refused_to_non_admins_on_any_acl() {
         let provider = request_protection_provider();
-        for filter in REQUEST_FILTERS {
-            let shared = format!("$share/g/{filter}");
-            for candidate in [filter, shared.as_str()] {
-                for user in [Some("mallory"), None] {
-                    assert!(
-                        !provider.authorize_subscribe("c", user, candidate).await,
-                        "{user:?} must be refused {candidate}"
-                    );
-                }
-                for user in ["root", "mqdb-internal"] {
-                    assert!(
-                        provider
-                            .authorize_subscribe("c", Some(user), candidate)
-                            .await,
-                        "{user} must keep {candidate}"
-                    );
-                }
+        for filter in LITERAL_REQUEST_FILTERS
+            .iter()
+            .chain(&ENTITY_WILDCARD_FILTERS)
+        {
+            for user in [Some("mallory"), None] {
+                assert_subscribe(&provider, user, filter, false).await;
             }
+            for user in ["root", "mqdb-internal"] {
+                assert_subscribe(&provider, Some(user), filter, true).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn secret_requests_are_closed_to_every_client_but_the_service() {
+        let with_ownership = request_protection_provider();
+        let without_ownership = TopicProtectionAuthProvider::new(
+            Arc::new(AllowAllAuthProvider),
+            HashSet::from(["root".to_string()]),
+        )
+        .with_internal_service_username(Some("mqdb-internal".to_string()));
+        let all_admins =
+            TopicProtectionAuthProvider::new(Arc::new(AllowAllAuthProvider), HashSet::new())
+                .with_all_users_admin(true);
+        for filter in SECRET_REACHING_FILTERS {
+            for provider in [&with_ownership, &without_ownership] {
+                assert_subscribe(provider, Some("mallory"), filter, false).await;
+                assert_subscribe(provider, None, filter, false).await;
+                assert_subscribe(provider, Some("root"), filter, false).await;
+                assert_subscribe(provider, Some("mqdb-internal"), filter, true).await;
+            }
+            assert_subscribe(&all_admins, Some("anyone"), filter, false).await;
+        }
+        for topic in SECRET_REQUEST_TOPICS {
+            assert!(
+                without_ownership
+                    .authorize_publish("c", Some("mallory"), topic)
+                    .await,
+                "{topic} must stay publishable"
+            );
+            assert!(
+                without_ownership
+                    .authorize_publish("c", Some("root"), topic)
+                    .await,
+                "{topic} must stay publishable"
+            );
+        }
+    }
+
+    #[test]
+    fn the_secret_topic_list_names_every_auth_and_vault_operation() {
+        use mqdb_core::protocol::{AdminOperation, parse_admin_topic};
+        let mut seen = HashSet::new();
+        for topic in SECRET_REQUEST_TOPICS {
+            let operation = parse_admin_topic(topic);
+            let name = match operation {
+                Some(AdminOperation::PasswordChange) => "password change",
+                Some(AdminOperation::PasswordResetStart) => "reset start",
+                Some(AdminOperation::PasswordResetSubmit) => "reset submit",
+                Some(AdminOperation::VaultEnable) => "vault enable",
+                Some(AdminOperation::VaultUnlock) => "vault unlock",
+                Some(AdminOperation::VaultLock) => "vault lock",
+                Some(AdminOperation::VaultStatus) => "vault status",
+                Some(AdminOperation::VaultChange) => "vault change",
+                Some(AdminOperation::VaultDisable) => "vault disable",
+                _ => panic!("{topic} is not an auth or vault request"),
+            };
+            assert!(seen.insert(name), "{topic} is listed twice");
+        }
+        assert_eq!(seen.len(), SECRET_REQUEST_TOPICS.len());
+    }
+
+    #[tokio::test]
+    async fn every_protection_tier_applies_to_shared_subscriptions() {
+        let admins = HashSet::from(["root".to_string()]);
+        let provider = TopicProtectionAuthProvider::new(Arc::new(AllowAllAuthProvider), admins)
+            .with_internal_service_username(Some("mqdb-internal".to_string()))
+            .with_scoped_events(true);
+        let mut filters: Vec<String> = crate::topic_rules::PROTECTED_TOPICS
+            .iter()
+            .map(|rule| rule.pattern.replace("p+", "p3"))
+            .collect();
+        filters.extend(
+            [
+                "$DB/_admin/#",
+                "$DB/_sessions/list",
+                "$DB/_oauth_tokens/#",
+                "$DB/_identities/#",
+                "$DB/_identity_links/#",
+                "$DB/_credentials/#",
+                "$DB/_verification_challenges/#",
+                "$DB/_shares/#",
+                "$DB/u/alice/events/#",
+                "sensors/room1",
+                "sensors/#",
+            ]
+            .map(str::to_string),
+        );
+        for filter in &filters {
+            for user in [Some("mallory"), Some("root"), Some("mqdb-internal"), None] {
+                assert_eq!(
+                    provider
+                        .authorize_subscribe("c", user, &format!("$share/g/{filter}"))
+                        .await,
+                    provider.authorize_subscribe("c", user, filter).await,
+                    "{user:?} on {filter}"
+                );
+            }
+        }
+        assert!(
+            !provider
+                .authorize_subscribe("c", Some("mallory"), "$share/g/$DB/_admin/#")
+                .await
+        );
+        assert!(
+            !provider
+                .authorize_subscribe("c", Some("mallory"), "$share/g/$DB/u/alice/events/#")
+                .await
+        );
+        assert!(
+            provider
+                .authorize_subscribe("c", Some("mallory"), "$share/g/sensors/#")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn verification_topics_need_a_real_acl_grant() {
+        for (acl_configured, expected) in [(false, false), (true, true)] {
+            let provider = create_test_provider_with_internal("mqdb-internal")
+                .with_acl_configured(acl_configured);
+            for filter in ["$DB/_verify/#", "$DB/_verify/challenges/email"] {
+                assert_subscribe(&provider, Some("mallory"), filter, expected).await;
+                assert_subscribe(&provider, Some("mqdb-internal"), filter, true).await;
+            }
+            assert_eq!(
+                provider
+                    .authorize_publish("c", Some("mallory"), "$DB/_verify/receipts/r1")
+                    .await,
+                expected
+            );
+        }
+        let admin_provider = create_test_provider(HashSet::from(["root".to_string()]));
+        assert_subscribe(&admin_provider, Some("root"), "$DB/_verify/#", true).await;
+    }
+
+    #[tokio::test]
+    async fn entity_wildcards_reach_no_internal_traffic_without_ownership() {
+        let provider = create_test_provider(HashSet::new());
+        let internal_topics = [
+            "$DB/_verify/challenges/email",
+            "$DB/_verify/receipts/r1",
+            "$DB/_oauth_tokens/k1/update",
+            "$DB/_oauth_tokens/k1/delete",
+            "$DB/_identity_links/k1/update",
+            "$DB/_identity_links/k1/delete",
+            "$DB/_admin/users/add",
+            "$DB/_admin/acl/rules/add",
+            "$DB/_admin/schema/notes/set",
+            "$DB/_sub/subscribe",
+        ];
+        let filters = [
+            "$DB/#",
+            "$DB/+/#",
+            "$DB/+/+",
+            "$DB/+/+/+",
+            "$DB/+/+/+/+",
+            "$DB/+/+/#",
+            "$DB/+/k1/#",
+            "$DB/+/k1/update",
+            "$DB/+/+/update",
+            "$DB/+/+/delete",
+            "$DB/+/challenges/email",
+            "$DB/+/challenges/+",
+            "$DB/+/receipts/#",
+            "$DB/+/users/add",
+            "$DB/+/acl/#",
+            "$DB/+/schema/+/set",
+            "$DB/+/subscribe",
+        ];
+        for filter in filters {
+            assert!(
+                internal_topics
+                    .iter()
+                    .any(|topic| topic_matches_filter(topic, filter)),
+                "{filter} reaches nothing, so this check proves nothing"
+            );
+            assert_subscribe(&provider, Some("mallory"), filter, false).await;
         }
     }
 
@@ -1607,7 +1865,6 @@ mod tests {
             "$DB/+/events/+",
             "$DB/+/+/events/#",
             "$DB/+/+/+/events/#",
-            "$DB/+/+/+/+",
             "$DB/events/events/#",
             "$DB/u/mallory/events/#",
             "$DB/_presence/#",
@@ -1621,31 +1878,18 @@ mod tests {
             "+/notes/create",
             "+/+/+",
         ] {
-            let shared = format!("$share/g/{filter}");
-            for candidate in [filter, shared.as_str()] {
-                assert!(
-                    provider
-                        .authorize_subscribe("c", Some("mallory"), candidate)
-                        .await,
-                    "mallory must keep {candidate}"
-                );
-            }
+            assert_subscribe(&provider, Some("mallory"), filter, true).await;
         }
     }
 
     #[tokio::test]
-    async fn request_filters_stay_open_without_ownership() {
+    async fn literal_request_filters_stay_open_without_ownership() {
         let provider = TopicProtectionAuthProvider::new(
             Arc::new(AllowAllAuthProvider),
             HashSet::from(["root".to_string()]),
         );
-        for filter in REQUEST_FILTERS {
-            assert!(
-                provider
-                    .authorize_subscribe("c", Some("mallory"), filter)
-                    .await,
-                "{filter}"
-            );
+        for filter in LITERAL_REQUEST_FILTERS {
+            assert_subscribe(&provider, Some("mallory"), filter, true).await;
         }
     }
 
@@ -1660,19 +1904,8 @@ mod tests {
                 .with_derivations("items=noteId>notes")
                 .unwrap(),
         ));
-        for filter in ["$DB/items/create", "$DB/+/create", "$DB/#", "$DB/+/#"] {
-            assert!(
-                !provider
-                    .authorize_subscribe("c", Some("mallory"), filter)
-                    .await,
-                "{filter}"
-            );
-        }
-        assert!(
-            provider
-                .authorize_subscribe("c", Some("mallory"), "$DB/notes/create")
-                .await
-        );
+        assert_subscribe(&provider, Some("mallory"), "$DB/items/create", false).await;
+        assert_subscribe(&provider, Some("mallory"), "$DB/notes/create", true).await;
     }
 
     fn request_topics(entity: &str, id: &str) -> Vec<String> {
@@ -1693,7 +1926,6 @@ mod tests {
     #[test]
     fn filter_reach_agrees_with_the_broker_matcher_and_the_request_parser() {
         use mqdb_core::protocol::parse_db_topic;
-        use mqtt5::validation::topic_matches_filter;
 
         let ownership = notes_ownership();
         let mut topics = vec![
@@ -1737,8 +1969,8 @@ mod tests {
             }
         }
 
-        let mut refused = 0;
-        let mut open = 0;
+        let mut refused_filters = 0;
+        let mut open_filters = 0;
         for filter in &filters {
             let reaches_owned_request = topics.iter().any(|topic| {
                 topic_matches_filter(topic, filter)
@@ -1746,20 +1978,22 @@ mod tests {
                     && parse_db_topic(topic)
                         .is_some_and(|request| ownership.controls_access_to(&request.entity))
             });
+            let refused = filter_reaches_request(filter, &ownership)
+                || filter_crosses_entities_outside_events(filter);
             assert_eq!(
-                filter_reaches_request(filter, &ownership),
-                reaches_owned_request,
+                refused,
+                reaches_owned_request || filter_crosses_entities_outside_events(filter),
                 "{filter}"
             );
             assert_eq!(
                 filter_reaches_request(&format!("$share/g/{filter}"), &ownership),
-                reaches_owned_request,
+                filter_reaches_request(filter, &ownership),
                 "$share/g/{filter}"
             );
-            if reaches_owned_request {
-                refused += 1;
+            if refused {
+                refused_filters += 1;
             } else {
-                open += 1;
+                open_filters += 1;
             }
             assert!(
                 !filter_reaches_request(filter, &OwnershipConfig::default()),
@@ -1767,8 +2001,8 @@ mod tests {
             );
         }
         assert!(
-            refused > 100 && open > 100,
-            "{refused} filters refused and {open} left open"
+            refused_filters > 100 && open_filters > 100,
+            "{refused_filters} filters refused and {open_filters} left open"
         );
     }
 

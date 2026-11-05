@@ -129,8 +129,6 @@ async fn a_non_admin_cannot_subscribe_to_requests_and_nothing_else_changes() {
         "$DB/+/create",
         "$DB/notes/+",
         "$DB/notes/#",
-        "$DB/+/#",
-        "$DB/#",
         "$share/g/$DB/notes/create",
         "$share/g/$DB/+/create",
         "$share/g/$DB/#",
@@ -220,6 +218,143 @@ async fn the_request_of_an_entity_with_no_owner_stays_subscribable() {
     assert!(requests.try_recv().is_err());
 
     alice_client.disconnect().await.unwrap();
+    mallory_client.disconnect().await.unwrap();
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn auth_and_vault_requests_reach_the_handler_and_no_subscriber_without_ownership() {
+    let alice = User::new("alice");
+    let mallory = User::new("mallory");
+    let root = User::new("root");
+    let agent = start_agent(&[&alice, &mallory, &root], "").await;
+    let alice_client = alice.connect(agent.port).await;
+    let mallory_client = mallory.connect(agent.port).await;
+    let root_client = root.connect(agent.port).await;
+
+    for client in [&mallory_client, &root_client] {
+        for filter in [
+            "$DB/_auth/#",
+            "$DB/_auth/password/change",
+            "$DB/_vault/#",
+            "$DB/_vault/unlock",
+            "$DB/#",
+            "$DB/+/#",
+            "$DB/+/unlock",
+            "$DB/+/password/#",
+            "$share/g/$DB/_auth/#",
+            "$share/g/$DB/_vault/#",
+            "$share/g/$DB/#",
+        ] {
+            assert!(
+                watch(client, filter).await.is_err(),
+                "{filter} must be refused"
+            );
+        }
+    }
+
+    let secret = uuid::Uuid::new_v4().to_string();
+    for client in [&alice_client, &root_client] {
+        for (topic, payload) in [
+            (
+                "$DB/_auth/password/change",
+                json!({"current_password": secret, "new_password": secret}),
+            ),
+            ("$DB/_vault/unlock", json!({"passphrase": secret})),
+            ("$DB/_vault/status", json!({})),
+        ] {
+            let reply = request(client, topic, &payload).await;
+            assert!(reply.get("status").is_some(), "{topic}: {reply}");
+        }
+    }
+
+    alice_client.disconnect().await.unwrap();
+    mallory_client.disconnect().await.unwrap();
+    root_client.disconnect().await.unwrap();
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_shared_subscription_gets_the_tier_of_its_plain_filter() {
+    let alice = User::new("alice");
+    let mallory = User::new("mallory");
+    let root = User::new("root");
+    let agent = start_agent(&[&alice, &mallory, &root], "").await;
+    let alice_client = alice.connect(agent.port).await;
+    let mallory_client = mallory.connect(agent.port).await;
+    let root_client = root.connect(agent.port).await;
+
+    for filter in [
+        "$share/g/$DB/_admin/#",
+        "$share/g/$DB/_sub/subscribe",
+        "$share/g/$DB/_verify/#",
+        "$share/g/$DB/_idx/#",
+        "$share/g/$DB/_sessions/#",
+        "$DB/_verify/#",
+        "$DB/+/+/update",
+        "$DB/+/challenges/email",
+    ] {
+        assert!(
+            watch(&mallory_client, filter).await.is_err(),
+            "{filter} must be refused"
+        );
+    }
+    let admin_requests = watch(&root_client, "$share/g/$DB/_admin/#").await.unwrap();
+    let shared = watch(&mallory_client, "$share/g/sensors/#").await.unwrap();
+    alice_client
+        .publish("sensors/room1", b"21".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(next_message(&shared).await.0, "sensors/room1");
+
+    let reply = request(&root_client, "$DB/_admin/schema/notes/get", &json!({})).await;
+    assert!(reply.get("status").is_some(), "{reply}");
+    assert_eq!(
+        next_message(&admin_requests).await.0,
+        "$DB/_admin/schema/notes/get"
+    );
+
+    alice_client.disconnect().await.unwrap();
+    mallory_client.disconnect().await.unwrap();
+    root_client.disconnect().await.unwrap();
+    agent.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_acl_grant_opens_verification_topics_to_that_user_only() {
+    let verifier = User::new("verifier");
+    let mallory = User::new("mallory");
+    let tmp = TempDir::new().unwrap();
+    let password_file = tmp.path().join("passwd");
+    let lines: String = [&verifier, &mallory]
+        .iter()
+        .map(|user| {
+            let hash = PasswordAuthProvider::hash_password(&user.password).unwrap();
+            format!("{}:{hash}\n", user.name)
+        })
+        .collect();
+    std::fs::write(&password_file, lines).unwrap();
+    let acl_file = tmp.path().join("acl");
+    std::fs::write(
+        &acl_file,
+        "user verifier topic $DB/_verify/# permission readwrite\nuser * topic resp/# permission readwrite\n",
+    )
+    .unwrap();
+    let db = Database::open_without_background_tasks(tmp.path().join("agent"))
+        .await
+        .unwrap();
+    let agent = MqdbAgent::new(db)
+        .with_password_file(password_file)
+        .with_acl_file(acl_file)
+        .with_ownership_config(OwnershipConfig::parse("notes=ownerId").unwrap());
+    let agent = RunningAgent::start(agent, next_test_port(), tmp).await;
+
+    let verifier_client = verifier.connect(agent.port).await;
+    let mallory_client = mallory.connect(agent.port).await;
+    assert!(watch(&verifier_client, "$DB/_verify/#").await.is_ok());
+    assert!(watch(&mallory_client, "$DB/_verify/#").await.is_err());
+
+    verifier_client.disconnect().await.unwrap();
     mallory_client.disconnect().await.unwrap();
     agent.stop().await;
 }

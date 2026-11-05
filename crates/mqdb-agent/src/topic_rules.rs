@@ -60,6 +60,14 @@ pub const PROTECTED_TOPICS: &[TopicRule] = &[
         tier: ProtectionTier::WriteOnly,
     },
     TopicRule {
+        pattern: "$DB/_auth/#",
+        tier: ProtectionTier::WriteOnly,
+    },
+    TopicRule {
+        pattern: "$DB/_vault/#",
+        tier: ProtectionTier::WriteOnly,
+    },
+    TopicRule {
         pattern: "$SYS/mqdb/cluster/#",
         tier: ProtectionTier::AdminRequired,
     },
@@ -618,6 +626,27 @@ mod tests {
     }
 
     #[test]
+    fn secret_request_namespaces_are_write_only_for_everyone() {
+        for topic in [
+            "$DB/_auth/password/change",
+            "$DB/_auth/password/reset/start",
+            "$DB/_auth/#",
+            "$DB/_vault/unlock",
+            "$DB/_vault/change",
+            "$DB/_vault/#",
+        ] {
+            for is_admin in [false, true] {
+                assert_eq!(
+                    check_topic_access(topic, false, is_admin),
+                    Err(BlockReason::WriteOnlyTopic),
+                    "{topic}"
+                );
+                assert_eq!(check_topic_access(topic, true, is_admin), Ok(()), "{topic}");
+            }
+        }
+    }
+
+    #[test]
     fn check_access_vault_endpoints_allowed() {
         assert_eq!(check_topic_access("$DB/_vault/enable", true, false), Ok(()));
         assert_eq!(check_topic_access("$DB/_vault/unlock", true, false), Ok(()));
@@ -634,10 +663,6 @@ mod tests {
     fn check_access_auth_endpoints_allowed() {
         assert_eq!(
             check_topic_access("$DB/_auth/password/change", true, false),
-            Ok(())
-        );
-        assert_eq!(
-            check_topic_access("$DB/_auth/password/change", false, false),
             Ok(())
         );
     }

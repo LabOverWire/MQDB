@@ -1031,12 +1031,39 @@ fn request_subscribe_checks(entity: &str, ports: &[u16], passed: &mut u32, faile
     let request_filters = [
         format!("$DB/{entity}/create"),
         format!("$DB/{entity}/#"),
-        "$DB/+/create".to_string(),
-        "$DB/#".to_string(),
         format!("$share/g/$DB/{entity}/create"),
+    ];
+    let closed_to_admins_too = [
+        "$DB/_auth/#",
+        "$DB/_vault/#",
+        "$DB/#",
+        "$DB/+/#",
+        "$share/g/$DB/_vault/#",
     ];
     let event_filter = format!("$DB/{entity}/events/#");
     for port in ports {
+        for filter in closed_to_admins_too {
+            for user in ["bob", "admin"] {
+                record(
+                    passed,
+                    failed,
+                    &format!("Subscribe to {filter} as {user} on {port} (refused)"),
+                    subscribe_refused(*port, user, filter) == Some(true),
+                );
+            }
+        }
+        record(
+            passed,
+            failed,
+            &format!("Subscribe to $share/g/$DB/_admin/# as bob on {port} (refused)"),
+            subscribe_refused(*port, "bob", "$share/g/$DB/_admin/#") == Some(true),
+        );
+        record(
+            passed,
+            failed,
+            &format!("Subscribe to $DB/+/create as bob on {port} (refused)"),
+            subscribe_refused(*port, "bob", "$DB/+/create") == Some(true),
+        );
         for filter in &request_filters {
             record(
                 passed,
