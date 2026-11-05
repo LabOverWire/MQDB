@@ -562,6 +562,7 @@ Create Entity object
 ┌─────────────────────────────┐
 │   Start BatchWriter         │
 │                             │
+│   Expect the id is absent   │
 │   Validate NOT NULL         │
 │   Validate Unique (index)   │
 │   Validate Foreign Keys     │

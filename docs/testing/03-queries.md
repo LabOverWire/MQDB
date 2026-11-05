@@ -20,8 +20,7 @@ mqdb create products --data '{"name": "Keyboard", "price": 79, "category": "elec
 > `mqdb create products --data '{"id": "my-uuid", "name": "Monitor", "price": 499}'`
 > If no `"id"` field is present, the server generates a partition-prefixed hex ID (e.g., `"6fc263177a320176-0011"`).
 >
-> **Important:** In agent mode, `create` with an existing ID performs an upsert (overwrites the existing record).
-> To prevent duplicates with client-provided IDs, add a unique constraint on the relevant field.
+> **Important:** `create` with an existing ID is refused with 409 `entity already exists`, in agent and cluster mode, for every sender. The record is left as it was. A client that retries a create after losing the response gets this 409 and can read the record back.
 
 ### Basic List
 

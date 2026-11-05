@@ -1205,6 +1205,40 @@ async fn create_entity_with_response(
     serde_json::from_slice(&resp_payload).ok()
 }
 
+async fn create_or_update_credentials(
+    client: &MqttClient,
+    canonical_id: &str,
+    new_hash: &str,
+    target_hash: &str,
+) -> bool {
+    let created = create_entity_with_response(
+        client,
+        "_credentials",
+        &json!({
+            "id": canonical_id,
+            "password_hash": new_hash,
+            "email_hash": target_hash,
+        }),
+    )
+    .await;
+    let field = |name: &str| {
+        created
+            .as_ref()
+            .and_then(|response| response.get(name).cloned())
+    };
+    if field("status") == Some(json!("ok")) {
+        return true;
+    }
+    field("code") == Some(json!(409))
+        && update_entity(
+            client,
+            "_credentials",
+            canonical_id,
+            &json!({"password_hash": new_hash}),
+        )
+        .await
+}
+
 fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
     query
         .split('&')
@@ -2749,25 +2783,27 @@ pub async fn handle_password_reset_submit(
         .unwrap_or("");
 
     let existing_creds = read_entity(&state.mqtt_client, "_credentials", canonical_id).await;
-    if existing_creds.is_some() {
+    let stored = if existing_creds.is_some() {
         update_entity(
             &state.mqtt_client,
             "_credentials",
             canonical_id,
             &json!({"password_hash": new_hash}),
         )
-        .await;
+        .await
     } else {
-        create_entity_with_response(
-            &state.mqtt_client,
-            "_credentials",
-            &json!({
-                "id": canonical_id,
-                "password_hash": new_hash,
-                "email_hash": target_hash,
-            }),
-        )
-        .await;
+        create_or_update_credentials(&state.mqtt_client, canonical_id, &new_hash, target_hash).await
+    };
+    if !stored {
+        error!(
+            canonical_id,
+            "password reset could not store the new password"
+        );
+        return json_response_with_credentials(
+            500,
+            &json!({"error": "failed to store password"}),
+            cors,
+        );
     }
 
     update_entity(
@@ -3003,4 +3039,116 @@ async fn expire_pending_challenges(state: &ServerState, target_hash: &str) {
 
 fn now_unix() -> u64 {
     super::challenge_utils::now_unix()
+}
+
+#[cfg(test)]
+mod reset_credentials_tests {
+    use super::create_or_update_credentials;
+    use crate::agent::MqdbAgent;
+    use crate::database::Database;
+    use mqdb_core::config::DatabaseConfig;
+    use mqdb_core::schema::{FieldDefinition, FieldType, Schema};
+    use mqtt5::client::MqttClient;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+    use tempfile::TempDir;
+
+    const SERVICE_USER: &str = "reset-service";
+
+    struct Broker {
+        db: Database,
+        client: MqttClient,
+        handle: tokio::task::JoinHandle<()>,
+        shutdown: tokio::sync::broadcast::Sender<()>,
+        dir: TempDir,
+    }
+
+    impl Broker {
+        async fn stop(self) {
+            self.client.disconnect().await.unwrap();
+            self.shutdown.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(10), self.handle)
+                .await
+                .unwrap()
+                .unwrap();
+            self.dir.close().unwrap();
+        }
+    }
+
+    async fn broker() -> Broker {
+        let dir = TempDir::new().unwrap();
+        let config = DatabaseConfig::new(dir.path().join("db")).without_background_tasks();
+        let db = Database::open_with_config(config).await.unwrap();
+        let passwd = dir.path().join("passwd.txt");
+        std::fs::write(&passwd, "").unwrap();
+        let service_password = uuid::Uuid::new_v4().to_string();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let (handle, mut ready, shutdown) = MqdbAgent::new(db.clone())
+            .with_password_file(passwd)
+            .with_service_credentials(SERVICE_USER.to_string(), service_password.clone())
+            .with_bind_address(SocketAddr::from(([127, 0, 0, 1], port)))
+            .start()
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), ready.wait_for(|up| *up))
+            .await
+            .unwrap()
+            .unwrap();
+        let client_id = format!("reset-test-{port}");
+        let client = MqttClient::new(client_id.clone());
+        let options = mqtt5::types::ConnectOptions::new(client_id)
+            .with_credentials(SERVICE_USER, service_password);
+        Box::pin(client.connect_with_options(&format!("127.0.0.1:{port}"), options))
+            .await
+            .unwrap();
+        Broker {
+            db,
+            client,
+            handle,
+            shutdown,
+            dir,
+        }
+    }
+
+    async fn stored_hash(db: &Database) -> Option<serde_json::Value> {
+        crate::db_helpers::read_entity_db(db, "_credentials", "cid")
+            .await
+            .unwrap()
+            .map(|record| record["password_hash"].clone())
+    }
+
+    fn requiring_a_missing_field() -> Schema {
+        Schema::new("_credentials")
+            .add_field(FieldDefinition::new("missing", FieldType::String).required())
+    }
+
+    #[tokio::test]
+    async fn a_reset_that_lost_the_create_race_stores_its_password() {
+        let broker = broker().await;
+
+        assert!(create_or_update_credentials(&broker.client, "cid", "first", "target").await);
+        assert_eq!(stored_hash(&broker.db).await, Some("first".into()));
+
+        assert!(create_or_update_credentials(&broker.client, "cid", "second", "target").await);
+        assert_eq!(stored_hash(&broker.db).await, Some("second".into()));
+        broker.stop().await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_create_is_reported_as_not_stored() {
+        let broker = broker().await;
+        broker
+            .db
+            .add_schema(requiring_a_missing_field())
+            .await
+            .unwrap();
+
+        assert!(!create_or_update_credentials(&broker.client, "cid", "first", "target").await);
+        assert_eq!(stored_hash(&broker.db).await, None);
+        broker.stop().await;
+    }
 }

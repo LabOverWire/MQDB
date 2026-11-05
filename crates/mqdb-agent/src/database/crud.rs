@@ -27,6 +27,24 @@ fn map_unique_guard_conflict(err: Error) -> Error {
     err
 }
 
+fn map_create_conflict(err: Error, entity: &Entity) -> Error {
+    match err {
+        Error::AbsentPreconditionViolated(ref key) if *key == entity.key() => {
+            Error::AlreadyExists {
+                entity: entity.name.clone(),
+                id: entity.id.clone(),
+            }
+        }
+        other => map_unique_guard_conflict(other),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExistingRecord {
+    Refuse,
+    Replace,
+}
+
 pub struct DerivedAccess<'a> {
     pub child_entity: &'a str,
     pub child_id: &'a str,
@@ -66,13 +84,17 @@ impl Database {
         }
         drop(schema_registry);
 
+        let caller = CallerContext {
+            sender,
+            client_id,
+            scope_config,
+        };
         self.insert_new_record(
             entity_name,
             data,
             constraint_data,
-            sender,
-            client_id,
-            scope_config,
+            &caller,
+            ExistingRecord::Refuse,
         )
         .await
     }
@@ -88,7 +110,13 @@ impl Database {
             .await
             .apply_defaults(&entity_name, &mut data)?;
 
-        self.insert_new_record(entity_name, data, None, None, None, &ScopeConfig::default())
+        let scope_config = ScopeConfig::default();
+        let caller = CallerContext {
+            sender: None,
+            client_id: None,
+            scope_config: &scope_config,
+        };
+        self.insert_new_record(entity_name, data, None, &caller, ExistingRecord::Replace)
             .await
     }
 
@@ -97,9 +125,8 @@ impl Database {
         entity_name: String,
         mut data: Value,
         constraint_data: Option<Value>,
-        sender: Option<&str>,
-        client_id: Option<&str>,
-        scope_config: &ScopeConfig,
+        caller: &CallerContext<'_>,
+        on_existing: ExistingRecord,
     ) -> Result<Value> {
         let id = if let Some(client_id) = data.get("id").and_then(Value::as_str) {
             client_id.to_string()
@@ -151,6 +178,9 @@ impl Database {
         };
 
         let mut batch = self.storage.batch();
+        if on_existing == ExistingRecord::Refuse {
+            batch.expect_absent(entity.key());
+        }
 
         let constraint_manager = self.constraint_manager.read().await;
         constraint_manager.validate_create(&constraint_entity, &mut batch, &self.storage)?;
@@ -163,15 +193,17 @@ impl Database {
 
         self.register_entity_name(&entity_name).await;
 
-        let scope = scope_config.resolve_scope(&entity_name, &data);
+        let scope = caller.scope_config.resolve_scope(&entity_name, &data);
         let event = ChangeEvent::create(entity_name, entity.id.clone(), data.clone())
-            .with_sender(sender.map(String::from))
-            .with_client_id(client_id.map(String::from))
+            .with_sender(caller.sender.map(String::from))
+            .with_client_id(caller.client_id.map(String::from))
             .with_scope(scope);
         let operation_id = uuid::Uuid::new_v4().to_string();
         self.outbox.enqueue_event(&mut batch, &operation_id, &event);
 
-        batch.commit().map_err(map_unique_guard_conflict)?;
+        batch
+            .commit()
+            .map_err(|err| map_create_conflict(err, &entity))?;
 
         self.dispatcher.dispatch(event).await?;
         self.outbox.mark_delivered(&operation_id)?;
@@ -1137,6 +1169,38 @@ mod concurrency_tests {
         )
         .await
         .expect("seat must be reclaimable after the TTL sweep reaps the expired hold");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn expired_record_refuses_a_create_until_the_sweep_removes_it() {
+        let (tmp, db) = test_db().await;
+        let scope = ScopeConfig::default();
+        let record = json!({ "id": "a", "ttl_secs": 1 });
+        let create = |data: Value| db.create("hold".to_string(), data, None, None, None, &scope);
+
+        create(record.clone()).await.unwrap();
+        let after_expiry = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 100;
+
+        assert!(
+            db.read("hold".to_string(), "a".to_string(), vec![], None)
+                .await
+                .is_ok(),
+            "an expired record stays readable until it is swept"
+        );
+        assert!(matches!(
+            create(record.clone()).await,
+            Err(mqdb_core::error::Error::AlreadyExists { .. })
+        ));
+
+        assert_eq!(db.ttl_cleanup_pass_for_test(after_expiry).await, 1);
+        create(record)
+            .await
+            .expect("the id is free once the sweep removed the record");
+        drop(tmp);
     }
 
     #[tokio::test(flavor = "multi_thread")]

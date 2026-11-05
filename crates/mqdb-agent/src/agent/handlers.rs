@@ -1762,16 +1762,8 @@ async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Val
             error!("password reset submit: failed to update credentials for {canonical_id}: {e}");
             return Response::error(mqdb_core::ErrorCode::Internal, "failed to update password");
         }
-    } else if let Err(e) = crate::db_helpers::create_entity_db(
-        ctx.db,
-        "_credentials",
-        &json!({
-            "id": canonical_id,
-            "password_hash": new_hash,
-            "email_hash": target_hash,
-        }),
-    )
-    .await
+    } else if let Err(e) =
+        create_or_update_credentials(ctx.db, canonical_id, &new_hash, target_hash).await
     {
         error!("password reset submit: failed to create credentials for {canonical_id}: {e}");
         return Response::error(
@@ -1800,13 +1792,66 @@ async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Val
     Response::ok(json!({"status": "password_reset"}))
 }
 
+#[cfg(feature = "http-api")]
+async fn create_or_update_credentials(
+    db: &crate::database::Database,
+    canonical_id: &str,
+    new_hash: &str,
+    target_hash: &str,
+) -> Result<Value, mqdb_core::error::Error> {
+    let created = crate::db_helpers::create_entity_db(
+        db,
+        "_credentials",
+        &serde_json::json!({
+            "id": canonical_id,
+            "password_hash": new_hash,
+            "email_hash": target_hash,
+        }),
+    )
+    .await;
+    match created {
+        Err(mqdb_core::error::Error::AlreadyExists { .. }) => {
+            crate::db_helpers::update_entity_db(
+                db,
+                "_credentials",
+                canonical_id,
+                &serde_json::json!({"password_hash": new_hash}),
+            )
+            .await
+        }
+        other => other,
+    }
+}
+
 #[cfg(all(test, feature = "http-api"))]
 mod tests {
-    use super::resolve_grantee_email;
+    use super::{create_or_update_credentials, resolve_grantee_email};
     use crate::database::Database;
     use crate::http::IdentityCrypto;
     use serde_json::json;
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn a_reset_that_lost_the_create_race_updates_the_password() {
+        let tmp = TempDir::new().unwrap();
+        let db = Database::open_without_background_tasks(tmp.path())
+            .await
+            .unwrap();
+
+        create_or_update_credentials(&db, "cid", "first", "target")
+            .await
+            .unwrap();
+        create_or_update_credentials(&db, "cid", "second", "target")
+            .await
+            .unwrap();
+
+        let stored = crate::db_helpers::read_entity_db(&db, "_credentials", "cid")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored["password_hash"], "second");
+        assert_eq!(stored["email_hash"], "target");
+    }
 
     #[tokio::test]
     async fn resolve_grantee_email_maps_known_email_to_canonical_id() {

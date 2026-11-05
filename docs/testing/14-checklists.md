@@ -67,6 +67,7 @@ Run through this checklist to verify MQDB works completely:
 - [ ] Agent start/stop (with `--passwd`)
 - [ ] Agent status returns health JSON
 - [ ] CRUD operations (create, read, update, delete, list)
+- [ ] Create on an existing id is refused with 409 and changes nothing
 - [ ] Filtering and sorting
 - [ ] Output formats (`--format json`, `--format table`, `--format csv`)
 - [ ] Schema validation

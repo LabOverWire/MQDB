@@ -15,6 +15,9 @@ pub enum Error {
     #[error("entity not found: {entity} id={id}")]
     NotFound { entity: String, id: String },
 
+    #[error("entity already exists: {entity} id={id}")]
+    AlreadyExists { entity: String, id: String },
+
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 

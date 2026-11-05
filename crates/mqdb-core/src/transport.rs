@@ -191,6 +191,9 @@ impl From<Error> for Response {
     fn from(e: Error) -> Self {
         let (code, message) = match &e {
             Error::NotFound { entity, .. } => (ErrorCode::NotFound, format!("not found: {entity}")),
+            Error::AlreadyExists { .. } => {
+                (ErrorCode::Conflict, "entity already exists".to_string())
+            }
             Error::Validation(msg) => (ErrorCode::BadRequest, format!("validation error: {msg}")),
             Error::KeyTooLarge(_) => (
                 ErrorCode::BadRequest,
