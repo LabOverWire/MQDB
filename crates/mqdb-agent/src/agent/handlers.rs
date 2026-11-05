@@ -219,7 +219,7 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
         return;
     }
 
-    if topic.contains("/events")
+    if crate::topic_rules::is_change_event_topic(topic)
         || topic.starts_with(crate::presence::PRESENCE_TOPIC_PREFIX)
         || topic.starts_with(VERIFY_TOPIC_PREFIX)
     {

@@ -3923,3 +3923,28 @@ async fn restore_keeps_records_whose_ids_exceed_the_create_limit() {
         .unwrap();
     assert_eq!(read["id"], long_id);
 }
+
+#[tokio::test]
+async fn restore_keeps_a_record_whose_id_is_reserved_for_new_creates() {
+    let tmp = TempDir::new().unwrap();
+    let db = Database::open_without_background_tasks(tmp.path().join("db"))
+        .await
+        .unwrap();
+    let backup_file = tmp.path().join("backup.jsonl");
+    let lines = [
+        json!({"_entity": "items", "_data": {"id": "a1", "v": 1}}),
+        json!({"_entity": "items", "_data": {"id": "events", "v": 2}}),
+        json!({"_entity": "items", "_data": {"id": "z9", "v": 3}}),
+    ];
+    let content: Vec<String> = lines.iter().map(ToString::to_string).collect();
+    std::fs::write(&backup_file, content.join("\n")).unwrap();
+
+    let count = db.restore_logical(&backup_file).await.unwrap();
+
+    assert_eq!(count, 3);
+    let read = db
+        .read("items".into(), "events".into(), vec![], None)
+        .await
+        .unwrap();
+    assert_eq!(read["v"], 2);
+}

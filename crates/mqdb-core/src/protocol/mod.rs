@@ -97,6 +97,7 @@ pub enum AdminOperation {
 
 pub const MAX_ENTITY_NAME_LEN: usize = 128;
 pub const MAX_RECORD_ID_LEN: usize = 512;
+pub const RESERVED_RECORD_ID: &str = "events";
 const MAX_PAYLOAD_SIZE: usize = 4 * 1024 * 1024;
 
 fn is_valid_entity_name(name: &str) -> bool {
@@ -280,6 +281,15 @@ pub fn parse_db_topic(topic: &str) -> Option<DbOperation> {
         }
         _ => None,
     }
+}
+
+#[must_use]
+pub fn reserved_record_id_message(data: &Value) -> Option<String> {
+    (data.get("id")?.as_str()? == RESERVED_RECORD_ID).then(|| {
+        format!(
+            "id '{RESERVED_RECORD_ID}' is reserved: $DB/{{entity}}/{RESERVED_RECORD_ID} is the change event namespace"
+        )
+    })
 }
 
 /// Remove and return the reserved `_expected_version` compare-and-set precondition from a

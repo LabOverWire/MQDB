@@ -151,15 +151,7 @@ impl Database {
                 .ok_or_else(|| Error::BackupFailed("entity missing _data field".to_string()))?
                 .clone();
 
-            self.create(
-                entity_name,
-                entity_data,
-                None,
-                None,
-                None,
-                &mqdb_core::types::ScopeConfig::default(),
-            )
-            .await?;
+            self.restore_record(entity_name, entity_data).await?;
             count += 1;
         }
 

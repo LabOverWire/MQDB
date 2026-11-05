@@ -14,7 +14,7 @@ pub use constraint_store::{
     constraint_key,
 };
 pub use data_store::{
-    DbDataStore, DbDataStoreError, DbEntity, FkReverseIndex, db_data_key, oversized_create_message,
+    DbDataStore, DbDataStoreError, DbEntity, FkReverseIndex, db_data_key, refused_create_message,
 };
 pub use fk_store::{
     FkStoreError, FkValidationRequest, FkValidationResponse, FkValidationResult, FkValidationStore,

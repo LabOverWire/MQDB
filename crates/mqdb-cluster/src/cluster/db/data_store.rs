@@ -83,7 +83,7 @@ pub(super) fn join_snapshot_entries(entries: &[Vec<u8>]) -> Vec<u8> {
 }
 
 #[must_use]
-pub fn oversized_create_message(entity: &str, data: &serde_json::Value) -> Option<String> {
+pub fn refused_create_message(entity: &str, data: &serde_json::Value) -> Option<String> {
     let entity_limit = mqdb_core::protocol::MAX_ENTITY_NAME_LEN;
     if entity.len() > entity_limit {
         return Some(format!(
@@ -93,7 +93,10 @@ pub fn oversized_create_message(entity: &str, data: &serde_json::Value) -> Optio
     }
     let id = data.get("id")?.as_str()?;
     let id_limit = mqdb_core::protocol::MAX_RECORD_ID_LEN;
-    (id.len() > id_limit).then(|| format!("id is {} bytes, the limit is {id_limit}", id.len()))
+    if id.len() > id_limit {
+        return Some(format!("id is {} bytes, the limit is {id_limit}", id.len()));
+    }
+    mqdb_core::protocol::reserved_record_id_message(data)
 }
 
 #[must_use]

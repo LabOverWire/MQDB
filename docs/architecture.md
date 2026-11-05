@@ -549,9 +549,11 @@ Writes forwarded to remote primaries publish change events fire-and-forget on th
 ```
 db.create("users", json!({...}))
     ↓
-Extract client-provided ID from payload, or generate one (atomic sequence counter)
-    ↓
 Apply schema defaults (if schema exists)
+    ↓
+Refuse the reserved id `events`
+    ↓
+Extract client-provided ID from payload, or generate one (atomic sequence counter)
     ↓
 Validate schema (types, required fields)
     ↓
