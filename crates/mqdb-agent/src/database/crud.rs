@@ -43,35 +43,8 @@ pub struct CallerContext<'a> {
 }
 
 impl Database {
-    pub async fn create(
-        &self,
-        entity_name: String,
-        mut data: Value,
-        constraint_data: Option<Value>,
-        sender: Option<&str>,
-        client_id: Option<&str>,
-        scope_config: &ScopeConfig,
-    ) -> Result<Value> {
-        self.schema_registry
-            .read()
-            .await
-            .apply_defaults(&entity_name, &mut data)?;
-        if let Some(message) = mqdb_core::protocol::reserved_record_id_message(&data) {
-            return Err(Error::Validation(message));
-        }
-        self.create_record(
-            entity_name,
-            data,
-            constraint_data,
-            sender,
-            client_id,
-            scope_config,
-        )
-        .await
-    }
-
     #[tracing::instrument(skip(self, data, constraint_data, scope_config), fields(entity = %entity_name))]
-    pub(super) async fn create_record(
+    pub async fn create(
         &self,
         entity_name: String,
         mut data: Value,
@@ -82,8 +55,46 @@ impl Database {
     ) -> Result<Value> {
         let schema_registry = self.schema_registry.read().await;
         schema_registry.apply_defaults(&entity_name, &mut data)?;
+        if let Some(message) = mqdb_core::protocol::reserved_record_id_message(&data) {
+            return Err(Error::Validation(message));
+        }
         drop(schema_registry);
 
+        self.insert_new_record(
+            entity_name,
+            data,
+            constraint_data,
+            sender,
+            client_id,
+            scope_config,
+        )
+        .await
+    }
+
+    #[tracing::instrument(name = "create", skip(self, data), fields(entity = %entity_name))]
+    pub(super) async fn restore_record(
+        &self,
+        entity_name: String,
+        mut data: Value,
+    ) -> Result<Value> {
+        self.schema_registry
+            .read()
+            .await
+            .apply_defaults(&entity_name, &mut data)?;
+
+        self.insert_new_record(entity_name, data, None, None, None, &ScopeConfig::default())
+            .await
+    }
+
+    async fn insert_new_record(
+        &self,
+        entity_name: String,
+        mut data: Value,
+        constraint_data: Option<Value>,
+        sender: Option<&str>,
+        client_id: Option<&str>,
+        scope_config: &ScopeConfig,
+    ) -> Result<Value> {
         let id = if let Some(client_id) = data.get("id").and_then(Value::as_str) {
             client_id.to_string()
         } else {
@@ -804,6 +815,54 @@ mod concurrency_tests {
             .await
             .unwrap();
         (tmp, Arc::new(db))
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_schema_change_queued_during_create_cannot_assign_the_reserved_id() {
+        use mqdb_core::schema::{FieldDefinition, FieldType, Schema};
+
+        let (_tmp, db) = test_db().await;
+        let held = db.schema_registry.write().await;
+
+        let creator = {
+            let db = Arc::clone(&db);
+            tokio::spawn(async move {
+                db.create(
+                    "raced".to_string(),
+                    json!({"v": 1}),
+                    None,
+                    None,
+                    None,
+                    &ScopeConfig::default(),
+                )
+                .await
+            })
+        };
+        tokio::task::yield_now().await;
+
+        let schema_change = {
+            let db = Arc::clone(&db);
+            tokio::spawn(async move {
+                db.schema_registry
+                    .write()
+                    .await
+                    .add_schema(Schema::new("raced").add_field(
+                        FieldDefinition::new("id", FieldType::String).with_default(json!("events")),
+                    ));
+            })
+        };
+        tokio::task::yield_now().await;
+
+        drop(held);
+        schema_change.await.unwrap();
+        let created = creator.await.unwrap().unwrap();
+
+        assert_ne!(created["id"], "events", "{created}");
+        assert!(
+            db.read("raced".to_string(), "events".to_string(), vec![], None)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 8)]

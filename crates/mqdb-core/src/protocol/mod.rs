@@ -283,8 +283,6 @@ pub fn parse_db_topic(topic: &str) -> Option<DbOperation> {
     }
 }
 
-/// The refusal for a create whose body `id` is [`RESERVED_RECORD_ID`]. `$DB/{entity}/events` is
-/// the change event namespace, so a record with that id could not be reached by id.
 #[must_use]
 pub fn reserved_record_id_message(data: &Value) -> Option<String> {
     (data.get("id")?.as_str()? == RESERVED_RECORD_ID).then(|| {
