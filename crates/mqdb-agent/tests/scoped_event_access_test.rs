@@ -161,6 +161,7 @@ async fn scoped_events_reach_only_users_who_can_view_the_scope() {
     let owner_events = watch(&alice_client, "$DB/collars/c2/#").await.unwrap();
     let viewer_events = watch(&vera_client, "$DB/collars/c2/#").await.unwrap();
     let admin_events = watch(&root_client, "$DB/collars/+/#").await.unwrap();
+    let broadcast = watch(&mallory_client, "$DB/fixes/events/#").await.unwrap();
 
     let fix = request(
         &alice_client,
@@ -175,19 +176,16 @@ async fn scoped_events_reach_only_users_who_can_view_the_scope() {
     assert_eq!(next_topic(&viewer_events).await, expected);
     assert_eq!(next_topic(&admin_events).await, expected);
 
-    let root_all = watch(&root_client, "$DB/#").await.unwrap();
-    let broadcast = watch(&mallory_client, "$DB/fixes/events/#").await.unwrap();
+    let notes = watch(&mallory_client, "$DB/notes/events/#").await.unwrap();
+    let admin_everything = watch(&root_client, "$DB/#").await.unwrap();
     let unscoped = request(&alice_client, "$DB/notes/create", &json!({"id": "n1"})).await;
     assert_eq!(unscoped["status"], "ok", "{unscoped}");
-    let notes = watch(&mallory_client, "$DB/notes/events/#").await.unwrap();
-    let second = request(&alice_client, "$DB/notes/create", &json!({"id": "n2"})).await;
-    assert_eq!(second["status"], "ok", "{second}");
     let broadcast_topic = next_topic(&notes).await;
     assert!(
-        broadcast_topic.starts_with("$DB/notes/events/") && broadcast_topic.ends_with("/n2"),
+        broadcast_topic.starts_with("$DB/notes/events/") && broadcast_topic.ends_with("/n1"),
         "{broadcast_topic}"
     );
-    assert!(root_all.recv_async().await.is_ok());
+    assert!(!next_topic(&admin_everything).await.is_empty());
     tokio::time::sleep(QUIET_PERIOD).await;
     assert!(
         broadcast.try_recv().is_err(),
