@@ -346,6 +346,7 @@ async fn an_acl_grant_opens_verification_topics_to_that_user_only() {
     let agent = MqdbAgent::new(db)
         .with_password_file(password_file)
         .with_acl_file(acl_file)
+        .with_admin_users(HashSet::from(["root".to_string()]))
         .with_ownership_config(OwnershipConfig::parse("notes=ownerId").unwrap());
     let agent = RunningAgent::start(agent, next_test_port(), tmp).await;
 

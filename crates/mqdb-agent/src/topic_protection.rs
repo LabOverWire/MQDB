@@ -1798,6 +1798,13 @@ mod tests {
         }
         let admin_provider = create_test_provider(HashSet::from(["root".to_string()]));
         assert_subscribe(&admin_provider, Some("root"), "$DB/_verify/#", true).await;
+        assert_subscribe(
+            &admin_provider,
+            Some("mallory"),
+            "$SYS/mqdb/cluster/status",
+            true,
+        )
+        .await;
     }
 
     #[tokio::test]
