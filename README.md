@@ -433,6 +433,10 @@ An owner can share any ownership-enabled entity (the motivating case is diagrams
 
 **Event confidentiality.** By default change events broadcast on `$DB/{entity}/events/#` to every authenticated subscriber. Enabling `--scoped-events` (env `MQDB_SCOPED_EVENTS`) routes events for ownership-enabled and derived entities to per-recipient topics `$DB/u/{recipient}/events/{entity}/{id}` — the owner plus its share grantees (children resolve recipients through the parent). The broker only lets a user subscribe to their own `$DB/u/{me}/events/#`. Global entities keep the broadcast topic. **This is a breaking change for subscribers** (subscribe to `$DB/u/{me}/events/#` instead of `$DB/{entity}/events/#`), so it is opt-in; enable it on the broker and the client together. Granting or revoking access itself emits a `_shares` event to the affected grantee's namespace (so a client learns of gained or lost access without polling); when an admin shares or unshares on an owner's behalf, the owner is notified too.
 
+**Scoped event access.** With `--event-scope {scope}=field`, a record's change events go to `$DB/{scope}/{value}/events/{op}` (the scope record) or `$DB/{scope}/{value}/{entity}/events/{op}` (its children) instead of `$DB/{entity}/events/#`. When `{scope}` has `--ownership` or `--ownership-derive`, a non-admin may subscribe to a filter that reaches those topics only with `view` access to the scope record, checked the same way as a read. That covers the owner and view or edit grantees. The record must already exist, so create it before subscribing. A filter that crosses scope values, such as `$DB/{scope}/+/#`, `$DB/{scope}/#` or `$DB/#`, is admin-only, and `$share/{group}/` makes no difference. `{value}` always takes one topic level: `%`, `/`, `+`, `#` and NUL are written as `%25`, `%2F`, `%2B`, `%23` and `%00`, and the value `events` as `%65vents`, so a record `a/b` is watched with `$DB/{scope}/a%2Fb/#`. The event payload keeps the original value. Non-admins cannot publish to any of these topics.
+
+The check runs when a client subscribes and when a persistent session resumes. A subscription already live when access is revoked keeps receiving events until the client reconnects or unsubscribes. A scope entity with no ownership of its own has no check, even if its children have owners. In cluster mode the publish refusal and the topic encoding apply, but the subscribe check does not: any user can subscribe to a scope's events there.
+
 #### Admin Operations
 
 | Topic | Action |
@@ -491,7 +495,7 @@ MQDB enforces hardcoded protection on internal topics that cannot be overridden 
 | Tier | Topics | Behavior |
 |------|--------|----------|
 | BlockAll | `_mqdb/#`, `$DB/_idx/#`, `$DB/_unique/#`, `$DB/_fk/#`, `$DB/_query/#`, `$DB/p+/#` | All access denied |
-| ReadOnly | `$SYS/#`, `$DB/+/events/#`, `$DB/u/#`, `$DB/{scope}/+/events/#` and `$DB/{scope}/+/+/events/#` with `--event-scope {scope}=...` | Subscribe allowed, publish denied |
+| ReadOnly | `$SYS/#`, `$DB/+/events/#`, `$DB/u/#`, and any topic under `$DB/{scope}/` with an `events` level with `--event-scope {scope}=...` | Subscribe allowed, publish denied. Subscribing to a scope's events is further limited, see Scoped event access |
 | WriteOnly | `$DB/_sub/#` | Publish allowed, subscribe denied |
 | AdminRequired | `$DB/_admin/#`, `$DB/_verify/#`, `$DB/_oauth_tokens/#`, `$DB/_identities/#`, `$DB/_identity_links/#` | Requires admin user or explicit ACL grant |
 

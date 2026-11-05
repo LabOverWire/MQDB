@@ -106,41 +106,11 @@ impl Database {
                 includes,
                 projection,
             } => {
-                match ownership.evaluate(&entity, sender) {
-                    OwnershipDecision::Check {
-                        owner_field,
-                        sender: uid,
-                    } => {
-                        if let Err(e) = self
-                            .check_access(&entity, &id, owner_field, uid, AccessLevel::View)
-                            .await
-                        {
-                            return e.into();
-                        }
-                    }
-                    OwnershipDecision::Derive {
-                        parent_entity,
-                        fk_field,
-                        sender: uid,
-                    } => {
-                        if let Err(e) = self
-                            .check_derived_access(
-                                &DerivedAccess {
-                                    child_entity: &entity,
-                                    child_id: &id,
-                                    parent_entity,
-                                    fk_field,
-                                    sender: uid,
-                                    required: AccessLevel::View,
-                                },
-                                ownership,
-                            )
-                            .await
-                        {
-                            return e.into();
-                        }
-                    }
-                    OwnershipDecision::Allowed => {}
+                if let Err(e) = self
+                    .check_read_access(&entity, &id, sender, ownership)
+                    .await
+                {
+                    return e.into();
                 }
                 match self.read(entity, id, includes, projection).await {
                     Ok(v) => Response::ok(v),

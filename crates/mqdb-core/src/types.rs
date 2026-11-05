@@ -165,6 +165,11 @@ impl OwnershipConfig {
     }
 
     #[must_use]
+    pub fn controls_access_to(&self, entity: &str) -> bool {
+        self.owner_field(entity).is_some() || self.derivation(entity).is_some()
+    }
+
+    #[must_use]
     pub fn is_admin(&self, user: &str) -> bool {
         self.admin_users.contains(user)
     }

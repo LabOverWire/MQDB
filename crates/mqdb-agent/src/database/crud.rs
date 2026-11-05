@@ -12,7 +12,9 @@ use mqdb_core::{Filter, FilterOp};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
-use mqdb_core::types::{AccessLevel, OwnershipConfig, SHARES_ENTITY, owner_change_refusal};
+use mqdb_core::types::{
+    AccessLevel, OwnershipConfig, OwnershipDecision, SHARES_ENTITY, owner_change_refusal,
+};
 
 const MAX_WRITE_ATTEMPTS: u32 = 32;
 
@@ -904,6 +906,43 @@ impl Database {
             ownership,
         )
         .await
+    }
+
+    pub async fn check_read_access(
+        &self,
+        entity: &str,
+        id: &str,
+        sender: Option<&str>,
+        ownership: &OwnershipConfig,
+    ) -> Result<()> {
+        match ownership.evaluate(entity, sender) {
+            OwnershipDecision::Check {
+                owner_field,
+                sender: uid,
+            } => {
+                self.check_access(entity, id, owner_field, uid, AccessLevel::View)
+                    .await
+            }
+            OwnershipDecision::Derive {
+                parent_entity,
+                fk_field,
+                sender: uid,
+            } => {
+                self.check_derived_access(
+                    &DerivedAccess {
+                        child_entity: entity,
+                        child_id: id,
+                        parent_entity,
+                        fk_field,
+                        sender: uid,
+                        required: AccessLevel::View,
+                    },
+                    ownership,
+                )
+                .await
+            }
+            OwnershipDecision::Allowed => Ok(()),
+        }
     }
 
     pub async fn check_derived_create(

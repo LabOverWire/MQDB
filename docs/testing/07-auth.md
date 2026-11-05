@@ -809,3 +809,27 @@ The 4th connection attempt (even with correct credentials) is rejected.
 - [ ] Rate limiting locks out after N failed attempts
 - [ ] Lockout applies to correct credentials too (IP-based)
 - [ ] Lockout expires after configured duration
+
+---
+
+## 31. Scoped Event Access (`--event-scope`, agent mode)
+
+Start the agent with `--passwd`, `--admin-users root`, `--ownership collars=ownerId`, `--ownership-derive 'fixes=collarId>collars'` and `--event-scope collars=collarId`. Users: `alice` owns `c2` and `a/b`, `vera` has a view share on `c2`, `ed` has an edit share on `c2`, `mallory` owns `a`.
+
+```bash
+mosquitto_sub -V mqttv5 -u mallory -P "$PW" -t '$DB/collars/c2/#'
+mosquitto_sub -V mqttv5 -u mallory -P "$PW" -t '$DB/collars/+/#'
+mosquitto_sub -V mqttv5 -u mallory -P "$PW" -t '$DB/#'
+mosquitto_pub -V mqttv5 -u mallory -P "$PW" -q 1 -t '$DB/collars/a/b/fixes/events/FORGED' -m '{}'
+```
+
+### Verification Checklist
+
+- [ ] Owner, view grantee, edit grantee and admin receive `$DB/collars/c2/fixes/events/created` on `$DB/collars/c2/#`
+- [ ] A user without view access is refused `$DB/collars/c2/#`, also with `$share/{group}/` in front
+- [ ] `$DB/collars/+/#`, `$DB/collars/#`, `$DB/+/#` and `$DB/#` are refused for non-admins and allowed for admins
+- [ ] `$DB/fixes/events/#`, `$DB/+/events/#` and `mqdb watch` stay open
+- [ ] Subscribing before the scope record exists is refused for non-admins
+- [ ] Events for scope value `a/b` arrive on `$DB/collars/a%2Fb/...`, and the owner of `a` does not receive them on `$DB/collars/a/#`
+- [ ] A forged publish is refused for any scope depth, for non-admins and for admins
+- [ ] After `unshare`, a live subscription keeps receiving (known limit), a new subscribe is refused, and a resumed persistent session receives nothing
