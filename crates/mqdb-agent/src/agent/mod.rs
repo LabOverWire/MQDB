@@ -305,6 +305,10 @@ impl MqdbAgent {
                 allow_anonymous: self.auth_setup.allow_anonymous,
                 scoped_events: self.scoped_events,
                 event_scope_entity: self.scope_config.scope_entity(),
+                scope_access: crate::topic_protection::ScopeAccess {
+                    db: self.db.clone(),
+                    ownership: Arc::clone(&self.ownership_config),
+                },
                 sparkplug_aware: self.sparkplug_aware,
                 rate_limit,
             },
@@ -423,6 +427,10 @@ impl MqdbAgent {
                 allow_anonymous: self.auth_setup.allow_anonymous,
                 scoped_events: self.scoped_events,
                 event_scope_entity: self.scope_config.scope_entity(),
+                scope_access: crate::topic_protection::ScopeAccess {
+                    db: self.db.clone(),
+                    ownership: Arc::clone(&self.ownership_config),
+                },
                 sparkplug_aware: self.sparkplug_aware,
                 rate_limit,
             },

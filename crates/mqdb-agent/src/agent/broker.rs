@@ -11,7 +11,7 @@ use crate::presence::{
     PRESENCE_CHANNEL_CAPACITY, PRESENCE_TOPIC_PREFIX, PresenceEvent, PresenceEventHandler,
 };
 use crate::sparkplug::{CERTIFICATES_PREFIX, CertificateStore};
-use crate::topic_protection::TopicProtectionAuthProvider;
+use crate::topic_protection::{ScopeAccess, TopicProtectionAuthProvider};
 use mqtt5::broker::auth::ComprehensiveAuthProvider;
 use mqtt5::broker::config::{
     AuthMethod, ChangeOnlyDeliveryConfig, QuicConfig, StorageBackend, StorageConfig,
@@ -39,6 +39,7 @@ pub(super) struct AuthProviderConfig<'a> {
     pub allow_anonymous: bool,
     pub scoped_events: bool,
     pub event_scope_entity: &'a str,
+    pub scope_access: ScopeAccess,
     pub sparkplug_aware: bool,
     pub rate_limit: Option<AuthRateLimit>,
 }
@@ -314,6 +315,7 @@ impl MqdbAgent {
                 .with_all_users_admin(config.allow_anonymous && config.admin_users.is_empty())
                 .with_scoped_events(config.scoped_events)
                 .with_event_scope_entity(Some(config.event_scope_entity.to_string()))
+                .with_scope_access(config.scope_access)
                 .with_sparkplug_aware(config.sparkplug_aware);
         broker = broker.with_auth_provider(Arc::new(protected_provider));
         if config.admin_users.is_empty() {

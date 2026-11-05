@@ -1,11 +1,15 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::topic_rules::{BlockReason, check_topic_access};
+use crate::database::Database;
+use crate::topic_rules::{BlockReason, check_topic_access, is_change_event_topic};
+use mqdb_core::events::scope_value_from_level;
+use mqdb_core::types::OwnershipConfig;
 use mqtt5::broker::auth::{AuthProvider, AuthResult, EnhancedAuthResult};
 use mqtt5::error::Result;
 use mqtt5::packet::connect::ConnectPacket;
 use mqtt5::protocol::v5::reason_codes::ReasonCode;
+use mqtt5::validation::parse_shared_subscription;
 use std::collections::HashSet;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -13,11 +17,18 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tracing::debug;
 
+#[derive(Clone)]
+pub struct ScopeAccess {
+    pub db: Arc<Database>,
+    pub ownership: Arc<OwnershipConfig>,
+}
+
 pub struct TopicProtectionAuthProvider {
     inner: Arc<dyn AuthProvider>,
     admin_users: Arc<HashSet<String>>,
     internal_service_username: Option<String>,
     event_scope_entity: Option<String>,
+    scope_access: Option<ScopeAccess>,
     all_users_admin: bool,
     scoped_events: bool,
     sparkplug_aware: bool,
@@ -32,14 +43,64 @@ pub fn is_reserved_client_id(client_id: &str) -> bool {
 }
 
 fn is_scoped_event_topic(topic: &str, scope_entity: &str) -> bool {
-    let mut levels = topic.split('/');
-    levels.next() == Some("$DB")
-        && levels.next() == Some(scope_entity)
-        && levels.next().is_some()
-        && levels.take(2).any(|level| level == "events")
+    topic
+        .strip_prefix("$DB/")
+        .and_then(|levels| levels.strip_prefix(scope_entity))
+        .is_some_and(|levels| levels.starts_with('/'))
+        && is_change_event_topic(topic)
 }
 
-/// If `topic` is a per-user event namespace `$DB/u/{user}/...`, return `{user}`.
+#[derive(Debug, PartialEq, Eq)]
+enum ScopedFilter<'a> {
+    Elsewhere,
+    AnyScope,
+    OneScope(&'a str),
+}
+
+const SCOPE_RECORD_EVENT_LEVELS: [Option<&str>; 2] = [Some("events"), None];
+const CHILD_RECORD_EVENT_LEVELS: [Option<&str>; 3] = [None, Some("events"), None];
+
+fn filter_reaches_levels<'a>(
+    mut filter: impl Iterator<Item = &'a str>,
+    levels: &[Option<&str>],
+) -> bool {
+    for expected in levels {
+        match filter.next() {
+            Some("#") => return true,
+            Some(level) if level == "+" || expected.is_none_or(|exact| exact == level) => {}
+            _ => return false,
+        }
+    }
+    matches!(filter.next(), None | Some("#"))
+}
+
+fn scoped_filter<'a>(filter: &'a str, scope_entity: &str) -> ScopedFilter<'a> {
+    let mut levels = parse_shared_subscription(filter).0.split('/');
+    if levels.next() != Some("$DB") {
+        return ScopedFilter::Elsewhere;
+    }
+    match levels.next() {
+        Some("#") => return ScopedFilter::AnyScope,
+        Some(entity) if entity == "+" || entity == scope_entity => {}
+        _ => return ScopedFilter::Elsewhere,
+    }
+    match levels.next() {
+        None | Some("events") => ScopedFilter::Elsewhere,
+        Some("#") => ScopedFilter::AnyScope,
+        Some(level)
+            if filter_reaches_levels(levels.clone(), &SCOPE_RECORD_EVENT_LEVELS)
+                || filter_reaches_levels(levels, &CHILD_RECORD_EVENT_LEVELS) =>
+        {
+            if level == "+" {
+                ScopedFilter::AnyScope
+            } else {
+                ScopedFilter::OneScope(level)
+            }
+        }
+        Some(_) => ScopedFilter::Elsewhere,
+    }
+}
+
 fn user_scope_segment(topic: &str) -> Option<&str> {
     let mut parts = topic.split('/');
     if parts.next()? != "$DB" {
@@ -59,6 +120,7 @@ impl TopicProtectionAuthProvider {
             admin_users: Arc::new(admin_users),
             internal_service_username: None,
             event_scope_entity: None,
+            scope_access: None,
             all_users_admin: false,
             scoped_events: false,
             sparkplug_aware: false,
@@ -80,6 +142,12 @@ impl TopicProtectionAuthProvider {
     #[must_use]
     pub fn with_event_scope_entity(mut self, scope_entity: Option<String>) -> Self {
         self.event_scope_entity = scope_entity.filter(|entity| !entity.is_empty());
+        self
+    }
+
+    #[must_use]
+    pub fn with_scope_access(mut self, access: ScopeAccess) -> Self {
+        self.scope_access = Some(access);
         self
     }
 
@@ -110,6 +178,31 @@ impl TopicProtectionAuthProvider {
 
     fn is_admin_user(&self, user_id: Option<&str>) -> bool {
         self.all_users_admin || user_id.is_some_and(|u| self.admin_users.contains(u))
+    }
+
+    async fn may_receive_scope_events(&self, user_id: Option<&str>, filter: &str) -> bool {
+        let (Some(scope_entity), Some(access)) =
+            (self.event_scope_entity.as_deref(), &self.scope_access)
+        else {
+            return true;
+        };
+        if !access.ownership.controls_access_to(scope_entity) {
+            return true;
+        }
+        match (scoped_filter(filter, scope_entity), user_id) {
+            (ScopedFilter::Elsewhere, _) => true,
+            (ScopedFilter::OneScope(level), Some(user)) => access
+                .db
+                .check_read_access(
+                    scope_entity,
+                    &scope_value_from_level(level),
+                    Some(user),
+                    &access.ownership,
+                )
+                .await
+                .is_ok(),
+            _ => false,
+        }
     }
 }
 
@@ -238,6 +331,15 @@ impl AuthProvider for TopicProtectionAuthProvider {
         Box::pin(async move {
             if is_internal {
                 return true;
+            }
+
+            if !is_admin && !self.may_receive_scope_events(user_id, topic_filter).await {
+                debug!(
+                    client_id = %client_id_owned,
+                    topic_filter = %topic_filter,
+                    "subscribe to scoped events without view access denied"
+                );
+                return false;
             }
 
             if self.scoped_events
@@ -939,6 +1041,394 @@ mod tests {
                 "{topic} must stay open to the service"
             );
             assert!(provider.authorize_subscribe("c", Some("bob"), topic).await);
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_event_topics_are_service_only_whatever_the_depth_of_the_scope() {
+        let provider = create_event_scope_provider();
+        for topic in [
+            "$DB/lists/a/b/items/events/FORGED",
+            "$DB/lists/a/b/events/FORGED",
+            "$DB/lists/a/b/c/d/e/items/events/created",
+            "$DB/lists/a%2Fb/items/events/created",
+        ] {
+            assert!(
+                !provider.authorize_publish("c", Some("bob"), topic).await,
+                "{topic} must be read-only"
+            );
+            assert!(
+                provider
+                    .authorize_publish("c", Some("mqdb-internal"), topic)
+                    .await,
+                "{topic} must stay open to the service"
+            );
+        }
+    }
+
+    #[test]
+    fn every_real_scoped_topic_is_classified_under_its_own_scope() {
+        use mqdb_core::events::{ChangeEvent, scope_topic_level};
+        for value in ["L1", "a/b", "a+b", "#", "50%", "events", "a%2Fb", ""] {
+            let scope = Some(("lists".to_string(), value.to_string()));
+            let level = scope_topic_level(value);
+            for entity in ["lists", "items", "events"] {
+                let event = ChangeEvent::create(entity.into(), "r1".into(), serde_json::json!({}))
+                    .with_scope(scope.clone());
+                let topic = event.event_topic(0);
+                assert!(is_scoped_event_topic(&topic, "lists"), "{topic}");
+                assert_eq!(
+                    scoped_filter(&topic, "lists"),
+                    ScopedFilter::OneScope(&level),
+                    "{topic}"
+                );
+                assert_eq!(scope_value_from_level(&level), value, "{topic}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_filter_reaching_a_scoped_event_is_never_classified_elsewhere() {
+        use mqdb_core::events::ChangeEvent;
+        use mqtt5::validation::topic_matches_filter;
+        let topics: Vec<String> = ["L1", "a/b", "events"]
+            .into_iter()
+            .flat_map(|value| {
+                ["lists", "items"].map(|entity| {
+                    ChangeEvent::create(entity.into(), "r1".into(), serde_json::json!({}))
+                        .with_scope(Some(("lists".to_string(), value.to_string())))
+                        .event_topic(0)
+                })
+            })
+            .collect();
+        let mut filters = vec!["#".to_string(), "+/lists/L1/#".to_string()];
+        for entity in ["lists", "+"] {
+            filters.push(format!("$DB/{entity}/#"));
+            for value in ["L1", "+", "events", "%65vents", "a%2Fb"] {
+                for tail in [
+                    "#",
+                    "events/#",
+                    "+/#",
+                    "events/created",
+                    "events/+",
+                    "+/created",
+                    "+/+",
+                    "items/events/#",
+                    "items/events/created",
+                    "items/+/created",
+                    "+/events/#",
+                    "+/events/+",
+                    "+/+/created",
+                    "+/+/#",
+                    "+/+/+",
+                    "items/#",
+                ] {
+                    filters.push(format!("$DB/{entity}/{value}/{tail}"));
+                }
+            }
+        }
+        filters.push("$DB/#".to_string());
+        filters.push("$DB/+/#".to_string());
+        let mut reached = 0;
+        for filter in &filters {
+            for topic in &topics {
+                if !topic_matches_filter(topic, filter) {
+                    continue;
+                }
+                reached += 1;
+                let scope_level = topic.split('/').nth(2).unwrap();
+                match scoped_filter(filter, "lists") {
+                    ScopedFilter::Elsewhere => panic!("{filter} reaches {topic}"),
+                    ScopedFilter::AnyScope => {}
+                    ScopedFilter::OneScope(level) => {
+                        assert_eq!(level, scope_level, "{filter} reaches {topic}");
+                    }
+                }
+                assert_eq!(
+                    scoped_filter(&format!("$share/g/{filter}"), "lists"),
+                    scoped_filter(filter, "lists"),
+                    "{filter}"
+                );
+            }
+        }
+        assert!(
+            reached > 100,
+            "only {reached} filter and topic pairs matched"
+        );
+    }
+
+    #[test]
+    fn filters_that_reach_no_scoped_event_are_elsewhere() {
+        for filter in [
+            "$DB/lists",
+            "$DB/+",
+            "$DB/lists/create",
+            "$DB/lists/L1",
+            "$DB/lists/L1/update",
+            "$DB/lists/+/update",
+            "$DB/lists/L1/items/update",
+            "$DB/lists/events/#",
+            "$DB/+/events/#",
+            "$DB/lists/events/L1",
+            "$DB/items/events/#",
+            "$DB/items/L1/events/created",
+            "$DB/u/alice/events/#",
+            "$share/g/$DB/items/events/#",
+            "resp/alice/1",
+            "#",
+            "+/lists/L1/#",
+        ] {
+            assert_eq!(
+                scoped_filter(filter, "lists"),
+                ScopedFilter::Elsewhere,
+                "{filter}"
+            );
+        }
+    }
+
+    async fn scope_access_provider() -> (tempfile::TempDir, TopicProtectionAuthProvider, Database) {
+        use mqdb_core::types::ScopeConfig;
+        use serde_json::json;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = Database::open_without_background_tasks(tmp.path())
+            .await
+            .unwrap();
+        let ownership = OwnershipConfig::parse("lists=ownerId")
+            .unwrap()
+            .with_admin_users(HashSet::from(["root".to_string()]))
+            .with_derivations("items=listId>lists")
+            .unwrap();
+        for (id, owner) in [("L1", "alice"), ("a/b", "alice"), ("a", "mallory")] {
+            db.create(
+                "lists".to_string(),
+                json!({"id": id, "ownerId": owner}),
+                None,
+                None,
+                None,
+                &ScopeConfig::default(),
+            )
+            .await
+            .unwrap();
+        }
+        let provider = TopicProtectionAuthProvider::new(
+            Arc::new(AllowAllAuthProvider),
+            HashSet::from(["root".to_string()]),
+        )
+        .with_internal_service_username(Some("mqdb-internal".to_string()))
+        .with_event_scope_entity(Some("lists".to_string()))
+        .with_scope_access(ScopeAccess {
+            db: Arc::new(db.clone()),
+            ownership: Arc::new(ownership),
+        });
+        (tmp, provider, db)
+    }
+
+    #[tokio::test]
+    async fn scoped_events_need_view_access_to_the_scope_record() {
+        let (_tmp, provider, _db) = scope_access_provider().await;
+        for filter in [
+            "$DB/lists/L1/#",
+            "$DB/lists/L1/events/#",
+            "$DB/lists/L1/items/events/created",
+            "$DB/+/L1/#",
+            "$share/g/$DB/lists/L1/#",
+            "$DB/lists/a%2Fb/#",
+        ] {
+            assert!(
+                provider
+                    .authorize_subscribe("c", Some("alice"), filter)
+                    .await,
+                "the owner must receive {filter}"
+            );
+            assert!(
+                !provider
+                    .authorize_subscribe("c", Some("mallory"), filter)
+                    .await,
+                "a stranger must not receive {filter}"
+            );
+            assert!(
+                !provider.authorize_subscribe("c", None, filter).await,
+                "a client with no user must not receive {filter}"
+            );
+            assert!(
+                provider
+                    .authorize_subscribe("c", Some("root"), filter)
+                    .await
+            );
+            assert!(
+                provider
+                    .authorize_subscribe("c", Some("mqdb-internal"), filter)
+                    .await
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_share_opens_scoped_events_and_a_revoke_closes_new_subscriptions() {
+        use crate::database::{GranteeIdentity, ShareActor};
+        let (_tmp, provider, db) = scope_access_provider().await;
+        let filter = "$DB/lists/L1/#";
+        let ownership = OwnershipConfig::parse("lists=ownerId").unwrap();
+        for (grantee, permission) in [("vera", "view"), ("ed", "edit")] {
+            assert!(
+                !provider
+                    .authorize_subscribe("c", Some(grantee), filter)
+                    .await
+            );
+            db.share_grant(
+                "lists",
+                "L1",
+                GranteeIdentity {
+                    key: grantee,
+                    resolved: Some(grantee),
+                    display: None,
+                },
+                permission,
+                ShareActor {
+                    sender: Some("alice"),
+                    ownership: &ownership,
+                },
+                false,
+            )
+            .await
+            .unwrap();
+            assert!(
+                provider
+                    .authorize_subscribe("c", Some(grantee), filter)
+                    .await,
+                "a {permission} grantee must receive scoped events"
+            );
+        }
+        let vera = GranteeIdentity {
+            key: "vera",
+            resolved: Some("vera"),
+            display: None,
+        };
+        db.share_revoke(
+            "lists",
+            "L1",
+            vera,
+            ShareActor {
+                sender: Some("alice"),
+                ownership: &ownership,
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !provider
+                .authorize_subscribe("c", Some("vera"), filter)
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn a_scope_that_does_not_exist_yet_is_closed_to_non_admins() {
+        let (_tmp, provider, _db) = scope_access_provider().await;
+        let filter = "$DB/lists/not-created-yet/#";
+        assert!(
+            !provider
+                .authorize_subscribe("c", Some("alice"), filter)
+                .await
+        );
+        assert!(
+            provider
+                .authorize_subscribe("c", Some("root"), filter)
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn wildcards_across_scopes_are_admin_only() {
+        let (_tmp, provider, _db) = scope_access_provider().await;
+        for filter in [
+            "$DB/#",
+            "$DB/+/#",
+            "$DB/lists/#",
+            "$DB/lists/+/#",
+            "$DB/+/+/#",
+            "$DB/lists/+/events/#",
+            "$DB/lists/+/items/events/created",
+            "$DB/+/+/+/events/#",
+            "$DB/lists/+/+/+",
+            "$share/g/$DB/lists/+/#",
+            "$share/g/$DB/#",
+        ] {
+            assert!(
+                !provider
+                    .authorize_subscribe("c", Some("alice"), filter)
+                    .await,
+                "{filter} must be closed to non-admins"
+            );
+            assert!(
+                provider
+                    .authorize_subscribe("c", Some("root"), filter)
+                    .await
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn owning_a_prefix_of_a_scope_value_grants_nothing_over_it() {
+        let (_tmp, provider, _db) = scope_access_provider().await;
+        assert!(
+            provider
+                .authorize_subscribe("c", Some("mallory"), "$DB/lists/a/#")
+                .await
+        );
+        assert!(
+            !provider
+                .authorize_subscribe("c", Some("mallory"), "$DB/lists/a%2Fb/#")
+                .await
+        );
+        assert!(!mqtt5::validation::topic_matches_filter(
+            &mqdb_core::events::ChangeEvent::create(
+                "items".into(),
+                "r1".into(),
+                serde_json::json!({})
+            )
+            .with_scope(Some(("lists".to_string(), "a/b".to_string())))
+            .event_topic(0),
+            "$DB/lists/a/#"
+        ));
+    }
+
+    #[tokio::test]
+    async fn other_subscriptions_are_untouched_by_scope_access() {
+        let (_tmp, provider, _db) = scope_access_provider().await;
+        for filter in [
+            "$DB/items/events/#",
+            "$DB/+/events/#",
+            "$DB/lists/events/#",
+            "$DB/u/alice/events/#",
+            "resp/alice/1",
+            "$DB/lists/L1/update",
+        ] {
+            assert!(
+                provider
+                    .authorize_subscribe("c", Some("mallory"), filter)
+                    .await,
+                "{filter} must stay open"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_scope_entity_without_access_control_stays_open() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db = Database::open_without_background_tasks(tmp.path())
+            .await
+            .unwrap();
+        let provider = create_event_scope_provider().with_scope_access(ScopeAccess {
+            db: Arc::new(db),
+            ownership: Arc::new(OwnershipConfig::parse("items=ownerId").unwrap()),
+        });
+        for filter in ["$DB/lists/L1/#", "$DB/lists/+/#", "$DB/#"] {
+            assert!(
+                provider.authorize_subscribe("c", Some("bob"), filter).await,
+                "{filter}"
+            );
         }
     }
 
