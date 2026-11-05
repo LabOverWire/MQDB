@@ -4,6 +4,49 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-11-04 — mqdb-core 0.9.0, mqdb-agent 0.11.0, mqdb-cluster 0.6.0, mqdb-vault 0.3.0, mqdb-wasm 0.5.0, mqdb-cli 0.8.68
+
+### Upgrading from v0.8.67
+
+- An update that would change a record's ownership field used to answer `ok` and drop the field. It now answers 403 for an owner or an `edit` grantee, and nothing is applied. A value equal to the stored owner is still allowed, so a client that sends a whole record back keeps working.
+- A create with the record id `events` now answers 400 (#335). Records already stored under that id stay unreachable by id and appear only in `list`.
+- During a rolling upgrade, a request involving an old node still answers `ok` and drops the ownership field; the owner does not change. Survivors on the old binary keep the 60 s redial until upgraded. There is no wire format change an old node cannot read: it ignores the new trailing `requested_owner` field and the new `peer_addrs` file.
+- A restarted node no longer leads alone when its stored state names other nodes, so a node that cannot reach a majority of its voters now stays at 503 (#330).
+
+### Fixed
+
+- **A restarted node no longer leads alone and serves empty or stale data** (#300, #280). It counts every node named in its stored map, members or Raft log as a voter, starts no election until it has links to a quorum of them, and holds a map restored from a snapshot until the leader has shown it committed everything it sent. Killing and restarting nodes under write load gave 0 acked reads at 404 at 3 and 5 nodes, against 750 of 7935 and 2677 of 24995 on v0.8.67.
+- **Failover keeps data when holders die together.** Failovers wait until 1.5 s have passed with no new death, so holders dying together are handled as one batch. A partition with both holders gone keeps both map entries and answers 503 until one returns, where it used to move to a node with no copy and answer 404. Holders killed together kept both entries in 15 of 15 runs at 5 nodes.
+- **Lost peers are redialled within seconds.** A known peer with no link, or one reported dead, is redialled every 1 s backing off to 5 s, then every 60 s after 5 minutes, down from a fixed 60 s tick. Learned peer addresses are kept in `peer_addrs` in the data dir.
+- **A death verdict refused by a full queue is retried** instead of being lost for good.
+- **Agent mode answers requests for names containing `events`** (#335). The entity `events`, ids such as `events-1`, and admin requests naming `events` got no reply, because the handler ignored any topic containing `/events`. Only topics with an `events` level after the entity are ignored now.
+- **An owner change no longer answers `ok` and does nothing** (#334), in agent and cluster mode, including through an unlocked vault in agent mode. Nothing is applied, `_version` stays and no change event is sent.
+
+### Changed
+
+- `mqdb cluster rebalance` after a restart can give partitions whose holders are absent to a live node, which starts them empty after about 90 s. Their records then answer 404 where v0.8.67 answered 503.
+- A node back after its 30 s death verdict rebalances in rounds, more slowly than before: balanced at about 89 s at 3 nodes and 87 s at 5, against 62 s and 71 s.
+- First success after a single failure at 5 nodes has a median of 16.8 s, against 14.7 s, because of the batch window.
+
+### Breaking changes
+
+- `mqdb-core`: new `Error::OwnerChangeRefused`, `RESERVED_RECORD_ID`, `reserved_record_id_message` and `owner_change_refusal`.
+- `mqdb-vault`: new `VaultError::Forbidden`.
+- `mqdb-agent`: new `UpdatePrecondition`.
+- `mqdb-cluster`: `oversized_create_message` is renamed `refused_create_message`, and `JsonDbRequest` gains `requested_owner`, which breaks struct literals.
+
+### Known limitations
+
+- Security, in agent mode, also in earlier releases: a create on an existing id overwrites the record and can take ownership of it (#188); `list` ignores derived ownership (#239); scoped change events reach users without access (#238) and can be forged when the scope value contains `/` (#342).
+- `--durability periodic`, the default, never fsyncs (#292).
+- A partition snapshot import stays in memory and is lost on restart (#287). Replacing every node and then restarting loses most acked records, on this release and on v0.8.67.
+- A cluster update waiting on a remote FK or unique check overwrites writes made during the wait, and a non-admin's waiting update can restore an old owner (#347).
+- A majority of voters that never returns leaves survivors at 503, with no forced recovery (#330).
+- A node with another cluster's data can join through a reused address under the same CA (#329).
+- A partition that lost one copy can stay on the other indefinitely while primaries are balanced (#327), and a live node can hold no replicas (#336).
+- A create accepts record ids that cannot be addressed afterwards (#340).
+- Rare old-value and replica reads after a two-node kill are untraced (#337).
+
 ## 2026-11-03 — mqdb-core 0.8.0, mqdb-agent 0.10.0, mqdb-cluster 0.5.0, mqdb-vault 0.2.0, mqdb-wasm 0.4.0, mqdb-cli 0.8.67
 
 ### Upgrading from v0.8.66
