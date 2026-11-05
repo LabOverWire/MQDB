@@ -284,21 +284,24 @@ async fn the_refusal_comes_before_a_stale_expected_version() {
     assert_code(&equal_owner, 412, "expected _version");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn an_editor_racing_an_admin_never_restores_the_old_owner() {
+    const EDITORS: usize = 8;
     let (_tmp, db) = open().await;
     let db = Arc::new(db);
-    for round in 0..300 {
+    for round in 0..100 {
         let id = format!("d{round}");
         seed(&db, json!({"id": id, "userId": "alice", "n": 0})).await;
         grant(&db, &id, "alice", "carol", "edit").await;
 
-        let barrier = Arc::new(Barrier::new(2));
+        let barrier = Arc::new(Barrier::new(EDITORS + 1));
         let mut tasks = Vec::new();
-        for (sender, payload) in [
-            ("root", json!({"userId": "bob"})),
-            ("carol", json!({"userId": "alice", "n": round})),
-        ] {
+        for writer in 0..=EDITORS {
+            let (sender, payload) = if writer == EDITORS {
+                ("root", json!({"userId": "bob"}))
+            } else {
+                ("carol", json!({"userId": "alice", "n": writer}))
+            };
             let (db, barrier, id) = (Arc::clone(&db), Arc::clone(&barrier), id.clone());
             tasks.push(tokio::spawn(async move {
                 barrier.wait().await;
