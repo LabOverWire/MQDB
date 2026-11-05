@@ -75,7 +75,7 @@ async fn tagged(db: &Database, tag: &str) -> Vec<Value> {
 
 #[tokio::test]
 async fn another_user_cannot_take_over_a_record() {
-    let (_tmp, db) = fresh().await;
+    let (tmp, db) = fresh().await;
     let original = json!({"id": "bob-d", "userId": "bob", "title": "bob-secret"});
     assert!(
         as_user(&db, "$DB/docs/create", &original, "bob")
@@ -106,11 +106,12 @@ async fn another_user_cannot_take_over_a_record() {
     assert_eq!(data["userId"], "bob");
     assert_eq!(data["title"], "bob-secret");
     assert!(share.is_error(), "{share:?}");
+    drop(tmp);
 }
 
 #[tokio::test]
 async fn an_admin_create_on_an_existing_id_is_refused_too() {
-    let (_tmp, db) = fresh().await;
+    let (tmp, db) = fresh().await;
     let original = json!({"id": "bob-d", "userId": "bob", "title": "bob-secret"});
     assert!(
         as_user(&db, "$DB/docs/create", &original, "bob")
@@ -128,11 +129,12 @@ async fn an_admin_create_on_an_existing_id_is_refused_too() {
 
     assert_refused_as_existing(&over);
     assert_eq!(stored(&db, "docs", "bob-d").await["userId"], "bob");
+    drop(tmp);
 }
 
 #[tokio::test]
 async fn a_replay_keeps_the_version_and_later_updates() {
-    let (_tmp, db) = fresh().await;
+    let (tmp, db) = fresh().await;
     let record = json!({"id": "a", "n": 1});
     assert!(create(&db, "items", record.clone()).await.is_ok());
     let updated = db
@@ -150,11 +152,12 @@ async fn a_replay_keeps_the_version_and_later_updates() {
     let after = stored(&db, "items", "a").await;
     assert_eq!(after["n"], 2);
     assert_eq!(after["_version"], 2);
+    drop(tmp);
 }
 
 #[tokio::test]
 async fn a_refused_create_emits_no_change_event() {
-    let (_tmp, db) = fresh().await;
+    let (tmp, db) = fresh().await;
     let mut receiver = db.event_receiver();
     db.subscribe("items/#".into(), Some("items".into()), None)
         .await
@@ -177,11 +180,12 @@ async fn a_refused_create_emits_no_change_event() {
             .is_err(),
         "a refused create must not emit an event"
     );
+    drop(tmp);
 }
 
 #[tokio::test]
 async fn a_replay_on_a_unique_entity_says_the_record_exists() {
-    let (_tmp, db) = fresh().await;
+    let (tmp, db) = fresh().await;
     db.add_unique_constraint("hold".to_string(), vec!["seat".to_string()])
         .await
         .unwrap();
@@ -196,11 +200,12 @@ async fn a_replay_on_a_unique_entity_says_the_record_exists() {
     };
     assert_eq!(code, 409);
     assert!(message.contains("unique constraint violation"), "{message}");
+    drop(tmp);
 }
 
 #[tokio::test]
 async fn a_refused_create_leaves_guards_and_indexes_alone() {
-    let (_tmp, db) = fresh().await;
+    let (tmp, db) = fresh().await;
     db.add_unique_constraint("hold".to_string(), vec!["seat".to_string()])
         .await
         .unwrap();
@@ -223,11 +228,12 @@ async fn a_refused_create_leaves_guards_and_indexes_alone() {
     assert!(held_value.is_error(), "the original value was freed");
     assert!(tagged(&db, "y").await.is_empty());
     assert_eq!(tagged(&db, "x").await.len(), 1);
+    drop(tmp);
 }
 
 #[tokio::test]
 async fn a_deleted_id_can_be_created_again() {
-    let (_tmp, db) = fresh().await;
+    let (tmp, db) = fresh().await;
     assert!(
         create(&db, "items", json!({"id": "a", "n": 1}))
             .await
@@ -247,6 +253,7 @@ async fn a_deleted_id_can_be_created_again() {
     let after = stored(&db, "items", "a").await;
     assert_eq!(after["n"], 2);
     assert_eq!(after["_version"], 1);
+    drop(tmp);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -254,7 +261,7 @@ async fn concurrent_creates_of_one_id_have_exactly_one_winner() {
     const ROUNDS: usize = 200;
     const WRITERS: usize = 8;
 
-    let (_tmp, db) = fresh().await;
+    let (tmp, db) = fresh().await;
     let db = Arc::new(db);
 
     for round in 0..ROUNDS {
@@ -290,6 +297,7 @@ async fn concurrent_creates_of_one_id_have_exactly_one_winner() {
             "round {round}: the record is not the winner's"
         );
     }
+    drop(tmp);
 }
 
 #[tokio::test]

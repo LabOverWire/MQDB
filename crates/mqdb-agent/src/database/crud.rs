@@ -1173,7 +1173,7 @@ mod concurrency_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn expired_record_refuses_a_create_until_the_sweep_removes_it() {
-        let (_tmp, db) = test_db().await;
+        let (tmp, db) = test_db().await;
         let scope = ScopeConfig::default();
         let record = json!({ "id": "a", "ttl_secs": 1 });
         let create = |data: Value| db.create("hold".to_string(), data, None, None, None, &scope);
@@ -1200,6 +1200,7 @@ mod concurrency_tests {
         create(record)
             .await
             .expect("the id is free once the sweep removed the record");
+        drop(tmp);
     }
 
     #[tokio::test(flavor = "multi_thread")]
