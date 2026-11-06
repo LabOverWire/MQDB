@@ -4,6 +4,54 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-11-05 — mqdb-core 0.10.0, mqdb-agent 0.12.0, mqdb-cluster 0.7.0, mqdb-vault 0.4.0, mqdb-wasm 0.6.0, mqdb-cli 0.8.69
+
+This is a security release. Upgrade if users you do not fully trust can connect.
+
+### Upgrading from v0.8.68
+
+- Subscriptions are checked when they are made. A persistent session that subscribed before the upgrade keeps that subscription until the session expires, and receives what was queued for it. Clear stored sessions when upgrading if untrusted users had access.
+- In earlier releases, other users could read password changes, password resets and vault passphrases sent over MQTT. If untrusted users had access, consider rotating those passwords and passphrases.
+- A create on an id that already exists answers 409 `entity already exists` in agent mode, for every sender including admins, as the cluster already did. A client that replays a create after losing the response gets 409 and can read the record back.
+- Nobody can subscribe to `$DB/_auth/#` or `$DB/_vault/#`, admins included. Publishing requests there still works.
+- Admins can no longer subscribe to `$DB/#`, `$DB/+/#`, `$DB/+/+` or `$DB/+/+/+`. Filters naming an entity, such as `$DB/{entity}/#`, still work.
+- A non-admin filter with a wildcard entity level is refused unless it has an `events` level. `$DB/+/events/#` still works.
+- With `--ownership` or `--ownership-derive`, a non-admin cannot subscribe to request topics of an entity with ownership, and an ACL grant does not change that. A response topic shaped like such a request topic is refused too.
+- Without an `--acl` file, `$DB/_verify/#` is open only to admins and the internal service.
+- With `--event-scope`, a non-admin subscribing to a scope's change events needs `view` on the scope record, so the record must exist first. A client that subscribed before creating the record must now create it first. Filters across scope values, such as `$DB/{scope}/+/#` or `$DB/#`, are refused for non-admins.
+- A scope value is now always one topic level: `%`, `/`, `+`, `#` and NUL are percent-encoded, and the value `events` becomes `%65vents`. Subscribers to such values must use the encoded level. Other values keep their topics.
+- `$DB/{child}/list` under `--ownership-derive` returns only the children the sender could read.
+
+### Fixed
+
+- **A create can no longer replace another user's record** (#188). In agent mode a create on an existing id overwrote the record and could take its ownership. The record is now left as it was, and concurrent creates of one id give exactly one `ok`.
+- **`list` applies derived ownership** in agent mode (#239). Children are filtered before limit, offset, sort and projection, so pages stay full.
+- **Scoped change events reach only users who can view the scope record** (#238), and non-admins can no longer publish under a scope's `events` topics (#342). Cluster mode has the publish refusal and the encoding, not the subscribe check.
+- **Request and internal topics are protected at subscribe.** Non-admins cannot read other users' requests on entities with ownership, nobody can subscribe to auth or vault requests, and `$share/{group}/` filters are checked as their plain filter. Agent and cluster mode.
+- On HTTP, a password reset whose password could not be stored answers 500, not 200.
+
+### Breaking changes
+
+- `mqdb-core`: new `Error::AlreadyExists`, which breaks exhaustive matches. New `scope_topic_level`, `scope_value_from_level` and `OwnershipConfig::controls_access_to`.
+- `mqdb-agent`: new `topic_protection::ScopeAccess`, `TopicProtectionAuthProvider::with_scope_access`, `with_ownership` and `with_acl_configured`, and `Database::check_read_access`.
+
+### Known limitations
+
+- Reply topics are not protected: any user can subscribe to a response topic and read the replies sent there (#356).
+- A subscription that is live when a share is revoked keeps receiving scoped events. A new subscribe is refused.
+- A scope entity with no ownership of its own has no subscribe check, even if its children have owners.
+- In agent mode, a user with `view` on a scope record who subscribes to `$DB/{scope}/{value}/#` also receives other users' requests naming that record. In cluster mode that filter is refused for non-admins when the scope has ownership; use `$DB/{scope}/{value}/events/#` and `$DB/{scope}/{value}/+/events/#`.
+- Cluster mode does not deliver replies sent to a `$DB/` response topic.
+- A derived `list` scans `_shares` once and can scan the whole child entity, even with `limit=1`.
+- `--durability periodic`, the default, never fsyncs (#292).
+- A partition snapshot import stays in memory and is lost on restart (#287).
+- A cluster update waiting on a remote FK or unique check overwrites writes made during the wait, and a non-admin's waiting update can restore an old owner (#347).
+- A majority of voters that never returns leaves survivors at 503, with no forced recovery (#330).
+- A node with another cluster's data can join through a reused address under the same CA (#329).
+- A partition that lost one copy can stay on the other indefinitely while primaries are balanced (#327), and a live node can hold no replicas (#336).
+- A create accepts record ids that cannot be addressed afterwards (#340).
+- Rare old-value and replica reads after a two-node kill are untraced (#337).
+
 ## 2026-11-04 — mqdb-core 0.9.0, mqdb-agent 0.11.0, mqdb-cluster 0.6.0, mqdb-vault 0.3.0, mqdb-wasm 0.5.0, mqdb-cli 0.8.68
 
 ### Upgrading from v0.8.67
