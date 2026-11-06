@@ -11,7 +11,6 @@ This is a security release. Upgrade if users you do not fully trust can connect.
 ### Upgrading from v0.8.68
 
 - Subscriptions are checked when they are made. A persistent session that subscribed before the upgrade keeps that subscription until the session expires, and receives what was queued for it. Clear stored sessions when upgrading if untrusted users had access.
-- In earlier releases, other users could read password changes, password resets and vault passphrases sent over MQTT. If untrusted users had access, consider rotating those passwords and passphrases.
 - A create on an id that already exists answers 409 `entity already exists` in agent mode, for every sender including admins, as the cluster already did. A client that replays a create after losing the response gets 409 and can read the record back.
 - Nobody can subscribe to `$DB/_auth/#` or `$DB/_vault/#`, admins included. Publishing requests there still works.
 - Admins can no longer subscribe to `$DB/#`, `$DB/+/#`, `$DB/+/+` or `$DB/+/+/+`. Filters naming an entity, such as `$DB/{entity}/#`, still work.
@@ -37,10 +36,10 @@ This is a security release. Upgrade if users you do not fully trust can connect.
 
 ### Known limitations
 
-- Reply topics are not protected: any user can subscribe to a response topic and read the replies sent there (#356).
+- Reply topics are not yet protected (#356).
 - A subscription that is live when a share is revoked keeps receiving scoped events. A new subscribe is refused.
 - A scope entity with no ownership of its own has no subscribe check, even if its children have owners.
-- In agent mode, a user with `view` on a scope record who subscribes to `$DB/{scope}/{value}/#` also receives other users' requests naming that record. In cluster mode that filter is refused for non-admins when the scope has ownership; use `$DB/{scope}/{value}/events/#` and `$DB/{scope}/{value}/+/events/#`.
+- In cluster mode `$DB/{scope}/{value}/#` is refused for non-admins when the scope has ownership; use `$DB/{scope}/{value}/events/#` and `$DB/{scope}/{value}/+/events/#`.
 - Cluster mode does not deliver replies sent to a `$DB/` response topic.
 - A derived `list` scans `_shares` once and can scan the whole child entity, even with `limit=1`.
 - `--durability periodic`, the default, never fsyncs (#292).
