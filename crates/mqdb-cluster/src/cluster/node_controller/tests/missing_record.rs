@@ -338,6 +338,7 @@ fn suspend_share(
             expected_count: 1,
             received: Vec::new(),
             client_response_topic: "resp/share".to_string(),
+            correlation_data: None,
             created_at_ms: 0,
             filters: Vec::new(),
             sorts: Vec::new(),

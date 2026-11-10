@@ -700,6 +700,7 @@ impl ClusteredAgent {
                 ..Default::default()
             };
             options.properties.user_properties = req.user_properties;
+            options.properties.correlation_data = req.correlation_data;
             if let Err(e) = client
                 .publish_with_options(&req.topic, req.payload, options)
                 .await
@@ -924,6 +925,7 @@ mod tests {
             qos: 1,
             kind: LocalPublishKind::Retained,
             user_properties: Vec::new(),
+            correlation_data: None,
             order_key: None,
             share_groups: None,
         }
@@ -936,6 +938,7 @@ mod tests {
             qos: 1,
             kind: LocalPublishKind::Routed,
             user_properties: Vec::new(),
+            correlation_data: None,
             order_key: None,
             share_groups: None,
         }

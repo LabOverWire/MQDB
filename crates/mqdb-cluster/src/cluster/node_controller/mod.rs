@@ -78,7 +78,7 @@ pub struct TickOutput {
     pub heartbeat: Option<ClusterMessage>,
     pub catchup_requests: Vec<(NodeId, ClusterMessage)>,
     pub seal_requests: Vec<(NodeId, ClusterMessage)>,
-    pub local_publishes: Vec<(String, Vec<u8>)>,
+    pub local_publishes: Vec<(String, Vec<u8>, Option<Vec<u8>>)>,
 }
 
 pub struct PendingVaultDecrypt {
@@ -92,6 +92,7 @@ pub struct PendingScatterRequest {
     pub expected_count: usize,
     pub received: Vec<serde_json::Value>,
     pub client_response_topic: String,
+    pub correlation_data: Option<Vec<u8>>,
     pub created_at_ms: u64,
     pub filters: Vec<mqdb_core::Filter>,
     pub sorts: Vec<mqdb_core::SortOrder>,
@@ -791,8 +792,10 @@ impl<T: ClusterTransport> NodeController<T> {
         for (target, msg) in output.seal_requests {
             let _ = self.transport.send(target, msg).await;
         }
-        for (topic, payload) in output.local_publishes {
-            self.transport.queue_local_publish(topic, payload, 0).await;
+        for (topic, payload, correlation_data) in output.local_publishes {
+            self.transport
+                .queue_local_response(topic, payload, 0, correlation_data)
+                .await;
         }
     }
 
@@ -819,6 +822,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     output.local_publishes.push((
                         cont.response_topic,
                         Self::json_error(504, "grantee resolution timed out"),
+                        cont.correlation_data,
                     ));
                     continue;
                 }
@@ -865,9 +869,11 @@ impl<T: ClusterTransport> NodeController<T> {
                 });
                 let payload = serde_json::to_vec(&result).unwrap_or_default();
 
-                output
-                    .local_publishes
-                    .push((pending.client_response_topic, payload));
+                output.local_publishes.push((
+                    pending.client_response_topic,
+                    payload,
+                    pending.correlation_data,
+                ));
             }
         }
     }

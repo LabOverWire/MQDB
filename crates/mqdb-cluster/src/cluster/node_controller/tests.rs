@@ -55,6 +55,8 @@ enum QueuedPublish {
     Routed(RoutedPublish),
 }
 
+type ResponseCorrelation = (String, Option<Vec<u8>>);
+
 #[derive(Debug, Clone)]
 struct MockTransport {
     node_id: NodeId,
@@ -67,6 +69,7 @@ struct MockTransport {
     queue_full: Arc<std::sync::atomic::AtomicBool>,
     full_peers: Arc<Mutex<std::collections::HashSet<NodeId>>>,
     retained_refreshes: Arc<Mutex<Vec<String>>>,
+    response_correlations: Arc<Mutex<Vec<ResponseCorrelation>>>,
 }
 
 impl MockTransport {
@@ -82,6 +85,7 @@ impl MockTransport {
             queue_full: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             full_peers: Arc::new(Mutex::new(std::collections::HashSet::new())),
             retained_refreshes: Arc::new(Mutex::new(Vec::new())),
+            response_correlations: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -99,6 +103,10 @@ impl MockTransport {
 
     fn sent_messages(&self) -> Vec<(NodeId, ClusterMessage)> {
         self.outbox.lock().unwrap().clone()
+    }
+
+    fn response_correlations(&self) -> Vec<ResponseCorrelation> {
+        self.response_correlations.lock().unwrap().clone()
     }
 
     fn queued_publishes(&self) -> Vec<QueuedPublish> {
@@ -172,6 +180,20 @@ impl ClusterTransport for MockTransport {
             .lock()
             .unwrap()
             .push(QueuedPublish::Plain(topic, payload, qos));
+    }
+
+    async fn queue_local_response(
+        &self,
+        topic: String,
+        payload: Vec<u8>,
+        qos: u8,
+        correlation_data: Option<Vec<u8>>,
+    ) {
+        self.response_correlations
+            .lock()
+            .unwrap()
+            .push((topic.clone(), correlation_data));
+        self.queue_local_publish(topic, payload, qos).await;
     }
 
     async fn queue_routed_publish(&self, publish: RoutedPublish) {
@@ -3182,6 +3204,7 @@ mod partition_map;
 mod primary_role_wait;
 mod promoted_transfer;
 mod remote_fk_unique;
+mod reply_correlation;
 mod snapshot;
 mod snapshot_replace;
 mod stale_log;

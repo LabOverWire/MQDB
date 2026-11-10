@@ -311,7 +311,14 @@ impl DbRequestHandler {
             }
             DbTopicOperation::JsonList { entity } => {
                 match self
-                    .handle_json_list(controller, entity, payload, response_topic, sender)
+                    .handle_json_list(
+                        controller,
+                        entity,
+                        payload,
+                        response_topic,
+                        mqtt_ctx.correlation_data,
+                        sender,
+                    )
                     .await
                 {
                     Some(payload) => JsonOpResult::Response(payload),
@@ -358,6 +365,7 @@ impl DbRequestHandler {
                         SHARES_ENTITY,
                         &shared_payload,
                         response_topic,
+                        mqtt_ctx.correlation_data,
                         sender,
                     )
                     .await
@@ -1336,6 +1344,7 @@ impl DbRequestHandler {
         entity: &str,
         payload: &[u8],
         response_topic: &str,
+        correlation_data: Option<&[u8]>,
         sender: Option<&str>,
     ) -> Option<Vec<u8>> {
         let parsed_data: Option<Value> = if payload.is_empty() {
@@ -1449,6 +1458,7 @@ impl DbRequestHandler {
                     entity,
                     &scatter_payload,
                     response_topic.to_string(),
+                    correlation_data.map(<[u8]>::to_vec),
                     if hydrate_entity.is_some() {
                         Vec::new()
                     } else {

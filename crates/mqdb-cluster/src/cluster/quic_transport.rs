@@ -71,6 +71,7 @@ pub struct LocalPublishRequest {
     pub qos: u8,
     pub kind: LocalPublishKind,
     pub user_properties: Vec<(String, String)>,
+    pub correlation_data: Option<Vec<u8>>,
     pub order_key: Option<String>,
     pub share_groups: Option<Vec<String>>,
 }
@@ -669,6 +670,7 @@ impl ClusterTransport for QuicDirectTransport {
             qos,
             kind: LocalPublishKind::Plain,
             user_properties: Vec::new(),
+            correlation_data: None,
             order_key: None,
             share_groups: None,
         });
@@ -687,6 +689,26 @@ impl ClusterTransport for QuicDirectTransport {
             qos,
             kind: LocalPublishKind::Plain,
             user_properties,
+            correlation_data: None,
+            order_key: None,
+            share_groups: None,
+        });
+    }
+
+    async fn queue_local_response(
+        &self,
+        topic: String,
+        payload: Vec<u8>,
+        qos: u8,
+        correlation_data: Option<Vec<u8>>,
+    ) {
+        self.enqueue_local_publish(LocalPublishRequest {
+            topic,
+            payload,
+            qos,
+            kind: LocalPublishKind::Plain,
+            user_properties: Vec::new(),
+            correlation_data,
             order_key: None,
             share_groups: None,
         });
@@ -699,6 +721,7 @@ impl ClusterTransport for QuicDirectTransport {
             qos: publish.qos,
             kind: LocalPublishKind::Routed,
             user_properties: publish.user_properties,
+            correlation_data: None,
             order_key: publish.order_key,
             share_groups: publish.share_groups,
         });
@@ -711,6 +734,7 @@ impl ClusterTransport for QuicDirectTransport {
             qos: publish.qos,
             kind: LocalPublishKind::Routed,
             user_properties: publish.user_properties,
+            correlation_data: None,
             order_key: publish.order_key,
             share_groups: publish.share_groups,
         };
@@ -734,6 +758,7 @@ impl ClusterTransport for QuicDirectTransport {
             qos,
             kind: LocalPublishKind::Retained,
             user_properties: Vec::new(),
+            correlation_data: None,
             order_key: None,
             share_groups: None,
         });
@@ -746,6 +771,7 @@ impl ClusterTransport for QuicDirectTransport {
             qos: 0,
             kind: LocalPublishKind::RetainedRefresh,
             user_properties: Vec::new(),
+            correlation_data: None,
             order_key: None,
             share_groups: None,
         });
@@ -1403,6 +1429,36 @@ mod tests {
             .map(|request| request.topic)
             .collect();
         assert_eq!(queued, ["resp/t"]);
+    }
+
+    #[tokio::test]
+    async fn a_local_response_keeps_its_correlation_data() {
+        let transport = QuicDirectTransport::new(NodeId::validated(1).unwrap());
+
+        transport
+            .queue_local_response(
+                "resp/t".to_string(),
+                b"reply".to_vec(),
+                1,
+                Some(b"corr".to_vec()),
+            )
+            .await;
+        transport
+            .queue_local_publish("resp/u".to_string(), b"reply".to_vec(), 1)
+            .await;
+
+        let queued: Vec<(String, Option<Vec<u8>>)> = transport
+            .local_publish_rx
+            .drain()
+            .map(|request| (request.topic, request.correlation_data))
+            .collect();
+        assert_eq!(
+            queued,
+            [
+                ("resp/t".to_string(), Some(b"corr".to_vec())),
+                ("resp/u".to_string(), None)
+            ]
+        );
     }
 
     #[test]
