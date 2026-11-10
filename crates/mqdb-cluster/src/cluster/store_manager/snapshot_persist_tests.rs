@@ -380,3 +380,35 @@ fn an_import_whose_flush_fails_is_not_reported_complete() {
     );
     assert!(joiner.db_data.get(ENTITY, RECORD).is_none());
 }
+
+#[test]
+fn an_imported_processing_idempotency_claim_is_not_recovered_after_a_restart() {
+    let source = StoreManager::new(node(1));
+    let partition = session_partition(CLIENT);
+    source
+        .idempotency
+        .check_or_insert_processing("in-flight", partition, Epoch::new(1), ENTITY, RECORD, 1)
+        .unwrap();
+
+    let joiner_disk: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
+    let joiner = with_storage(2, &joiner_disk);
+    joiner
+        .import_partition(&source.export_partition(partition).unwrap())
+        .unwrap();
+    assert!(
+        joiner
+            .idempotency
+            .get(partition, "in-flight")
+            .is_some_and(|record| record.is_processing()),
+        "the in-memory import keeps the claim"
+    );
+
+    let restarted = recovered(&joiner_disk);
+    assert!(
+        !restarted
+            .idempotency
+            .get(partition, "in-flight")
+            .is_some_and(|record| record.is_processing()),
+        "a processing claim must not survive a restart"
+    );
+}

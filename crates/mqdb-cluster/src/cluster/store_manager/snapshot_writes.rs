@@ -224,14 +224,16 @@ pub(super) fn snapshot_writes(
                     .and_then(|(partition_num, _)| partition_num.parse::<u16>().ok())
                     .and_then(PartitionId::new);
                 Ok(partition.and_then(|partition| {
-                    IdempotencyStore::deserialize(value).map(|record| {
-                        insert(
-                            partition,
-                            entity_name,
-                            key,
-                            IdempotencyStore::serialize(&record),
-                        )
-                    })
+                    IdempotencyStore::deserialize(value)
+                        .filter(|record| !record.is_processing())
+                        .map(|record| {
+                            insert(
+                                partition,
+                                entity_name,
+                                key,
+                                IdempotencyStore::serialize(&record),
+                            )
+                        })
                 }))
             })
         }
