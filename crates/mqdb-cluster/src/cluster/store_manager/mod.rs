@@ -20,6 +20,7 @@ mod snapshot_persist_tests;
 mod snapshot_writes;
 #[cfg(test)]
 mod tests;
+mod transfer_window;
 mod unique_ops;
 
 use super::NodeId;
@@ -42,6 +43,8 @@ use mqdb_core::storage::StorageBackend;
 use std::sync::Arc;
 
 pub(crate) use primary_marker::HeldPrimaries;
+#[cfg(test)]
+pub(crate) use transfer_window::TRANSFER_WINDOW_CAPACITY;
 
 #[derive(Debug, Default, Clone)]
 pub struct RecoveryStats {
@@ -138,6 +141,7 @@ pub enum StoreApplyError {
     ChangeEventError,
     PersistenceError,
     SnapshotTooLarge,
+    TransferWindowFull,
 }
 
 impl std::fmt::Display for StoreApplyError {
@@ -163,6 +167,12 @@ impl std::fmt::Display for StoreApplyError {
             Self::ChangeEventError => write!(f, "change event store error"),
             Self::PersistenceError => write!(f, "persistence error"),
             Self::SnapshotTooLarge => write!(f, "partition snapshot exceeds the frame size limits"),
+            Self::TransferWindowFull => {
+                write!(
+                    f,
+                    "too many writes arrived while the partition snapshot was in transfer"
+                )
+            }
         }
     }
 }
@@ -189,6 +199,7 @@ pub struct StoreManager {
     pub db_constraints: ConstraintStore,
     pub client_locations: ClientLocationStore,
     pub fk_reverse_index: FkReverseIndex,
+    transfer_windows: transfer_window::TransferWindows,
 }
 
 impl StoreManager {
@@ -221,6 +232,7 @@ impl StoreManager {
             db_constraints: ConstraintStore::new(node_id),
             client_locations: ClientLocationStore::new(),
             fk_reverse_index: FkReverseIndex::new(),
+            transfer_windows: transfer_window::TransferWindows::default(),
         }
     }
 

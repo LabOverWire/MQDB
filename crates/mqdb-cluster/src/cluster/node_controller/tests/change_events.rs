@@ -685,7 +685,10 @@ async fn a_partition_snapshot_carries_the_pending_events() {
 
     let target_backend: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
     let target = controller_with_storage(3, &target_backend);
-    target.stores().import_partition(&snapshot).unwrap();
+    target
+        .stores()
+        .import_partition(partition, &snapshot)
+        .unwrap();
 
     let events = target
         .stores()

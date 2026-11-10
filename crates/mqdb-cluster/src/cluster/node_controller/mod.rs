@@ -702,6 +702,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
         state.become_primary(epoch);
         self.incoming_snapshots.remove(&partition);
+        self.stores.close_transfer_window(partition);
         if !self.imported_partitions[usize::from(partition.get())]
             && let Err(e) = self.stores.record_held_primary(partition, epoch)
         {
@@ -718,6 +719,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
         state.become_replica(epoch, sequence);
         self.abandon_snapshot_request(partition);
+        self.stores.close_transfer_window(partition);
         self.stop_sending_change_events(partition);
     }
 
@@ -735,6 +737,7 @@ impl<T: ClusterTransport> NodeController<T> {
             state.step_down();
         }
         self.incoming_snapshots.remove(&partition);
+        self.stores.close_transfer_window(partition);
         self.stop_sending_change_events(partition);
     }
 

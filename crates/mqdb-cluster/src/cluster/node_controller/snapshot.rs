@@ -537,7 +537,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let data = finished.into_data();
 
         let saved_events = self.set_aside_change_events(partition);
-        match self.stores.import_partition_counted(&data) {
+        match self.stores.import_partition_counted(partition, &data) {
             Ok(counts) => {
                 self.write_log.clear_partition(partition);
                 if counts.partition_records > 0 {
@@ -581,6 +581,9 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             Err(e) => {
                 tracing::error!(?partition, ?e, "failed to import snapshot");
+                if e == StoreApplyError::TransferWindowFull {
+                    self.stores.close_transfer_window(partition);
+                }
                 self.restore_change_events(partition, &saved_events);
                 self.back_off_snapshot_with(partition, wait);
                 self.send_snapshot_failed(from, partition).await;
@@ -930,6 +933,7 @@ impl<T: ClusterTransport> NodeController<T> {
             return;
         }
 
+        self.stores.open_transfer_window(partition);
         let since_ms = self.snapshot_stamp();
         let first_asked_ms = wait.first_asked_ms.or(since_ms);
         self.incoming_snapshots.insert(

@@ -189,7 +189,7 @@ fn written_by_normal_paths(backend: &Arc<dyn StorageBackend>) -> StoreManager {
 
 fn import_every_partition(from: &StoreManager, into: &StoreManager) {
     for partition in PartitionId::all() {
-        into.import_partition(&from.export_partition(partition).unwrap())
+        into.import_partition(partition, &from.export_partition(partition).unwrap())
             .unwrap();
     }
 }
@@ -343,9 +343,8 @@ fn a_delete_after_an_import_is_not_undone_by_a_restart() {
 fn an_import_that_cannot_be_persisted_fails_and_leaves_memory_untouched() {
     let source_disk: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
     let source = written_by_normal_paths(&source_disk);
-    let payload = source
-        .export_partition(data_partition(ENTITY, RECORD))
-        .unwrap();
+    let partition = data_partition(ENTITY, RECORD);
+    let payload = source.export_partition(partition).unwrap();
 
     let faulty = FaultyBackend::shared();
     faulty.fail_writes(true);
@@ -353,7 +352,7 @@ fn an_import_that_cannot_be_persisted_fails_and_leaves_memory_untouched() {
     let joiner = with_storage(2, &faulty_disk);
 
     assert_eq!(
-        joiner.import_partition(&payload),
+        joiner.import_partition(partition, &payload),
         Err(StoreApplyError::PersistenceError)
     );
     assert!(joiner.db_data.get(ENTITY, RECORD).is_none());
@@ -365,9 +364,8 @@ fn an_import_that_cannot_be_persisted_fails_and_leaves_memory_untouched() {
 fn an_import_whose_flush_fails_is_not_reported_complete() {
     let source_disk: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
     let source = written_by_normal_paths(&source_disk);
-    let payload = source
-        .export_partition(data_partition(ENTITY, RECORD))
-        .unwrap();
+    let partition = data_partition(ENTITY, RECORD);
+    let payload = source.export_partition(partition).unwrap();
 
     let faulty = FaultyBackend::shared();
     faulty.fail_flushes(true);
@@ -375,7 +373,7 @@ fn an_import_whose_flush_fails_is_not_reported_complete() {
     let joiner = with_storage(2, &faulty_disk);
 
     assert_eq!(
-        joiner.import_partition(&payload),
+        joiner.import_partition(partition, &payload),
         Err(StoreApplyError::PersistenceError)
     );
     assert!(joiner.db_data.get(ENTITY, RECORD).is_none());
@@ -393,7 +391,7 @@ fn an_imported_processing_idempotency_claim_is_not_recovered_after_a_restart() {
     let joiner_disk: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
     let joiner = with_storage(2, &joiner_disk);
     joiner
-        .import_partition(&source.export_partition(partition).unwrap())
+        .import_partition(partition, &source.export_partition(partition).unwrap())
         .unwrap();
     assert!(
         joiner
@@ -411,4 +409,159 @@ fn an_imported_processing_idempotency_claim_is_not_recovered_after_a_restart() {
             .is_some_and(|record| record.is_processing()),
         "a processing claim must not survive a restart"
     );
+}
+
+fn assert_holds_no_partition_data(store: &StoreManager, context: &str) {
+    assert!(store.sessions.get(CLIENT).is_none(), "{context}: session");
+    assert!(store.qos2.get(CLIENT, 7).is_none(), "{context}: qos2");
+    assert!(
+        store.subscriptions.get_snapshot(CLIENT).is_none(),
+        "{context}: subscriptions"
+    );
+    assert!(
+        store.retained.get(EXACT_TOPIC).is_none(),
+        "{context}: retained"
+    );
+    assert!(
+        store.inflight.get(CLIENT, 9).is_none(),
+        "{context}: inflight"
+    );
+    assert!(
+        store.offsets.get(CLIENT, PartitionId::ZERO).is_none(),
+        "{context}: offsets"
+    );
+    assert!(
+        store
+            .idempotency
+            .get(session_partition(CLIENT), IDEMPOTENCY_KEY)
+            .is_none(),
+        "{context}: idempotency"
+    );
+    assert!(
+        store.db_data.get(ENTITY, RECORD).is_none(),
+        "{context}: db data"
+    );
+    assert!(
+        store
+            .db_index
+            .lookup(ENTITY, "email", UNIQUE_VALUE)
+            .is_empty(),
+        "{context}: index"
+    );
+    assert!(
+        store.db_unique.get(ENTITY, "email", UNIQUE_VALUE).is_none(),
+        "{context}: unique"
+    );
+    assert!(
+        store.db_fk.get_request(FK_REQUEST).is_none(),
+        "{context}: fk request"
+    );
+}
+
+#[test]
+fn an_import_replaces_partition_data_and_the_replacement_survives_a_restart() {
+    let joiner_disk: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
+    let joiner = written_by_normal_paths(&joiner_disk);
+    let empty_source = StoreManager::new(node(1));
+
+    import_every_partition(&empty_source, &joiner);
+
+    assert_holds_no_partition_data(&joiner, "after import");
+    assert_holds_no_partition_data(&recovered(&joiner_disk), "after restart");
+}
+
+#[test]
+fn an_import_keeps_the_global_catalog_the_source_lacks() {
+    let joiner_disk: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
+    let joiner = written_by_normal_paths(&joiner_disk);
+    let empty_source = StoreManager::new(node(1));
+
+    import_every_partition(&empty_source, &joiner);
+
+    for store in [&joiner, &recovered(&joiner_disk)] {
+        assert!(store.db_schema.get(ENTITY).is_some(), "schema");
+        assert!(
+            store.db_constraints.get(ENTITY, "uniq_email").is_some(),
+            "constraint"
+        );
+    }
+}
+
+fn schema_delete(name: &str) -> ReplicationWrite {
+    ReplicationWrite::new(
+        PartitionId::ZERO,
+        Operation::Delete,
+        Epoch::ZERO,
+        0,
+        entity::DB_SCHEMA.to_string(),
+        name.to_string(),
+        Vec::new(),
+    )
+}
+
+#[test]
+fn a_global_write_during_two_transfers_survives_both_imports() {
+    let source_disk: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
+    let source = written_by_normal_paths(&source_disk);
+    let first = data_partition(ENTITY, RECORD);
+    let second = session_partition(CLIENT);
+    assert_ne!(first, second);
+    let first_snapshot = source.export_partition(first).unwrap();
+    let second_snapshot = source.export_partition(second).unwrap();
+
+    let joiner_disk: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
+    let joiner = with_storage(2, &joiner_disk);
+    joiner.open_transfer_window(first);
+    joiner.open_transfer_window(second);
+    joiner.apply_write(&schema_delete(ENTITY)).unwrap();
+
+    joiner.import_partition(first, &first_snapshot).unwrap();
+    joiner.import_partition(second, &second_snapshot).unwrap();
+
+    assert!(joiner.db_schema.get(ENTITY).is_none());
+    assert!(recovered(&joiner_disk).db_schema.get(ENTITY).is_none());
+}
+
+#[test]
+fn a_global_write_before_the_transfer_window_is_overwritten_by_the_snapshot() {
+    let source_disk: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
+    let source = written_by_normal_paths(&source_disk);
+    let partition = data_partition(ENTITY, RECORD);
+    let snapshot = source.export_partition(partition).unwrap();
+
+    let joiner_disk: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
+    let joiner = with_storage(2, &joiner_disk);
+    joiner.apply_write(&schema_delete(ENTITY)).unwrap();
+    joiner.open_transfer_window(partition);
+
+    joiner.import_partition(partition, &snapshot).unwrap();
+
+    assert!(joiner.db_schema.get(ENTITY).is_some());
+}
+
+#[test]
+fn a_transfer_window_that_overflows_refuses_the_import() {
+    let source_disk: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
+    let source = written_by_normal_paths(&source_disk);
+    let partition = data_partition(ENTITY, RECORD);
+    let snapshot = source.export_partition(partition).unwrap();
+
+    let joiner_disk: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
+    let joiner = with_storage(2, &joiner_disk);
+    joiner.open_transfer_window(partition);
+    for n in 0..=super::transfer_window::TRANSFER_WINDOW_CAPACITY {
+        joiner
+            .apply_write(&schema_delete(&format!("gone-{n}")))
+            .unwrap();
+    }
+
+    assert_eq!(
+        joiner.import_partition(partition, &snapshot),
+        Err(StoreApplyError::TransferWindowFull)
+    );
+    assert!(joiner.db_data.get(ENTITY, RECORD).is_none());
+
+    joiner.close_transfer_window(partition);
+    joiner.import_partition(partition, &snapshot).unwrap();
+    assert!(joiner.db_data.get(ENTITY, RECORD).is_some());
 }

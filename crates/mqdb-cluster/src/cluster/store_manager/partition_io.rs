@@ -2,15 +2,57 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::outbox::ClusterOutbox;
-use super::snapshot_writes::{SnapshotSections, snapshot_writes};
+use super::snapshot_writes::{SnapshotSections, processing_claims, snapshot_writes};
+use super::transfer_window::GLOBAL_SECTIONS;
 use super::{StoreApplyError, StoreManager};
-use crate::cluster::{PartitionId, entity};
+use crate::cluster::protocol::{Operation, ReplicationWrite};
+use crate::cluster::{Epoch, PartitionId, entity};
+use std::collections::HashSet;
 
-const SHARED_SECTIONS: [&str; 3] = [
+const REPLACED_SECTIONS: [&str; 11] = [
+    entity::SESSIONS,
+    entity::QOS2,
+    entity::SUBSCRIPTIONS,
+    entity::RETAINED,
+    entity::INFLIGHT,
+    entity::OFFSETS,
+    entity::IDEMPOTENCY,
+    entity::DB_DATA,
+    entity::DB_INDEX,
+    entity::DB_UNIQUE,
+    entity::DB_FK,
+];
+
+const SNAPSHOT_SECTIONS: [&str; 16] = [
+    entity::SESSIONS,
+    entity::QOS2,
+    entity::SUBSCRIPTIONS,
+    entity::RETAINED,
+    entity::TOPIC_INDEX,
+    entity::WILDCARDS,
+    entity::INFLIGHT,
+    entity::OFFSETS,
+    entity::IDEMPOTENCY,
+    entity::DB_DATA,
     entity::DB_SCHEMA,
+    entity::DB_INDEX,
+    entity::DB_UNIQUE,
+    entity::DB_FK,
     entity::DB_CONSTRAINT,
     entity::CHANGE_EVENTS,
 ];
+
+fn removal(write: &ReplicationWrite) -> ReplicationWrite {
+    ReplicationWrite::new(
+        write.partition,
+        Operation::Delete,
+        Epoch::ZERO,
+        0,
+        write.entity.clone(),
+        write.id.clone(),
+        Vec::new(),
+    )
+}
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ImportCounts {
@@ -24,57 +66,8 @@ impl StoreManager {
     pub fn export_partition(&self, partition: PartitionId) -> Result<Vec<u8>, StoreApplyError> {
         let mut buf = Vec::new();
 
-        let store_data = [
-            (
-                entity::SESSIONS,
-                self.sessions.export_for_partition(partition),
-            ),
-            (entity::QOS2, self.qos2.export_for_partition(partition)),
-            (
-                entity::SUBSCRIPTIONS,
-                self.subscriptions.export_for_partition(partition),
-            ),
-            (
-                entity::RETAINED,
-                self.retained.export_for_partition(partition),
-            ),
-            (
-                entity::TOPIC_INDEX,
-                self.topics.export_for_partition(partition),
-            ),
-            (
-                entity::WILDCARDS,
-                self.wildcards.export_for_partition(partition),
-            ),
-            (
-                entity::INFLIGHT,
-                self.inflight.export_for_partition(partition),
-            ),
-            (
-                entity::OFFSETS,
-                self.offsets.export_for_partition(partition),
-            ),
-            (
-                entity::IDEMPOTENCY,
-                self.idempotency.export_for_partition(partition),
-            ),
-            (
-                entity::DB_DATA,
-                self.db_data.export_for_partition(partition),
-            ),
-            (entity::DB_SCHEMA, self.db_schema.export_all()),
-            (
-                entity::DB_INDEX,
-                self.db_index.export_for_partition(partition),
-            ),
-            (
-                entity::DB_UNIQUE,
-                self.db_unique.export_for_partition(partition),
-            ),
-            (entity::DB_FK, self.db_fk.export_for_partition(partition)),
-            (entity::DB_CONSTRAINT, self.db_constraints.export_all()),
-            (entity::CHANGE_EVENTS, self.export_change_events(partition)),
-        ];
+        let store_data = SNAPSHOT_SECTIONS
+            .map(|entity_name| (entity_name, self.export_section(entity_name, partition)));
 
         let too_large = |_| StoreApplyError::SnapshotTooLarge;
         buf.push(u8::try_from(store_data.len()).map_err(too_large)?);
@@ -92,13 +85,18 @@ impl StoreManager {
 
     /// # Errors
     /// Returns `StoreApplyError` if the snapshot data is malformed or a store import fails.
-    pub fn import_partition(&self, data: &[u8]) -> Result<usize, StoreApplyError> {
-        self.import_partition_counted(data)
+    pub fn import_partition(
+        &self,
+        partition: PartitionId,
+        data: &[u8],
+    ) -> Result<usize, StoreApplyError> {
+        self.import_partition_counted(partition, data)
             .map(|counts| counts.total)
     }
 
     pub(crate) fn import_partition_counted(
         &self,
+        partition: PartitionId,
         data: &[u8],
     ) -> Result<ImportCounts, StoreApplyError> {
         let mut counts = ImportCounts::default();
@@ -106,52 +104,106 @@ impl StoreManager {
             return Ok(counts);
         }
 
-        let mut writes = Vec::new();
+        let written = self.transfer_window_writes(partition)?;
+        let kept = |write: &ReplicationWrite| {
+            !written.is_empty() && written.contains(&(write.entity.clone(), write.id.clone()))
+        };
+
+        let mut incoming = Vec::new();
+        let mut incoming_claims = Vec::new();
         for section in SnapshotSections::new(data) {
             let (entity_name, store_data) = section?;
-            writes.extend(snapshot_writes(entity_name, store_data)?);
+            incoming.extend(snapshot_writes(entity_name, store_data)?);
+            if entity_name == entity::IDEMPOTENCY {
+                incoming_claims.extend(processing_claims(store_data)?);
+            }
         }
-        self.persist_writes_batch(&writes)?;
+        incoming.retain(|write| !kept(write));
+        incoming_claims.retain(|write| !kept(write));
+
+        let mut replaced = self.partition_writes(partition)?;
+        replaced.retain(|write| !kept(write));
+        let mut local_claims =
+            processing_claims(&self.idempotency.export_for_partition(partition))?;
+        local_claims.retain(|write| !kept(write));
+
+        let incoming_keys: HashSet<(&str, &str)> = incoming
+            .iter()
+            .map(|write| (write.entity.as_str(), write.id.as_str()))
+            .collect();
+        let stale = replaced
+            .iter()
+            .filter(|write| !incoming_keys.contains(&(write.entity.as_str(), write.id.as_str())))
+            .map(removal);
+        let batch: Vec<ReplicationWrite> = stale.chain(incoming.iter().cloned()).collect();
+        self.persist_writes_batch(&batch)?;
+
+        for write in replaced.iter().chain(&local_claims) {
+            self.apply_to_memory(&removal(write))?;
+        }
+        for write in incoming.iter().chain(&incoming_claims) {
+            self.apply_to_memory(write)?;
+            counts.total += 1;
+            if !GLOBAL_SECTIONS.contains(&write.entity.as_str()) {
+                counts.partition_records += 1;
+            }
+        }
 
         for section in SnapshotSections::new(data) {
             let (entity_name, store_data) = section?;
-            let Some(imported) = self.import_section(entity_name, store_data)? else {
-                continue;
-            };
-
+            let imported = self.import_merged_section(entity_name, store_data)?;
             counts.total += imported;
-            if !SHARED_SECTIONS.contains(&entity_name) {
+            if entity_name != entity::CHANGE_EVENTS {
                 counts.partition_records += imported;
             }
         }
 
+        self.close_transfer_window(partition);
         self.rebuild_fk_indexes_after_import();
 
         Ok(counts)
     }
 
-    fn import_section(
+    fn partition_writes(
+        &self,
+        partition: PartitionId,
+    ) -> Result<Vec<ReplicationWrite>, StoreApplyError> {
+        let mut writes = Vec::new();
+        for entity_name in REPLACED_SECTIONS {
+            let exported = self.export_section(entity_name, partition);
+            writes.extend(snapshot_writes(entity_name, &exported)?);
+        }
+        Ok(writes)
+    }
+
+    fn export_section(&self, entity_name: &str, partition: PartitionId) -> Vec<u8> {
+        match entity_name {
+            entity::SESSIONS => self.sessions.export_for_partition(partition),
+            entity::QOS2 => self.qos2.export_for_partition(partition),
+            entity::SUBSCRIPTIONS => self.subscriptions.export_for_partition(partition),
+            entity::RETAINED => self.retained.export_for_partition(partition),
+            entity::INFLIGHT => self.inflight.export_for_partition(partition),
+            entity::OFFSETS => self.offsets.export_for_partition(partition),
+            entity::IDEMPOTENCY => self.idempotency.export_for_partition(partition),
+            entity::DB_DATA => self.db_data.export_for_partition(partition),
+            entity::DB_INDEX => self.db_index.export_for_partition(partition),
+            entity::DB_UNIQUE => self.db_unique.export_for_partition(partition),
+            entity::DB_FK => self.db_fk.export_for_partition(partition),
+            entity::TOPIC_INDEX => self.topics.export_for_partition(partition),
+            entity::WILDCARDS => self.wildcards.export_for_partition(partition),
+            entity::DB_SCHEMA => self.db_schema.export_all(),
+            entity::DB_CONSTRAINT => self.db_constraints.export_all(),
+            entity::CHANGE_EVENTS => self.export_change_events(partition),
+            _ => Vec::new(),
+        }
+    }
+
+    fn import_merged_section(
         &self,
         entity_name: &str,
         store_data: &[u8],
-    ) -> Result<Option<usize>, StoreApplyError> {
-        let imported = match entity_name {
-            entity::SESSIONS => self
-                .sessions
-                .import_sessions(store_data)
-                .map_err(|_| StoreApplyError::SessionError),
-            entity::QOS2 => self
-                .qos2
-                .import_states(store_data)
-                .map_err(|_| StoreApplyError::Qos2Error),
-            entity::SUBSCRIPTIONS => self
-                .subscriptions
-                .import_subscriptions(store_data)
-                .map_err(|_| StoreApplyError::SubscriptionError),
-            entity::RETAINED => self
-                .retained
-                .import_retained(store_data)
-                .map_err(|_| StoreApplyError::RetainedError),
+    ) -> Result<usize, StoreApplyError> {
+        match entity_name {
             entity::TOPIC_INDEX => self
                 .topics
                 .import_entries(store_data)
@@ -160,46 +212,9 @@ impl StoreManager {
                 .wildcards
                 .import_wildcards(store_data)
                 .map_err(|_| StoreApplyError::WildcardError),
-            entity::INFLIGHT => self
-                .inflight
-                .import_inflight(store_data)
-                .map_err(|_| StoreApplyError::InflightError),
-            entity::OFFSETS => self
-                .offsets
-                .import_offsets(store_data)
-                .map_err(|_| StoreApplyError::OffsetError),
-            entity::IDEMPOTENCY => self
-                .idempotency
-                .import_records(store_data)
-                .map_err(|_| StoreApplyError::IdempotencyError),
-            entity::DB_DATA => self
-                .db_data
-                .import_entities(store_data)
-                .map_err(|_| StoreApplyError::DbDataError),
-            entity::DB_SCHEMA => self
-                .db_schema
-                .import_schemas(store_data)
-                .map_err(|_| StoreApplyError::DbSchemaError),
-            entity::DB_INDEX => self
-                .db_index
-                .import_entries(store_data)
-                .map_err(|_| StoreApplyError::DbIndexError),
-            entity::DB_UNIQUE => self
-                .db_unique
-                .import_reservations(store_data)
-                .map_err(|_| StoreApplyError::DbUniqueError),
-            entity::DB_FK => self
-                .db_fk
-                .import_requests(store_data)
-                .map_err(|_| StoreApplyError::DbFkError),
-            entity::DB_CONSTRAINT => self
-                .db_constraints
-                .import_constraints(store_data)
-                .map_err(|_| StoreApplyError::DbConstraintError),
             entity::CHANGE_EVENTS => self.import_change_events(store_data),
-            _ => return Ok(None),
-        };
-        imported.map(Some)
+            _ => Ok(0),
+        }
     }
 
     fn export_change_events(&self, partition: PartitionId) -> Vec<u8> {
@@ -257,7 +272,7 @@ mod tests {
         let payload = src.export_partition(partition).unwrap();
         assert!(!payload.is_empty(), "snapshot payload must not be empty");
 
-        let imported = dst.import_partition(&payload).expect("import");
+        let imported = dst.import_partition(partition, &payload).expect("import");
         assert!(
             imported >= 1,
             "at least one record for partition must survive the roundtrip"
@@ -282,7 +297,7 @@ mod tests {
 
         let payload = src.export_partition(partition).unwrap();
 
-        dst.import_partition(&payload).expect("import");
+        dst.import_partition(partition, &payload).expect("import");
         assert!(dst.db_data.get("notes", "n1").is_some());
     }
 
@@ -300,7 +315,7 @@ mod tests {
 
         let payload = src.export_partition(target).unwrap();
         assert!(!payload.is_empty());
-        let total_imported = dst.import_partition(&payload).expect("import");
+        let total_imported = dst.import_partition(target, &payload).expect("import");
         assert!(total_imported >= 1);
 
         for entity in &entities {
@@ -462,7 +477,9 @@ mod tests {
 
         let payload = src.export_partition(child_partition).unwrap();
         assert!(!payload.is_empty(), "snapshot payload must not be empty");
-        let imported = dst.import_partition(&payload).expect("import");
+        let imported = dst
+            .import_partition(child_partition, &payload)
+            .expect("import");
         assert!(imported >= 1, "child record must survive import");
 
         assert!(
@@ -531,7 +548,8 @@ mod tests {
         );
 
         let payload = src.export_partition(any_partition).unwrap();
-        dst.import_partition(&payload).expect("import");
+        dst.import_partition(any_partition, &payload)
+            .expect("import");
 
         for entity in &entities {
             assert!(
