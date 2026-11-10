@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::{error, warn};
 
 fn fits_key_limit(key: &[u8]) -> bool {
     u16::try_from(key.len()).is_ok()
@@ -74,24 +74,14 @@ impl PeriodicSync {
         let worker = thread::Builder::new()
             .name("mqdb-periodic-sync".to_string())
             .spawn(move || {
-                let mut failing = false;
                 while let Err(mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(interval) {
                     if !unsynced_writes.swap(false, Ordering::AcqRel) {
                         continue;
                     }
-                    match sync() {
-                        Ok(()) if failing => {
-                            failing = false;
-                            info!("periodic storage sync recovered");
-                        }
-                        Ok(()) => {}
-                        Err(error) => {
-                            unsynced_writes.store(true, Ordering::Release);
-                            if !failing {
-                                failing = true;
-                                warn!(%error, "periodic storage sync failed, retrying every interval");
-                            }
-                        }
+                    if let Err(error) = sync() {
+                        unsynced_writes.store(true, Ordering::Release);
+                        error!(%error, "periodic storage sync failed; storage refuses further writes");
+                        break;
                     }
                 }
             })
@@ -435,6 +425,9 @@ mod tests {
         backend.remove(b"k").unwrap();
         assert!(unsynced.swap(false, Ordering::AcqRel));
 
+        backend.flush().unwrap();
+        assert!(unsynced.swap(false, Ordering::AcqRel));
+
         assert!(backend.get(b"b").unwrap().is_some());
         assert!(!unsynced.load(Ordering::Acquire));
     }
@@ -468,16 +461,16 @@ mod tests {
     }
 
     #[test]
-    fn periodic_sync_runs_only_after_writes_and_retries_failures() {
+    fn periodic_sync_runs_only_after_writes_and_stops_after_a_failure() {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let fail_first = Arc::new(AtomicBool::new(true));
+        let fail = Arc::new(AtomicBool::new(false));
         let unsynced = Arc::new(AtomicBool::new(false));
         let counted = Arc::clone(&calls);
-        let failing = Arc::clone(&fail_first);
+        let failing = Arc::clone(&fail);
         let worker =
             PeriodicSync::start(Duration::from_millis(5), Arc::clone(&unsynced), move || {
                 counted.fetch_add(1, Ordering::SeqCst);
-                if failing.swap(false, Ordering::SeqCst) {
+                if failing.load(Ordering::SeqCst) {
                     return Err(crate::error::Error::Internal("disk".into()));
                 }
                 Ok(())
@@ -488,10 +481,17 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
 
         unsynced.store(true, Ordering::Release);
-        assert!(wait_until(|| calls.load(Ordering::SeqCst) == 2));
+        assert!(wait_until(|| calls.load(Ordering::SeqCst) == 1));
         assert!(!unsynced.load(Ordering::Acquire));
 
-        thread::sleep(Duration::from_millis(50));
+        fail.store(true, Ordering::SeqCst);
+        unsynced.store(true, Ordering::Release);
+        assert!(wait_until(|| calls.load(Ordering::SeqCst) == 2));
+        assert!(wait_until(|| worker
+            .worker
+            .as_ref()
+            .is_some_and(thread::JoinHandle::is_finished)));
+        assert!(unsynced.load(Ordering::Acquire));
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         drop(worker);
     }
