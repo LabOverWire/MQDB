@@ -267,6 +267,7 @@ impl<T: ClusterTransport> NodeController<T> {
         if let Some(state) = self.replicas.get_mut(&partition.get()) {
             let epoch = state.epoch();
             state.become_awaiting_snapshot(epoch);
+            self.stores.open_transfer_window(partition);
         }
         self.request_snapshot(partition, source).await;
     }

@@ -670,6 +670,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 super::super::replication::ReplicaState::new(partition, self.node_id)
             })
             .become_awaiting_snapshot(epoch);
+        self.stores.open_transfer_window(partition);
         self.stop_sending_change_events(partition);
         tracing::info!(
             ?partition,

@@ -5,6 +5,7 @@ use super::*;
 use crate::cluster::data_partition;
 use crate::cluster::db::{SchemaStore, UniqueReserveParams, unique_key, unique_partition};
 use crate::cluster::entity;
+use crate::cluster::node_controller::snapshot::SNAPSHOT_RETRY_BACKOFF_MS;
 use crate::cluster::protocol::{Operation, ReplicationWrite};
 use crate::cluster::snapshot::SnapshotChunk;
 use crate::cluster::{PartitionAssignment, PartitionMap};
@@ -385,6 +386,91 @@ async fn a_unique_reserve_during_transfer_survives_import() {
             .get(ENTITY, "email", VALUE)
             .map(|claim| claim.record_id_str().to_string()),
         Some("r1".to_string())
+    );
+}
+
+fn schema_write(from: &SchemaStore, name: &str, operation: Operation) -> ClusterMessage {
+    let data = from
+        .get(name)
+        .map(|schema| SchemaStore::serialize(&schema))
+        .unwrap_or_default();
+    ClusterMessage::WriteRequest(ReplicationWrite::new(
+        PartitionId::ZERO,
+        operation,
+        Epoch::ZERO,
+        0,
+        entity::DB_SCHEMA.to_string(),
+        name.to_string(),
+        data,
+    ))
+}
+
+async fn retry_transfer_if_refused(
+    primary: &mut NodeController<MockTransport>,
+    replica: &mut NodeController<MockTransport>,
+    partition: PartitionId,
+) {
+    if replica.role(partition) != ReplicaRole::AwaitingSnapshot {
+        return;
+    }
+    replica.transport.take_sent();
+    replica.drive_snapshots(1_000).await;
+    replica
+        .drive_snapshots(1_000 + SNAPSHOT_RETRY_BACKOFF_MS)
+        .await;
+    let chunks = start_transfer(primary, replica).await;
+    finish_transfer(replica, &chunks).await;
+}
+
+#[tokio::test]
+async fn a_global_write_while_the_request_cannot_be_sent_survives_import() {
+    let (mut primary, partition) = primary_holding(1, 16);
+    let first = primary
+        .schema_register(ENTITY, b"{\"fields\":[]}")
+        .await
+        .unwrap();
+    primary.transport.take_sent();
+    let elsewhere = controller(3);
+    elsewhere
+        .stores
+        .db_schema
+        .apply_replicated(Operation::Insert, ENTITY, &SchemaStore::serialize(&first))
+        .unwrap();
+    let updated = elsewhere
+        .stores
+        .db_schema
+        .update(ENTITY, b"{\"fields\":[\"new\"]}")
+        .unwrap();
+
+    let mut replica = controller(2);
+    assign(&mut replica, node(1));
+    replica
+        .stores
+        .db_schema
+        .apply_replicated(Operation::Insert, ENTITY, &SchemaStore::serialize(&first))
+        .unwrap();
+    replica
+        .transport
+        .refuse_sends
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    replica
+        .become_replica_with_snapshot(partition, Epoch::new(1), node(1))
+        .await;
+    replica.transport.inject_message(
+        node(3),
+        schema_write(&elsewhere.stores.db_schema, ENTITY, Operation::Update),
+    );
+    replica.process_messages().await;
+    replica
+        .transport
+        .refuse_sends
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    retry_transfer_if_refused(&mut primary, &mut replica, partition).await;
+
+    assert_eq!(replica.role(partition), ReplicaRole::Replica);
+    assert_eq!(
+        String::from_utf8_lossy(&replica.stores.db_schema.get(ENTITY).unwrap().data),
+        String::from_utf8_lossy(&updated.data),
     );
 }
 
