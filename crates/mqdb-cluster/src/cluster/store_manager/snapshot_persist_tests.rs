@@ -555,7 +555,7 @@ fn a_global_write_before_the_transfer_window_is_overwritten_by_the_snapshot() {
 }
 
 #[test]
-fn a_transfer_window_that_overflows_refuses_the_import() {
+fn a_transfer_window_that_overflows_keeps_every_unsequenced_key() {
     let source_disk: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
     let source = written_by_normal_paths(&source_disk);
     let partition = data_partition(ENTITY, RECORD);
@@ -570,13 +570,9 @@ fn a_transfer_window_that_overflows_refuses_the_import() {
             .unwrap();
     }
 
-    assert_eq!(
-        joiner.import_partition(partition, &snapshot),
-        Err(StoreApplyError::TransferWindowFull)
-    );
-    assert!(joiner.db_data.get(ENTITY, RECORD).is_none());
-
-    joiner.close_transfer_window(partition);
     joiner.import_partition(partition, &snapshot).unwrap();
+
     assert!(joiner.db_data.get(ENTITY, RECORD).is_some());
+    assert!(joiner.db_schema.get(ENTITY).is_none());
+    assert!(joiner.db_constraints.get(ENTITY, "uniq_email").is_none());
 }

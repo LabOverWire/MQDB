@@ -8,6 +8,7 @@ use crate::cluster::entity;
 use crate::cluster::node_controller::snapshot::SNAPSHOT_RETRY_BACKOFF_MS;
 use crate::cluster::protocol::{Operation, ReplicationWrite};
 use crate::cluster::snapshot::SnapshotChunk;
+use crate::cluster::store_manager::TRANSFER_WINDOW_CAPACITY;
 use crate::cluster::{PartitionAssignment, PartitionMap};
 
 const ENTITY: &str = "snap";
@@ -389,6 +390,18 @@ async fn a_unique_reserve_during_transfer_survives_import() {
     );
 }
 
+fn schema_delete(name: &str) -> ClusterMessage {
+    ClusterMessage::WriteRequest(ReplicationWrite::new(
+        PartitionId::ZERO,
+        Operation::Delete,
+        Epoch::ZERO,
+        0,
+        entity::DB_SCHEMA.to_string(),
+        name.to_string(),
+        Vec::new(),
+    ))
+}
+
 fn schema_write(from: &SchemaStore, name: &str, operation: Operation) -> ClusterMessage {
     let data = from
         .get(name)
@@ -420,6 +433,37 @@ async fn retry_transfer_if_refused(
         .await;
     let chunks = start_transfer(primary, replica).await;
     finish_transfer(replica, &chunks).await;
+}
+
+#[tokio::test]
+async fn a_delete_protected_before_the_window_fills_stays_deleted() {
+    let (mut primary, partition) = primary_holding(1, 16);
+    primary
+        .schema_register("gone", b"{\"fields\":[]}")
+        .await
+        .unwrap();
+    primary.transport.take_sent();
+    let (mut replica, _) = awaiting_replica(node(1)).await;
+    let chunks = start_transfer(&mut primary, &mut replica).await;
+    replica.transport.inject_message(
+        node(3),
+        schema_write(&replica.stores.db_schema, "gone", Operation::Delete),
+    );
+    for n in 0..=TRANSFER_WINDOW_CAPACITY {
+        replica
+            .transport
+            .inject_message(node(3), schema_delete(&format!("other-{n}")));
+    }
+    replica.process_messages().await;
+    finish_transfer(&mut replica, &chunks).await;
+    retry_transfer_if_refused(&mut primary, &mut replica, partition).await;
+
+    assert_eq!(replica.role(partition), ReplicaRole::Replica);
+    assert!(replica.db_get(ENTITY, ID).is_some());
+    assert!(
+        replica.stores.db_schema.get("gone").is_none(),
+        "the delete taken during the transfer was undone"
+    );
 }
 
 #[tokio::test]

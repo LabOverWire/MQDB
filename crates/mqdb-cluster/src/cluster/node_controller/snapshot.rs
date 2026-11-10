@@ -578,9 +578,6 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             Err(e) => {
                 tracing::error!(?partition, ?e, "failed to import snapshot");
-                if e == StoreApplyError::TransferWindowFull {
-                    self.stores.close_transfer_window(partition);
-                }
                 self.restore_change_events(partition, &saved_events);
                 self.back_off_snapshot_with(partition, wait);
                 self.send_snapshot_failed(from, partition).await;

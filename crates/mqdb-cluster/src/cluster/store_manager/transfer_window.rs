@@ -1,7 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use super::{StoreApplyError, StoreManager};
+use super::StoreManager;
 use crate::cluster::protocol::ReplicationWrite;
 use crate::cluster::{PartitionId, entity};
 use std::collections::{HashMap, HashSet};
@@ -57,8 +57,7 @@ impl StoreManager {
 
     pub(super) fn note_transfer_write(&self, write: &ReplicationWrite) {
         let global = GLOBAL_SECTIONS.contains(&write.entity.as_str());
-        let tracked = global || write.entity == entity::DB_UNIQUE;
-        if !tracked
+        if !tracked(&write.entity)
             || self
                 .transfer_windows
                 .0
@@ -80,10 +79,7 @@ impl StoreManager {
         }
     }
 
-    pub(super) fn transfer_window_writes(
-        &self,
-        partition: PartitionId,
-    ) -> Result<HashSet<WrittenKey>, StoreApplyError> {
+    pub(super) fn transfer_window_protection(&self, partition: PartitionId) -> Protection {
         match self
             .transfer_windows
             .0
@@ -91,9 +87,31 @@ impl StoreManager {
             .unwrap_or_else(PoisonError::into_inner)
             .get(&partition)
         {
-            Some(window) if window.overflowed => Err(StoreApplyError::TransferWindowFull),
-            Some(window) => Ok(window.written.clone()),
-            None => Ok(HashSet::new()),
+            Some(window) => Protection {
+                written: window.written.clone(),
+                every_tracked_key: window.overflowed,
+            },
+            None => Protection::default(),
         }
     }
+}
+
+#[derive(Debug, Default)]
+pub(super) struct Protection {
+    written: HashSet<WrittenKey>,
+    every_tracked_key: bool,
+}
+
+impl Protection {
+    pub(super) fn keeps(&self, write: &ReplicationWrite) -> bool {
+        (self.every_tracked_key && tracked(&write.entity))
+            || (!self.written.is_empty()
+                && self
+                    .written
+                    .contains(&(write.entity.clone(), write.id.clone())))
+    }
+}
+
+fn tracked(entity_name: &str) -> bool {
+    GLOBAL_SECTIONS.contains(&entity_name) || entity_name == entity::DB_UNIQUE
 }

@@ -43,6 +43,8 @@ use mqdb_core::storage::StorageBackend;
 use std::sync::Arc;
 
 pub(crate) use primary_marker::HeldPrimaries;
+#[cfg(test)]
+pub(crate) use transfer_window::TRANSFER_WINDOW_CAPACITY;
 
 #[derive(Debug, Default, Clone)]
 pub struct RecoveryStats {
@@ -139,7 +141,6 @@ pub enum StoreApplyError {
     ChangeEventError,
     PersistenceError,
     SnapshotTooLarge,
-    TransferWindowFull,
 }
 
 impl std::fmt::Display for StoreApplyError {
@@ -165,12 +166,6 @@ impl std::fmt::Display for StoreApplyError {
             Self::ChangeEventError => write!(f, "change event store error"),
             Self::PersistenceError => write!(f, "persistence error"),
             Self::SnapshotTooLarge => write!(f, "partition snapshot exceeds the frame size limits"),
-            Self::TransferWindowFull => {
-                write!(
-                    f,
-                    "too many writes arrived while the partition snapshot was in transfer"
-                )
-            }
         }
     }
 }

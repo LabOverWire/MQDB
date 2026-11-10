@@ -103,10 +103,8 @@ impl StoreManager {
             return Ok(counts);
         }
 
-        let written = self.transfer_window_writes(partition)?;
-        let kept = |write: &ReplicationWrite| {
-            !written.is_empty() && written.contains(&(write.entity.clone(), write.id.clone()))
-        };
+        let protection = self.transfer_window_protection(partition);
+        let kept = |write: &ReplicationWrite| protection.keeps(write);
 
         let mut incoming = Vec::new();
         let mut incoming_claims = Vec::new();
