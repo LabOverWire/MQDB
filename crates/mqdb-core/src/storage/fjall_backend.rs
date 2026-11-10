@@ -7,7 +7,11 @@ use crate::error::Result;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode, Readable, Slice};
 use std::ops::Bound;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
+use std::time::Duration;
+use tracing::{info, warn};
 
 fn fits_key_limit(key: &[u8]) -> bool {
     u16::try_from(key.len()).is_ok()
@@ -37,10 +41,84 @@ fn oversized_key_error(key: &[u8]) -> crate::error::Error {
     crate::error::Error::KeyTooLarge(key.len())
 }
 
+#[derive(Clone)]
+struct WriteDurability {
+    mode: DurabilityMode,
+    unsynced_writes: Arc<AtomicBool>,
+}
+
+impl WriteDurability {
+    fn after_write(&self, db: &Database) -> Result<()> {
+        match self.mode {
+            DurabilityMode::Immediate => {
+                db.persist(PersistMode::SyncAll)?;
+            }
+            DurabilityMode::PeriodicMs(_) => self.unsynced_writes.store(true, Ordering::Release),
+            DurabilityMode::None => {}
+        }
+        Ok(())
+    }
+}
+
+struct PeriodicSync {
+    stop: Option<mpsc::Sender<()>>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+impl PeriodicSync {
+    fn start<F>(interval: Duration, unsynced_writes: Arc<AtomicBool>, sync: F) -> Result<Self>
+    where
+        F: Fn() -> Result<()> + Send + 'static,
+    {
+        let (stop, stopped) = mpsc::channel::<()>();
+        let worker = thread::Builder::new()
+            .name("mqdb-periodic-sync".to_string())
+            .spawn(move || {
+                let mut failing = false;
+                while let Err(mpsc::RecvTimeoutError::Timeout) = stopped.recv_timeout(interval) {
+                    if !unsynced_writes.swap(false, Ordering::AcqRel) {
+                        continue;
+                    }
+                    match sync() {
+                        Ok(()) if failing => {
+                            failing = false;
+                            info!("periodic storage sync recovered");
+                        }
+                        Ok(()) => {}
+                        Err(error) => {
+                            unsynced_writes.store(true, Ordering::Release);
+                            if !failing {
+                                failing = true;
+                                warn!(%error, "periodic storage sync failed, retrying every interval");
+                            }
+                        }
+                    }
+                }
+            })
+            .map_err(fjall::Error::Io)?;
+        Ok(Self {
+            stop: Some(stop),
+            worker: Some(worker),
+        })
+    }
+}
+
+impl Drop for PeriodicSync {
+    fn drop(&mut self) {
+        self.stop.take();
+        if let Some(worker) = self.worker.take()
+            && worker.join().is_err()
+        {
+            warn!("periodic storage sync worker panicked");
+        }
+    }
+}
+
 pub struct FjallBackend {
+    periodic_sync: Option<PeriodicSync>,
     db: Database,
     keyspace: Keyspace,
-    durability: DurabilityMode,
+    durability: WriteDurability,
     commit_lock: Arc<Mutex<()>>,
 }
 
@@ -51,23 +129,44 @@ impl FjallBackend {
         std::fs::create_dir_all(path.as_ref()).map_err(fjall::Error::Io)?;
         let db = Database::builder(path.as_ref()).open()?;
         let keyspace = db.keyspace("main", KeyspaceCreateOptions::default)?;
+        let unsynced_writes = Arc::new(AtomicBool::new(false));
+        let periodic_sync = match durability {
+            DurabilityMode::PeriodicMs(interval_ms) => {
+                let synced_db = db.clone();
+                Some(PeriodicSync::start(
+                    Duration::from_millis(interval_ms.max(1)),
+                    Arc::clone(&unsynced_writes),
+                    move || Ok(synced_db.persist(PersistMode::SyncAll)?),
+                )?)
+            }
+            DurabilityMode::Immediate | DurabilityMode::None => None,
+        };
 
         Ok(Self {
+            periodic_sync,
             db,
             keyspace,
-            durability,
+            durability: WriteDurability {
+                mode: durability,
+                unsynced_writes,
+            },
             commit_lock: Arc::new(Mutex::new(())),
         })
     }
 
     fn sync_if_needed(&self) -> Result<()> {
-        match self.durability {
-            DurabilityMode::Immediate => {
-                self.db.persist(PersistMode::SyncAll)?;
-            }
-            DurabilityMode::PeriodicMs(_) | DurabilityMode::None => {}
-        }
-        Ok(())
+        self.durability.after_write(&self.db)
+    }
+
+    #[cfg(test)]
+    fn has_unsynced_writes(&self) -> bool {
+        self.durability.unsynced_writes.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for FjallBackend {
+    fn drop(&mut self) {
+        drop(self.periodic_sync.take());
     }
 }
 
@@ -178,7 +277,7 @@ impl StorageBackend for FjallBackend {
         Box::new(FjallBatch {
             db: self.db.clone(),
             keyspace: self.keyspace.clone(),
-            durability: self.durability,
+            durability: self.durability.clone(),
             operations: Vec::new(),
             preconditions: Vec::new(),
             commit_lock: Arc::clone(&self.commit_lock),
@@ -213,7 +312,7 @@ enum Precondition {
 pub struct FjallBatch {
     db: Database,
     keyspace: Keyspace,
-    durability: DurabilityMode,
+    durability: WriteDurability,
     operations: Vec<BatchOp>,
     preconditions: Vec<Precondition>,
     commit_lock: Arc<Mutex<()>>,
@@ -295,14 +394,7 @@ impl BatchOperations for FjallBatch {
             batch.commit()?;
         }
 
-        match self.durability {
-            DurabilityMode::Immediate => {
-                self.db.persist(PersistMode::SyncAll)?;
-            }
-            DurabilityMode::PeriodicMs(_) | DurabilityMode::None => {}
-        }
-
-        Ok(())
+        self.durability.after_write(&self.db)
     }
 }
 
@@ -312,6 +404,110 @@ mod tests {
 
     fn open_backend(dir: &tempfile::TempDir) -> FjallBackend {
         FjallBackend::open(dir.path(), DurabilityMode::None).unwrap()
+    }
+
+    fn wait_until(condition: impl Fn() -> bool) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if condition() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        condition()
+    }
+
+    #[test]
+    fn periodic_mode_marks_every_write_kind_unsynced() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend =
+            FjallBackend::open(dir.path(), DurabilityMode::PeriodicMs(3_600_000)).unwrap();
+        let unsynced = &backend.durability.unsynced_writes;
+
+        backend.insert(b"k", b"v").unwrap();
+        assert!(unsynced.swap(false, Ordering::AcqRel));
+
+        let mut batch = backend.batch();
+        batch.insert(b"b".to_vec(), b"v".to_vec());
+        batch.commit().unwrap();
+        assert!(unsynced.swap(false, Ordering::AcqRel));
+
+        backend.remove(b"k").unwrap();
+        assert!(unsynced.swap(false, Ordering::AcqRel));
+
+        assert!(backend.get(b"b").unwrap().is_some());
+        assert!(!unsynced.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn periodic_mode_syncs_writes_and_batches_within_the_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = FjallBackend::open(dir.path(), DurabilityMode::PeriodicMs(10)).unwrap();
+
+        backend.insert(b"k", b"v").unwrap();
+        assert!(wait_until(|| !backend.has_unsynced_writes()));
+
+        let mut batch = backend.batch();
+        batch.insert(b"b".to_vec(), b"v".to_vec());
+        batch.commit().unwrap();
+        assert!(wait_until(|| !backend.has_unsynced_writes()));
+
+        backend.remove(b"k").unwrap();
+        assert!(wait_until(|| !backend.has_unsynced_writes()));
+    }
+
+    #[test]
+    fn immediate_and_none_modes_leave_nothing_for_a_timer() {
+        for mode in [DurabilityMode::Immediate, DurabilityMode::None] {
+            let dir = tempfile::tempdir().unwrap();
+            let backend = FjallBackend::open(dir.path(), mode).unwrap();
+            backend.insert(b"k", b"v").unwrap();
+            assert!(!backend.has_unsynced_writes());
+            assert!(backend.periodic_sync.is_none());
+        }
+    }
+
+    #[test]
+    fn periodic_sync_runs_only_after_writes_and_retries_failures() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fail_first = Arc::new(AtomicBool::new(true));
+        let unsynced = Arc::new(AtomicBool::new(false));
+        let counted = Arc::clone(&calls);
+        let failing = Arc::clone(&fail_first);
+        let worker =
+            PeriodicSync::start(Duration::from_millis(5), Arc::clone(&unsynced), move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                if failing.swap(false, Ordering::SeqCst) {
+                    return Err(crate::error::Error::Internal("disk".into()));
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        unsynced.store(true, Ordering::Release);
+        assert!(wait_until(|| calls.load(Ordering::SeqCst) == 2));
+        assert!(!unsynced.load(Ordering::Acquire));
+
+        thread::sleep(Duration::from_millis(50));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        drop(worker);
+    }
+
+    #[test]
+    fn dropping_the_backend_stops_the_sync_worker_without_waiting_an_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend =
+            FjallBackend::open(dir.path(), DurabilityMode::PeriodicMs(3_600_000)).unwrap();
+        backend.insert(b"k", b"v").unwrap();
+        let started = std::time::Instant::now();
+        drop(backend);
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let reopened = FjallBackend::open(dir.path(), DurabilityMode::None).unwrap();
+        assert_eq!(reopened.get(b"k").unwrap(), Some(b"v".to_vec()));
     }
 
     #[test]

@@ -698,7 +698,7 @@ Return Vec<Value>
 |----------|-----------|-------------|
 | Write atomicity | Per-entity batch commit (fjall) | Per-entity write lock serialization |
 | Replication | N/A (standalone) | Eventual consistency (async, epoch-based failover) |
-| Local durability | `Immediate` fsync (default) | `PeriodicMs(10)` (default, configurable) |
+| Local durability | `PeriodicMs(10)` (CLI default, configurable) | `PeriodicMs(10)` (default, configurable) |
 | Constraint enforcement | Atomic with data (same batch) | Best-effort (lock-drop gap, TTL self-heal) |
 | Change events | Outbox (atomic with data) | Outbox for local partitions, fire-and-forget for forwarded |
 | Isolation | Optimistic concurrency (`_version` + batch preconditions) | Per-entity write lock |
@@ -722,12 +722,12 @@ Change events are persisted atomically with data via a transactional outbox (`Cl
 
 ### Durability
 
-Configurable via `stores_durability`:
-- `Immediate`: fsync before commit returns (agent mode default)
-- `Periodic(ms)`: background flush at intervals (cluster mode default: 10ms)
-- `None`: no explicit flush (testing only)
+Set with `--durability` and `--durability-ms` in both modes:
+- `Immediate`: fsync before commit returns
+- `PeriodicMs(ms)`: a background thread fsyncs every `ms` milliseconds when there were writes since the last fsync (default for `mqdb agent start` and `mqdb cluster start`: 10 ms)
+- `None`: no explicit fsync (testing only)
 
-The Raft log always uses `Immediate` durability. Agent mode defaults to `Immediate` for maximum safety. Cluster mode defaults to `PeriodicMs(10)` — the outbox pattern guarantees consistency between data and change events regardless of fsync timing, since both share the same batch. The 10ms window trades a small durability risk on hard crash (power loss) for significantly higher write throughput. Note that replication is asynchronous: a primary failure can lose writes that were acknowledged but not yet replicated to the replica, regardless of the local fsync mode.
+The Raft log always uses `Immediate` durability. The library default `DatabaseConfig` is `Immediate`. With `PeriodicMs`, a write acknowledged in the last interval can be lost on power loss or an OS crash; a process crash loses nothing, because the write already reached the OS. The outbox keeps data and change events consistent regardless of fsync timing, since both share the same batch. Note that replication is asynchronous: a primary failure can lose writes that were acknowledged but not yet replicated to the replica, regardless of the local fsync mode.
 
 ### Optimistic Locking
 
@@ -1439,7 +1439,7 @@ pub struct SharedSubscriptionConfig {
 ```rust
 pub enum DurabilityMode {
     Immediate,        // fsync before commit returns (safest, slowest)
-    PeriodicMs(u64),  // fsync every N ms (balanced)
+    PeriodicMs(u64),  // background fsync every N ms after writes (balanced)
     None,             // no fsync (fastest, data loss risk)
 }
 ```
