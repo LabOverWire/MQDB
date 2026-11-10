@@ -9,8 +9,11 @@ use crate::cluster::node_controller::snapshot::{
 };
 use crate::cluster::protocol::{CatchupRequest, CatchupResponse, Operation, ReplicationWrite};
 use crate::cluster::snapshot::{SnapshotChunk, SnapshotComplete, SnapshotRequest, SnapshotSender};
+use crate::cluster::store_manager::StoreManager;
+use crate::cluster::test_support::FaultyBackend;
 use crate::cluster::write_log::PartitionWriteLog;
 use crate::cluster::{PartitionAssignment, PartitionMap};
+use mqdb_core::storage::{MemoryBackend, StorageBackend};
 use std::sync::atomic::Ordering;
 
 const ENTITY: &str = "snap";
@@ -133,6 +136,67 @@ async fn a_snapshot_larger_than_one_chunk_is_imported() {
 
     assert!(imported(&replica));
     assert_eq!(replica.role(partition), ReplicaRole::Replica);
+}
+
+fn completions_in(sent: &[(NodeId, ClusterMessage)]) -> usize {
+    sent.iter()
+        .filter(|(_, message)| {
+            matches!(message, ClusterMessage::SnapshotComplete(complete) if complete.is_ok())
+        })
+        .count()
+}
+
+async fn awaiting_replica_on(
+    disk: &Arc<dyn StorageBackend>,
+    source: NodeId,
+) -> (NodeController<MockTransport>, PartitionId) {
+    let mut replica = NodeController::new_with_storage(
+        node(2),
+        MockTransport::new(node(2)),
+        TransportConfig::default(),
+        Some(Arc::clone(disk)),
+        flume::unbounded().0,
+        flume::unbounded().0,
+    );
+    let partition = assign(&mut replica, source);
+    replica
+        .become_replica_with_snapshot(partition, Epoch::new(1), source)
+        .await;
+    (replica, partition)
+}
+
+#[tokio::test]
+async fn an_imported_snapshot_is_on_disk_when_the_replica_restarts() {
+    let (mut primary, partition) = primary_holding(1, 64);
+    let disk: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
+    let (mut replica, _) = awaiting_replica_on(&disk, node(1)).await;
+
+    deliver(&replica, &mut primary).await;
+    deliver(&primary, &mut replica).await;
+    assert!(imported(&replica));
+    assert_eq!(replica.role(partition), ReplicaRole::Replica);
+
+    let restarted = StoreManager::new_with_storage(node(2), Some(disk));
+    restarted.recover().unwrap();
+    assert!(restarted.db_get(ENTITY, ID).is_some());
+}
+
+#[tokio::test]
+async fn a_snapshot_that_cannot_be_persisted_is_refused_and_not_imported() {
+    let (mut primary, partition) = primary_holding(1, 64);
+    let faulty = FaultyBackend::shared();
+    let disk: Arc<dyn StorageBackend> = faulty.clone();
+    let (mut replica, _) = awaiting_replica_on(&disk, node(1)).await;
+    faulty.fail_writes(true);
+
+    deliver(&replica, &mut primary).await;
+    deliver(&primary, &mut replica).await;
+
+    let sent = replica.transport.take_sent();
+    assert_eq!(failures_in(&sent), 1);
+    assert_eq!(completions_in(&sent), 0);
+    assert!(!imported(&replica));
+    assert_eq!(replica.role(partition), ReplicaRole::AwaitingSnapshot);
 }
 
 #[tokio::test]

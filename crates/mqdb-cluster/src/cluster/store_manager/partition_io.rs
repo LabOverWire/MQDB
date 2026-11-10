@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::outbox::ClusterOutbox;
+use super::snapshot_writes::{SnapshotSections, snapshot_writes};
 use super::{StoreApplyError, StoreManager};
 use crate::cluster::{PartitionId, entity};
 
@@ -105,41 +106,15 @@ impl StoreManager {
             return Ok(counts);
         }
 
-        let store_count = data[0] as usize;
-        let mut offset = 1;
+        let mut writes = Vec::new();
+        for section in SnapshotSections::new(data) {
+            let (entity_name, store_data) = section?;
+            writes.extend(snapshot_writes(entity_name, store_data)?);
+        }
+        self.persist_writes_batch(&writes)?;
 
-        for _ in 0..store_count {
-            if offset >= data.len() {
-                break;
-            }
-
-            let name_len = data[offset] as usize;
-            offset += 1;
-
-            if offset + name_len > data.len() {
-                break;
-            }
-            let entity_name = std::str::from_utf8(&data[offset..offset + name_len])
-                .map_err(|_| StoreApplyError::UnknownEntity)?;
-            offset += name_len;
-
-            if offset + 4 > data.len() {
-                break;
-            }
-            let data_len = u32::from_be_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-            ]) as usize;
-            offset += 4;
-
-            if offset + data_len > data.len() {
-                break;
-            }
-            let store_data = &data[offset..offset + data_len];
-            offset += data_len;
-
+        for section in SnapshotSections::new(data) {
+            let (entity_name, store_data) = section?;
             let Some(imported) = self.import_section(entity_name, store_data)? else {
                 continue;
             };
