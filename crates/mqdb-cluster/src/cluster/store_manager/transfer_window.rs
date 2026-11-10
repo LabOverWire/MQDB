@@ -89,7 +89,7 @@ impl StoreManager {
         {
             Some(window) => Protection {
                 written: window.written.clone(),
-                every_tracked_key: window.overflowed,
+                overflowed: window.overflowed,
             },
             None => Protection::default(),
         }
@@ -99,19 +99,25 @@ impl StoreManager {
 #[derive(Debug, Default)]
 pub(super) struct Protection {
     written: HashSet<WrittenKey>,
-    every_tracked_key: bool,
+    overflowed: bool,
 }
 
 impl Protection {
+    pub(super) fn overflowed(&self) -> bool {
+        self.overflowed
+    }
+
     pub(super) fn keeps(&self, write: &ReplicationWrite) -> bool {
-        (self.every_tracked_key && tracked(&write.entity))
-            || (!self.written.is_empty()
-                && self
-                    .written
-                    .contains(&(write.entity.clone(), write.id.clone())))
+        !self.written.is_empty()
+            && self
+                .written
+                .contains(&(write.entity.clone(), write.id.clone()))
     }
 }
 
+pub(super) const TRACKED_SECTIONS: [&str; 3] =
+    [entity::DB_UNIQUE, entity::DB_SCHEMA, entity::DB_CONSTRAINT];
+
 fn tracked(entity_name: &str) -> bool {
-    GLOBAL_SECTIONS.contains(&entity_name) || entity_name == entity::DB_UNIQUE
+    TRACKED_SECTIONS.contains(&entity_name)
 }

@@ -555,7 +555,7 @@ fn a_global_write_before_the_transfer_window_is_overwritten_by_the_snapshot() {
 }
 
 #[test]
-fn a_transfer_window_that_overflows_keeps_every_unsequenced_key() {
+fn a_transfer_window_that_overflows_still_takes_the_keys_this_node_lacks() {
     let source_disk: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
     let source = written_by_normal_paths(&source_disk);
     let partition = data_partition(ENTITY, RECORD);
@@ -573,6 +573,6 @@ fn a_transfer_window_that_overflows_keeps_every_unsequenced_key() {
     joiner.import_partition(partition, &snapshot).unwrap();
 
     assert!(joiner.db_data.get(ENTITY, RECORD).is_some());
-    assert!(joiner.db_schema.get(ENTITY).is_none());
-    assert!(joiner.db_constraints.get(ENTITY, "uniq_email").is_none());
+    assert!(joiner.db_schema.get(ENTITY).is_some());
+    assert!(joiner.db_constraints.get(ENTITY, "uniq_email").is_some());
 }

@@ -435,34 +435,77 @@ async fn retry_transfer_if_refused(
     finish_transfer(replica, &chunks).await;
 }
 
-#[tokio::test]
-async fn a_delete_protected_before_the_window_fills_stays_deleted() {
-    let (mut primary, partition) = primary_holding(1, 16);
-    primary
-        .schema_register("gone", b"{\"fields\":[]}")
-        .await
-        .unwrap();
-    primary.transport.take_sent();
-    let (mut replica, _) = awaiting_replica(node(1)).await;
-    let chunks = start_transfer(&mut primary, &mut replica).await;
-    replica.transport.inject_message(
-        node(3),
-        schema_write(&replica.stores.db_schema, "gone", Operation::Delete),
-    );
+fn overflow_window(replica: &NodeController<MockTransport>) {
     for n in 0..=TRANSFER_WINDOW_CAPACITY {
         replica
             .transport
             .inject_message(node(3), schema_delete(&format!("other-{n}")));
     }
+}
+
+#[tokio::test]
+async fn an_update_taken_before_the_window_fills_is_kept() {
+    let (mut primary, partition) = primary_holding(1, 16);
+    let first = primary
+        .schema_register(ENTITY, b"{\"fields\":[]}")
+        .await
+        .unwrap();
+    primary.transport.take_sent();
+    let elsewhere = controller(3);
+    elsewhere
+        .stores
+        .db_schema
+        .apply_replicated(Operation::Insert, ENTITY, &SchemaStore::serialize(&first))
+        .unwrap();
+    let updated = elsewhere
+        .stores
+        .db_schema
+        .update(ENTITY, b"{\"fields\":[\"new\"]}")
+        .unwrap();
+    let (mut replica, _) = awaiting_replica(node(1)).await;
+    let chunks = start_transfer(&mut primary, &mut replica).await;
+    replica.transport.inject_message(
+        node(3),
+        schema_write(&elsewhere.stores.db_schema, ENTITY, Operation::Update),
+    );
+    overflow_window(&replica);
     replica.process_messages().await;
     finish_transfer(&mut replica, &chunks).await;
     retry_transfer_if_refused(&mut primary, &mut replica, partition).await;
 
     assert_eq!(replica.role(partition), ReplicaRole::Replica);
     assert!(replica.db_get(ENTITY, ID).is_some());
+    assert_eq!(
+        String::from_utf8_lossy(&replica.stores.db_schema.get(ENTITY).unwrap().data),
+        String::from_utf8_lossy(&updated.data),
+        "the update taken during the transfer was undone"
+    );
+}
+
+#[tokio::test]
+async fn an_overflowed_import_takes_the_claims_this_node_lacks() {
+    let mut primary = controller(1);
+    let up = unique_partition(ENTITY, "email", VALUE);
+    primary.become_primary(up, Epoch::new(1));
+    reserve(&primary, "r1");
+    let mut replica = controller(2);
+    replica
+        .become_replica_with_snapshot(up, Epoch::new(1), node(1))
+        .await;
+    let chunks = start_transfer(&mut primary, &mut replica).await;
+    overflow_window(&replica);
+    replica.process_messages().await;
+    finish_transfer(&mut replica, &chunks).await;
+    retry_transfer_if_refused(&mut primary, &mut replica, up).await;
+
+    assert_eq!(replica.role(up), ReplicaRole::Replica);
     assert!(
-        replica.stores.db_schema.get("gone").is_none(),
-        "the delete taken during the transfer was undone"
+        replica
+            .stores
+            .db_unique
+            .get(ENTITY, "email", VALUE)
+            .is_some(),
+        "the claim the snapshot carried was not imported"
     );
 }
 

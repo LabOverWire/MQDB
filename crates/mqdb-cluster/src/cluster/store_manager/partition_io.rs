@@ -3,7 +3,7 @@
 
 use super::outbox::ClusterOutbox;
 use super::snapshot_writes::{SnapshotSections, processing_claims, snapshot_writes};
-use super::transfer_window::GLOBAL_SECTIONS;
+use super::transfer_window::{GLOBAL_SECTIONS, TRACKED_SECTIONS};
 use super::{StoreApplyError, StoreManager};
 use crate::cluster::protocol::{Operation, ReplicationWrite};
 use crate::cluster::{Epoch, PartitionId, entity};
@@ -104,7 +104,15 @@ impl StoreManager {
         }
 
         let protection = self.transfer_window_protection(partition);
-        let kept = |write: &ReplicationWrite| protection.keeps(write);
+        let held = if protection.overflowed() {
+            self.tracked_keys_held(partition)?
+        } else {
+            HashSet::new()
+        };
+        let kept = |write: &ReplicationWrite| {
+            protection.keeps(write)
+                || (!held.is_empty() && held.contains(&(write.entity.clone(), write.id.clone())))
+        };
 
         let mut incoming = Vec::new();
         let mut incoming_claims = Vec::new();
@@ -162,6 +170,22 @@ impl StoreManager {
         self.rebuild_fk_indexes_after_import();
 
         Ok(counts)
+    }
+
+    fn tracked_keys_held(
+        &self,
+        partition: PartitionId,
+    ) -> Result<HashSet<(String, String)>, StoreApplyError> {
+        let mut held = HashSet::new();
+        for entity_name in TRACKED_SECTIONS {
+            let exported = self.export_section(entity_name, partition);
+            held.extend(
+                snapshot_writes(entity_name, &exported)?
+                    .into_iter()
+                    .map(|write| (write.entity, write.id)),
+            );
+        }
+        Ok(held)
     }
 
     fn partition_writes(
