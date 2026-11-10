@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 Each entry lists the date and the crate versions that were released.
 
+## 2026-11-10 — mqdb-core 0.10.1, mqdb-cluster 0.8.0, mqdb-cli 0.8.70
+
+### Upgrading from v0.8.69
+
+- `--durability periodic`, the default in agent and cluster mode, now fsyncs every `--durability-ms` (default 10 ms) when there were writes. Before, it never fsynced. In our agent-mode benchmark of sequential inserts, throughput dropped by 8 to 23% at 10 ms; a larger `--durability-ms` costs less and loses more on power loss. A process crash loses nothing either way.
+- In a cluster, a node that copied a partition from another node now keeps that copy on disk, and a later copy replaces what the node held instead of merging into it. Data left over from an earlier copy is removed on the next one.
+
+### Fixed
+
+- **Periodic durability fsyncs** (#292). `--durability-ms` was ignored and nothing was fsynced in periodic mode.
+- **Copied partitions survive a restart** (#287). A replica or replacement node held a copied partition in memory only, so replacing nodes one at a time and then restarting the cluster lost about half the acked records in our tests. It now writes the copy to disk in one batch before using it, and refuses the copy if that write fails.
+- **A partition copy no longer brings back deleted data or undoes changes made during the copy** (#308). Records, sessions and the other partition data the source no longer holds are removed. Unique claims, schemas and constraints written while the copy was in flight are kept. A primary that got its partition by copying it now trusts its disk after a restart, so it keeps the writes it acked that its replica had not received yet.
+- A replicated index delete now removes the index entry from memory.
+- **Cluster `$DB` replies echo the request's Correlation Data** (#326), as agent mode and `$DB/_health` already did. Clients that match replies by correlation data on one response topic now get the right reply.
+
+### Breaking changes
+
+- `mqdb-cluster`: `ClusterTransport` has a new required method `queue_local_response`, and `queue_local_publish_with_properties` no longer has a default. `LocalPublishRequest` has a new `correlation_data` field.
+
+### Known limitations
+
+- Unique claims, schemas and constraints are merged by a partition copy, never deleted, so one released or deleted while a node was down can stay on that node.
+- If more than 4096 unique, schema or constraint writes reach a node during one partition copy, a delete or release among them can come back, as before this release.
+
 ## 2026-11-05 — mqdb-core 0.10.0, mqdb-agent 0.12.0, mqdb-cluster 0.7.0, mqdb-vault 0.4.0, mqdb-wasm 0.6.0, mqdb-cli 0.8.69
 
 This is a security release. Upgrade if users you do not fully trust can connect.
