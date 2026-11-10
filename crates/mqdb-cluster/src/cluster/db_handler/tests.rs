@@ -117,6 +117,15 @@ impl ClusterTransport for MockTransport {
 
     async fn queue_local_publish(&self, _: String, _: Vec<u8>, _: u8) {}
 
+    async fn queue_local_publish_with_properties(
+        &self,
+        _: String,
+        _: Vec<u8>,
+        _: u8,
+        _: Vec<(String, String)>,
+    ) {
+    }
+
     async fn queue_local_response(
         &self,
         topic: String,

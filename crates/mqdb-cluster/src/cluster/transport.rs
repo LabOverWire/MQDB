@@ -609,10 +609,8 @@ pub trait ClusterTransport: Send + Sync + Debug + Clone {
         topic: String,
         payload: Vec<u8>,
         qos: u8,
-        _correlation_data: Option<Vec<u8>>,
-    ) -> impl std::future::Future<Output = ()> + Send {
-        self.queue_local_publish(topic, payload, qos)
-    }
+        correlation_data: Option<Vec<u8>>,
+    ) -> impl std::future::Future<Output = ()> + Send;
 
     fn queue_routed_publish(
         &self,
@@ -651,10 +649,8 @@ pub trait ClusterTransport: Send + Sync + Debug + Clone {
         topic: String,
         payload: Vec<u8>,
         qos: u8,
-        _user_properties: Vec<(String, String)>,
-    ) -> impl std::future::Future<Output = ()> + Send {
-        self.queue_local_publish(topic, payload, qos)
-    }
+        user_properties: Vec<(String, String)>,
+    ) -> impl std::future::Future<Output = ()> + Send;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

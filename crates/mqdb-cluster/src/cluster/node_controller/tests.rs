@@ -196,6 +196,16 @@ impl ClusterTransport for MockTransport {
         self.queue_local_publish(topic, payload, qos).await;
     }
 
+    async fn queue_local_publish_with_properties(
+        &self,
+        topic: String,
+        payload: Vec<u8>,
+        qos: u8,
+        _: Vec<(String, String)>,
+    ) {
+        self.queue_local_publish(topic, payload, qos).await;
+    }
+
     async fn queue_routed_publish(&self, publish: RoutedPublish) {
         self.queued_publishes
             .lock()

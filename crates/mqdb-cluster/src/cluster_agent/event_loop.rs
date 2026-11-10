@@ -695,12 +695,7 @@ impl ClusteredAgent {
         };
         let client = admin_client.clone();
         tokio::spawn(async move {
-            let mut options = mqtt5::PublishOptions {
-                qos: mqtt5::QoS::from(req.qos),
-                ..Default::default()
-            };
-            options.properties.user_properties = req.user_properties;
-            options.properties.correlation_data = req.correlation_data;
+            let options = local_publish_options(&req);
             if let Err(e) = client
                 .publish_with_options(&req.topic, req.payload, options)
                 .await
@@ -913,6 +908,22 @@ pub(super) async fn clear_expired_session_subscriptions<T: ClusterTransport>(
     }
 }
 
+fn local_publish_options(req: &LocalPublishRequest) -> mqtt5::PublishOptions {
+    let mut options = mqtt5::PublishOptions {
+        qos: mqtt5::QoS::from(req.qos),
+        ..Default::default()
+    };
+    options
+        .properties
+        .user_properties
+        .clone_from(&req.user_properties);
+    options
+        .properties
+        .correlation_data
+        .clone_from(&req.correlation_data);
+    options
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1042,5 +1053,28 @@ mod tests {
         )
         .await;
         assert_eq!(router.retained_count().await, 0);
+    }
+
+    #[test]
+    fn a_plain_publish_puts_the_correlation_data_and_user_properties_on_the_wire() {
+        let request = LocalPublishRequest {
+            topic: "resp/t".to_string(),
+            payload: b"reply".to_vec(),
+            qos: 1,
+            kind: LocalPublishKind::Plain,
+            user_properties: vec![("k".to_string(), "v".to_string())],
+            correlation_data: Some(b"corr".to_vec()),
+            order_key: None,
+            share_groups: None,
+        };
+
+        let options = local_publish_options(&request);
+
+        assert_eq!(options.qos, mqtt5::QoS::AtLeastOnce);
+        assert_eq!(options.properties.correlation_data, Some(b"corr".to_vec()));
+        assert_eq!(
+            options.properties.user_properties,
+            vec![("k".to_string(), "v".to_string())]
+        );
     }
 }
