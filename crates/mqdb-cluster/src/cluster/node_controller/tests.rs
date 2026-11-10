@@ -3183,6 +3183,7 @@ mod primary_role_wait;
 mod promoted_transfer;
 mod remote_fk_unique;
 mod snapshot;
+mod snapshot_replace;
 mod stale_log;
 mod store_failure;
 

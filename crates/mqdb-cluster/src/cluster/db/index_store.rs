@@ -228,7 +228,7 @@ impl IndexStore {
                 self.add_entry(entry).or(Ok(()))
             }
             Operation::Delete => {
-                let parts: Vec<&str> = id.split('/').collect();
+                let parts: Vec<&str> = id.strip_prefix("gidx/").unwrap_or(id).split('/').collect();
                 if parts.len() >= 4 {
                     let entity = parts[0];
                     let field = parts[1];
@@ -627,6 +627,19 @@ mod tests {
                 assert_eq!(results.len(), 1);
             }
         }
+    }
+
+    #[test]
+    fn a_replicated_delete_by_index_key_removes_the_entry() {
+        let store = IndexStore::new(node(1));
+        let entry = IndexEntry::create("users", "email", b"a@x.com", partition(3), "u1").unwrap();
+        store.add_entry(entry.clone()).unwrap();
+
+        store
+            .apply_replicated(Operation::Delete, &index_key(&entry), &[])
+            .unwrap();
+
+        assert!(store.lookup("users", "email", b"a@x.com").is_empty());
     }
 
     #[test]

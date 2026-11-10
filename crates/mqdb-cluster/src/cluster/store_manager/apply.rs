@@ -47,6 +47,7 @@ impl StoreManager {
                 .map_err(|_| StoreApplyError::PersistenceError)?;
         }
 
+        self.note_transfer_write(write);
         self.apply_to_memory(write)
     }
 
@@ -64,6 +65,7 @@ impl StoreManager {
                 .map_err(|_| StoreApplyError::PersistenceError)?;
         }
 
+        self.note_transfer_write(write);
         self.apply_to_memory(write)
     }
 
@@ -79,6 +81,7 @@ impl StoreManager {
                 .map_err(|_| StoreApplyError::PersistenceError)?;
         }
 
+        self.note_transfer_write(write);
         self.apply_to_memory(write)
     }
 

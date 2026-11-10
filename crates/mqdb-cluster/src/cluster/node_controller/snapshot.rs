@@ -537,12 +537,9 @@ impl<T: ClusterTransport> NodeController<T> {
         let data = finished.into_data();
 
         let saved_events = self.set_aside_change_events(partition);
-        match self.stores.import_partition_counted(&data) {
+        match self.stores.import_partition_counted(partition, &data) {
             Ok(counts) => {
                 self.write_log.clear_partition(partition);
-                if counts.partition_records > 0 {
-                    self.imported_partitions[usize::from(partition.get())] = true;
-                }
                 tracing::info!(
                     ?partition,
                     imported = counts.total,
@@ -670,6 +667,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 super::super::replication::ReplicaState::new(partition, self.node_id)
             })
             .become_awaiting_snapshot(epoch);
+        self.stores.open_transfer_window(partition);
         self.stop_sending_change_events(partition);
         tracing::info!(
             ?partition,
@@ -930,6 +928,7 @@ impl<T: ClusterTransport> NodeController<T> {
             return;
         }
 
+        self.stores.open_transfer_window(partition);
         let since_ms = self.snapshot_stamp();
         let first_asked_ms = wait.first_asked_ms.or(since_ms);
         self.incoming_snapshots.insert(

@@ -140,6 +140,34 @@ fn client_and_packet(key: &str) -> Option<&str> {
     packet_id.parse::<u16>().ok().map(|_| client_id)
 }
 
+fn idempotency_writes(
+    section: &[u8],
+    processing: bool,
+) -> Result<Vec<ReplicationWrite>, StoreApplyError> {
+    keyed_writes(section, StoreApplyError::IdempotencyError, |key, value| {
+        let partition = key
+            .split_once(':')
+            .and_then(|(partition_num, _)| partition_num.parse::<u16>().ok())
+            .and_then(PartitionId::new);
+        Ok(partition.and_then(|partition| {
+            IdempotencyStore::deserialize(value)
+                .filter(|record| record.is_processing() == processing)
+                .map(|record| {
+                    insert(
+                        partition,
+                        entity::IDEMPOTENCY,
+                        key,
+                        IdempotencyStore::serialize(&record),
+                    )
+                })
+        }))
+    })
+}
+
+pub(super) fn processing_claims(section: &[u8]) -> Result<Vec<ReplicationWrite>, StoreApplyError> {
+    idempotency_writes(section, true)
+}
+
 pub(super) fn snapshot_writes(
     entity_name: &str,
     section: &[u8],
@@ -217,26 +245,7 @@ pub(super) fn snapshot_writes(
                 )
             }))
         }),
-        entity::IDEMPOTENCY => {
-            keyed_writes(section, StoreApplyError::IdempotencyError, |key, value| {
-                let partition = key
-                    .split_once(':')
-                    .and_then(|(partition_num, _)| partition_num.parse::<u16>().ok())
-                    .and_then(PartitionId::new);
-                Ok(partition.and_then(|partition| {
-                    IdempotencyStore::deserialize(value)
-                        .filter(|record| !record.is_processing())
-                        .map(|record| {
-                            insert(
-                                partition,
-                                entity_name,
-                                key,
-                                IdempotencyStore::serialize(&record),
-                            )
-                        })
-                }))
-            })
-        }
+        entity::IDEMPOTENCY => idempotency_writes(section, false),
         entity::DB_DATA => keyed_writes(section, StoreApplyError::DbDataError, |_, value| {
             let record = DbDataStore::deserialize(value).ok_or(StoreApplyError::DbDataError)?;
             Ok(Some(insert(

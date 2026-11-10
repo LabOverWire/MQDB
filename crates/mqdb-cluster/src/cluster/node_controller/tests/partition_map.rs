@@ -347,7 +347,7 @@ async fn a_snapshot_from_a_node_it_was_not_requested_from_is_ignored() {
 }
 
 #[tokio::test]
-async fn a_primary_built_from_a_snapshot_does_not_trust_its_disk_after_a_restart() {
+async fn a_primary_built_from_a_snapshot_trusts_its_disk_after_a_restart() {
     let partition = session_partition("c1");
     let mut replica = controller(3);
     replica.become_replica(partition, Epoch::new(1), 4);
@@ -365,8 +365,9 @@ async fn a_primary_built_from_a_snapshot_does_not_trust_its_disk_after_a_restart
     restarted.stores().recover().unwrap();
     restarted.apply_raft_partition_map(map).await;
 
-    assert_eq!(restarted.role(partition), ReplicaRole::AwaitingSnapshot);
-    assert_eq!(snapshot_requests_to(&restarted, node(3)), 1);
+    assert_eq!(restarted.role(partition), ReplicaRole::Primary);
+    assert_eq!(snapshot_requests_to(&restarted, node(3)), 0);
+    assert!(restarted.stores().sessions.get("c1").is_some());
 }
 
 #[tokio::test]
@@ -734,7 +735,7 @@ async fn new_ids_are_only_placed_on_partitions_held_in_the_primary_role() {
 }
 
 #[tokio::test]
-async fn a_primary_built_from_a_topic_index_snapshot_takes_a_snapshot_after_a_restart() {
+async fn a_primary_built_from_a_topic_index_snapshot_trusts_its_disk_after_a_restart() {
     let topic = "probe/topic/a";
     let partition = crate::cluster::topic_index::topic_partition(topic);
     let other = PartitionId::new((partition.get() + 1) % 256).unwrap();
@@ -758,7 +759,7 @@ async fn a_primary_built_from_a_topic_index_snapshot_takes_a_snapshot_after_a_re
     restarted.stores().recover().unwrap();
     restarted.apply_raft_partition_map(map).await;
 
-    assert_eq!(restarted.role(partition), ReplicaRole::AwaitingSnapshot);
+    assert_eq!(restarted.role(partition), ReplicaRole::Primary);
 }
 
 #[tokio::test]
@@ -1636,4 +1637,53 @@ async fn a_primary_built_from_a_snapshot_with_only_change_events_trusts_its_disk
     restarted.apply_raft_partition_map(map).await;
 
     assert_eq!(restarted.role(partition), ReplicaRole::Primary);
+}
+
+fn record_in(partition: PartitionId, prefix: &str) -> String {
+    (0..)
+        .map(|n| format!("{prefix}-{n}"))
+        .find(|id| crate::cluster::data_partition("bigdocs", id) == partition)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_write_acked_by_a_primary_built_from_a_snapshot_survives_its_restart() {
+    let partition = crate::cluster::data_partition("bigdocs", "seed");
+    let acked = record_in(partition, "acked");
+    let mut replica = controller(3);
+    replica.become_replica(partition, Epoch::new(1), 0);
+    let (_, seed) = replica
+        .stores()
+        .db_create_write("bigdocs", "seed", b"{\"v\":1}", 1)
+        .unwrap();
+    replica.stores().apply_write(&seed).unwrap();
+    let backend = crate::cluster::test_support::FaultyBackend::shared();
+    let map = map_with(partition, node(2), &[node(3)], 1);
+
+    let mut primary = controller_on(2, &backend);
+    primary.apply_raft_partition_map(map.clone()).await;
+    serve_snapshot(&mut replica, &mut primary, partition).await;
+    assert_eq!(primary.role(partition), ReplicaRole::Primary);
+    primary
+        .db_create("bigdocs", &acked, b"{\"v\":2}", 2)
+        .await
+        .unwrap();
+    primary.transport.take_sent();
+    replica.transport.take_sent();
+    assert!(replica.stores().db_get("bigdocs", &acked).is_none());
+    drop(primary);
+
+    let mut restarted = controller_on(2, &backend);
+    restarted.stores().recover().unwrap();
+    assert!(restarted.stores().db_get("bigdocs", &acked).is_some());
+    restarted.apply_raft_partition_map(map).await;
+    if restarted.role(partition) == ReplicaRole::AwaitingSnapshot {
+        serve_snapshot(&mut replica, &mut restarted, partition).await;
+    }
+
+    assert_eq!(restarted.role(partition), ReplicaRole::Primary);
+    assert!(
+        restarted.stores().db_get("bigdocs", &acked).is_some(),
+        "the write acked as primary was lost"
+    );
 }

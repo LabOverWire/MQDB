@@ -453,7 +453,6 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) dead_nodes_for_session_update: VecDeque<NodeId>,
     pub(super) migration_manager: MigrationManager,
     pub(super) incoming_snapshots: HashMap<PartitionId, snapshot::IncomingSnapshot>,
-    pub(super) imported_partitions: [bool; super::NUM_PARTITIONS as usize],
     pub(super) deferred_snapshot_requests: VecDeque<(NodeId, PartitionId)>,
     pub(super) primary_taken_after_wait: bool,
     pub(super) held_primaries: Option<super::store_manager::HeldPrimaries>,
@@ -535,7 +534,6 @@ impl<T: ClusterTransport> NodeController<T> {
             dead_nodes_for_session_update: VecDeque::new(),
             migration_manager: MigrationManager::new(node_id),
             incoming_snapshots: HashMap::new(),
-            imported_partitions: [false; super::NUM_PARTITIONS as usize],
             deferred_snapshot_requests: VecDeque::new(),
             primary_taken_after_wait: false,
             held_primaries: None,
@@ -702,9 +700,8 @@ impl<T: ClusterTransport> NodeController<T> {
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
         state.become_primary(epoch);
         self.incoming_snapshots.remove(&partition);
-        if !self.imported_partitions[usize::from(partition.get())]
-            && let Err(e) = self.stores.record_held_primary(partition, epoch)
-        {
+        self.stores.close_transfer_window(partition);
+        if let Err(e) = self.stores.record_held_primary(partition, epoch) {
             tracing::warn!(?partition, ?e, "failed to persist the held primary marker");
         }
         self.seal_or_queue_unique(partition, epoch);
@@ -718,6 +715,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
         state.become_replica(epoch, sequence);
         self.abandon_snapshot_request(partition);
+        self.stores.close_transfer_window(partition);
         self.stop_sending_change_events(partition);
     }
 
@@ -735,6 +733,7 @@ impl<T: ClusterTransport> NodeController<T> {
             state.step_down();
         }
         self.incoming_snapshots.remove(&partition);
+        self.stores.close_transfer_window(partition);
         self.stop_sending_change_events(partition);
     }
 
