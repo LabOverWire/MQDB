@@ -14,7 +14,7 @@ use mqdb_core::types::OwnershipConfig;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-fn create_test_controller(
+pub(crate) fn create_test_controller(
     node_id: NodeId,
     transport: MockTransport,
 ) -> NodeController<MockTransport> {
@@ -29,6 +29,7 @@ fn create_test_controller(
     )
 }
 
+pub(crate) type LocalResponses = Arc<Mutex<Vec<(String, Option<Vec<u8>>)>>>;
 type RetainedPublishes = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 type RetainedRefreshes = Arc<Mutex<Vec<String>>>;
 type SentMessages = Arc<Mutex<Vec<(NodeId, ClusterMessage)>>>;
@@ -39,22 +40,24 @@ type PresenceHarness = (
 );
 
 #[derive(Debug, Clone)]
-struct MockTransport {
+pub(crate) struct MockTransport {
     node_id: NodeId,
     inbox: Arc<Mutex<VecDeque<InboundMessage>>>,
     outbox: Arc<Mutex<Vec<(NodeId, ClusterMessage)>>>,
     retained_publishes: RetainedPublishes,
     retained_refreshes: RetainedRefreshes,
+    pub(crate) local_responses: LocalResponses,
 }
 
 impl MockTransport {
-    fn new(node_id: NodeId) -> Self {
+    pub(crate) fn new(node_id: NodeId) -> Self {
         Self {
             node_id,
             inbox: Arc::new(Mutex::new(VecDeque::new())),
             outbox: Arc::new(Mutex::new(Vec::new())),
             retained_publishes: Arc::new(Mutex::new(Vec::new())),
             retained_refreshes: Arc::new(Mutex::new(Vec::new())),
+            local_responses: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -114,6 +117,28 @@ impl ClusterTransport for MockTransport {
 
     async fn queue_local_publish(&self, _: String, _: Vec<u8>, _: u8) {}
 
+    async fn queue_local_publish_with_properties(
+        &self,
+        _: String,
+        _: Vec<u8>,
+        _: u8,
+        _: Vec<(String, String)>,
+    ) {
+    }
+
+    async fn queue_local_response(
+        &self,
+        topic: String,
+        _: Vec<u8>,
+        _: u8,
+        correlation_data: Option<Vec<u8>>,
+    ) {
+        self.local_responses
+            .lock()
+            .unwrap()
+            .push((topic, correlation_data));
+    }
+
     async fn queue_local_publish_retained(&self, topic: String, payload: Vec<u8>, _: u8) {
         self.retained_publishes
             .lock()
@@ -147,7 +172,7 @@ fn setup_controller_with_partition(partition: PartitionId) -> NodeController<Moc
     ctrl
 }
 
-fn setup_controller_all_partitions() -> NodeController<MockTransport> {
+pub(crate) fn setup_controller_all_partitions() -> NodeController<MockTransport> {
     let node1 = NodeId::validated(1).unwrap();
     let transport = MockTransport::new(node1);
     let mut ctrl = create_test_controller(node1, transport);
@@ -787,6 +812,7 @@ async fn vault_json_create_forwarded_to_primary_keeps_ttl_expiry() {
         outbox: Arc::clone(&outbox),
         retained_publishes: Arc::new(Mutex::new(Vec::new())),
         retained_refreshes: Arc::new(Mutex::new(Vec::new())),
+        local_responses: Arc::new(Mutex::new(Vec::new())),
     };
     let mut receiver = create_test_controller(node1, transport);
     receiver.set_ownership(Arc::clone(&ownership));
@@ -2689,6 +2715,7 @@ async fn cluster_share_and_read_forward_to_resource_primary() {
         outbox: Arc::clone(&outbox),
         retained_publishes: Arc::new(Mutex::new(Vec::new())),
         retained_refreshes: Arc::new(Mutex::new(Vec::new())),
+        local_responses: Arc::new(Mutex::new(Vec::new())),
     };
     let mut ctrl = create_test_controller(node1, transport);
     ctrl.set_ownership(Arc::clone(&ownership));
@@ -2776,6 +2803,7 @@ async fn cluster_forwarded_read_graded_against_grant_on_primary() {
         outbox: Arc::clone(&outbox),
         retained_publishes: Arc::new(Mutex::new(Vec::new())),
         retained_refreshes: Arc::new(Mutex::new(Vec::new())),
+        local_responses: Arc::new(Mutex::new(Vec::new())),
     };
     let mut ctrl = create_test_controller(node1, transport);
     ctrl.set_ownership(Arc::clone(&ownership));
@@ -3073,6 +3101,7 @@ fn suspended_resolution(
             expected_count: 1,
             received: Vec::new(),
             client_response_topic: "$DB/_resp/c".into(),
+            correlation_data: None,
             created_at_ms: 0,
             filters: Vec::new(),
             sorts: Vec::new(),
@@ -3608,6 +3637,7 @@ async fn a_forwarded_publish_reaches_local_subscribers_without_being_forwarded_a
             qos: 1,
             kind: crate::cluster::LocalPublishKind::Routed,
             user_properties: Vec::new(),
+            correlation_data: None,
             order_key: None,
             share_groups: None,
         })
@@ -3759,6 +3789,7 @@ async fn json_write_without_a_response_topic_is_forwarded_to_the_primary() {
         outbox: Arc::clone(&outbox),
         retained_publishes: Arc::new(Mutex::new(Vec::new())),
         retained_refreshes: Arc::new(Mutex::new(Vec::new())),
+        local_responses: Arc::new(Mutex::new(Vec::new())),
     };
     let mut ctrl = create_test_controller(node1, transport);
     let mut map = PartitionMap::default();
@@ -3814,6 +3845,7 @@ async fn forwarded_write_without_a_response_topic_is_applied_without_a_reply() {
         outbox: Arc::clone(&outbox),
         retained_publishes: Arc::new(Mutex::new(Vec::new())),
         retained_refreshes: Arc::new(Mutex::new(Vec::new())),
+        local_responses: Arc::new(Mutex::new(Vec::new())),
     };
     let mut ctrl = create_test_controller(node1, transport);
     let partition = data_partition("nr", "r1");
@@ -3872,6 +3904,7 @@ async fn a_forwarded_create_on_a_node_that_lost_the_partition_is_refused() {
         outbox: Arc::clone(&outbox),
         retained_publishes: Arc::new(Mutex::new(Vec::new())),
         retained_refreshes: Arc::new(Mutex::new(Vec::new())),
+        local_responses: Arc::new(Mutex::new(Vec::new())),
     };
     let mut ctrl = create_test_controller(node1, transport);
     let partition = data_partition("nr", "r1");
@@ -3936,6 +3969,7 @@ async fn a_create_whose_primary_moves_during_its_unique_check_is_refused() {
         outbox: Arc::clone(&outbox),
         retained_publishes: Arc::new(Mutex::new(Vec::new())),
         retained_refreshes: Arc::new(Mutex::new(Vec::new())),
+        local_responses: Arc::new(Mutex::new(Vec::new())),
     };
     let mut ctrl = create_test_controller(node1, transport);
     let partition = data_partition("nr", "r1");

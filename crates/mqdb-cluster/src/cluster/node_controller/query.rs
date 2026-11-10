@@ -71,6 +71,7 @@ impl<T: ClusterTransport> NodeController<T> {
         entity: &str,
         payload: &[u8],
         client_response_topic: String,
+        correlation_data: Option<Vec<u8>>,
         filters: Vec<mqdb_core::Filter>,
         sorts: Vec<mqdb_core::SortOrder>,
         projection: Option<Vec<String>>,
@@ -111,6 +112,7 @@ impl<T: ClusterTransport> NodeController<T> {
             expected_count: remote_nodes.len(),
             received: local_items,
             client_response_topic,
+            correlation_data,
             created_at_ms: self.current_time,
             filters,
             sorts,
@@ -252,7 +254,12 @@ impl<T: ClusterTransport> NodeController<T> {
             let payload = serde_json::to_vec(&result).unwrap_or_default();
 
             self.transport
-                .queue_local_publish(completed.client_response_topic, payload, 0)
+                .queue_local_response(
+                    completed.client_response_topic,
+                    payload,
+                    0,
+                    completed.correlation_data,
+                )
                 .await;
         }
     }

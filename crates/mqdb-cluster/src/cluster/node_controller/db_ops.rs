@@ -697,7 +697,12 @@ impl<T: ClusterTransport> NodeController<T> {
             };
 
         self.transport
-            .queue_local_publish(response.response_topic.clone(), payload, 0)
+            .queue_local_response(
+                response.response_topic.clone(),
+                payload,
+                0,
+                response.correlation_data.clone(),
+            )
             .await;
     }
 

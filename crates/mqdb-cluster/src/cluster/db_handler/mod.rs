@@ -5,7 +5,7 @@ mod binary_ops;
 pub(crate) mod helpers;
 mod json_ops;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use super::NodeId;
 use super::db_topic::{DbTopicOperation, ParsedDbTopic};

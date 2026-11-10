@@ -173,6 +173,27 @@ impl ClusterTransport for ClusterTransportKind {
         }
     }
 
+    async fn queue_local_response(
+        &self,
+        topic: String,
+        payload: Vec<u8>,
+        qos: u8,
+        correlation_data: Option<Vec<u8>>,
+    ) {
+        match self {
+            #[cfg(feature = "mqtt-bridge")]
+            #[allow(deprecated)]
+            Self::Mqtt(t) => {
+                t.queue_local_response(topic, payload, qos, correlation_data)
+                    .await;
+            }
+            Self::Quic(t) => {
+                t.queue_local_response(topic, payload, qos, correlation_data)
+                    .await;
+            }
+        }
+    }
+
     async fn queue_routed_publish(&self, publish: RoutedPublish) {
         match self {
             #[cfg(feature = "mqtt-bridge")]

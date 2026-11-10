@@ -567,6 +567,7 @@ impl<T: ClusterTransport> NodeController<T> {
             expected_count: remote_nodes.len(),
             received: Vec::new(),
             client_response_topic: cont.response_topic.clone(),
+            correlation_data: cont.correlation_data.clone(),
             created_at_ms: self.current_time,
             filters: vec![filter],
             sorts: Vec::new(),
@@ -640,7 +641,7 @@ impl<T: ClusterTransport> NodeController<T> {
             }))
             .unwrap_or_default();
             self.transport
-                .queue_local_publish(cont.response_topic, body, 0)
+                .queue_local_response(cont.response_topic, body, 0, cont.correlation_data)
                 .await;
             return;
         }
@@ -679,7 +680,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 )
                 .await;
             self.transport
-                .queue_local_publish(cont.response_topic, out, 0)
+                .queue_local_response(cont.response_topic, out, 0, cont.correlation_data)
                 .await;
         } else {
             self.forward_json_db_request(

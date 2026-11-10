@@ -456,6 +456,42 @@ impl ClusterTransport for MqttTransport {
             .await;
     }
 
+    async fn queue_local_response(
+        &self,
+        topic: String,
+        payload: Vec<u8>,
+        _qos: u8,
+        correlation_data: Option<Vec<u8>>,
+    ) {
+        let mut options = mqtt5::PublishOptions {
+            qos: QoS::AtMostOnce,
+            ..Default::default()
+        };
+        options.properties.correlation_data = correlation_data;
+        let _ = self
+            .forward_client
+            .publish_with_options(&topic, payload, options)
+            .await;
+    }
+
+    async fn queue_local_publish_with_properties(
+        &self,
+        topic: String,
+        payload: Vec<u8>,
+        _qos: u8,
+        user_properties: Vec<(String, String)>,
+    ) {
+        let mut options = mqtt5::PublishOptions {
+            qos: QoS::AtMostOnce,
+            ..Default::default()
+        };
+        options.properties.user_properties = user_properties;
+        let _ = self
+            .forward_client
+            .publish_with_options(&topic, payload, options)
+            .await;
+    }
+
     async fn queue_local_publish_retained(&self, topic: String, payload: Vec<u8>, _qos: u8) {
         let options = mqtt5::PublishOptions {
             qos: QoS::AtMostOnce,

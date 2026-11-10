@@ -112,6 +112,7 @@ mod tests {
             qos: 1,
             kind: LocalPublishKind::Routed,
             user_properties: Vec::new(),
+            correlation_data: None,
             order_key: None,
             share_groups: None,
         }

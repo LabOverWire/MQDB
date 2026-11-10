@@ -180,7 +180,12 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             DbPublishResult::Response(response) => {
                 let t_handle = crate::cluster::node_controller::elapsed_micros(start);
                 ctrl.transport()
-                    .queue_local_publish(response.topic, response.payload, qos)
+                    .queue_local_response(
+                        response.topic,
+                        response.payload,
+                        qos,
+                        response.correlation_data,
+                    )
                     .await;
                 let t_queue = crate::cluster::node_controller::elapsed_micros(start);
                 tracing::info!(
@@ -228,7 +233,12 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             .await
         {
             ctrl.transport()
-                .queue_local_publish(response.topic, response.payload, qos)
+                .queue_local_response(
+                    response.topic,
+                    response.payload,
+                    qos,
+                    response.correlation_data,
+                )
                 .await;
         }
     }
@@ -256,7 +266,12 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
         {
             FkCheckCompletion::Done(Some(response)) => {
                 ctrl.transport()
-                    .queue_local_publish(response.topic, response.payload, qos)
+                    .queue_local_response(
+                        response.topic,
+                        response.payload,
+                        qos,
+                        response.correlation_data,
+                    )
                     .await;
             }
             FkCheckCompletion::NeedUniqueCheck(unique) => {
@@ -298,7 +313,12 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             .await
         {
             ctrl.transport()
-                .queue_local_publish(response.topic, response.payload, qos)
+                .queue_local_response(
+                    response.topic,
+                    response.payload,
+                    qos,
+                    response.correlation_data,
+                )
                 .await;
         }
     }
@@ -426,5 +446,216 @@ async fn combine_quorum(
             Err(field) => Err((ReserveFailure::NotDurable(field), confirmed)),
         },
         Err(e) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::super::db::data_partition;
+    use super::super::super::node_controller::{
+        FkCheckContinuation, FkDeleteContinuation, PendingFkDeleteWork, PendingFkWork,
+        PendingUniqueWork, UniqueCheckContinuation, UniqueCheckPhase1Result,
+    };
+    use super::*;
+    use crate::cluster::db_handler::tests::{
+        LocalResponses, MockTransport, setup_controller_all_partitions,
+    };
+    use mqtt5::broker::events::BrokerEventHandler;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    const RESPONSE_TOPIC: &str = "resp/t";
+
+    type Harness = (
+        ClusterEventHandler<MockTransport>,
+        Arc<RwLock<NodeController<MockTransport>>>,
+        LocalResponses,
+    );
+
+    fn harness() -> Harness {
+        let ctrl = setup_controller_all_partitions();
+        let responses = Arc::clone(&ctrl.transport().local_responses);
+        let node = ctrl.node_id();
+        let ctrl = Arc::new(RwLock::new(ctrl));
+        let handler = ClusterEventHandler::new(node, Arc::clone(&ctrl));
+        (handler, ctrl, responses)
+    }
+
+    async fn request(
+        handler: &ClusterEventHandler<MockTransport>,
+        topic: &str,
+        payload: &serde_json::Value,
+        correlation: &[u8],
+    ) {
+        handler
+            .on_client_publish(ClientPublishEvent {
+                client_id: "client-1".into(),
+                user_id: None,
+                topic: topic.into(),
+                payload: serde_json::to_vec(payload).unwrap().into(),
+                qos: mqtt5::QoS::AtLeastOnce,
+                retain: false,
+                packet_id: Some(1),
+                response_topic: Some(RESPONSE_TOPIC.into()),
+                correlation_data: Some(correlation.to_vec().into()),
+            })
+            .await;
+    }
+
+    fn take(responses: &LocalResponses) -> Vec<(String, Option<Vec<u8>>)> {
+        std::mem::take(&mut *responses.lock().unwrap())
+    }
+
+    fn expect_one(responses: &LocalResponses, correlation: &[u8]) {
+        assert_eq!(
+            take(responses),
+            vec![(RESPONSE_TOPIC.to_string(), Some(correlation.to_vec()))]
+        );
+    }
+
+    #[tokio::test]
+    async fn crud_replies_carry_the_request_correlation_data() {
+        let (handler, _, responses) = harness();
+        let record = serde_json::json!({"id": "x1", "n": 1});
+        let empty = serde_json::json!({});
+
+        request(&handler, "$DB/item/create", &record, b"create-1").await;
+        expect_one(&responses, b"create-1");
+
+        request(&handler, "$DB/item/x1", &empty, b"read-2").await;
+        expect_one(&responses, b"read-2");
+
+        request(
+            &handler,
+            "$DB/item/x1/update",
+            &serde_json::json!({"n": 2}),
+            b"update-3",
+        )
+        .await;
+        expect_one(&responses, b"update-3");
+
+        request(&handler, "$DB/item/list", &empty, b"list-4").await;
+        expect_one(&responses, b"list-4");
+
+        request(&handler, "$DB/item/x1/delete", &empty, b"delete-5").await;
+        expect_one(&responses, b"delete-5");
+    }
+
+    #[tokio::test]
+    async fn a_reply_without_request_correlation_data_carries_none() {
+        let (handler, _, responses) = harness();
+        handler
+            .on_client_publish(ClientPublishEvent {
+                client_id: "client-1".into(),
+                user_id: None,
+                topic: "$DB/item/create".into(),
+                payload: serde_json::to_vec(&serde_json::json!({"id": "x1"}))
+                    .unwrap()
+                    .into(),
+                qos: mqtt5::QoS::AtLeastOnce,
+                retain: false,
+                packet_id: Some(1),
+                response_topic: Some(RESPONSE_TOPIC.into()),
+                correlation_data: None,
+            })
+            .await;
+        assert_eq!(take(&responses), vec![(RESPONSE_TOPIC.to_string(), None)]);
+    }
+
+    #[tokio::test]
+    async fn the_unique_check_continuation_reply_carries_the_correlation_data() {
+        let (handler, ctrl, responses) = harness();
+        let data = serde_json::json!({"id": "u1", "email": "a@b.c"});
+        let pending = PendingUniqueWork {
+            phase1: UniqueCheckPhase1Result {
+                local_reserved: Vec::new(),
+                pending_remote: Vec::new(),
+                pending_quorum: Vec::new(),
+            },
+            continuation: UniqueCheckContinuation::CreateFromDbHandler {
+                entity: "user".to_string(),
+                id: "u1".to_string(),
+                data: data.clone(),
+                constraint_data: data,
+                partition: data_partition("user", "u1"),
+                request_id: "req-1".to_string(),
+                now_ms: 1000,
+                sender: None,
+                client_id: None,
+                response_topic: RESPONSE_TOPIC.to_string(),
+                correlation_data: Some(b"unique-1".to_vec()),
+            },
+        };
+
+        let guard = ctrl.write().await;
+        handler.finish_unique_check(guard, pending, 1).await;
+
+        expect_one(&responses, b"unique-1");
+    }
+
+    #[tokio::test]
+    async fn the_fk_check_continuation_reply_carries_the_correlation_data() {
+        let (handler, ctrl, responses) = harness();
+        let pending = PendingFkWork {
+            pending_checks: Vec::new(),
+            continuation: FkCheckContinuation::CreateFromDbHandler {
+                entity: "post".to_string(),
+                id: "p1".to_string(),
+                data: serde_json::json!({"id": "p1", "title": "t"}),
+                partition: data_partition("post", "p1"),
+                request_id: "req-2".to_string(),
+                sender: None,
+                client_id: None,
+                response_topic: RESPONSE_TOPIC.to_string(),
+                correlation_data: Some(b"fk-1".to_vec()),
+            },
+        };
+
+        let guard = ctrl.write().await;
+        handler.finish_fk_check(guard, pending, 1).await;
+
+        expect_one(&responses, b"fk-1");
+    }
+
+    #[tokio::test]
+    async fn the_fk_delete_continuation_reply_carries_the_correlation_data() {
+        let (handler, ctrl, responses) = harness();
+        ctrl.write()
+            .await
+            .db_create("user", "u1", br#"{"name":"a"}"#, 1000)
+            .await
+            .unwrap();
+        let pending = PendingFkDeleteWork {
+            local_results: Vec::new(),
+            pending_lookups: Vec::new(),
+            continuation: FkDeleteContinuation::DeleteFromDbHandler {
+                entity: "user".to_string(),
+                id: "u1".to_string(),
+                sender: None,
+                client_id: None,
+                response_topic: RESPONSE_TOPIC.to_string(),
+                correlation_data: Some(b"fk-del-1".to_vec()),
+            },
+        };
+
+        let guard = ctrl.write().await;
+        handler.finish_fk_delete(guard, pending, 1).await;
+
+        expect_one(&responses, b"fk-del-1");
+    }
+
+    #[tokio::test]
+    async fn a_forwarded_reply_carries_the_correlation_data_of_the_original_request() {
+        let (_, ctrl, responses) = harness();
+        let response = super::super::super::protocol::JsonDbResponse::new(
+            7,
+            br#"{"status":"ok"}"#.to_vec(),
+            RESPONSE_TOPIC.to_string(),
+            Some(b"fwd-1".to_vec()),
+        );
+
+        ctrl.write().await.handle_json_db_response(&response).await;
+
+        expect_one(&responses, b"fwd-1");
     }
 }
