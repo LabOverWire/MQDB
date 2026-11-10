@@ -24,6 +24,15 @@
 (*             a global key is merged as on main                            *)
 (*   Protect   a key R wrote after sending its request keeps R's value      *)
 (*                                                                          *)
+(* Restart (Trust): once R is a replica, P may restart once. With Trust it *)
+(* keeps its own persisted store; without it, it does not trust its disk  *)
+(* and imports R's store with the same import rule (main before this fix  *)
+(* for a primary whose partition came from an import). P takes no writes  *)
+(* after the restart.                                                     *)
+(*                                                                          *)
+(* InvAckedKept: after the restart P holds exactly what it held before    *)
+(* (no acked write lost, nothing it deleted back).                        *)
+(*                                                                          *)
 (* InvConverged: once R is a replica, the channel is drained and R holds   *)
 (* P's sequence, R's store equals P's store (no ghost, no resurrection, no *)
 (* undone update).                                                          *)
@@ -48,6 +57,15 @@
 (*                                     export is undone.                    *)
 (*   ClusterSnapshotReplace_noreplace.cfg Protect only: violated, a stale  *)
 (*                                     partition key survives.              *)
+(*   ClusterSnapshotReplace_restart.cfg Replace + Protect + Restart with   *)
+(*                                     Trust: InvConverged and InvAcked-   *)
+(*                                     Kept hold, 481,806 states.           *)
+(*   ClusterSnapshotReplace_restart_untrusted.cfg same without Trust:      *)
+(*                                     InvAckedKept violated, an acked     *)
+(*                                     write R had not applied is lost.     *)
+(*   ClusterSnapshotReplace_restart_main.cfg merge, no Trust: InvAcked-    *)
+(*                                     Kept violated, a key R still holds  *)
+(*                                     comes back to P.                     *)
 (*                                                                          *)
 (* NOT MODELLED: global writes from an origin other than P (R can then be  *)
 (* ahead of the snapshot source before its transfer starts); lost global   *)
@@ -57,16 +75,18 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences, FiniteSets
 
-CONSTANTS DKeys, UKeys, GKeys, Vals, MaxWrites, Replace, Protect
+CONSTANTS DKeys, UKeys, GKeys, Vals, MaxWrites, Replace, Protect, Restart, Trust
 
 None == 0
 Keys == DKeys \cup UKeys \cup GKeys
 PartKeys == DKeys \cup UKeys
 Values == Vals \cup {None}
 
-VARIABLES pstore, pseq, plog, writes, chan, snap, rstore, rrole, rseq, touched
+VARIABLES pstore, pseq, plog, writes, chan, snap, rstore, rrole, rseq, touched,
+          restarted, acked
 
-vars == <<pstore, pseq, plog, writes, chan, snap, rstore, rrole, rseq, touched>>
+vars == <<pstore, pseq, plog, writes, chan, snap, rstore, rrole, rseq, touched,
+          restarted, acked>>
 
 Msg == [t : {"seq", "unseq"}, k : Keys, v : Values, q : 0..MaxWrites]
 
@@ -80,6 +100,8 @@ TypeOK ==
     /\ rseq \in 0..MaxWrites
     /\ touched \subseteq Keys
     /\ snap.taken \in BOOLEAN
+    /\ restarted \in BOOLEAN
+    /\ acked \in [Keys -> Values]
 
 Init ==
     /\ pstore \in [Keys -> Values]
@@ -93,8 +115,11 @@ Init ==
     /\ rrole = "awaiting"
     /\ rseq = 0
     /\ touched = {}
+    /\ restarted = FALSE
+    /\ acked = [k \in Keys |-> None]
 
 PrimaryWrite(k, v) ==
+    /\ ~restarted
     /\ writes < MaxWrites
     /\ pstore[k] # v
     /\ pstore' = [pstore EXCEPT ![k] = v]
@@ -105,12 +130,12 @@ PrimaryWrite(k, v) ==
               /\ chan' = Append(chan, [t |-> "seq", k |-> k, v |-> v, q |-> pseq + 1])
          ELSE /\ chan' = Append(chan, [t |-> "unseq", k |-> k, v |-> v, q |-> 0])
               /\ UNCHANGED <<pseq, plog>>
-    /\ UNCHANGED <<snap, rstore, rrole, rseq, touched>>
+    /\ UNCHANGED <<snap, rstore, rrole, rseq, touched, restarted, acked>>
 
 Export ==
     /\ ~snap.taken
     /\ snap' = [taken |-> TRUE, s |-> pstore, q |-> pseq]
-    /\ UNCHANGED <<pstore, pseq, plog, writes, chan, rstore, rrole, rseq, touched>>
+    /\ UNCHANGED <<pstore, pseq, plog, writes, chan, rstore, rrole, rseq, touched, restarted, acked>>
 
 Kept(k) == Protect /\ k \in touched
 
@@ -127,7 +152,7 @@ Import ==
     /\ rrole' = "replica"
     /\ rseq' = snap.q
     /\ touched' = {}
-    /\ UNCHANGED <<pstore, pseq, plog, writes, chan, snap>>
+    /\ UNCHANGED <<pstore, pseq, plog, writes, chan, snap, restarted, acked>>
 
 DeliverUnsequenced ==
     /\ chan # <<>>
@@ -135,7 +160,7 @@ DeliverUnsequenced ==
     /\ chan' = Tail(chan)
     /\ rstore' = [rstore EXCEPT ![Head(chan).k] = Head(chan).v]
     /\ touched' = IF rrole = "awaiting" THEN touched \cup {Head(chan).k} ELSE touched
-    /\ UNCHANGED <<pstore, pseq, plog, writes, snap, rrole, rseq>>
+    /\ UNCHANGED <<pstore, pseq, plog, writes, snap, rrole, rseq, restarted, acked>>
 
 DeliverSequenced ==
     /\ chan # <<>>
@@ -145,7 +170,7 @@ DeliverSequenced ==
          THEN /\ rstore' = [rstore EXCEPT ![Head(chan).k] = Head(chan).v]
               /\ rseq' = Head(chan).q
          ELSE UNCHANGED <<rstore, rseq>>
-    /\ UNCHANGED <<pstore, pseq, plog, writes, snap, rrole, touched>>
+    /\ UNCHANGED <<pstore, pseq, plog, writes, snap, rrole, touched, restarted, acked>>
 
 RECURSIVE ApplyFrom(_, _, _)
 ApplyFrom(store, from, to) ==
@@ -157,7 +182,21 @@ CatchUp ==
     /\ rseq < pseq
     /\ rstore' = ApplyFrom(rstore, rseq + 1, pseq)
     /\ rseq' = pseq
-    /\ UNCHANGED <<pstore, pseq, plog, writes, chan, snap, rrole, touched>>
+    /\ UNCHANGED <<pstore, pseq, plog, writes, chan, snap, rrole, touched, restarted, acked>>
+
+RestartValue(k) ==
+    IF Replace /\ k \in PartKeys THEN rstore[k]
+    ELSE IF rstore[k] # None THEN rstore[k]
+    ELSE pstore[k]
+
+PrimaryRestart ==
+    /\ Restart
+    /\ ~restarted
+    /\ rrole = "replica"
+    /\ restarted' = TRUE
+    /\ acked' = pstore
+    /\ pstore' = IF Trust THEN pstore ELSE [k \in Keys |-> RestartValue(k)]
+    /\ UNCHANGED <<pseq, plog, writes, chan, snap, rstore, rrole, rseq, touched>>
 
 Next ==
     \/ \E k \in Keys, v \in Values : PrimaryWrite(k, v)
@@ -166,12 +205,15 @@ Next ==
     \/ DeliverUnsequenced
     \/ DeliverSequenced
     \/ CatchUp
+    \/ PrimaryRestart
 
 Spec == Init /\ [][Next]_vars
 
 Quiescent == rrole = "replica" /\ chan = <<>> /\ rseq = pseq
 
 InvConverged == Quiescent => rstore = pstore
+
+InvAckedKept == restarted => pstore = acked
 
 NeverQuiescentAfterWrites == ~(Quiescent /\ writes = MaxWrites)
 =============================================================================

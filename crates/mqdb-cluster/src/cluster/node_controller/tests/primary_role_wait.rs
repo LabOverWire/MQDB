@@ -65,54 +65,6 @@ fn on_backend(
     )
 }
 
-async fn primary_built_from_a_snapshot(backend: &Arc<crate::cluster::test_support::FaultyBackend>) {
-    let partition = data_partition(ENTITY, ID);
-    let mut holder = controller(REPLACED);
-    holder.become_primary(partition, Epoch::new(1));
-    holder
-        .apply_raft_partition_map(map_with(REPLACED, &[OLD_PRIMARY], 1))
-        .await;
-    holder
-        .db_create(ENTITY, ID, br#"{"id":"role-wait"}"#, 1)
-        .await
-        .unwrap();
-    holder
-        .apply_raft_partition_map(map_with(THIS, &[REPLACED], 2))
-        .await;
-    holder.transport.take_sent();
-    let mut first = on_backend(THIS, backend);
-    first
-        .apply_raft_partition_map(map_with(THIS, &[REPLACED], 2))
-        .await;
-    holder.transport.inject_message(
-        node(THIS),
-        ClusterMessage::SnapshotRequest(crate::cluster::snapshot::SnapshotRequest::create(
-            partition,
-            node(THIS),
-        )),
-    );
-    holder.process_messages().await;
-    for (to, message) in holder.transport.take_sent() {
-        if to == node(THIS) && matches!(message, ClusterMessage::SnapshotChunk(_)) {
-            first.transport.inject_message(node(REPLACED), message);
-        }
-    }
-    first.process_messages().await;
-    for (to, message) in first.transport.take_sent() {
-        if to == node(REPLACED) && matches!(message, ClusterMessage::CatchupRequest(_)) {
-            holder.transport.inject_message(node(THIS), message);
-        }
-    }
-    holder.process_messages().await;
-    for (to, message) in holder.transport.take_sent() {
-        if to == node(THIS) && matches!(message, ClusterMessage::CatchupResponse(_)) {
-            first.transport.inject_message(node(REPLACED), message);
-        }
-    }
-    first.process_messages().await;
-    assert_eq!(first.role(partition), ReplicaRole::Primary);
-}
-
 #[tokio::test]
 async fn a_dead_named_source_keeps_the_wait_until_the_map_changes() {
     let partition = data_partition(ENTITY, ID);
@@ -134,10 +86,9 @@ async fn a_dead_named_source_keeps_the_wait_until_the_map_changes() {
 }
 
 #[tokio::test]
-async fn a_primary_built_from_a_snapshot_waits_for_a_replica_never_heard_from() {
+async fn a_restarted_primary_without_the_data_waits_for_a_replica_never_heard_from() {
     let partition = data_partition(ENTITY, ID);
     let backend = crate::cluster::test_support::FaultyBackend::shared();
-    primary_built_from_a_snapshot(&backend).await;
 
     let mut restarted = on_backend(THIS, &backend);
     restarted.stores().recover().unwrap();
@@ -156,10 +107,9 @@ async fn a_primary_built_from_a_snapshot_waits_for_a_replica_never_heard_from() 
 }
 
 #[tokio::test]
-async fn a_primary_built_from_a_snapshot_waits_for_the_map_when_its_replica_is_dead() {
+async fn a_restarted_primary_without_the_data_waits_for_the_map_when_its_replica_is_dead() {
     let partition = data_partition(ENTITY, ID);
     let backend = crate::cluster::test_support::FaultyBackend::shared();
-    primary_built_from_a_snapshot(&backend).await;
 
     let mut restarted = on_backend(THIS, &backend);
     restarted.stores().recover().unwrap();

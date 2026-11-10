@@ -540,9 +540,6 @@ impl<T: ClusterTransport> NodeController<T> {
         match self.stores.import_partition_counted(partition, &data) {
             Ok(counts) => {
                 self.write_log.clear_partition(partition);
-                if counts.partition_records > 0 {
-                    self.imported_partitions[usize::from(partition.get())] = true;
-                }
                 tracing::info!(
                     ?partition,
                     imported = counts.total,
