@@ -43,8 +43,6 @@ use mqdb_core::storage::StorageBackend;
 use std::sync::Arc;
 
 pub(crate) use primary_marker::HeldPrimaries;
-#[cfg(test)]
-pub(crate) use transfer_window::TRANSFER_WINDOW_CAPACITY;
 
 #[derive(Debug, Default, Clone)]
 pub struct RecoveryStats {

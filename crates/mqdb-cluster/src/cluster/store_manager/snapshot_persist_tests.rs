@@ -449,10 +449,6 @@ fn assert_holds_no_partition_data(store: &StoreManager, context: &str) {
         "{context}: index"
     );
     assert!(
-        store.db_unique.get(ENTITY, "email", UNIQUE_VALUE).is_none(),
-        "{context}: unique"
-    );
-    assert!(
         store.db_fk.get_request(FK_REQUEST).is_none(),
         "{context}: fk request"
     );
@@ -468,6 +464,25 @@ fn an_import_replaces_partition_data_and_the_replacement_survives_a_restart() {
 
     assert_holds_no_partition_data(&joiner, "after import");
     assert_holds_no_partition_data(&recovered(&joiner_disk), "after restart");
+}
+
+#[test]
+fn an_import_keeps_the_unique_claims_the_source_lacks() {
+    let joiner_disk: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
+    let joiner = written_by_normal_paths(&joiner_disk);
+    let empty_source = StoreManager::new(node(1));
+
+    import_every_partition(&empty_source, &joiner);
+
+    for store in [&joiner, &recovered(&joiner_disk)] {
+        assert!(
+            store
+                .db_unique
+                .get(ENTITY, "email", UNIQUE_VALUE)
+                .is_some_and(|claim| claim.is_committed()),
+            "unique"
+        );
+    }
 }
 
 #[test]

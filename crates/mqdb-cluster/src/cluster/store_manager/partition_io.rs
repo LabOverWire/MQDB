@@ -9,7 +9,7 @@ use crate::cluster::protocol::{Operation, ReplicationWrite};
 use crate::cluster::{Epoch, PartitionId, entity};
 use std::collections::HashSet;
 
-const REPLACED_SECTIONS: [&str; 11] = [
+const REPLACED_SECTIONS: [&str; 10] = [
     entity::SESSIONS,
     entity::QOS2,
     entity::SUBSCRIPTIONS,
@@ -19,7 +19,6 @@ const REPLACED_SECTIONS: [&str; 11] = [
     entity::IDEMPOTENCY,
     entity::DB_DATA,
     entity::DB_INDEX,
-    entity::DB_UNIQUE,
     entity::DB_FK,
 ];
 
@@ -142,6 +141,9 @@ impl StoreManager {
             self.apply_to_memory(&removal(write))?;
         }
         for write in incoming.iter().chain(&incoming_claims) {
+            if write.entity == entity::DB_UNIQUE {
+                self.apply_to_memory(&removal(write))?;
+            }
             self.apply_to_memory(write)?;
             counts.total += 1;
             if !GLOBAL_SECTIONS.contains(&write.entity.as_str()) {

@@ -5,10 +5,8 @@ use super::*;
 use crate::cluster::data_partition;
 use crate::cluster::db::{SchemaStore, UniqueReserveParams, unique_key, unique_partition};
 use crate::cluster::entity;
-use crate::cluster::node_controller::snapshot::SNAPSHOT_RETRY_BACKOFF_MS;
 use crate::cluster::protocol::{Operation, ReplicationWrite};
 use crate::cluster::snapshot::SnapshotChunk;
-use crate::cluster::store_manager::TRANSFER_WINDOW_CAPACITY;
 use crate::cluster::{PartitionAssignment, PartitionMap};
 
 const ENTITY: &str = "snap";
@@ -308,17 +306,47 @@ async fn unique_transfer() -> (
 }
 
 #[tokio::test]
-async fn a_stale_unique_reservation_is_removed_by_import() {
-    let (mut primary, mut replica, _) = unique_transfer().await;
-    reserve(&replica, "stale");
+async fn a_unique_claim_the_source_lacks_is_kept_by_import() {
+    let mut primary = controller(1);
+    let up = unique_partition(ENTITY, "email", VALUE);
+    primary.become_primary(up, Epoch::new(1));
+    let coordinator = controller(3);
+    reserve(&coordinator, "r1");
+    let claim = coordinator
+        .stores
+        .db_unique
+        .get(ENTITY, "email", VALUE)
+        .unwrap();
+    let mut replica = controller(2);
+    replica.transport.inject_message(
+        node(3),
+        ClusterMessage::UniqueReplicate {
+            request_id: 0,
+            write: ReplicationWrite::new(
+                up,
+                Operation::Insert,
+                Epoch::ZERO,
+                0,
+                entity::DB_UNIQUE.to_string(),
+                unique_key(&claim),
+                crate::cluster::db::UniqueStore::serialize(&claim),
+            ),
+        },
+    );
+    replica.process_messages().await;
+    replica
+        .become_replica_with_snapshot(up, Epoch::new(1), node(1))
+        .await;
     let chunks = start_transfer(&mut primary, &mut replica).await;
     finish_transfer(&mut replica, &chunks).await;
+    assert_eq!(replica.role(up), ReplicaRole::Replica);
     assert!(
         replica
             .stores
             .db_unique
             .get(ENTITY, "email", VALUE)
-            .is_none()
+            .is_some(),
+        "a claim acked through this node was dropped"
     );
 }
 
@@ -360,40 +388,56 @@ async fn a_unique_reserve_during_transfer_survives_import() {
     );
 }
 
-fn schema_delete(name: &str) -> ClusterMessage {
-    ClusterMessage::WriteRequest(ReplicationWrite::new(
-        PartitionId::ZERO,
-        Operation::Delete,
-        Epoch::ZERO,
-        0,
-        entity::DB_SCHEMA.to_string(),
-        name.to_string(),
-        Vec::new(),
-    ))
+fn v(n: u64) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({"id": ID, "v": n})).unwrap()
+}
+
+fn val(ctrl: &NodeController<MockTransport>) -> Option<u64> {
+    let found = ctrl.db_get(ENTITY, ID)?;
+    let json: serde_json::Value = serde_json::from_slice(&found.data).unwrap();
+    json["v"].as_u64()
+}
+
+async fn upsert(primary: &mut NodeController<MockTransport>, n: u64) {
+    primary.db_update(ENTITY, ID, &v(n), n + 1).await.unwrap();
 }
 
 #[tokio::test]
-async fn a_full_transfer_window_refuses_the_snapshot_and_asks_again() {
+async fn a_write_refused_while_awaiting_is_caught_up_after_import() {
     let (mut primary, partition) = primary_holding(1, 16);
     let (mut replica, _) = awaiting_replica(node(1)).await;
     let chunks = start_transfer(&mut primary, &mut replica).await;
-    for n in 0..=TRANSFER_WINDOW_CAPACITY {
-        replica
-            .transport
-            .inject_message(node(1), schema_delete(&format!("gone-{n}")));
-    }
-    replica.process_messages().await;
-    finish_transfer(&mut replica, &chunks).await;
-    assert_eq!(replica.role(partition), ReplicaRole::AwaitingSnapshot);
-    assert!(replica.db_get(ENTITY, ID).is_none());
+    upsert(&mut primary, 7).await;
+    deliver(&primary, &mut replica).await;
+    assert_eq!(val(&replica), None);
+    let refused = replica.transport.take_sent().into_iter().any(|(_, message)| {
+        matches!(message, ClusterMessage::Ack(ack) if ack.status() == Some(crate::cluster::protocol::AckStatus::NotReplica))
+    });
+    assert!(refused, "the write was not refused while awaiting");
 
-    replica.transport.take_sent();
-    replica.drive_snapshots(1_000).await;
-    replica
-        .drive_snapshots(1_000 + SNAPSHOT_RETRY_BACKOFF_MS)
-        .await;
-    let chunks = start_transfer(&mut primary, &mut replica).await;
     finish_transfer(&mut replica, &chunks).await;
+    exchange(&mut primary, &mut replica).await;
+
     assert_eq!(replica.role(partition), ReplicaRole::Replica);
-    assert!(replica.db_get(ENTITY, ID).is_some());
+    assert_eq!(val(&replica), Some(7));
+}
+
+#[tokio::test]
+async fn a_catchup_past_the_evicted_log_falls_back_to_a_new_snapshot() {
+    let (mut primary, partition) = primary_holding(1, 16);
+    primary.write_log = crate::cluster::write_log::PartitionWriteLog::with_max_entries(2);
+    let (mut replica, _) = awaiting_replica(node(1)).await;
+    let chunks = start_transfer(&mut primary, &mut replica).await;
+    for n in 1..=5 {
+        upsert(&mut primary, n).await;
+    }
+    primary.transport.take_sent();
+    assert_eq!(primary.write_log.oldest_sequence(partition), Some(4));
+
+    finish_transfer(&mut replica, &chunks).await;
+    exchange(&mut primary, &mut replica).await;
+
+    assert_eq!(replica.role(partition), ReplicaRole::Replica);
+    assert_eq!(val(&replica), Some(5));
+    assert_eq!(replica.sequence(partition), primary.sequence(partition));
 }
