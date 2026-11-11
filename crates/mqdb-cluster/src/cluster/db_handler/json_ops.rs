@@ -1943,10 +1943,13 @@ impl DbRequestHandler {
     ) -> Result<Value, Vec<u8>> {
         let vault_crypto = self.resolve_vault_crypto(entity, sender);
         let current = self.read_for_update(controller, entity, id, vault_crypto.as_ref());
-        update
+        let merged = update
             .apply_to(current)
-            .map(|merged| self.vault_encrypt_if_needed(vault_crypto.as_ref(), entity, id, merged))
-            .map_err(|refusal| Self::json_error(refusal.code(), &refusal.message(entity, id)))
+            .map_err(|refusal| Self::json_error(refusal.code(), &refusal.message(entity, id)))?;
+        if let Some(err) = Self::validate_against_schema(controller, entity, &merged) {
+            return Err(err);
+        }
+        Ok(self.vault_encrypt_if_needed(vault_crypto.as_ref(), entity, id, merged))
     }
 
     fn vault_encrypt_update_delta(

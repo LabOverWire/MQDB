@@ -583,3 +583,33 @@ async fn forwarded_pending_update_with_an_expected_version_fails_when_the_record
         "{record}"
     );
 }
+
+#[tokio::test]
+async fn published_pending_update_is_validated_against_the_schema_when_it_completes() {
+    let mut ctrl = cluster().await;
+    let handler = DbRequestHandler::new(node(1));
+    let pending = publish(
+        &handler,
+        &mut ctrl,
+        "$DB/posts/p1/update",
+        &json!({"author_id": REMOTE_AUTHOR}),
+    )
+    .await;
+    let schema = mqdb_core::schema::Schema::new("posts").add_field(
+        mqdb_core::schema::FieldDefinition::new("title", mqdb_core::schema::FieldType::Number),
+    );
+    ctrl.schema_register("posts", &serde_json::to_vec(&schema).unwrap())
+        .await
+        .unwrap();
+
+    let author = finish_published(&handler, &mut ctrl, pending).await;
+
+    assert_eq!(
+        (
+            &author["code"],
+            &stored(&ctrl, "posts", "p1").unwrap()["author_id"]
+        ),
+        (&json!(400), &json!("u2")),
+        "{author}"
+    );
+}
