@@ -3676,13 +3676,9 @@ async fn a_forwarded_publish_reaches_local_subscribers_without_being_forwarded_a
         .topics
         .subscribe("plant/temp", "remote-dashboard", PartitionId::ZERO, 1)
         .unwrap();
-    ctrl.stores().client_locations.set_if_newer(
-        "remote-dashboard",
-        crate::cluster::client_location::Located {
-            node: node2,
-            since_ms: 0,
-        },
-    );
+    ctrl.stores()
+        .client_locations
+        .claim("remote-dashboard", node2);
     let ctrl = Arc::new(tokio::sync::RwLock::new(ctrl));
     let handler = Arc::new(crate::cluster::event_handler::ClusterEventHandler::new(
         node1,
@@ -4736,4 +4732,30 @@ async fn per_id_writes_on_a_replica_still_waiting_for_its_data_go_to_the_primary
         .handle_publish(&mut ctrl, "$DB/docs/d/update", &update, &ctx)
         .await;
     assert!(matches!(response, super::DbPublishResult::NoResponse));
+}
+
+#[tokio::test]
+async fn a_client_moving_from_a_node_whose_clock_runs_ahead_is_located_here() {
+    use mqtt5::broker::events::BrokerEventHandler;
+
+    let (handler, ctrl) = session_harness();
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let mut ahead = crate::cluster::ClientLocationEntry::create("mover", node2);
+    ahead.timestamp_ms += 60_000;
+    ctrl.read()
+        .await
+        .stores()
+        .client_locations
+        .apply_replicated(crate::cluster::Operation::Insert, &ahead.to_be_bytes())
+        .unwrap();
+
+    handler
+        .on_client_connect(session_connect("mover", true, 0))
+        .await;
+
+    let mut ctrl = ctrl.write().await;
+    assert_eq!(ctrl.connected_node("mover"), Some(node1));
+    ctrl.apply_dead_nodes(&[node2]);
+    assert_eq!(ctrl.connected_nodes("mover"), [node1]);
 }

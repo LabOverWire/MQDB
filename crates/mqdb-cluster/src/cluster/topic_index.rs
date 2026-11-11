@@ -46,6 +46,7 @@ pub struct TopicIndexEntry {
 
 const NARROW_ENTRY_VERSION: u8 = 1;
 const WIDE_ENTRY_VERSION: u8 = 2;
+const NARROW_READER_GUARD: u16 = u16::MAX;
 
 #[derive(Debug, Clone, BeBytes)]
 struct NarrowSubscriber {
@@ -80,6 +81,7 @@ struct WideSubscriber {
 #[derive(Debug, Clone, BeBytes)]
 struct WideEntry {
     version: u8,
+    narrow_reader_guard: u16,
     topic_len: u16,
     #[FromField(topic_len)]
     topic: Vec<u8>,
@@ -137,6 +139,7 @@ impl TopicIndexEntry {
             .collect::<Option<Vec<_>>>()?;
         Some(WideEntry {
             version: WIDE_ENTRY_VERSION,
+            narrow_reader_guard: NARROW_READER_GUARD,
             topic_len: u16::try_from(self.topic.len()).ok()?,
             topic: self.topic.clone(),
             last_seq: self.last_seq,
@@ -174,6 +177,9 @@ impl TopicIndexEntry {
             }
             WIDE_ENTRY_VERSION => {
                 let (entry, _) = WideEntry::try_from_be_bytes(bytes).ok()?;
+                if entry.narrow_reader_guard != NARROW_READER_GUARD {
+                    return None;
+                }
                 Some(Self {
                     topic: entry.topic,
                     last_seq: entry.last_seq,
@@ -780,6 +786,58 @@ mod tests {
         let decoded = TopicIndex::deserialize(&TopicIndex::serialize(&entry).unwrap()).unwrap();
 
         assert_eq!(decoded.subscribers.len(), entry.subscribers.len());
+    }
+
+    #[derive(Debug, Clone, BeBytes)]
+    struct PreviousSubscriberLocation {
+        client_id_len: u8,
+        #[FromField(client_id_len)]
+        client_id: Vec<u8>,
+        client_partition: u16,
+        qos: u8,
+    }
+
+    #[derive(Debug, Clone, BeBytes)]
+    struct PreviousTopicIndexEntry {
+        version: u8,
+        topic_len: u16,
+        #[FromField(topic_len)]
+        topic: Vec<u8>,
+        last_seq: u64,
+        subscriber_count: u16,
+        #[FromField(subscriber_count)]
+        subscribers: Vec<PreviousSubscriberLocation>,
+    }
+
+    #[test]
+    fn a_node_running_the_previous_decoder_rejects_a_wide_entry() {
+        let mut entry = TopicIndexEntry::create("a/b");
+        entry.add_subscriber("short1", partition(1), 1);
+        entry.add_subscriber("short2", partition(2), 1);
+        entry.add_subscriber(&"x".repeat(300), partition(3), 1);
+        let bytes = TopicIndex::serialize(&entry).unwrap();
+
+        assert_eq!(bytes[0], WIDE_ENTRY_VERSION);
+        assert!(PreviousTopicIndexEntry::try_from_be_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn a_node_running_the_previous_decoder_still_reads_a_narrow_entry() {
+        let mut entry = TopicIndexEntry::create("a/b");
+        entry.add_subscriber("short1", partition(1), 1);
+        let bytes = TopicIndex::serialize(&entry).unwrap();
+
+        let (previous, _) = PreviousTopicIndexEntry::try_from_be_bytes(&bytes).unwrap();
+
+        assert_eq!(previous.version, NARROW_ENTRY_VERSION);
+        assert_eq!(previous.topic_len, 3);
+        assert_eq!(previous.topic, b"a/b");
+        assert_eq!(previous.last_seq, 0);
+        assert_eq!(previous.subscriber_count, 1);
+        assert_eq!(previous.subscribers[0].client_id_len, 6);
+        assert_eq!(previous.subscribers[0].client_id, b"short1");
+        assert_eq!(previous.subscribers[0].client_partition, 1);
+        assert_eq!(previous.subscribers[0].qos, 1);
     }
 
     #[test]

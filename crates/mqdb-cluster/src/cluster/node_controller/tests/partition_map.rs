@@ -762,17 +762,9 @@ async fn a_primary_built_from_a_topic_index_snapshot_trusts_its_disk_after_a_res
     assert_eq!(restarted.role(partition), ReplicaRole::Primary);
 }
 
-const CONNECTED_AT_MS: u64 = 1_000;
-
-fn located(node: NodeId, since_ms: u64) -> crate::cluster::client_location::Located {
-    crate::cluster::client_location::Located { node, since_ms }
-}
-
 fn connect_subscriber(owner: &NodeController<MockTransport>, client_id: &str, filters: &[&str]) {
     let stores = owner.stores();
-    stores
-        .client_locations
-        .set_if_newer(client_id, located(owner.node_id(), CONNECTED_AT_MS));
+    stores.client_locations.claim(client_id, owner.node_id());
     for filter in filters {
         if filter.contains('+') || filter.contains('#') {
             stores
@@ -886,10 +878,7 @@ async fn a_restarted_node_relearns_exact_and_wildcard_subscribers_connected_to_a
             1,
         )
         .unwrap();
-    owner
-        .stores()
-        .client_locations
-        .set_if_newer("elsewhere", located(node(3), CONNECTED_AT_MS));
+    owner.stores().client_locations.claim("elsewhere", node(3));
 
     let mut restarted = controller(2);
     hear_from_peer_after_restart(&mut restarted, &mut owner).await;
@@ -968,30 +957,6 @@ async fn a_peer_is_asked_for_its_subscribers_once_each_time_it_comes_back() {
     ctrl.transport.inject_message(node(1), heartbeat());
     ctrl.process_messages().await;
     assert_eq!(resync_requests_sent(&ctrl, node(1)), 2);
-}
-
-#[tokio::test]
-async fn an_unsent_resync_request_is_sent_with_the_next_heartbeat() {
-    let mut ctrl = controller(2);
-    ctrl.transport
-        .refuse_sends
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    ctrl.transport.inject_message(
-        node(1),
-        ClusterMessage::Heartbeat(Heartbeat::create(node(1), 0)),
-    );
-    ctrl.process_messages().await;
-    assert_eq!(resync_requests_sent(&ctrl, node(1)), 0);
-
-    ctrl.transport
-        .refuse_sends
-        .store(false, std::sync::atomic::Ordering::SeqCst);
-    ctrl.transport.inject_message(
-        node(1),
-        ClusterMessage::Heartbeat(Heartbeat::create(node(1), 0)),
-    );
-    ctrl.process_messages().await;
-    assert_eq!(resync_requests_sent(&ctrl, node(1)), 1);
 }
 
 #[tokio::test]
@@ -1982,16 +1947,26 @@ async fn a_write_acked_by_a_primary_built_from_a_snapshot_survives_its_restart()
     );
 }
 
+fn location_write(client_id: &str, on: NodeId, operation: Operation) -> ClusterMessage {
+    let entry = crate::cluster::ClientLocationEntry::create(client_id, on);
+    ClusterMessage::WriteRequest(ReplicationWrite::new(
+        session_partition(client_id),
+        operation,
+        Epoch::new(0),
+        0,
+        crate::cluster::entity::CLIENT_LOCATIONS.to_string(),
+        crate::cluster::client_location_key(client_id),
+        bebytes::BeBytes::to_be_bytes(&entry),
+    ))
+}
+
 #[tokio::test]
-async fn a_reply_does_not_override_a_client_that_moved_to_a_third_node() {
+async fn a_late_reply_for_a_client_that_moved_to_a_third_node_does_not_lose_the_new_node() {
     let client = client_outside(&[], "moving-client");
     let mut owner = controller(1);
     connect_subscriber(&owner, &client, &["probe/old"]);
     let mut restarted = controller(2);
-    restarted
-        .stores()
-        .client_locations
-        .set_if_newer(&client, located(node(3), CONNECTED_AT_MS + 1_000));
+    restarted.stores().client_locations.claim(&client, node(3));
     restarted
         .stores()
         .topics
@@ -2000,12 +1975,65 @@ async fn a_reply_does_not_override_a_client_that_moved_to_a_third_node() {
 
     hear_from_peer_after_restart(&mut restarted, &mut owner).await;
 
-    assert_eq!(restarted.connected_node(&client), Some(node(3)));
+    assert!(restarted.connected_nodes(&client).contains(&node(3)));
     assert_eq!(
         routed_clients(&restarted, "probe/new"),
         std::slice::from_ref(&client)
     );
-    assert!(routed_clients(&restarted, "probe/old").is_empty());
+
+    restarted.transport.inject_message(
+        owner.node_id(),
+        location_write(&client, node(1), Operation::Delete),
+    );
+    restarted.process_messages().await;
+
+    assert_eq!(restarted.connected_nodes(&client), [node(3)]);
+}
+
+#[tokio::test]
+async fn a_peer_restarted_quickly_drops_the_clients_it_no_longer_has() {
+    let mut peer = controller(1);
+    let mut restarted = controller(2);
+    restarted
+        .stores()
+        .client_locations
+        .claim("gone-client", peer.node_id());
+    connect_subscriber(&peer, "live-client", &["probe/live"]);
+
+    hear_from_peer_after_restart(&mut restarted, &mut peer).await;
+
+    assert_eq!(restarted.connected_nodes("gone-client"), []);
+    assert_eq!(restarted.connected_nodes("live-client"), [node(1)]);
+}
+
+#[tokio::test]
+async fn a_dead_node_no_longer_holds_its_clients() {
+    let mut ctrl = controller(2);
+    ctrl.stores().client_locations.claim("client-a", node(1));
+    ctrl.stores().client_locations.claim("client-b", node(1));
+    ctrl.stores().client_locations.claim("client-b", node(3));
+
+    ctrl.transport
+        .inject_message(node(3), ClusterMessage::DeathNotice { node_id: node(1) });
+    ctrl.process_messages().await;
+
+    assert_eq!(ctrl.connected_nodes("client-a"), []);
+    assert_eq!(ctrl.connected_nodes("client-b"), [node(3)]);
+}
+
+#[tokio::test]
+async fn a_publish_is_forwarded_to_every_node_holding_the_client() {
+    let ctrl = controller(2);
+    ctrl.stores().client_locations.claim("twice", node(1));
+    ctrl.stores().client_locations.claim("twice", node(3));
+
+    let mut forwarded: Vec<NodeId> = ctrl
+        .remote_targets([crate::cluster::ForwardTarget::new("twice".to_string(), 1)])
+        .into_keys()
+        .collect();
+    forwarded.sort_by_key(|node| node.get());
+
+    assert_eq!(forwarded, [node(1), node(3)]);
 }
 
 #[tokio::test]
@@ -2215,7 +2243,7 @@ async fn a_peer_that_never_saw_the_restart_learns_the_restarted_nodes_clients() 
 }
 
 #[tokio::test]
-async fn a_resumed_client_announcement_replaces_a_restarted_nodes_view() {
+async fn a_resumed_client_announcement_adds_to_a_restarted_nodes_view() {
     let client = client_outside(&[], "resumed-client");
     let mut owner = controller(1);
     connect_subscriber(&owner, &client, &["probe/kept", "probe/+/wild"]);
@@ -2226,9 +2254,7 @@ async fn a_resumed_client_announcement_replaces_a_restarted_nodes_view() {
         .subscribe("probe/stale", &client, session_partition(&client), 1)
         .unwrap();
 
-    owner
-        .announce_resumed_client(&client, CONNECTED_AT_MS)
-        .await;
+    owner.announce_resumed_client(&client).await;
     let announced: Vec<_> = owner
         .transport
         .take_sent()
@@ -2247,5 +2273,182 @@ async fn a_resumed_client_announcement_replaces_a_restarted_nodes_view() {
         routed_clients(&restarted, "probe/x/wild"),
         std::slice::from_ref(&client)
     );
-    assert!(routed_clients(&restarted, "probe/stale").is_empty());
+    assert_eq!(
+        routed_clients(&restarted, "probe/stale"),
+        std::slice::from_ref(&client)
+    );
+}
+
+#[tokio::test]
+async fn a_silent_peer_is_asked_a_bounded_number_of_times() {
+    let mut restarted = controller(2);
+    restarted.transport.inject_message(
+        node(1),
+        ClusterMessage::Heartbeat(Heartbeat::create(node(1), 0)),
+    );
+    restarted.process_messages().await;
+    let mut total = resync_requests_sent(&restarted, node(1));
+    restarted.transport.take_sent();
+    let step = crate::cluster::node_controller::subscription_resync::RESYNC_RETRY_MS;
+    for tick in 0..=720u64 {
+        restarted
+            .drive_subscription_resyncs(LATER_MS + tick * step)
+            .await;
+        total += resync_requests_sent(&restarted, node(1));
+        restarted.transport.take_sent();
+    }
+
+    assert_eq!(
+        total,
+        usize::try_from(crate::cluster::node_controller::subscription_resync::MAX_RESYNC_ATTEMPTS)
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn a_reply_that_arrives_after_the_retry_still_completes_the_round() {
+    let client = client_outside(&[], "remote-client");
+    let mut owner = controller(1);
+    connect_subscriber(&owner, &client, &["probe/exact"]);
+    let mut restarted = controller(2);
+    restarted.transport.inject_message(
+        owner.node_id(),
+        ClusterMessage::Heartbeat(Heartbeat::create(owner.node_id(), 0)),
+    );
+    restarted.process_messages().await;
+    let step = crate::cluster::node_controller::subscription_resync::RESYNC_RETRY_MS;
+    let mut now = LATER_MS;
+    restarted.drive_subscription_resyncs(now).await;
+    deliver_requests_only(&mut restarted, &mut owner).await;
+    now += step;
+    restarted.drive_subscription_resyncs(now).await;
+    deliver_replies_only(&mut owner, &mut restarted).await;
+    restarted.transport.take_sent();
+
+    for _ in 0..8 {
+        now += 64 * step;
+        restarted.drive_subscription_resyncs(now).await;
+    }
+
+    assert_eq!(resync_requests_sent(&restarted, node(1)), 0);
+    assert_eq!(
+        routed_clients(&restarted, "probe/exact"),
+        std::slice::from_ref(&client)
+    );
+}
+
+#[tokio::test]
+async fn a_failed_request_is_retried_after_the_backoff_not_every_tick() {
+    use std::sync::atomic::Ordering;
+    let mut restarted = controller(2);
+    restarted
+        .transport
+        .refuse_sends
+        .store(true, Ordering::SeqCst);
+    restarted.transport.inject_message(
+        node(1),
+        ClusterMessage::Heartbeat(Heartbeat::create(node(1), 0)),
+    );
+    restarted.process_messages().await;
+    restarted.drive_subscription_resyncs(LATER_MS).await;
+    restarted
+        .transport
+        .refuse_sends
+        .store(false, Ordering::SeqCst);
+
+    let step = crate::cluster::node_controller::subscription_resync::RESYNC_RETRY_MS;
+    for elapsed in (10..step).step_by(10) {
+        restarted
+            .drive_subscription_resyncs(LATER_MS + elapsed)
+            .await;
+    }
+    assert_eq!(resync_requests_sent(&restarted, node(1)), 0);
+
+    restarted.drive_subscription_resyncs(LATER_MS + step).await;
+    assert_eq!(resync_requests_sent(&restarted, node(1)), 1);
+}
+
+#[tokio::test]
+async fn a_peer_revived_through_the_processing_batch_is_asked_for_its_subscribers() {
+    let mut restarted = controller(2);
+    let processor = spawn_message_processor(node(2), PartitionMap::default());
+    processor
+        .inbox
+        .send(InboundMessage {
+            from: node(1),
+            message: ClusterMessage::Heartbeat(Heartbeat::create(node(1), 1_000)),
+            received_at: 1_000,
+        })
+        .unwrap();
+    let batch = next_batch_with(&processor, 1_000, |batch| {
+        !batch.heartbeat_updates.is_empty()
+    })
+    .await;
+
+    restarted.apply_heartbeat_updates(&batch.heartbeat_updates);
+    restarted.request_subscription_resyncs().await;
+
+    assert_eq!(resync_requests_sent(&restarted, node(1)), 1);
+}
+
+async fn deliver_requests_only(
+    from: &mut NodeController<MockTransport>,
+    to: &mut NodeController<MockTransport>,
+) {
+    for (dest, message) in from.transport.take_sent() {
+        if dest == to.node_id() && matches!(message, ClusterMessage::SubscriptionResyncRequest(_)) {
+            to.transport.inject_message(from.node_id(), message);
+        }
+    }
+    to.process_messages().await;
+}
+
+async fn deliver_replies_only(
+    from: &mut NodeController<MockTransport>,
+    to: &mut NodeController<MockTransport>,
+) {
+    let replies: Vec<_> = from
+        .transport
+        .take_sent()
+        .into_iter()
+        .filter(|(dest, message)| {
+            *dest == to.node_id() && matches!(message, ClusterMessage::SubscriptionResync(_))
+        })
+        .collect();
+    for (_, message) in replies {
+        to.transport.inject_message(from.node_id(), message);
+    }
+    to.process_messages().await;
+}
+
+#[tokio::test]
+async fn a_peer_declared_dead_by_notice_is_not_asked() {
+    use std::sync::atomic::Ordering;
+    let mut restarted = controller(2);
+    restarted
+        .transport
+        .refuse_sends
+        .store(true, Ordering::SeqCst);
+    restarted.transport.inject_message(
+        node(1),
+        ClusterMessage::Heartbeat(Heartbeat::create(node(1), 0)),
+    );
+    restarted.process_messages().await;
+    restarted
+        .transport
+        .inject_message(node(3), ClusterMessage::DeathNotice { node_id: node(1) });
+    restarted.process_messages().await;
+    restarted
+        .transport
+        .refuse_sends
+        .store(false, Ordering::SeqCst);
+
+    let step = crate::cluster::node_controller::subscription_resync::RESYNC_RETRY_MS;
+    for tick in 0..20u64 {
+        restarted
+            .drive_subscription_resyncs(LATER_MS + tick * step)
+            .await;
+    }
+
+    assert_eq!(resync_requests_sent(&restarted, node(1)), 0);
 }

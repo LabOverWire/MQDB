@@ -73,13 +73,7 @@ fn watch(ctrl: &NodeController<MockTransport>, client: &str, on: NodeId) {
             1,
         )
         .unwrap();
-    ctrl.stores().client_locations.set_if_newer(
-        client,
-        crate::cluster::client_location::Located {
-            node: on,
-            since_ms: 0,
-        },
-    );
+    ctrl.stores().client_locations.claim(client, on);
 }
 
 fn assign(

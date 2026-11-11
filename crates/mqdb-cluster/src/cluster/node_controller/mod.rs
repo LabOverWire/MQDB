@@ -965,6 +965,15 @@ impl<T: ClusterTransport> NodeController<T> {
         let start = std::time::Instant::now();
 
         tracing::warn!(?dead_node, "node death detected");
+        self.forget_resync_peer(dead_node);
+        let released = self.stores.client_locations.release_node(dead_node);
+        if released > 0 {
+            tracing::info!(
+                ?dead_node,
+                released,
+                "released client locations held by a dead node"
+            );
+        }
         self.dead_nodes_for_session_update.push_back(dead_node);
         self.change_events_node_gone(dead_node);
         self.snapshots_node_gone(dead_node);
@@ -1052,7 +1061,6 @@ impl<T: ClusterTransport> NodeController<T> {
     pub fn apply_dead_nodes(&mut self, dead_nodes: &[NodeId]) {
         for &node in dead_nodes {
             self.heartbeat.handle_death_notice(node);
-            self.forget_resync_peer(node);
             self.handle_node_death(node);
         }
     }
@@ -1385,7 +1393,11 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     pub(crate) fn connected_node(&self, client_id: &str) -> Option<NodeId> {
-        self.stores.client_locations.get(client_id).or_else(|| {
+        let claimants = self.stores.client_locations.claimants(client_id);
+        if claimants.contains(&self.node_id) {
+            return Some(self.node_id);
+        }
+        claimants.last().copied().or_else(|| {
             self.stores
                 .sessions
                 .get(client_id)
@@ -1394,16 +1406,28 @@ impl<T: ClusterTransport> NodeController<T> {
         })
     }
 
+    pub(crate) fn connected_nodes(&self, client_id: &str) -> Vec<NodeId> {
+        let claimed = self.stores.client_locations.claimants(client_id);
+        if claimed.is_empty() {
+            self.connected_node(client_id).into_iter().collect()
+        } else {
+            claimed
+        }
+    }
+
     pub(crate) fn remote_targets(
         &self,
         targets: impl IntoIterator<Item = ForwardTarget>,
     ) -> HashMap<NodeId, Vec<ForwardTarget>> {
         let mut remote_nodes: HashMap<NodeId, Vec<ForwardTarget>> = HashMap::new();
         for target in targets {
-            if let Some(target_node) = self.connected_node(&target.client_id)
-                && target_node != self.node_id
-            {
-                remote_nodes.entry(target_node).or_default().push(target);
+            for target_node in self.connected_nodes(&target.client_id) {
+                if target_node != self.node_id {
+                    remote_nodes
+                        .entry(target_node)
+                        .or_default()
+                        .push(target.clone());
+                }
             }
         }
         remote_nodes

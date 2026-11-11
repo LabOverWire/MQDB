@@ -2,126 +2,136 @@
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS Nodes, Clients, Topics, Crashable, NoNode,
-          MaxOps, MaxCrashes, MaxDrops,
-          Resync, LocTargets, StampGuard, DeleteCheck, AskBack, Retry, ResumePush, StaleDisk
+          MaxOps, MaxCrashes, MaxDrops, MaxAsks, MaxChan,
+          Resync, Claims, LinkedTargets, ReleaseOnDeath, RetainOnComplete,
+          AskBack, Retry, Announce, StaleDisk
 
 Entries == Clients \X Topics
 Pairs == {p \in Nodes \X Nodes : p[1] # p[2]}
-Absent == [node |-> NoNode, ts |-> 0]
 
-VARIABLES up, links, conn, clock, loc, idx, view, chan, pending, outstanding, ops, crashes, drops, ever, want, sess
+VARIABLES up, links, view, dead, conn, sess, want, resub, loc, idx, chan,
+          pending, outstanding, asks, ops, crashes, drops, ever
 
-vars == <<up, links, conn, clock, loc, idx, view, chan, pending, outstanding, ops, crashes, drops, ever, want, sess>>
+vars == <<up, links, view, dead, conn, sess, want, resub, loc, idx, chan,
+          pending, outstanding, asks, ops, crashes, drops, ever>>
 
 Linked(n, m) == {n, m} \in links
 
 SubsOf(n, c) == {t \in Topics : <<c, t>> \in idx[n]}
 
-OwnClients(n) == {c \in Clients : loc[n][c].node = n}
-
-Listing(n) == {[c |-> c, ts |-> loc[n][c].ts, subs |-> SubsOf(n, c)] : c \in OwnClients(n)}
+Listing(n) == {[c |-> c, subs |-> SubsOf(n, c)] : c \in {x \in Clients : n \in loc[n][x]}}
 
 LocReceivers(n) ==
-    IF LocTargets = "alive" THEN {m \in Nodes \ {n} : view[n][m] /\ Linked(n, m)}
-    ELSE {m \in Nodes \ {n} : Linked(n, m)}
+    IF LinkedTargets THEN {m \in Nodes \ {n} : Linked(n, m)}
+    ELSE {m \in Nodes \ {n} : Linked(n, m) /\ view[n][m]}
 
 TopicReceivers(n) == {m \in Nodes \ {n} : Linked(n, m)}
 
 SendTo(ch, from, targets, msg) ==
     [p \in Pairs |-> IF p[1] = from /\ p[2] \in targets THEN Append(ch[p], msg) ELSE ch[p]]
 
+Claimed(set, node) == IF Claims THEN set \cup {node} ELSE {node}
+
+ClaimedAt(to, set, node) == IF ReleaseOnDeath /\ dead[to][node] THEN set ELSE Claimed(set, node)
+
+Released(set, node) == IF Claims THEN set \ {node} ELSE {}
+
 Settled ==
     /\ \A p \in Pairs : chan[p] = <<>>
     /\ \A n \in Nodes : up[n] => pending[n] = {}
     /\ \A n, m \in Nodes : (up[n] /\ n # m) => (view[n][m] = up[m] /\ (up[m] => Linked(n, m)))
+    /\ \A c \in Clients : ~resub[c]
     /\ Retry => \A n \in Nodes : up[n] => outstanding[n] = {}
 
 Init ==
     /\ up = [n \in Nodes |-> TRUE]
     /\ links = {{n, m} : n \in Nodes, m \in Nodes \ {n}}
-    /\ conn = [c \in Clients |-> NoNode]
-    /\ clock = 0
-    /\ loc = [n \in Nodes |-> [c \in Clients |-> Absent]]
-    /\ idx = [n \in Nodes |-> {}]
     /\ view = [n \in Nodes |-> [m \in Nodes |-> m # n]]
+    /\ dead = [n \in Nodes |-> [m \in Nodes |-> FALSE]]
+    /\ conn = [c \in Clients |-> NoNode]
+    /\ sess = [c \in Clients |-> NoNode]
+    /\ want = [c \in Clients |-> {}]
+    /\ resub = [c \in Clients |-> FALSE]
+    /\ loc = [n \in Nodes |-> [c \in Clients |-> {}]]
+    /\ idx = [n \in Nodes |-> {}]
     /\ chan = [p \in Pairs |-> <<>>]
     /\ pending = [n \in Nodes |-> {}]
     /\ outstanding = [n \in Nodes |-> {}]
+    /\ asks = [n \in Nodes |-> [m \in Nodes |-> 0]]
     /\ ops = 0
     /\ crashes = 0
     /\ drops = 0
     /\ ever = {}
-    /\ want = [c \in Clients |-> {}]
-    /\ sess = [c \in Clients |-> NoNode]
 
-StampedSet(n, c, node, ts) == [loc EXCEPT ![n][c] = [node |-> node, ts |-> ts]]
-
-AcceptsLocation(current, ts) ==
-    StampGuard = "none" \/ current.node = NoNode \/ current.ts <= ts
-
-AcceptsDelete(current, node, ts) ==
-    ~DeleteCheck \/ (current.node = node /\ current.ts <= ts)
-
-Resumes(c, n) == sess[c] = n
-
-Connect(c, n) ==
+Connect(c, n, clean) ==
+    LET old == conn[c]
+        resumed == ~clean /\ sess[c] = n
+        located == [kind |-> "loc", c |-> c, node |-> n]
+        released == [kind |-> "del", c |-> c, node |-> old]
+        announced == [kind |-> "announce", list |-> {[c |-> c, subs |-> SubsOf(n, c)]}]
+        afterOld == IF old # NoNode /\ old # n
+                    THEN SendTo(chan, old, LocReceivers(old), released)
+                    ELSE chan
+        afterLoc == SendTo(afterOld, n, LocReceivers(n), located)
+    IN
     /\ ops < MaxOps
-    /\ conn[c] = NoNode
     /\ up[n]
-    /\ clock' = clock + 1
+    /\ conn[c] # n
     /\ conn' = [conn EXCEPT ![c] = n]
     /\ sess' = [sess EXCEPT ![c] = n]
-    /\ loc' = StampedSet(n, c, n, clock + 1)
-    /\ LET located == [kind |-> "loc", c |-> c, node |-> n, ts |-> clock + 1]
-           pushed == [kind |-> "push",
-                      list |-> {[c |-> c, ts |-> clock + 1, subs |-> SubsOf(n, c)]}]
-           resubscribed == [kind |-> "subs", c |-> c, ts |-> want[c]]
-       IN IF Resumes(c, n)
-          THEN /\ idx' = idx
-               /\ chan' = IF ResumePush
-                          THEN SendTo(SendTo(chan, n, LocReceivers(n), located),
-                                      n, TopicReceivers(n), pushed)
-                          ELSE SendTo(chan, n, LocReceivers(n), located)
-          ELSE /\ idx' = [idx EXCEPT ![n] = @ \cup {<<c, t>> : t \in want[c]}]
-               /\ chan' = SendTo(SendTo(chan, n, LocReceivers(n), located),
-                                 n, TopicReceivers(n), resubscribed)
+    /\ resub' = [resub EXCEPT ![c] = ~resumed]
+    /\ loc' = [m \in Nodes |->
+                 IF m = n THEN [loc[m] EXCEPT ![c] = Claimed(@, n)]
+                 ELSE IF m = old THEN [loc[m] EXCEPT ![c] = Released(@, old)]
+                 ELSE loc[m]]
+    /\ chan' = IF Announce /\ ~clean
+               THEN SendTo(afterLoc, n, TopicReceivers(n), announced)
+               ELSE afterLoc
     /\ ops' = ops + 1
-    /\ UNCHANGED <<want, ever, links, up, view, pending, outstanding, crashes, drops>>
+    /\ UNCHANGED <<up, links, view, dead, want, idx, pending, outstanding, asks, crashes, drops, ever>>
+
+Resubscribe(c) ==
+    LET n == conn[c] IN
+    /\ resub[c]
+    /\ n # NoNode
+    /\ idx' = [idx EXCEPT ![n] = @ \cup {<<c, t>> : t \in want[c]}]
+    /\ chan' = SendTo(chan, n, TopicReceivers(n), [kind |-> "subs", c |-> c, ts |-> want[c]])
+    /\ resub' = [resub EXCEPT ![c] = FALSE]
+    /\ UNCHANGED <<up, links, view, dead, conn, sess, want, loc, pending, outstanding, asks, ops, crashes, drops, ever>>
 
 Disconnect(c) ==
     LET n == conn[c] IN
     /\ ops < MaxOps
     /\ n # NoNode
-    /\ clock' = clock + 1
     /\ conn' = [conn EXCEPT ![c] = NoNode]
-    /\ loc' = IF AcceptsDelete(loc[n][c], n, clock + 1)
-              THEN [loc EXCEPT ![n][c] = Absent] ELSE loc
-    /\ chan' = SendTo(chan, n, LocReceivers(n), [kind |-> "del", c |-> c, node |-> n, ts |-> clock + 1])
+    /\ resub' = [resub EXCEPT ![c] = FALSE]
+    /\ loc' = [loc EXCEPT ![n][c] = Released(@, n)]
+    /\ chan' = SendTo(chan, n, LocReceivers(n), [kind |-> "del", c |-> c, node |-> n])
     /\ ops' = ops + 1
-    /\ UNCHANGED <<want, sess, ever, links, up, idx, view, pending, outstanding, crashes, drops>>
+    /\ UNCHANGED <<up, links, view, dead, sess, want, idx, pending, outstanding, asks, crashes, drops, ever>>
 
 Sub(c, t) ==
     LET n == conn[c] IN
     /\ ops < MaxOps
     /\ n # NoNode
     /\ t \notin want[c]
+    /\ want' = [want EXCEPT ![c] = @ \cup {t}]
     /\ idx' = [idx EXCEPT ![n] = @ \cup {<<c, t>>}]
     /\ chan' = SendTo(chan, n, TopicReceivers(n), [kind |-> "sub", c |-> c, t |-> t])
-    /\ ops' = ops + 1
     /\ ever' = ever \cup {<<c, t>>}
-    /\ want' = [want EXCEPT ![c] = @ \cup {t}]
-    /\ UNCHANGED <<sess, links, up, conn, clock, loc, view, pending, outstanding, crashes, drops>>
+    /\ ops' = ops + 1
+    /\ UNCHANGED <<up, links, view, dead, conn, sess, resub, loc, pending, outstanding, asks, crashes, drops>>
 
 Unsub(c, t) ==
     LET n == conn[c] IN
     /\ ops < MaxOps
     /\ n # NoNode
     /\ t \in want[c]
+    /\ want' = [want EXCEPT ![c] = @ \ {t}]
     /\ idx' = [idx EXCEPT ![n] = @ \ {<<c, t>>}]
     /\ chan' = SendTo(chan, n, TopicReceivers(n), [kind |-> "unsub", c |-> c, t |-> t])
     /\ ops' = ops + 1
-    /\ want' = [want EXCEPT ![c] = @ \ {t}]
-    /\ UNCHANGED <<sess, ever, links, up, conn, clock, loc, view, pending, outstanding, crashes, drops>>
+    /\ UNCHANGED <<up, links, view, dead, conn, sess, resub, loc, pending, outstanding, asks, crashes, drops, ever>>
 
 Crash(n) ==
     /\ n \in Crashable
@@ -129,38 +139,35 @@ Crash(n) ==
     /\ crashes < MaxCrashes
     /\ up' = [up EXCEPT ![n] = FALSE]
     /\ links' = {l \in links : n \notin l}
+    /\ view' = [view EXCEPT ![n] = [m \in Nodes |-> FALSE]]
+    /\ dead' = [dead EXCEPT ![n] = [m \in Nodes |-> FALSE]]
     /\ conn' = [c \in Clients |-> IF conn[c] = n THEN NoNode ELSE conn[c]]
     /\ sess' = [c \in Clients |-> IF sess[c] = n THEN NoNode ELSE sess[c]]
-    /\ loc' = [loc EXCEPT ![n] = [c \in Clients |-> Absent]]
-    /\ view' = [view EXCEPT ![n] = [m \in Nodes |-> FALSE]]
+    /\ resub' = [c \in Clients |-> IF conn[c] = n THEN FALSE ELSE resub[c]]
+    /\ loc' = [loc EXCEPT ![n] = [c \in Clients |-> {}]]
     /\ chan' = [p \in Pairs |-> IF p[2] = n THEN <<>> ELSE chan[p]]
     /\ pending' = [pending EXCEPT ![n] = {}]
     /\ outstanding' = [outstanding EXCEPT ![n] = {}]
     /\ crashes' = crashes + 1
-    /\ UNCHANGED <<want, ever, clock, idx, ops, drops>>
+    /\ UNCHANGED <<want, idx, asks, ops, drops, ever>>
 
 Restart(n) ==
     /\ ~up[n]
     /\ \E disk \in IF StaleDisk THEN SUBSET ever ELSE {{}} :
           idx' = [idx EXCEPT ![n] = disk]
     /\ up' = [up EXCEPT ![n] = TRUE]
-    /\ UNCHANGED <<want, sess, ever, links, conn, clock, loc, view, chan, pending, outstanding, ops, crashes, drops>>
-
-LinkUp(n, m) ==
-    /\ n # m
-    /\ up[n]
-    /\ up[m]
-    /\ ~Linked(n, m)
-    /\ links' = links \cup {{n, m}}
-    /\ UNCHANGED <<want, sess, ever, up, conn, clock, loc, idx, view, chan, pending, outstanding, ops, crashes, drops>>
+    /\ UNCHANGED <<links, view, dead, conn, sess, want, resub, loc, chan, pending, outstanding, asks, ops, crashes, drops, ever>>
 
 Heartbeat(n, m) ==
     /\ n # m
-    /\ Linked(n, m)
+    /\ up[n]
+    /\ up[m]
     /\ ~view[n][m]
+    /\ links' = links \cup {{n, m}}
     /\ view' = [view EXCEPT ![n][m] = TRUE]
+    /\ dead' = [dead EXCEPT ![n][m] = FALSE]
     /\ pending' = IF Resync THEN [pending EXCEPT ![n] = @ \cup {[peer |-> m, back |-> AskBack]}] ELSE pending
-    /\ UNCHANGED <<want, sess, ever, links, up, conn, clock, loc, idx, chan, outstanding, ops, crashes, drops>>
+    /\ UNCHANGED <<up, conn, sess, want, resub, loc, idx, chan, outstanding, asks, ops, crashes, drops, ever>>
 
 DetectDeath(n, m) ==
     /\ n # m
@@ -168,9 +175,13 @@ DetectDeath(n, m) ==
     /\ ~up[m]
     /\ view[n][m]
     /\ view' = [view EXCEPT ![n][m] = FALSE]
+    /\ dead' = [dead EXCEPT ![n][m] = TRUE]
+    /\ loc' = IF ReleaseOnDeath
+              THEN [loc EXCEPT ![n] = [c \in Clients |-> Released(@[c], m)]]
+              ELSE loc
     /\ pending' = [pending EXCEPT ![n] = {q \in @ : q.peer # m}]
     /\ outstanding' = [outstanding EXCEPT ![n] = {q \in @ : q.peer # m}]
-    /\ UNCHANGED <<want, sess, ever, links, up, conn, clock, loc, idx, chan, ops, crashes, drops>>
+    /\ UNCHANGED <<up, links, conn, sess, want, resub, idx, chan, asks, ops, crashes, drops, ever>>
 
 SendRequest(n, m) ==
     /\ Linked(n, m)
@@ -179,7 +190,8 @@ SendRequest(n, m) ==
           /\ chan' = [chan EXCEPT ![<<n, m>>] = Append(@, [kind |-> "req", back |-> q.back])]
           /\ pending' = [pending EXCEPT ![n] = @ \ {q}]
           /\ outstanding' = [outstanding EXCEPT ![n] = {o \in @ : o.peer # m} \cup {q}]
-    /\ UNCHANGED <<want, sess, ever, links, up, conn, clock, loc, idx, view, ops, crashes, drops>>
+          /\ asks' = [asks EXCEPT ![n][m] = 1]
+    /\ UNCHANGED <<up, links, view, dead, conn, sess, want, resub, loc, idx, ops, crashes, drops, ever>>
 
 InFlight(n, m) ==
     \/ \E i \in 1..Len(chan[<<n, m>>]) : chan[<<n, m>>][i].kind = "req"
@@ -188,12 +200,19 @@ InFlight(n, m) ==
 ReAsk(n, m) ==
     /\ Retry
     /\ Linked(n, m)
-    /\ view[n][m]
-    /\ ~InFlight(n, m)
+    /\ asks[n][m] < MaxAsks
     /\ \E q \in outstanding[n] :
           /\ q.peer = m
           /\ chan' = [chan EXCEPT ![<<n, m>>] = Append(@, [kind |-> "req", back |-> q.back])]
-    /\ UNCHANGED <<want, sess, ever, links, up, conn, clock, loc, idx, view, pending, outstanding, ops, crashes, drops>>
+    /\ asks' = [asks EXCEPT ![n][m] = @ + 1]
+    /\ UNCHANGED <<up, links, view, dead, conn, sess, want, resub, loc, idx, pending, outstanding, ops, crashes, drops, ever>>
+
+GiveUp(n, m) ==
+    /\ asks[n][m] >= MaxAsks
+    /\ ~InFlight(n, m)
+    /\ \E q \in outstanding[n] : q.peer = m
+    /\ outstanding' = [outstanding EXCEPT ![n] = {o \in @ : o.peer # m}]
+    /\ UNCHANGED <<up, links, view, dead, conn, sess, want, resub, loc, idx, chan, pending, asks, ops, crashes, drops, ever>>
 
 Lost(n, m) ==
     /\ drops < MaxDrops
@@ -201,23 +220,29 @@ Lost(n, m) ==
     /\ Head(chan[<<n, m>>]).kind \in {"req", "reply"}
     /\ chan' = [chan EXCEPT ![<<n, m>>] = Tail(@)]
     /\ drops' = drops + 1
-    /\ UNCHANGED <<want, sess, ever, links, up, conn, clock, loc, idx, view, pending, outstanding, ops, crashes>>
+    /\ UNCHANGED <<up, links, view, dead, conn, sess, want, resub, loc, idx, pending, outstanding, asks, ops, crashes, ever>>
 
-Takes(to, e) ==
-    /\ loc[to][e.c].node # to
-    /\ AcceptsLocation(loc[to][e.c], e.ts)
+Named(list) == {e.c : e \in list}
 
-TakenNames(to, list) == {e.c : e \in {x \in list : Takes(to, x)}}
+AfterClaims(to, from, list) ==
+    [c \in Clients |-> IF c \in Named(list) THEN ClaimedAt(to, loc[to][c], from) ELSE loc[to][c]]
 
-ReplacedIdx(to, list) ==
-    {x \in idx[to] : x[1] \notin TakenNames(to, list)}
-    \cup UNION {{<<e.c, t>> : t \in e.subs} : e \in {x \in list : Takes(to, x)}}
+Replaces(to, from, claims, c) == to \notin claims[c] /\ claims[c] = {from}
 
-ReplacedLoc(to, from, list) ==
-    [c \in Clients |->
-        IF c \in TakenNames(to, list)
-        THEN [node |-> from, ts |-> (CHOOSE e \in list : e.c = c).ts]
-        ELSE loc[to][c]]
+Adds(to, claims, c) == to \notin claims[c]
+
+Applied(to, from, list, replacing) ==
+    LET claims == AfterClaims(to, from, list)
+        replaced == {e.c : e \in {x \in list : replacing /\ Replaces(to, from, claims, x.c)}}
+        added == {x \in list : Adds(to, claims, x.c)}
+    IN [ loc |-> claims,
+         idx |-> {x \in idx[to] : x[1] \notin replaced}
+                 \cup UNION {{<<e.c, t>> : t \in e.subs} : e \in added} ]
+
+Completed(to, from, claims, list) ==
+    IF RetainOnComplete /\ (\E q \in outstanding[to] : q.peer = from)
+    THEN [c \in Clients |-> IF c \in Named(list) THEN claims[c] ELSE Released(claims[c], from)]
+    ELSE claims
 
 Receive(from, to) ==
     /\ chan[<<from, to>>] # <<>>
@@ -227,59 +252,64 @@ Receive(from, to) ==
        CASE msg.kind = "sub" ->
               /\ idx' = [idx EXCEPT ![to] = @ \cup {<<msg.c, msg.t>>}]
               /\ chan' = rest
-              /\ UNCHANGED <<want, sess, ever, loc, outstanding, pending>>
+              /\ UNCHANGED <<loc, pending, outstanding>>
          [] msg.kind = "subs" ->
               /\ idx' = [idx EXCEPT ![to] = @ \cup {<<msg.c, t>> : t \in msg.ts}]
               /\ chan' = rest
-              /\ UNCHANGED <<want, sess, ever, loc, outstanding, pending>>
+              /\ UNCHANGED <<loc, pending, outstanding>>
          [] msg.kind = "unsub" ->
               /\ idx' = [idx EXCEPT ![to] = @ \ {<<msg.c, msg.t>>}]
               /\ chan' = rest
-              /\ UNCHANGED <<want, sess, ever, loc, outstanding, pending>>
+              /\ UNCHANGED <<loc, pending, outstanding>>
          [] msg.kind = "loc" ->
-              /\ loc' = IF AcceptsLocation(loc[to][msg.c], msg.ts)
-                        THEN StampedSet(to, msg.c, msg.node, msg.ts) ELSE loc
+              /\ loc' = [loc EXCEPT ![to][msg.c] = ClaimedAt(to, @, msg.node)]
               /\ chan' = rest
-              /\ UNCHANGED <<want, sess, ever, idx, outstanding, pending>>
+              /\ UNCHANGED <<idx, pending, outstanding>>
          [] msg.kind = "del" ->
-              /\ loc' = IF AcceptsDelete(loc[to][msg.c], msg.node, msg.ts)
-                        THEN [loc EXCEPT ![to][msg.c] = Absent] ELSE loc
+              /\ loc' = [loc EXCEPT ![to][msg.c] = Released(@, msg.node)]
               /\ chan' = rest
-              /\ UNCHANGED <<want, sess, ever, idx, outstanding, pending>>
+              /\ UNCHANGED <<idx, pending, outstanding>>
          [] msg.kind = "req" ->
               /\ chan' = [rest EXCEPT ![<<to, from>>] =
                             Append(@, [kind |-> "reply", list |-> Listing(to)])]
               /\ pending' = IF msg.back
-                             THEN [pending EXCEPT ![to] = @ \cup {[peer |-> from, back |-> FALSE]}]
-                             ELSE pending
-              /\ UNCHANGED <<want, sess, ever, idx, loc, outstanding>>
-         [] msg.kind \in {"reply", "push"} ->
-              /\ idx' = [idx EXCEPT ![to] = ReplacedIdx(to, msg.list)]
-              /\ loc' = [loc EXCEPT ![to] = ReplacedLoc(to, from, msg.list)]
+                            THEN [pending EXCEPT ![to] = @ \cup {[peer |-> from, back |-> FALSE]}]
+                            ELSE pending
+              /\ UNCHANGED <<idx, loc, outstanding>>
+         [] msg.kind = "reply" ->
+              /\ LET r == Applied(to, from, msg.list, TRUE) IN
+                    /\ idx' = [idx EXCEPT ![to] = r.idx]
+                    /\ loc' = [loc EXCEPT ![to] = Completed(to, from, r.loc, msg.list)]
+              /\ outstanding' = [outstanding EXCEPT ![to] = {o \in @ : o.peer # from}]
               /\ chan' = rest
-              /\ outstanding' = IF msg.kind = "reply"
-                                THEN [outstanding EXCEPT ![to] = {o \in @ : o.peer # from}]
-                                ELSE outstanding
-              /\ pending' = pending
-    /\ UNCHANGED <<want, sess, ever, links, up, conn, clock, view, ops, crashes, drops>>
+              /\ UNCHANGED pending
+         [] msg.kind = "announce" ->
+              /\ LET r == Applied(to, from, msg.list, FALSE) IN
+                    /\ idx' = [idx EXCEPT ![to] = r.idx]
+                    /\ loc' = [loc EXCEPT ![to] = r.loc]
+              /\ chan' = rest
+              /\ UNCHANGED <<pending, outstanding>>
+    /\ UNCHANGED <<up, links, view, dead, conn, sess, want, resub, asks, ops, crashes, drops, ever>>
 
 Next ==
-    \/ \E c \in Clients, n \in Nodes : Connect(c, n)
-    \/ \E c \in Clients : Disconnect(c)
+    \/ \E c \in Clients, n \in Nodes, clean \in BOOLEAN : Connect(c, n, clean)
+    \/ \E c \in Clients : Disconnect(c) \/ Resubscribe(c)
     \/ \E c \in Clients, t \in Topics : Sub(c, t) \/ Unsub(c, t)
     \/ \E n \in Nodes : Crash(n) \/ Restart(n)
-    \/ \E n, m \in Nodes : n # m /\ (LinkUp(n, m) \/ Heartbeat(n, m) \/ DetectDeath(n, m)
-                                     \/ SendRequest(n, m) \/ ReAsk(n, m)
+    \/ \E n, m \in Nodes : n # m /\ (Heartbeat(n, m) \/ DetectDeath(n, m)
+                                     \/ SendRequest(n, m) \/ ReAsk(n, m) \/ GiveUp(n, m)
                                      \/ Lost(n, m) \/ Receive(n, m))
 
 Spec == Init /\ [][Next]_vars
 
+ChannelBound == \A p \in Pairs : Len(chan[p]) <= MaxChan
+
 InvConverged ==
     Settled =>
         \A n \in Nodes, c \in Clients :
-            (up[n] /\ conn[c] # NoNode) =>
-                /\ loc[n][c].node = conn[c]
-                /\ want[c] \subseteq SubsOf(n, c)
+            up[n] =>
+                /\ loc[n][c] = IF conn[c] = NoNode THEN {} ELSE {conn[c]}
+                /\ (conn[c] # NoNode => want[c] \subseteq SubsOf(n, c))
 
 InvNoInventedEntries == \A n \in Nodes : idx[n] \subseteq ever
 =============================================================================

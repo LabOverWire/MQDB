@@ -22,7 +22,6 @@ pub struct ResyncedPattern {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResyncedClient {
     pub client_id: String,
-    pub since_ms: u64,
     pub topics: Vec<ResyncedTopic>,
     pub patterns: Vec<ResyncedPattern>,
 }
@@ -32,12 +31,11 @@ impl ResyncedClient {
     pub fn encoded_len(&self) -> usize {
         let topics: usize = self.topics.iter().map(|t| 3 + t.topic.len()).sum();
         let patterns: usize = self.patterns.iter().map(|p| 4 + p.pattern.len()).sum();
-        18 + self.client_id.len() + topics + patterns
+        10 + self.client_id.len() + topics + patterns
     }
 
     fn encode(&self, buf: &mut Vec<u8>) -> Option<()> {
         push_length_prefixed(buf, self.client_id.as_bytes(), false)?;
-        buf.extend_from_slice(&self.since_ms.to_be_bytes());
         buf.extend_from_slice(&u32::try_from(self.topics.len()).ok()?.to_be_bytes());
         for topic in &self.topics {
             push_length_prefixed(buf, topic.topic.as_bytes(), false)?;
@@ -55,7 +53,6 @@ impl ResyncedClient {
     fn decode(reader: &mut WireReader<'_>) -> Option<Self> {
         let client_len = reader.length(true)?;
         let client_id = reader.text(client_len)?;
-        let since_ms = reader.u64()?;
         let topic_count = reader.u32()?;
         let topics = (0..topic_count)
             .map(|_| {
@@ -81,7 +78,6 @@ impl ResyncedClient {
             .collect::<Option<Vec<_>>>()?;
         Some(Self {
             client_id,
-            since_ms,
             topics,
             patterns,
         })
@@ -184,7 +180,6 @@ mod tests {
     fn client(id: &str) -> ResyncedClient {
         ResyncedClient {
             client_id: id.to_string(),
-            since_ms: 1_700_000_000_000,
             topics: vec![ResyncedTopic {
                 topic: "a/b".to_string(),
                 qos: 1,

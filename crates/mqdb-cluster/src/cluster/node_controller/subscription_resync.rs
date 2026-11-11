@@ -1,7 +1,6 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use super::super::client_location::Located;
 use super::super::heartbeat::NodeStatus;
 use super::super::protocol::{
     Heartbeat, ResyncRequest, ResyncedClient, ResyncedPattern, ResyncedTopic, SubscriptionResync,
@@ -13,13 +12,27 @@ use std::collections::{HashMap, HashSet};
 
 const RESYNC_MESSAGE_BUDGET: usize = 1024 * 1024;
 pub(crate) const RESYNC_RETRY_MS: u64 = 5_000;
+pub(crate) const MAX_RESYNC_ATTEMPTS: u32 = 6;
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ResyncRound {
-    round: u64,
-    ask_back: bool,
-    asked_at_ms: Option<u64>,
+#[derive(Debug, Default)]
+struct RoundProgress {
     next_part: u32,
+    listed: HashSet<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ResyncRound {
+    ask_back: bool,
+    attempts: u32,
+    next_ask_ms: Option<u64>,
+    progress: HashMap<u64, RoundProgress>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndexUpdate {
+    Replace,
+    Add,
+    Keep,
 }
 
 fn type_code(subscription_type: SubscriptionType) -> u8 {
@@ -34,6 +47,10 @@ fn type_from_code(code: u8) -> SubscriptionType {
         1 => SubscriptionType::Db,
         _ => SubscriptionType::Mqtt,
     }
+}
+
+fn retry_delay_ms(attempts: u32) -> u64 {
+    RESYNC_RETRY_MS.saturating_mul(1 << attempts.saturating_sub(1).min(16))
 }
 
 fn split_into_messages(
@@ -80,6 +97,7 @@ impl<T: ClusterTransport> NodeController<T> {
         self.heartbeat
             .receive_heartbeat(from, heartbeat, received_at);
         if revived {
+            self.stores.client_locations.revive_node(from);
             self.pending_resync_requests.insert(from, true);
         }
     }
@@ -92,64 +110,88 @@ impl<T: ClusterTransport> NodeController<T> {
     pub async fn request_subscription_resyncs(&mut self) {
         let pending: Vec<(NodeId, bool)> = self.pending_resync_requests.drain().collect();
         for (peer, ask_back) in pending {
-            self.send_resync_request(peer, ask_back).await;
+            if self.heartbeat.node_status(peer) == NodeStatus::Dead {
+                continue;
+            }
+            self.resync_rounds.insert(
+                peer,
+                ResyncRound {
+                    ask_back,
+                    attempts: 0,
+                    next_ask_ms: None,
+                    progress: HashMap::new(),
+                },
+            );
+            self.ask_for_resync(peer).await;
         }
     }
 
-    async fn send_resync_request(&mut self, peer: NodeId, ask_back: bool) {
+    async fn ask_for_resync(&mut self, peer: NodeId) {
+        let Some(state) = self.resync_rounds.get_mut(&peer) else {
+            return;
+        };
         let round = self.next_resync_round;
         self.next_resync_round += 1;
-        let request = ResyncRequest { round, ask_back };
+        state.attempts += 1;
+        state.next_ask_ms = None;
+        state.progress.insert(round, RoundProgress::default());
+        let request = ResyncRequest {
+            round,
+            ask_back: state.ask_back,
+        };
+        let attempt = state.attempts;
         match self
             .transport
             .send(peer, ClusterMessage::SubscriptionResyncRequest(request))
             .await
         {
-            Ok(()) => {
-                self.resync_rounds.insert(
-                    peer,
-                    ResyncRound {
-                        round,
-                        ask_back,
-                        asked_at_ms: None,
-                        next_part: 0,
-                    },
-                );
-                tracing::debug!(
-                    peer = peer.get(),
-                    round,
-                    ask_back,
-                    "asked peer for its connected subscribers"
-                );
-            }
-            Err(error) => {
-                let queued = self.pending_resync_requests.entry(peer).or_insert(false);
-                *queued |= ask_back;
-                tracing::warn!(peer = peer.get(), %error, "subscription resync request not sent");
-            }
+            Ok(()) => tracing::debug!(
+                peer = peer.get(),
+                round,
+                attempt,
+                "asked peer for its connected subscribers"
+            ),
+            Err(error) => tracing::debug!(
+                peer = peer.get(),
+                attempt,
+                %error,
+                "subscription resync request not sent"
+            ),
         }
     }
 
     pub async fn drive_subscription_resyncs(&mut self, now_ms: u64) {
-        let due: Vec<(NodeId, bool)> = self
+        let due: Vec<NodeId> = self
             .resync_rounds
             .iter_mut()
-            .filter_map(|(peer, round)| {
-                let asked_at = *round.asked_at_ms.get_or_insert(now_ms);
-                (now_ms.saturating_sub(asked_at) >= RESYNC_RETRY_MS)
-                    .then_some((*peer, round.ask_back))
+            .filter_map(|(peer, state)| {
+                let next = *state
+                    .next_ask_ms
+                    .get_or_insert(now_ms.saturating_add(retry_delay_ms(state.attempts)));
+                (next <= now_ms).then_some(*peer)
             })
             .collect();
-        for (peer, ask_back) in due {
-            self.resync_rounds.remove(&peer);
-            if self.heartbeat.node_status(peer) == NodeStatus::Dead {
+        for peer in due {
+            let exhausted = self
+                .resync_rounds
+                .get(&peer)
+                .is_some_and(|state| state.attempts >= MAX_RESYNC_ATTEMPTS);
+            if exhausted || self.heartbeat.node_status(peer) == NodeStatus::Dead {
+                self.resync_rounds.remove(&peer);
+                if exhausted {
+                    tracing::info!(
+                        peer = peer.get(),
+                        attempts = MAX_RESYNC_ATTEMPTS,
+                        "peer did not answer the subscription resync, giving up"
+                    );
+                }
                 continue;
             }
-            tracing::info!(
+            tracing::debug!(
                 peer = peer.get(),
                 "subscription resync incomplete, asking again"
             );
-            self.send_resync_request(peer, ask_back).await;
+            self.ask_for_resync(peer).await;
         }
         self.request_subscription_resyncs().await;
     }
@@ -188,13 +230,12 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    pub async fn announce_resumed_client(&self, client_id: &str, since_ms: u64) {
-        let clients = HashMap::from([(client_id.to_string(), since_ms)]);
+    pub async fn announce_resumed_client(&self, client_id: &str) {
         let announcement = SubscriptionResync {
             round: SubscriptionResync::UNSOLICITED,
             part: 0,
             parts: 1,
-            clients: self.resynced_clients(clients),
+            clients: self.resynced_clients(&HashSet::from([client_id.to_string()])),
         };
         if let Err(error) = self
             .transport
@@ -206,25 +247,24 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     fn connected_subscribers(&self) -> Vec<ResyncedClient> {
-        self.resynced_clients(self.stores.client_locations.clients_on(self.node_id))
+        self.resynced_clients(&self.stores.client_locations.clients_on(self.node_id))
     }
 
-    fn resynced_clients(&self, clients: HashMap<String, u64>) -> Vec<ResyncedClient> {
-        let names: HashSet<String> = clients.keys().cloned().collect();
-        let mut topics = self.stores.topics.subscriptions_of(&names);
-        let mut patterns = self.stores.wildcards.patterns_of(&names);
+    fn resynced_clients(&self, clients: &HashSet<String>) -> Vec<ResyncedClient> {
+        let mut topics = self.stores.topics.subscriptions_of(clients);
+        let mut patterns = self.stores.wildcards.patterns_of(clients);
         let mut resynced: Vec<ResyncedClient> = clients
-            .into_iter()
-            .map(|(client_id, since_ms)| ResyncedClient {
+            .iter()
+            .map(|client_id| ResyncedClient {
                 topics: topics
-                    .remove(&client_id)
+                    .remove(client_id)
                     .unwrap_or_default()
                     .into_iter()
                     .filter(|(topic, _)| !is_response_topic(topic))
                     .map(|(topic, qos)| ResyncedTopic { topic, qos })
                     .collect(),
                 patterns: patterns
-                    .remove(&client_id)
+                    .remove(client_id)
                     .unwrap_or_default()
                     .into_iter()
                     .map(|(pattern, qos, subscription_type)| ResyncedPattern {
@@ -233,104 +273,119 @@ impl<T: ClusterTransport> NodeController<T> {
                         subscription_type: type_code(subscription_type),
                     })
                     .collect(),
-                client_id,
-                since_ms,
+                client_id: client_id.clone(),
             })
             .collect();
         resynced.sort_by(|a, b| a.client_id.cmp(&b.client_id));
         resynced
     }
 
-    fn takes_resynced_client(&self, client: &ResyncedClient) -> bool {
-        self.stores
-            .client_locations
-            .located(&client.client_id)
-            .is_none_or(|current| {
-                current.node != self.node_id && current.since_ms <= client.since_ms
-            })
+    fn index_update_for(&self, from: NodeId, client_id: &str, announced: bool) -> IndexUpdate {
+        let claimants = self.stores.client_locations.claimants(client_id);
+        if claimants.contains(&self.node_id) {
+            IndexUpdate::Keep
+        } else if !announced && claimants == [from] {
+            IndexUpdate::Replace
+        } else {
+            IndexUpdate::Add
+        }
     }
 
     pub(crate) fn handle_subscription_resync(&mut self, from: NodeId, resync: &SubscriptionResync) {
-        let taken: Vec<&ResyncedClient> = resync
+        let announced = resync.round == SubscriptionResync::UNSOLICITED;
+        for client in &resync.clients {
+            self.stores.client_locations.claim(&client.client_id, from);
+        }
+        let updates: Vec<(&ResyncedClient, IndexUpdate)> = resync
             .clients
             .iter()
-            .filter(|client| self.takes_resynced_client(client))
+            .map(|client| {
+                (
+                    client,
+                    self.index_update_for(from, &client.client_id, announced),
+                )
+            })
             .collect();
-        let names: HashSet<String> = taken
+        let replaced: HashSet<String> = updates
             .iter()
-            .map(|client| client.client_id.clone())
+            .filter(|(_, update)| *update == IndexUpdate::Replace)
+            .map(|(client, _)| client.client_id.clone())
             .collect();
-        let mut indexed_topics = self.stores.topics.subscriptions_of(&names);
-        let mut indexed_patterns = self.stores.wildcards.patterns_of(&names);
-        for client in &taken {
-            self.replace_client_subscriptions(
-                from,
-                client,
-                indexed_topics.remove(&client.client_id).unwrap_or_default(),
-                indexed_patterns
-                    .remove(&client.client_id)
-                    .unwrap_or_default(),
-            );
+        let mut indexed_topics = self.stores.topics.subscriptions_of(&replaced);
+        let mut indexed_patterns = self.stores.wildcards.patterns_of(&replaced);
+        for (client, update) in &updates {
+            match update {
+                IndexUpdate::Keep => {}
+                IndexUpdate::Add => self.add_client_subscriptions(client),
+                IndexUpdate::Replace => {
+                    self.drop_unlisted_subscriptions(
+                        client,
+                        indexed_topics.remove(&client.client_id).unwrap_or_default(),
+                        indexed_patterns
+                            .remove(&client.client_id)
+                            .unwrap_or_default(),
+                    );
+                    self.add_client_subscriptions(client);
+                }
+            }
         }
-        tracing::info!(
+        tracing::debug!(
             from = from.get(),
             round = resync.round,
             part = resync.part,
             parts = resync.parts,
-            clients = taken.len(),
-            skipped = resync.clients.len() - taken.len(),
+            clients = resync.clients.len(),
+            replaced = replaced.len(),
             "applied subscribers connected to peer"
         );
-        if resync.round != SubscriptionResync::UNSOLICITED {
+        if !announced {
             self.track_resync_part(from, resync);
         }
     }
 
     fn track_resync_part(&mut self, from: NodeId, resync: &SubscriptionResync) {
-        let Some(round) = self.resync_rounds.get_mut(&from) else {
+        let Some(state) = self.resync_rounds.get_mut(&from) else {
             return;
         };
-        if round.round != resync.round {
+        let Some(progress) = state.progress.get_mut(&resync.round) else {
             return;
-        }
-        if resync.part != round.next_part {
-            tracing::warn!(
+        };
+        if resync.part != progress.next_part {
+            tracing::debug!(
                 from = from.get(),
-                expected = round.next_part,
+                expected = progress.next_part,
                 got = resync.part,
                 "subscription resync part missing, asking again"
             );
-            round.asked_at_ms = Some(0);
+            state.progress.remove(&resync.round);
+            state.next_ask_ms = Some(0);
             return;
         }
-        round.next_part += 1;
-        if round.next_part == resync.parts {
+        progress.next_part += 1;
+        progress
+            .listed
+            .extend(resync.clients.iter().map(|client| client.client_id.clone()));
+        if progress.next_part == resync.parts {
+            let listed = std::mem::take(&mut progress.listed);
             self.resync_rounds.remove(&from);
-            tracing::debug!(
+            let released = self.stores.client_locations.retain_claims_of(from, &listed);
+            tracing::info!(
                 from = from.get(),
                 round = resync.round,
+                clients = listed.len(),
+                released,
                 "subscription resync complete"
             );
         }
     }
 
-    fn replace_client_subscriptions(
+    fn drop_unlisted_subscriptions(
         &self,
-        from: NodeId,
         client: &ResyncedClient,
         indexed_topics: Vec<(String, u8)>,
         indexed_patterns: Vec<(String, u8, SubscriptionType)>,
     ) {
         let client_id = client.client_id.as_str();
-        let partition = session_partition(client_id);
-        self.stores.client_locations.set_if_newer(
-            client_id,
-            Located {
-                node: from,
-                since_ms: client.since_ms,
-            },
-        );
-
         let wanted_topics: HashMap<&str, u8> = client
             .topics
             .iter()
@@ -341,21 +396,6 @@ impl<T: ClusterTransport> NodeController<T> {
                 let _ = self.stores.topics.unsubscribe(&topic, client_id);
             }
         }
-        for topic in &client.topics {
-            if let Err(error) =
-                self.stores
-                    .topics
-                    .subscribe(&topic.topic, client_id, partition, topic.qos)
-            {
-                tracing::warn!(
-                    topic = topic.topic,
-                    client_id,
-                    ?error,
-                    "resynced topic not indexed"
-                );
-            }
-        }
-
         let wanted_patterns: HashMap<&str, (u8, SubscriptionType)> = client
             .patterns
             .iter()
@@ -369,6 +409,25 @@ impl<T: ClusterTransport> NodeController<T> {
         for (pattern, qos, subscription_type) in indexed_patterns {
             if wanted_patterns.get(pattern.as_str()) != Some(&(qos, subscription_type)) {
                 let _ = self.stores.wildcards.unsubscribe(&pattern, client_id);
+            }
+        }
+    }
+
+    fn add_client_subscriptions(&self, client: &ResyncedClient) {
+        let client_id = client.client_id.as_str();
+        let partition = session_partition(client_id);
+        for topic in &client.topics {
+            if let Err(error) =
+                self.stores
+                    .topics
+                    .subscribe(&topic.topic, client_id, partition, topic.qos)
+            {
+                tracing::warn!(
+                    topic = topic.topic,
+                    client_id,
+                    ?error,
+                    "resynced topic not indexed"
+                );
             }
         }
         for pattern in &client.patterns {
@@ -396,7 +455,6 @@ mod tests {
     fn client(id: &str, topic_len: usize) -> ResyncedClient {
         ResyncedClient {
             client_id: id.to_string(),
-            since_ms: 0,
             topics: vec![ResyncedTopic {
                 topic: "t".repeat(topic_len),
                 qos: 1,
@@ -439,5 +497,11 @@ mod tests {
                 clients: Vec::new()
             }]
         );
+    }
+
+    #[test]
+    fn retries_back_off_and_stay_bounded() {
+        let delays: Vec<u64> = (1..=MAX_RESYNC_ATTEMPTS).map(retry_delay_ms).collect();
+        assert_eq!(delays, [5_000, 10_000, 20_000, 40_000, 80_000, 160_000]);
     }
 }

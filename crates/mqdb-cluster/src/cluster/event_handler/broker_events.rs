@@ -115,8 +115,7 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
             );
             ctrl.write_or_forward(location_write).await;
             if !event.clean_start {
-                ctrl.announce_resumed_client(client_id, location_entry.timestamp_ms)
-                    .await;
+                ctrl.announce_resumed_client(client_id).await;
             }
         })
     }
