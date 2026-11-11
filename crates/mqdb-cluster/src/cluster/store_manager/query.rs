@@ -5,19 +5,20 @@ use bebytes::BeBytes;
 
 use super::{StoreApplyError, StoreManager};
 use crate::cluster::db::DbDataStore;
-use crate::cluster::entity;
+use crate::cluster::{TopicIndex, entity};
+
+pub type QueryPage = (Vec<u8>, bool, Option<Vec<u8>>);
 
 impl StoreManager {
     /// # Errors
     /// Returns `StoreApplyError::UnknownEntity` if the entity type is not recognized.
-    #[allow(clippy::type_complexity)]
     pub fn query_entity(
         &self,
         entity: &str,
         filter: Option<&str>,
         limit: u32,
         cursor: Option<&[u8]>,
-    ) -> Result<(Vec<u8>, bool, Option<Vec<u8>>), StoreApplyError> {
+    ) -> Result<QueryPage, StoreApplyError> {
         match entity {
             entity::SESSIONS => {
                 let (sessions, has_more, next_cursor) = self.sessions.query(filter, limit, cursor);
@@ -36,7 +37,11 @@ impl StoreManager {
             }
             entity::TOPIC_INDEX => {
                 let (entries, has_more, next_cursor) = self.topics.query(filter, limit, cursor);
-                let data = entries.into_iter().flat_map(|e| e.to_be_bytes()).collect();
+                let data = entries
+                    .iter()
+                    .filter_map(TopicIndex::serialize)
+                    .flatten()
+                    .collect();
                 Ok((data, has_more, next_cursor))
             }
             entity::WILDCARDS => {
@@ -91,7 +96,11 @@ impl StoreManager {
             entity::SESSIONS => self.sessions.get(id).map(|s| s.to_be_bytes()),
             entity::RETAINED => self.retained.get(id).map(|m| m.to_be_bytes()),
             entity::SUBSCRIPTIONS => self.subscriptions.get_snapshot(id).map(|s| s.to_be_bytes()),
-            entity::TOPIC_INDEX => self.topics.get_entry(id).map(|e| e.to_be_bytes()),
+            entity::TOPIC_INDEX => self
+                .topics
+                .get_entry(id)
+                .as_ref()
+                .and_then(TopicIndex::serialize),
             entity::DB_DATA => {
                 let parts: Vec<&str> = id.splitn(2, '/').collect();
                 if parts.len() == 2 {

@@ -762,9 +762,17 @@ async fn a_primary_built_from_a_topic_index_snapshot_trusts_its_disk_after_a_res
     assert_eq!(restarted.role(partition), ReplicaRole::Primary);
 }
 
+const CONNECTED_AT_MS: u64 = 1_000;
+
+fn located(node: NodeId, since_ms: u64) -> crate::cluster::client_location::Located {
+    crate::cluster::client_location::Located { node, since_ms }
+}
+
 fn connect_subscriber(owner: &NodeController<MockTransport>, client_id: &str, filters: &[&str]) {
     let stores = owner.stores();
-    stores.client_locations.set(client_id, owner.node_id());
+    stores
+        .client_locations
+        .set_if_newer(client_id, located(owner.node_id(), CONNECTED_AT_MS));
     for filter in filters {
         if filter.contains('+') || filter.contains('#') {
             stores
@@ -878,7 +886,10 @@ async fn a_restarted_node_relearns_exact_and_wildcard_subscribers_connected_to_a
             1,
         )
         .unwrap();
-    owner.stores().client_locations.set("elsewhere", node(3));
+    owner
+        .stores()
+        .client_locations
+        .set_if_newer("elsewhere", located(node(3), CONNECTED_AT_MS));
 
     let mut restarted = controller(2);
     hear_from_peer_after_restart(&mut restarted, &mut owner).await;
@@ -939,7 +950,7 @@ fn resync_requests_sent(ctrl: &NodeController<MockTransport>, to: NodeId) -> usi
         .sent_messages()
         .iter()
         .filter(|(dest, message)| {
-            *dest == to && matches!(message, ClusterMessage::SubscriptionResyncRequest)
+            *dest == to && matches!(message, ClusterMessage::SubscriptionResyncRequest(_))
         })
         .count()
 }
@@ -1969,4 +1980,272 @@ async fn a_write_acked_by_a_primary_built_from_a_snapshot_survives_its_restart()
         restarted.stores().db_get("bigdocs", &acked).is_some(),
         "the write acked as primary was lost"
     );
+}
+
+#[tokio::test]
+async fn a_reply_does_not_override_a_client_that_moved_to_a_third_node() {
+    let client = client_outside(&[], "moving-client");
+    let mut owner = controller(1);
+    connect_subscriber(&owner, &client, &["probe/old"]);
+    let mut restarted = controller(2);
+    restarted
+        .stores()
+        .client_locations
+        .set_if_newer(&client, located(node(3), CONNECTED_AT_MS + 1_000));
+    restarted
+        .stores()
+        .topics
+        .subscribe("probe/new", &client, session_partition(&client), 1)
+        .unwrap();
+
+    hear_from_peer_after_restart(&mut restarted, &mut owner).await;
+
+    assert_eq!(restarted.connected_node(&client), Some(node(3)));
+    assert_eq!(
+        routed_clients(&restarted, "probe/new"),
+        std::slice::from_ref(&client)
+    );
+    assert!(routed_clients(&restarted, "probe/old").is_empty());
+}
+
+#[tokio::test]
+async fn a_client_connecting_to_the_peer_after_the_reply_is_located_on_the_restarted_node() {
+    let mut owner = controller(1);
+    let mut restarted = controller(2);
+    *owner.transport.linked.lock().unwrap() = Some(vec![restarted.node_id()]);
+    restarted.transport.inject_message(
+        owner.node_id(),
+        ClusterMessage::Heartbeat(Heartbeat::create(owner.node_id(), 0)),
+    );
+    restarted.process_messages().await;
+    deliver_over_the_wire(&mut restarted, &mut owner).await;
+    deliver_over_the_wire(&mut owner, &mut restarted).await;
+
+    let client = client_outside(&[], "late-client");
+    let entry = crate::cluster::ClientLocationEntry::create(&client, owner.node_id());
+    owner
+        .write_or_forward(ReplicationWrite::new(
+            session_partition(&client),
+            Operation::Insert,
+            Epoch::new(0),
+            0,
+            crate::cluster::entity::CLIENT_LOCATIONS.to_string(),
+            crate::cluster::client_location_key(&client),
+            bebytes::BeBytes::to_be_bytes(&entry),
+        ))
+        .await;
+    deliver_over_the_wire(&mut owner, &mut restarted).await;
+
+    assert_eq!(restarted.connected_node(&client), Some(node(1)));
+}
+
+#[tokio::test]
+async fn a_recovered_subscriber_that_no_peer_lists_is_kept() {
+    let client = client_outside(&[], "gone-client");
+    let mut owner = controller(1);
+    let backend = crate::cluster::test_support::FaultyBackend::shared();
+    let mut stale = crate::cluster::MqttSubscriptionSnapshot::create(&client);
+    stale.add_subscription("probe/stale", 1);
+    controller_on(2, &backend)
+        .stores()
+        .apply_write(&ReplicationWrite::new(
+            session_partition(&client),
+            Operation::Insert,
+            Epoch::new(1),
+            1,
+            crate::cluster::entity::SUBSCRIPTIONS.to_string(),
+            client.clone(),
+            crate::cluster::SubscriptionCache::serialize(&stale),
+        ))
+        .unwrap();
+    let mut restarted = controller_on(2, &backend);
+    restarted.stores().recover().unwrap();
+
+    hear_from_peer_after_restart(&mut restarted, &mut owner).await;
+
+    assert_eq!(
+        routed_clients(&restarted, "probe/stale"),
+        std::slice::from_ref(&client)
+    );
+}
+
+fn request_round(ctrl: &NodeController<MockTransport>, to: NodeId) -> u64 {
+    ctrl.transport
+        .sent_messages()
+        .iter()
+        .rev()
+        .find_map(|(dest, message)| match message {
+            ClusterMessage::SubscriptionResyncRequest(request) if *dest == to => {
+                Some(request.round)
+            }
+            _ => None,
+        })
+        .unwrap()
+}
+
+const LATER_MS: u64 = 1_800_000_000_000;
+
+#[tokio::test]
+async fn a_lost_resync_reply_is_asked_for_again() {
+    let client = client_outside(&[], "remote-client");
+    let mut owner = controller(1);
+    connect_subscriber(&owner, &client, &["probe/exact"]);
+    let mut restarted = controller(2);
+    restarted.transport.inject_message(
+        owner.node_id(),
+        ClusterMessage::Heartbeat(Heartbeat::create(owner.node_id(), 0)),
+    );
+    restarted.process_messages().await;
+    deliver_over_the_wire(&mut restarted, &mut owner).await;
+    owner.transport.take_sent();
+
+    restarted.drive_subscription_resyncs(LATER_MS).await;
+    assert_eq!(resync_requests_sent(&restarted, node(1)), 0);
+    restarted
+        .drive_subscription_resyncs(
+            LATER_MS + crate::cluster::node_controller::subscription_resync::RESYNC_RETRY_MS,
+        )
+        .await;
+    assert_eq!(resync_requests_sent(&restarted, node(1)), 1);
+
+    let retried = request_round(&restarted, node(1));
+    restarted.transport.take_sent();
+    owner.transport.inject_message(
+        restarted.node_id(),
+        ClusterMessage::SubscriptionResyncRequest(crate::cluster::protocol::ResyncRequest {
+            round: retried,
+            ask_back: true,
+        }),
+    );
+    owner.process_messages().await;
+    deliver_over_the_wire(&mut owner, &mut restarted).await;
+
+    assert_eq!(
+        routed_clients(&restarted, "probe/exact"),
+        std::slice::from_ref(&client)
+    );
+    assert_eq!(restarted.connected_node(&client), Some(node(1)));
+    restarted
+        .drive_subscription_resyncs(
+            LATER_MS + 3 * crate::cluster::node_controller::subscription_resync::RESYNC_RETRY_MS,
+        )
+        .await;
+    assert_eq!(resync_requests_sent(&restarted, node(1)), 0);
+}
+
+#[tokio::test]
+async fn a_completed_resync_is_not_asked_for_again() {
+    let mut owner = controller(1);
+    let mut restarted = controller(2);
+    hear_from_peer_after_restart(&mut restarted, &mut owner).await;
+    restarted.transport.take_sent();
+
+    restarted.drive_subscription_resyncs(LATER_MS).await;
+    restarted
+        .drive_subscription_resyncs(
+            LATER_MS + crate::cluster::node_controller::subscription_resync::RESYNC_RETRY_MS,
+        )
+        .await;
+
+    assert_eq!(resync_requests_sent(&restarted, node(1)), 0);
+}
+
+#[tokio::test]
+async fn a_missing_resync_part_is_asked_for_again() {
+    let mut restarted = controller(2);
+    restarted.transport.inject_message(
+        node(1),
+        ClusterMessage::Heartbeat(Heartbeat::create(node(1), 0)),
+    );
+    restarted.process_messages().await;
+    let round = request_round(&restarted, node(1));
+    restarted.transport.take_sent();
+    restarted.transport.inject_message(
+        node(1),
+        ClusterMessage::SubscriptionResync(crate::cluster::protocol::SubscriptionResync {
+            round,
+            part: 1,
+            parts: 2,
+            clients: Vec::new(),
+        }),
+    );
+    restarted.process_messages().await;
+
+    restarted.drive_subscription_resyncs(LATER_MS).await;
+
+    assert_eq!(resync_requests_sent(&restarted, node(1)), 1);
+}
+
+#[tokio::test]
+async fn a_dead_peer_is_not_asked_again() {
+    let mut restarted = controller(2);
+    restarted.transport.inject_message(
+        node(1),
+        ClusterMessage::Heartbeat(Heartbeat::create(node(1), 0)),
+    );
+    restarted.process_messages().await;
+    restarted.transport.take_sent();
+    restarted.apply_dead_nodes(&[node(1)]);
+
+    restarted.drive_subscription_resyncs(LATER_MS).await;
+    restarted
+        .drive_subscription_resyncs(
+            LATER_MS + crate::cluster::node_controller::subscription_resync::RESYNC_RETRY_MS,
+        )
+        .await;
+
+    assert_eq!(resync_requests_sent(&restarted, node(1)), 0);
+}
+
+#[tokio::test]
+async fn a_peer_that_never_saw_the_restart_learns_the_restarted_nodes_clients() {
+    let client = client_outside(&[], "early-client");
+    let mut peer = controller(1);
+    let mut restarted = controller(2);
+    connect_subscriber(&restarted, &client, &["probe/early"]);
+
+    hear_from_peer_after_restart(&mut restarted, &mut peer).await;
+    deliver_over_the_wire(&mut restarted, &mut peer).await;
+
+    assert_eq!(peer.connected_node(&client), Some(node(2)));
+    assert_eq!(
+        routed_clients(&peer, "probe/early"),
+        std::slice::from_ref(&client)
+    );
+}
+
+#[tokio::test]
+async fn a_resumed_client_announcement_replaces_a_restarted_nodes_view() {
+    let client = client_outside(&[], "resumed-client");
+    let mut owner = controller(1);
+    connect_subscriber(&owner, &client, &["probe/kept", "probe/+/wild"]);
+    let mut restarted = controller(2);
+    restarted
+        .stores()
+        .topics
+        .subscribe("probe/stale", &client, session_partition(&client), 1)
+        .unwrap();
+
+    owner
+        .announce_resumed_client(&client, CONNECTED_AT_MS)
+        .await;
+    let announced: Vec<_> = owner
+        .transport
+        .take_sent()
+        .into_iter()
+        .map(|(_, message)| (restarted.node_id(), message))
+        .collect();
+    owner.transport.outbox.lock().unwrap().extend(announced);
+    deliver_over_the_wire(&mut owner, &mut restarted).await;
+
+    assert_eq!(restarted.connected_node(&client), Some(node(1)));
+    assert_eq!(
+        routed_clients(&restarted, "probe/kept"),
+        std::slice::from_ref(&client)
+    );
+    assert_eq!(
+        routed_clients(&restarted, "probe/x/wild"),
+        std::slice::from_ref(&client)
+    );
+    assert!(routed_clients(&restarted, "probe/stale").is_empty());
 }

@@ -9,10 +9,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::{PoisonError, RwLock};
 
-#[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubscriberLocation {
-    pub client_id_len: u8,
-    #[FromField(client_id_len)]
     pub client_id: Vec<u8>,
     pub client_partition: u16,
     pub qos: u8,
@@ -21,10 +19,8 @@ pub struct SubscriberLocation {
 impl SubscriberLocation {
     #[must_use]
     pub fn create(client_id: &str, client_partition: PartitionId, qos: u8) -> Self {
-        let client_bytes = client_id.as_bytes().to_vec();
         Self {
-            client_id_len: client_bytes.len() as u8,
-            client_id: client_bytes,
+            client_id: client_id.as_bytes().to_vec(),
             client_partition: client_partition.get(),
             qos,
         }
@@ -41,29 +37,158 @@ impl SubscriberLocation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicIndexEntry {
-    pub version: u8,
-    pub topic_len: u16,
-    #[FromField(topic_len)]
     pub topic: Vec<u8>,
     pub last_seq: u64,
-    pub subscriber_count: u16,
-    #[FromField(subscriber_count)]
     pub subscribers: Vec<SubscriberLocation>,
+}
+
+const NARROW_ENTRY_VERSION: u8 = 1;
+const WIDE_ENTRY_VERSION: u8 = 2;
+
+#[derive(Debug, Clone, BeBytes)]
+struct NarrowSubscriber {
+    client_id_len: u8,
+    #[FromField(client_id_len)]
+    client_id: Vec<u8>,
+    client_partition: u16,
+    qos: u8,
+}
+
+#[derive(Debug, Clone, BeBytes)]
+struct NarrowEntry {
+    version: u8,
+    topic_len: u16,
+    #[FromField(topic_len)]
+    topic: Vec<u8>,
+    last_seq: u64,
+    subscriber_count: u16,
+    #[FromField(subscriber_count)]
+    subscribers: Vec<NarrowSubscriber>,
+}
+
+#[derive(Debug, Clone, BeBytes)]
+struct WideSubscriber {
+    client_id_len: u16,
+    #[FromField(client_id_len)]
+    client_id: Vec<u8>,
+    client_partition: u16,
+    qos: u8,
+}
+
+#[derive(Debug, Clone, BeBytes)]
+struct WideEntry {
+    version: u8,
+    topic_len: u16,
+    #[FromField(topic_len)]
+    topic: Vec<u8>,
+    last_seq: u64,
+    subscriber_count: u32,
+    #[FromField(subscriber_count)]
+    subscribers: Vec<WideSubscriber>,
 }
 
 impl TopicIndexEntry {
     #[must_use]
     pub fn create(topic: &str) -> Self {
-        let topic_bytes = topic.as_bytes().to_vec();
         Self {
-            version: 1,
-            topic_len: topic_bytes.len() as u16,
-            topic: topic_bytes,
+            topic: topic.as_bytes().to_vec(),
             last_seq: 0,
-            subscriber_count: 0,
             subscribers: Vec::new(),
+        }
+    }
+
+    fn narrow(&self) -> Option<NarrowEntry> {
+        let subscribers = self
+            .subscribers
+            .iter()
+            .map(|sub| {
+                Some(NarrowSubscriber {
+                    client_id_len: u8::try_from(sub.client_id.len()).ok()?,
+                    client_id: sub.client_id.clone(),
+                    client_partition: sub.client_partition,
+                    qos: sub.qos,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(NarrowEntry {
+            version: NARROW_ENTRY_VERSION,
+            topic_len: u16::try_from(self.topic.len()).ok()?,
+            topic: self.topic.clone(),
+            last_seq: self.last_seq,
+            subscriber_count: u16::try_from(subscribers.len()).ok()?,
+            subscribers,
+        })
+    }
+
+    fn wide(&self) -> Option<WideEntry> {
+        let subscribers = self
+            .subscribers
+            .iter()
+            .map(|sub| {
+                Some(WideSubscriber {
+                    client_id_len: u16::try_from(sub.client_id.len()).ok()?,
+                    client_id: sub.client_id.clone(),
+                    client_partition: sub.client_partition,
+                    qos: sub.qos,
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(WideEntry {
+            version: WIDE_ENTRY_VERSION,
+            topic_len: u16::try_from(self.topic.len()).ok()?,
+            topic: self.topic.clone(),
+            last_seq: self.last_seq,
+            subscriber_count: u32::try_from(subscribers.len()).ok()?,
+            subscribers,
+        })
+    }
+
+    #[must_use]
+    pub fn to_bytes(&self) -> Option<Vec<u8>> {
+        match self.narrow() {
+            Some(narrow) => Some(narrow.to_be_bytes()),
+            None => self.wide().map(|wide| wide.to_be_bytes()),
+        }
+    }
+
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        match *bytes.first()? {
+            NARROW_ENTRY_VERSION => {
+                let (entry, _) = NarrowEntry::try_from_be_bytes(bytes).ok()?;
+                Some(Self {
+                    topic: entry.topic,
+                    last_seq: entry.last_seq,
+                    subscribers: entry
+                        .subscribers
+                        .into_iter()
+                        .map(|sub| SubscriberLocation {
+                            client_id: sub.client_id,
+                            client_partition: sub.client_partition,
+                            qos: sub.qos,
+                        })
+                        .collect(),
+                })
+            }
+            WIDE_ENTRY_VERSION => {
+                let (entry, _) = WideEntry::try_from_be_bytes(bytes).ok()?;
+                Some(Self {
+                    topic: entry.topic,
+                    last_seq: entry.last_seq,
+                    subscribers: entry
+                        .subscribers
+                        .into_iter()
+                        .map(|sub| SubscriberLocation {
+                            client_id: sub.client_id,
+                            client_partition: sub.client_partition,
+                            qos: sub.qos,
+                        })
+                        .collect(),
+                })
+            }
+            _ => None,
         }
     }
 
@@ -82,14 +207,12 @@ impl TopicIndexEntry {
         }
         self.subscribers
             .push(SubscriberLocation::create(client_id, client_partition, qos));
-        self.subscriber_count = self.subscribers.len() as u16;
     }
 
     #[must_use]
     pub fn remove_subscriber(&mut self, client_id: &str) -> bool {
         let len_before = self.subscribers.len();
         self.subscribers.retain(|s| s.client_id_str() != client_id);
-        self.subscriber_count = self.subscribers.len() as u16;
         self.subscribers.len() != len_before
     }
 
@@ -378,49 +501,14 @@ impl TopicIndex {
         found
     }
 
-    pub fn subscribe_with_data(
-        &self,
-        topic: &str,
-        client_id: &str,
-        client_partition: PartitionId,
-        qos: u8,
-    ) -> (TopicIndexEntry, Vec<u8>) {
-        let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
-        let entry = entries.get_or_create(topic);
-        entry.add_subscriber(client_id, client_partition, qos);
-        let data = Self::serialize(entry);
-        (entry.clone(), data)
-    }
-
-    /// # Errors
-    /// Returns `NotFound` if the topic does not exist.
-    pub fn unsubscribe_with_data(
-        &self,
-        topic: &str,
-        client_id: &str,
-    ) -> Result<(TopicIndexEntry, Vec<u8>), TopicIndexError> {
-        let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
-        if let Some(entry) = entries.get_mut(topic) {
-            let _ = entry.remove_subscriber(client_id);
-            let data = Self::serialize(entry);
-            let result = entry.clone();
-            if entry.subscribers.is_empty() {
-                entries.remove(topic);
-            }
-            Ok((result, data))
-        } else {
-            Err(TopicIndexError::NotFound)
-        }
-    }
-
     #[must_use]
-    pub fn serialize(entry: &TopicIndexEntry) -> Vec<u8> {
-        super::store_utils::serialize(entry)
+    pub fn serialize(entry: &TopicIndexEntry) -> Option<Vec<u8>> {
+        entry.to_bytes()
     }
 
     #[must_use]
     pub fn deserialize(bytes: &[u8]) -> Option<TopicIndexEntry> {
-        super::store_utils::deserialize(bytes)
+        TopicIndexEntry::from_bytes(bytes)
     }
 
     /// # Errors
@@ -474,25 +562,38 @@ impl TopicIndex {
     #[must_use]
     pub fn export_for_partition(&self, partition: PartitionId) -> Vec<u8> {
         let entries = self.entries.read().unwrap_or_else(PoisonError::into_inner);
-        let partition_entries: Vec<_> = entries
+        let framed: Vec<Vec<u8>> = entries
             .iter()
             .filter(|(topic, _)| topic_partition(topic) == partition)
+            .filter_map(|(topic, entry)| {
+                let frame = Self::frame(topic, entry);
+                if frame.is_none() {
+                    tracing::warn!(topic, "topic index entry too large to export");
+                }
+                frame
+            })
             .collect();
 
-        let mut buf = Vec::new();
-        buf.extend_from_slice(&(partition_entries.len() as u32).to_be_bytes());
-
-        for (topic, entry) in partition_entries {
-            let id_bytes = topic.as_bytes();
-            buf.extend_from_slice(&(id_bytes.len() as u16).to_be_bytes());
-            buf.extend_from_slice(id_bytes);
-
-            let data = entry.to_be_bytes();
-            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
-            buf.extend_from_slice(&data);
+        let count = u32::try_from(framed.len()).unwrap_or(u32::MAX);
+        let mut buf = count.to_be_bytes().to_vec();
+        for frame in framed
+            .into_iter()
+            .take(usize::try_from(count).unwrap_or(usize::MAX))
+        {
+            buf.extend_from_slice(&frame);
         }
-
         buf
+    }
+
+    fn frame(topic: &str, entry: &TopicIndexEntry) -> Option<Vec<u8>> {
+        let id_bytes = topic.as_bytes();
+        let data = Self::serialize(entry)?;
+        let mut frame = Vec::with_capacity(6 + id_bytes.len() + data.len());
+        frame.extend_from_slice(&u16::try_from(id_bytes.len()).ok()?.to_be_bytes());
+        frame.extend_from_slice(id_bytes);
+        frame.extend_from_slice(&u32::try_from(data.len()).ok()?.to_be_bytes());
+        frame.extend_from_slice(&data);
+        Some(frame)
     }
 
     /// # Errors
@@ -639,29 +740,60 @@ mod tests {
     }
 
     #[test]
-    fn subscriber_location_bebytes_roundtrip() {
-        let sub = SubscriberLocation::create("client1", partition(5), 2);
-        let bytes = sub.to_be_bytes();
-        let (parsed, _) = SubscriberLocation::try_from_be_bytes(&bytes).unwrap();
-        assert_eq!(sub.client_id, parsed.client_id);
-        assert_eq!(sub.client_partition, parsed.client_partition);
-        assert_eq!(sub.qos, parsed.qos);
-    }
-
-    #[test]
-    fn topic_index_entry_bebytes_roundtrip() {
+    fn topic_index_entry_roundtrip() {
         let mut entry = TopicIndexEntry::create("sensors/temp");
         entry.add_subscriber("client1", partition(12), 1);
         entry.add_subscriber("client2", partition(45), 2);
         entry.next_seq();
         entry.next_seq();
 
-        let bytes = TopicIndex::serialize(&entry);
-        let parsed = TopicIndex::deserialize(&bytes).unwrap();
+        let bytes = TopicIndex::serialize(&entry).unwrap();
 
-        assert_eq!(entry.topic, parsed.topic);
-        assert_eq!(entry.last_seq, parsed.last_seq);
-        assert_eq!(entry.subscribers.len(), parsed.subscribers.len());
+        assert_eq!(bytes[0], NARROW_ENTRY_VERSION);
+        assert_eq!(TopicIndex::deserialize(&bytes), Some(entry));
+    }
+
+    #[test]
+    fn a_client_id_longer_than_255_bytes_survives_serialization() {
+        let id = "x".repeat(300);
+        let mut entry = TopicIndexEntry::create("a/b");
+        entry.add_subscriber("short", partition(2), 0);
+        entry.add_subscriber(&id, partition(1), 1);
+
+        let bytes = TopicIndex::serialize(&entry).unwrap();
+
+        assert_eq!(bytes[0], WIDE_ENTRY_VERSION);
+        assert_eq!(TopicIndex::deserialize(&bytes), Some(entry));
+    }
+
+    #[test]
+    fn a_topic_with_more_than_u16_max_subscribers_survives_serialization() {
+        let mut entry = TopicIndexEntry::create("a/b");
+        for n in 0..=u32::from(u16::MAX) {
+            entry.subscribers.push(SubscriberLocation::create(
+                &format!("c{n}"),
+                partition(1),
+                0,
+            ));
+        }
+
+        let decoded = TopicIndex::deserialize(&TopicIndex::serialize(&entry).unwrap()).unwrap();
+
+        assert_eq!(decoded.subscribers.len(), entry.subscribers.len());
+    }
+
+    #[test]
+    fn an_exported_partition_with_a_long_client_id_imports_intact() {
+        let src = TopicIndex::new(node(1));
+        let id = "y".repeat(300);
+        src.subscribe("a/b", &id, partition(3), 1).unwrap();
+        let dst = TopicIndex::new(node(2));
+
+        assert_eq!(
+            dst.import_entries(&src.export_for_partition(topic_partition("a/b"))),
+            Ok(1)
+        );
+        assert_eq!(dst.get_client_topics(&id), vec![("a/b".to_string(), 1)]);
     }
 
     #[test]

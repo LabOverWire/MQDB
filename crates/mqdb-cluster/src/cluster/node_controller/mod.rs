@@ -458,7 +458,9 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) incoming_snapshots: HashMap<PartitionId, snapshot::IncomingSnapshot>,
     pub(super) deferred_snapshot_requests: VecDeque<(NodeId, PartitionId)>,
     pub(super) primary_taken_after_wait: bool,
-    pub(super) pending_resync_requests: HashSet<NodeId>,
+    pub(super) pending_resync_requests: HashMap<NodeId, bool>,
+    pub(super) resync_rounds: HashMap<NodeId, subscription_resync::ResyncRound>,
+    pub(super) next_resync_round: u64,
     pub(super) held_primaries: Option<super::store_manager::HeldPrimaries>,
     pub(super) outgoing_snapshots: VecDeque<snapshot::OutgoingSnapshot>,
     pub(super) snapshot_clock_ms: u64,
@@ -540,7 +542,9 @@ impl<T: ClusterTransport> NodeController<T> {
             incoming_snapshots: HashMap::new(),
             deferred_snapshot_requests: VecDeque::new(),
             primary_taken_after_wait: false,
-            pending_resync_requests: HashSet::new(),
+            pending_resync_requests: HashMap::new(),
+            resync_rounds: HashMap::new(),
+            next_resync_round: 1,
             held_primaries: None,
             outgoing_snapshots: VecDeque::new(),
             snapshot_clock_ms: 0,
@@ -1048,6 +1052,7 @@ impl<T: ClusterTransport> NodeController<T> {
     pub fn apply_dead_nodes(&mut self, dead_nodes: &[NodeId]) {
         for &node in dead_nodes {
             self.heartbeat.handle_death_notice(node);
+            self.forget_resync_peer(node);
             self.handle_node_death(node);
         }
     }
@@ -1305,8 +1310,9 @@ impl<T: ClusterTransport> NodeController<T> {
             ClusterMessage::TopicSubscriptionBroadcast(broadcast) => {
                 self.handle_topic_subscription_broadcast(from, broadcast);
             }
-            ClusterMessage::SubscriptionResyncRequest => {
-                self.handle_subscription_resync_request(from).await;
+            ClusterMessage::SubscriptionResyncRequest(request) => {
+                self.handle_subscription_resync_request(from, *request)
+                    .await;
             }
             ClusterMessage::SubscriptionResync(resync) => {
                 self.handle_subscription_resync(from, resync);

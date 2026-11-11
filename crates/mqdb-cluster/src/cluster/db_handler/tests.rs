@@ -3397,6 +3397,65 @@ async fn reconnecting_to_the_same_node_restores_the_client_location() {
     );
 }
 
+async fn announced_topics(
+    ctrl: &Arc<tokio::sync::RwLock<NodeController<MockTransport>>>,
+    client_id: &str,
+) -> Vec<Vec<String>> {
+    ctrl.read()
+        .await
+        .transport()
+        .outbox
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|(_, message)| match message {
+            ClusterMessage::SubscriptionResync(resync) => Some(resync),
+            _ => None,
+        })
+        .flat_map(|resync| resync.clients.iter())
+        .filter(|client| client.client_id == client_id)
+        .map(|client| client.topics.iter().map(|t| t.topic.clone()).collect())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_resumed_session_announces_its_subscriptions_to_peers() {
+    use mqtt5::broker::events::BrokerEventHandler;
+
+    let (handler, ctrl) = session_harness();
+    handler
+        .on_client_connect(session_connect("meter", true, 300))
+        .await;
+    handler
+        .on_client_subscribe(session_subscribe("meter", "plant/temp"))
+        .await;
+    handler
+        .on_client_disconnect(session_disconnect("meter"))
+        .await;
+    assert!(announced_topics(&ctrl, "meter").await.is_empty());
+
+    handler
+        .on_client_connect(session_connect("meter", false, 300))
+        .await;
+
+    assert_eq!(
+        announced_topics(&ctrl, "meter").await,
+        vec![vec!["plant/temp".to_string()]]
+    );
+}
+
+#[tokio::test]
+async fn a_clean_start_does_not_announce_subscriptions() {
+    use mqtt5::broker::events::BrokerEventHandler;
+
+    let (handler, ctrl) = session_harness();
+    handler
+        .on_client_connect(session_connect("valve", true, 300))
+        .await;
+
+    assert!(announced_topics(&ctrl, "valve").await.is_empty());
+}
+
 #[tokio::test]
 async fn disconnect_keeps_subscriptions_of_a_session_that_outlives_it() {
     use mqtt5::broker::events::BrokerEventHandler;
@@ -3617,9 +3676,13 @@ async fn a_forwarded_publish_reaches_local_subscribers_without_being_forwarded_a
         .topics
         .subscribe("plant/temp", "remote-dashboard", PartitionId::ZERO, 1)
         .unwrap();
-    ctrl.stores()
-        .client_locations
-        .set("remote-dashboard", node2);
+    ctrl.stores().client_locations.set_if_newer(
+        "remote-dashboard",
+        crate::cluster::client_location::Located {
+            node: node2,
+            since_ms: 0,
+        },
+    );
     let ctrl = Arc::new(tokio::sync::RwLock::new(ctrl));
     let handler = Arc::new(crate::cluster::event_handler::ClusterEventHandler::new(
         node1,

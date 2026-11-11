@@ -6,10 +6,10 @@ use super::protocol::{
     ChangeEventMark, FkCheckRequest, FkCheckResponse, FkReverseLookupRequest,
     FkReverseLookupResponse, ForwardedPublish, Heartbeat, JsonDbRequest, JsonDbResponse,
     PresenceBroadcast, QueryRequest, QueryResponse, ReplicationAck, ReplicationWrite,
-    SubscriptionResync, TopicSubscriptionBroadcast, UniqueCommitRequest, UniqueCommitResponse,
-    UniqueReassertRequest, UniqueReleaseRequest, UniqueReleaseResponse, UniqueReplicateAck,
-    UniqueReserveRequest, UniqueReserveResponse, UniqueSealRequest, UniqueSealResponse,
-    WildcardBroadcast,
+    ResyncRequest, SubscriptionResync, TopicSubscriptionBroadcast, UniqueCommitRequest,
+    UniqueCommitResponse, UniqueReassertRequest, UniqueReleaseRequest, UniqueReleaseResponse,
+    UniqueReplicateAck, UniqueReserveRequest, UniqueReserveResponse, UniqueSealRequest,
+    UniqueSealResponse, WildcardBroadcast,
 };
 use super::raft::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, PartitionUpdate,
@@ -56,7 +56,7 @@ pub enum ClusterMessage {
     PresenceBroadcast(PresenceBroadcast),
     WildcardBroadcast(WildcardBroadcast),
     TopicSubscriptionBroadcast(TopicSubscriptionBroadcast),
-    SubscriptionResyncRequest,
+    SubscriptionResyncRequest(ResyncRequest),
     SubscriptionResync(SubscriptionResync),
     PartitionUpdate(PartitionUpdate),
     JsonDbRequest {
@@ -141,7 +141,7 @@ impl ClusterMessage {
             Self::PresenceBroadcast(_) => 62,
             Self::WildcardBroadcast(_) => 60,
             Self::TopicSubscriptionBroadcast(_) => 61,
-            Self::SubscriptionResyncRequest => 63,
+            Self::SubscriptionResyncRequest(_) => 63,
             Self::SubscriptionResync(_) => 64,
             Self::PartitionUpdate(_) => 70,
             Self::JsonDbRequest { .. } => 54,
@@ -194,7 +194,7 @@ impl ClusterMessage {
             Self::PresenceBroadcast(_) => "PresenceBroadcast",
             Self::WildcardBroadcast(_) => "WildcardBroadcast",
             Self::TopicSubscriptionBroadcast(_) => "TopicSubscriptionBroadcast",
-            Self::SubscriptionResyncRequest => "SubscriptionResyncRequest",
+            Self::SubscriptionResyncRequest(_) => "SubscriptionResyncRequest",
             Self::SubscriptionResync(_) => "SubscriptionResync",
             Self::PartitionUpdate(_) => "PartitionUpdate",
             Self::JsonDbRequest { .. } => "JsonDbRequest",
@@ -270,7 +270,7 @@ impl ClusterMessage {
             Self::PresenceBroadcast(b) => buf.extend_from_slice(&b.to_be_bytes()),
             Self::WildcardBroadcast(b) => buf.extend_from_slice(&b.to_be_bytes()),
             Self::TopicSubscriptionBroadcast(b) => buf.extend_from_slice(&b.to_be_bytes()),
-            Self::SubscriptionResyncRequest => {}
+            Self::SubscriptionResyncRequest(request) => buf.extend_from_slice(&request.to_bytes()),
             Self::SubscriptionResync(resync) => match resync.to_bytes() {
                 Some(bytes) => buf.extend_from_slice(&bytes),
                 None => tracing::warn!(
@@ -427,7 +427,9 @@ impl ClusterMessage {
                 let (broadcast, _) = PresenceBroadcast::try_from_be_bytes(data).ok()?;
                 Some(Self::PresenceBroadcast(broadcast))
             }
-            63 => data.is_empty().then_some(Self::SubscriptionResyncRequest),
+            63 => Some(Self::SubscriptionResyncRequest(ResyncRequest::from_bytes(
+                data,
+            )?)),
             64 => Some(Self::SubscriptionResync(SubscriptionResync::from_bytes(
                 data,
             )?)),

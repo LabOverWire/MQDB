@@ -4,7 +4,7 @@
 use super::NodeId;
 use super::protocol::Operation;
 use bebytes::BeBytes;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{PoisonError, RwLock};
 
 #[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
@@ -67,8 +67,14 @@ impl std::fmt::Display for ClientLocationError {
 
 impl std::error::Error for ClientLocationError {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Located {
+    pub node: NodeId,
+    pub since_ms: u64,
+}
+
 pub struct ClientLocationStore {
-    entries: RwLock<HashMap<String, NodeId>>,
+    entries: RwLock<HashMap<String, Located>>,
 }
 
 impl ClientLocationStore {
@@ -92,22 +98,35 @@ impl ClientLocationStore {
         self.len() == 0
     }
 
-    pub fn set(&self, client_id: &str, node: NodeId) {
-        self.entries
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(client_id.to_string(), node);
+    pub fn set_if_newer(&self, client_id: &str, located: Located) -> bool {
+        let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
+        let newer = entries
+            .get(client_id)
+            .is_none_or(|current| current.since_ms <= located.since_ms);
+        if newer {
+            entries.insert(client_id.to_string(), located);
+        }
+        newer
     }
 
-    pub fn remove(&self, client_id: &str) {
-        self.entries
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(client_id);
+    pub fn remove_if_current(&self, client_id: &str, gone: Located) -> bool {
+        let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
+        let current = entries
+            .get(client_id)
+            .is_some_and(|located| located.node == gone.node && located.since_ms <= gone.since_ms);
+        if current {
+            entries.remove(client_id);
+        }
+        current
     }
 
     #[must_use]
     pub fn get(&self, client_id: &str) -> Option<NodeId> {
+        self.located(client_id).map(|located| located.node)
+    }
+
+    #[must_use]
+    pub fn located(&self, client_id: &str) -> Option<Located> {
         self.entries
             .read()
             .unwrap_or_else(PoisonError::into_inner)
@@ -116,22 +135,19 @@ impl ClientLocationStore {
     }
 
     #[must_use]
-    pub fn clients_on(&self, node: NodeId) -> HashSet<String> {
+    pub fn clients_on(&self, node: NodeId) -> HashMap<String, u64> {
         self.entries
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
-            .filter(|(_, located)| **located == node)
-            .map(|(client_id, _)| client_id.clone())
+            .filter(|(_, located)| located.node == node)
+            .map(|(client_id, located)| (client_id.clone(), located.since_ms))
             .collect()
     }
 
     #[must_use]
     pub fn count(&self) -> usize {
-        self.entries
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .len()
+        self.len()
     }
 
     /// # Errors
@@ -141,24 +157,26 @@ impl ClientLocationStore {
         operation: Operation,
         data: &[u8],
     ) -> Result<(), ClientLocationError> {
-        match operation {
-            Operation::Insert | Operation::Update => {
-                let (entry, _) = ClientLocationEntry::try_from_be_bytes(data)
-                    .map_err(|_| ClientLocationError::SerializationError)?;
-                if let Some(node) = entry.node() {
-                    self.set(entry.client_id_str(), node);
+        if data.is_empty() {
+            return Ok(());
+        }
+        let (entry, _) = ClientLocationEntry::try_from_be_bytes(data)
+            .map_err(|_| ClientLocationError::SerializationError)?;
+        if let Some(node) = entry.node() {
+            let located = Located {
+                node,
+                since_ms: entry.timestamp_ms,
+            };
+            match operation {
+                Operation::Insert | Operation::Update => {
+                    self.set_if_newer(entry.client_id_str(), located);
                 }
-                Ok(())
-            }
-            Operation::Delete => {
-                if !data.is_empty() {
-                    let (entry, _) = ClientLocationEntry::try_from_be_bytes(data)
-                        .map_err(|_| ClientLocationError::SerializationError)?;
-                    self.remove(entry.client_id_str());
+                Operation::Delete => {
+                    self.remove_if_current(entry.client_id_str(), located);
                 }
-                Ok(())
             }
         }
+        Ok(())
     }
 }
 
@@ -181,17 +199,67 @@ mod tests {
         assert_eq!(decoded.connected_node, 5);
     }
 
+    fn node(id: u16) -> NodeId {
+        NodeId::validated(id).unwrap()
+    }
+
+    fn entry_bytes(client_id: &str, node_id: u16, timestamp_ms: u64) -> Vec<u8> {
+        let mut entry = ClientLocationEntry::create(client_id, node(node_id));
+        entry.timestamp_ms = timestamp_ms;
+        entry.to_be_bytes()
+    }
+
     #[test]
-    fn store_set_get_remove() {
+    fn a_location_is_set_and_removed_by_its_own_node() {
         let store = ClientLocationStore::new();
-        let node = NodeId::validated(3).unwrap();
+        store
+            .apply_replicated(Operation::Insert, &entry_bytes("c", 3, 10))
+            .unwrap();
+        assert_eq!(store.get("c"), Some(node(3)));
 
-        assert!(store.get("test").is_none());
+        store
+            .apply_replicated(Operation::Delete, &entry_bytes("c", 3, 20))
+            .unwrap();
+        assert_eq!(store.get("c"), None);
+    }
 
-        store.set("test", node);
-        assert_eq!(store.get("test"), Some(node));
+    #[test]
+    fn a_disconnect_from_the_old_node_keeps_the_newer_location() {
+        let store = ClientLocationStore::new();
+        store.set_if_newer(
+            "c",
+            Located {
+                node: node(3),
+                since_ms: 10,
+            },
+        );
+        store
+            .apply_replicated(Operation::Delete, &entry_bytes("c", 1, 20))
+            .unwrap();
+        assert_eq!(store.get("c"), Some(node(3)));
+    }
 
-        store.remove("test");
-        assert!(store.get("test").is_none());
+    #[test]
+    fn an_older_location_does_not_replace_a_newer_one() {
+        let store = ClientLocationStore::new();
+        store
+            .apply_replicated(Operation::Insert, &entry_bytes("c", 3, 20))
+            .unwrap();
+        store
+            .apply_replicated(Operation::Insert, &entry_bytes("c", 1, 10))
+            .unwrap();
+        assert_eq!(store.get("c"), Some(node(3)));
+    }
+
+    #[test]
+    fn a_disconnect_older_than_a_reconnect_to_the_same_node_keeps_it() {
+        let store = ClientLocationStore::new();
+        store
+            .apply_replicated(Operation::Insert, &entry_bytes("c", 1, 30))
+            .unwrap();
+        store
+            .apply_replicated(Operation::Delete, &entry_bytes("c", 1, 20))
+            .unwrap();
+        assert_eq!(store.get("c"), Some(node(1)));
     }
 }

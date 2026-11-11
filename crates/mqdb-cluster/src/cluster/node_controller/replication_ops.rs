@@ -531,20 +531,25 @@ impl<T: ClusterTransport> NodeController<T> {
             );
         }
         let alive = self.heartbeat.alive_nodes();
-        let targets: Vec<_> = alive.iter().filter(|&n| *n != self.node_id).collect();
+        let linked = self.transport.direct_peers().await.unwrap_or_default();
+        let mut targets: Vec<NodeId> = alive.iter().chain(&linked).copied().collect();
+        targets.sort_by_key(|node| node.get());
+        targets.dedup();
+        targets.retain(|node| *node != self.node_id);
         tracing::debug!(
             entity = write.entity,
             id = write.id,
             alive_count = alive.len(),
+            linked_count = linked.len(),
             target_count = targets.len(),
             targets = ?targets.iter().map(|n| n.get()).collect::<Vec<_>>(),
-            "write_or_forward: broadcasting to alive nodes"
+            "write_or_forward: broadcasting to alive and linked nodes"
         );
         for node in targets {
             WRITE_REQUEST_SENT.fetch_add(1, AtomicOrdering::Relaxed);
             if let Err(error) = self
                 .transport
-                .send(*node, ClusterMessage::WriteRequest(write.clone()))
+                .send(node, ClusterMessage::WriteRequest(write.clone()))
                 .await
             {
                 tracing::warn!(to = node.get(), %error, entity = write.entity, "broadcast write not sent");
