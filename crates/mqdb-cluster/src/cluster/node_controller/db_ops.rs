@@ -901,6 +901,17 @@ impl<T: ClusterTransport> NodeController<T> {
             );
         };
 
+        let update = super::PendingUpdate::new(&old_data, data, expected_version);
+        let merged_data = match update.apply_to(Some(old_data.clone())) {
+            Ok(merged) => merged,
+            Err(refusal) => {
+                return (
+                    Self::json_error(refusal.code(), &refusal.message(entity, id)),
+                    None,
+                );
+            }
+        };
+
         if let Some(ref expected) = fk_expected
             && let Some((field, value)) = expected.split_once('=')
         {
@@ -922,17 +933,6 @@ impl<T: ClusterTransport> NodeController<T> {
                 );
             }
         }
-
-        let update = super::PendingUpdate::new(&old_data, data, expected_version);
-        let merged_data = match update.apply_to(Some(old_data.clone())) {
-            Ok(merged) => merged,
-            Err(refusal) => {
-                return (
-                    Self::json_error(refusal.code(), &refusal.message(entity, id)),
-                    None,
-                );
-            }
-        };
 
         let now_ms = Self::current_time_ms();
         let request_id = uuid::Uuid::new_v4().to_string();
