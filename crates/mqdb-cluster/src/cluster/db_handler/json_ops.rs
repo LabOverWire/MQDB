@@ -9,7 +9,7 @@ use super::super::node_controller::ShareResolveContinuation;
 use super::super::node_controller::db_ops::{EventOrigin, FkDeletePlan, ForwardedJsonRequest};
 use super::super::node_controller::{
     FkCheckContinuation, FkDeleteContinuation, NodeController, PendingFkDeleteWork, PendingFkWork,
-    PendingUniqueWork, RemoteReserveResult, UniqueCheckContinuation,
+    PendingUniqueWork, PendingUpdate, RemoteReserveResult, UniqueCheckContinuation,
 };
 use super::super::protocol::JsonDbOp;
 use super::super::transport::ClusterTransport;
@@ -42,6 +42,14 @@ struct JsonOpContext<'a> {
     client_id: Option<&'a str>,
     response_topic: &'a str,
     correlation_data: Option<&'a [u8]>,
+}
+
+struct PendingUpdateWrite {
+    update: PendingUpdate,
+    merged_data: Value,
+    new_diff: Value,
+    old_diff: Value,
+    request_id: String,
 }
 
 struct UniqueDiffs<'a> {
@@ -987,29 +995,23 @@ impl DbRequestHandler {
             Err(e) => return JsonOpResult::Response(Self::json_error(400, &e.to_string())),
         };
         let vault_crypto = self.resolve_vault_crypto(entity, sender);
-        let (old_data, merged_data) = match self.vault_merge_with_existing(
-            controller,
-            entity,
-            id,
-            updates,
-            vault_crypto.as_ref(),
-        ) {
-            Ok(pair) => pair,
-            Err(response) => return JsonOpResult::Response(response),
+        let Some(old_data) = self.read_for_update(controller, entity, id, vault_crypto.as_ref())
+        else {
+            return JsonOpResult::Response(Self::json_error(
+                404,
+                &format!("entity not found: {entity} id={id}"),
+            ));
         };
-
-        if let Some(expected) = expected_version {
-            let current = old_data
-                .get("_version")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            if current != expected {
+        let update = PendingUpdate::new(&old_data, updates, expected_version);
+        let merged_data = match update.apply_to(Some(old_data.clone())) {
+            Ok(merged) => merged,
+            Err(refusal) => {
                 return JsonOpResult::Response(Self::json_error(
-                    412,
-                    &format!("{entity}/{id}: expected _version {expected}, found {current}"),
+                    refusal.code(),
+                    &refusal.message(entity, id),
                 ));
             }
-        }
+        };
 
         if let Some(err) = Self::validate_against_schema(controller, entity, &merged_data) {
             return JsonOpResult::Response(err);
@@ -1038,7 +1040,7 @@ impl DbRequestHandler {
                 continuation: FkCheckContinuation::UpdateFromDbHandler {
                     entity: entity.to_string(),
                     id: id.to_string(),
-                    merged_data,
+                    update,
                     partition,
                     request_id,
                     new_diff,
@@ -1054,10 +1056,13 @@ impl DbRequestHandler {
         Self::reserve_unique_then_update(
             controller,
             ctx,
-            merged_data,
-            new_diff,
-            old_diff,
-            request_id,
+            PendingUpdateWrite {
+                update,
+                merged_data,
+                new_diff,
+                old_diff,
+                request_id,
+            },
         )
         .await
     }
@@ -1065,11 +1070,15 @@ impl DbRequestHandler {
     async fn reserve_unique_then_update<T: ClusterTransport>(
         controller: &mut NodeController<T>,
         ctx: &JsonOpContext<'_>,
-        merged_data: Value,
-        new_diff: Value,
-        old_diff: Value,
-        request_id: String,
+        write: PendingUpdateWrite,
     ) -> JsonOpResult {
+        let PendingUpdateWrite {
+            update,
+            merged_data,
+            new_diff,
+            old_diff,
+            request_id,
+        } = write;
         let now_ms = Self::current_time_ms();
         let entity = ctx.entity;
         let id = ctx.id.unwrap_or("");
@@ -1107,7 +1116,7 @@ impl DbRequestHandler {
                     continuation: UniqueCheckContinuation::UpdateFromDbHandler {
                         entity: entity.to_string(),
                         id: id.to_string(),
-                        merged_data,
+                        update,
                         partition,
                         request_id,
                         now_ms,
@@ -1194,44 +1203,6 @@ impl DbRequestHandler {
                 }
             },
         )
-    }
-
-    fn merge_with_existing<T: ClusterTransport>(
-        controller: &mut NodeController<T>,
-        entity: &str,
-        id: &str,
-        updates: Value,
-    ) -> Result<(Value, Value), Vec<u8>> {
-        let Some(existing) = controller.db_get(entity, id) else {
-            return Err(Self::json_error(
-                404,
-                &format!("entity not found: {entity} id={id}"),
-            ));
-        };
-
-        let existing_data: Value =
-            serde_json::from_slice(&existing.data).unwrap_or(Value::Object(serde_json::Map::new()));
-        let old_data = existing_data.clone();
-        let mut merged = existing_data;
-
-        if let (Value::Object(existing_obj), Value::Object(update_obj)) = (&mut merged, updates) {
-            for (key, value) in update_obj {
-                existing_obj.insert(key, value);
-            }
-        }
-
-        let existing_version = old_data
-            .get("_version")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        if let Value::Object(ref mut obj) = merged {
-            obj.insert(
-                "_version".to_string(),
-                Value::Number((existing_version + 1).into()),
-            );
-        }
-
-        Ok((old_data, merged))
     }
 
     async fn handle_json_delete<T: ClusterTransport>(
@@ -1625,7 +1596,7 @@ impl DbRequestHandler {
             UniqueCheckContinuation::UpdateFromDbHandler {
                 entity,
                 id,
-                merged_data,
+                update,
                 partition,
                 request_id,
                 now_ms,
@@ -1637,7 +1608,11 @@ impl DbRequestHandler {
                 correlation_data,
             } => {
                 let vault_sender = sender.clone();
-                let response_payload = match remote_results {
+                let response_payload = match remote_results.map(|confirmed| {
+                    let merged =
+                        self.rebased_update(controller, &entity, &id, sender.as_deref(), &update);
+                    (confirmed, merged)
+                }) {
                     Err((failure, confirmed)) => {
                         controller
                             .release_unique_check_reservations(
@@ -1649,7 +1624,18 @@ impl DbRequestHandler {
                             .await;
                         Self::json_error(failure.http_code(), &failure.message())
                     }
-                    Ok(confirmed_remotes) => {
+                    Ok((confirmed_remotes, Err(refusal))) => {
+                        controller
+                            .release_unique_check_reservations(
+                                &entity,
+                                &request_id,
+                                &local_reserved,
+                                &confirmed_remotes,
+                            )
+                            .await;
+                        refusal
+                    }
+                    Ok((confirmed_remotes, Ok(merged_data))) => {
                         let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
                         match controller
                             .db_update_with_event(
@@ -1863,7 +1849,7 @@ impl DbRequestHandler {
             FkCheckContinuation::UpdateFromDbHandler {
                 entity,
                 id,
-                merged_data,
+                update,
                 partition,
                 request_id,
                 new_diff,
@@ -1882,15 +1868,25 @@ impl DbRequestHandler {
                     response_topic: &response_topic,
                     correlation_data: correlation_data.as_deref(),
                 };
-                let result = Self::reserve_unique_then_update(
-                    controller,
-                    &ctx,
-                    merged_data,
-                    new_diff,
-                    old_diff,
-                    request_id,
-                )
-                .await;
+                let result =
+                    match self.rebased_update(controller, &entity, &id, sender.as_deref(), &update)
+                    {
+                        Ok(merged_data) => {
+                            Self::reserve_unique_then_update(
+                                controller,
+                                &ctx,
+                                PendingUpdateWrite {
+                                    update,
+                                    merged_data,
+                                    new_diff,
+                                    old_diff,
+                                    request_id,
+                                },
+                            )
+                            .await
+                        }
+                        Err(refusal) => JsonOpResult::Response(refusal),
+                    };
                 match result {
                     JsonOpResult::Response(payload) => {
                         let payload = self.vault_decrypt_response_payload(
@@ -1922,51 +1918,38 @@ impl DbRequestHandler {
         }
     }
 
-    fn vault_merge_with_existing<T: ClusterTransport>(
+    fn read_for_update<T: ClusterTransport>(
         &self,
-        controller: &mut NodeController<T>,
+        controller: &NodeController<T>,
         entity: &str,
         id: &str,
-        updates: Value,
         vault_crypto: Option<&mqdb_vault::VaultCrypto>,
-    ) -> Result<(Value, Value), Vec<u8>> {
+    ) -> Option<Value> {
+        let mut record = controller.current_record(entity, id)?;
         if let Some(crypto) = vault_crypto {
             let skip = mqdb_vault::transform::build_vault_skip_fields(entity, &self.ownership);
-            let Some(existing) = controller.db_get(entity, id) else {
-                return Err(Self::json_error(
-                    404,
-                    &format!("entity not found: {entity} id={id}"),
-                ));
-            };
-            let mut existing_data: Value = serde_json::from_slice(&existing.data)
-                .unwrap_or(Value::Object(serde_json::Map::new()));
-            mqdb_vault::transform::vault_decrypt_fields(
-                crypto,
-                entity,
-                id,
-                &mut existing_data,
-                &skip,
-            );
-            let old_data = existing_data.clone();
-            if let (Value::Object(base), Value::Object(patch)) = (&mut existing_data, updates) {
-                for (key, value) in patch {
-                    base.insert(key, value);
-                }
-            }
-            let existing_version = old_data
-                .get("_version")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            if let Value::Object(ref mut obj) = existing_data {
-                obj.insert(
-                    "_version".to_string(),
-                    Value::Number((existing_version + 1).into()),
-                );
-            }
-            Ok((old_data, existing_data))
-        } else {
-            Self::merge_with_existing(controller, entity, id, updates)
+            mqdb_vault::transform::vault_decrypt_fields(crypto, entity, id, &mut record, &skip);
         }
+        Some(record)
+    }
+
+    fn rebased_update<T: ClusterTransport>(
+        &self,
+        controller: &NodeController<T>,
+        entity: &str,
+        id: &str,
+        sender: Option<&str>,
+        update: &PendingUpdate,
+    ) -> Result<Value, Vec<u8>> {
+        let vault_crypto = self.resolve_vault_crypto(entity, sender);
+        let current = self.read_for_update(controller, entity, id, vault_crypto.as_ref());
+        let merged = update
+            .apply_to(current)
+            .map_err(|refusal| Self::json_error(refusal.code(), &refusal.message(entity, id)))?;
+        if let Some(err) = Self::validate_against_schema(controller, entity, &merged) {
+            return Err(err);
+        }
+        Ok(self.vault_encrypt_if_needed(vault_crypto.as_ref(), entity, id, merged))
     }
 
     fn vault_encrypt_update_delta(

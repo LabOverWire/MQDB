@@ -7,6 +7,7 @@ mod change_events;
 pub(crate) mod db_ops;
 pub(crate) mod fk;
 pub(crate) mod pending;
+pub(crate) mod pending_update;
 mod query;
 mod replication_ops;
 mod retained;
@@ -47,6 +48,7 @@ use db_ops::EventOrigin;
 use mqdb_core::storage::StorageBackend;
 use mqdb_core::types::{MAX_LIST_RESULTS, OwnershipConfig, ScopeConfig};
 use mqdb_vault::VaultKeyStore;
+pub use pending_update::PendingUpdate;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -306,7 +308,7 @@ pub enum FkCheckContinuation {
     UpdateFromDbHandler {
         entity: String,
         id: String,
-        merged_data: serde_json::Value,
+        update: PendingUpdate,
         partition: PartitionId,
         request_id: String,
         new_diff: serde_json::Value,
@@ -332,7 +334,7 @@ pub enum FkCheckContinuation {
         from: NodeId,
         entity: String,
         id: String,
-        merged_data: serde_json::Value,
+        update: PendingUpdate,
         partition: PartitionId,
         request_id: String,
         new_diff: serde_json::Value,
@@ -361,7 +363,7 @@ pub enum UniqueCheckContinuation {
     UpdateFromDbHandler {
         entity: String,
         id: String,
-        merged_data: serde_json::Value,
+        update: PendingUpdate,
         partition: PartitionId,
         request_id: String,
         now_ms: u64,
@@ -390,8 +392,7 @@ pub enum UniqueCheckContinuation {
         from: NodeId,
         entity: String,
         id: String,
-        merged_data: serde_json::Value,
-        data_bytes: Vec<u8>,
+        update: PendingUpdate,
         partition: PartitionId,
         request_id: String,
         now_ms: u64,
@@ -1614,8 +1615,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 from,
                 entity,
                 id,
-                merged_data,
-                data_bytes,
+                update,
                 partition,
                 request_id,
                 now_ms,
@@ -1627,7 +1627,10 @@ impl<T: ClusterTransport> NodeController<T> {
                 correlation_data,
             } => {
                 let origin = EventOrigin::new(sender.as_deref(), client_id.as_deref());
-                let response_payload = match remote_results {
+                let response_payload = match remote_results.map(|confirmed| {
+                    let merged = self.rebased_update(&entity, &id, &update);
+                    (confirmed, merged)
+                }) {
                     Err((failure, confirmed)) => {
                         self.release_unique_check_reservations(
                             &entity,
@@ -1638,7 +1641,18 @@ impl<T: ClusterTransport> NodeController<T> {
                         .await;
                         Self::json_error(failure.http_code(), &failure.message())
                     }
-                    Ok(confirmed_remotes) => {
+                    Ok((confirmed_remotes, Err(refusal))) => {
+                        self.release_unique_check_reservations(
+                            &entity,
+                            &request_id,
+                            &local_reserved,
+                            &confirmed_remotes,
+                        )
+                        .await;
+                        refusal
+                    }
+                    Ok((confirmed_remotes, Ok(merged_data))) => {
+                        let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
                         match self
                             .db_update_with_event(
                                 &entity,
