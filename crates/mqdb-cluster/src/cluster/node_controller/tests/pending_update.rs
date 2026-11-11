@@ -953,4 +953,16 @@ async fn forwarded_update_with_a_local_unique_reserve_is_refused_when_its_majori
 
     assert_eq!(forwarded_reply(&ctrl, 141)["code"], 503);
     assert_eq!(stored(&ctrl, "users", "u1").unwrap()["email"], "old@x");
+
+    let Some(PendingConstraintWork::Unique(retry)) = forward(
+        &mut ctrl,
+        &forwarded_update(142, "users", "u2", &json!({"email": "quorum@x"})),
+    )
+    .await
+    else {
+        panic!("the value refused for u1 should be free for u2 to reserve");
+    };
+    finish_forwarded_unique(&mut ctrl, retry, Vec::new()).await;
+    assert_eq!(forwarded_reply(&ctrl, 142)["status"], "ok");
+    assert_eq!(stored(&ctrl, "users", "u2").unwrap()["email"], "quorum@x");
 }
