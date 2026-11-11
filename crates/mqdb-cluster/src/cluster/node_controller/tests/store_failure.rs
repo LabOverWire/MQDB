@@ -1036,7 +1036,7 @@ async fn a_forwarded_update_the_primary_cannot_store_releases_its_unique_reserva
     user_with_unique_email(&mut ctrl).await;
     backend.fail_writes_to_keys_containing("users/u1");
     let partition = crate::cluster::db::data_partition("users", "u1");
-    let work = ctrl
+    let Some(PendingConstraintWork::Unique(pending)) = ctrl
         .handle_json_db_request(
             node(2),
             partition,
@@ -1047,8 +1047,16 @@ async fn a_forwarded_update_the_primary_cannot_store_releases_its_unique_reserva
                 &json!({"email": "a@x"}),
             ),
         )
-        .await;
-    assert!(work.is_none());
+        .await
+    else {
+        panic!("the update should wait on its local unique reserve");
+    };
+    ctrl.complete_pending_unique_work(
+        pending.phase1.local_reserved,
+        Ok(Vec::new()),
+        pending.continuation,
+    )
+    .await;
     let second = publish_completing_unique(
         &mut ctrl,
         "$DB/users/create",

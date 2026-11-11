@@ -904,3 +904,53 @@ async fn forwarded_update_with_a_stale_expected_version_and_a_moved_set_null_fie
         (true, json!(412), json!("t0"))
     );
 }
+
+async fn forwarded_update_waiting_on_a_local_majority(
+    ctrl: &mut NodeController<MockTransport>,
+    request_id: u64,
+) -> PendingUniqueWork {
+    let value = "quorum@x";
+    assert!(!remote_partitions().contains(&unique_partition("users", "email", &encoded(value))));
+    ctrl.seed_unique_voters([node(1), node(2), node(3)].into_iter().collect());
+    match forward(
+        ctrl,
+        &forwarded_update(request_id, "users", "u1", &json!({"email": value})),
+    )
+    .await
+    {
+        Some(PendingConstraintWork::Unique(work)) => {
+            assert!(work.phase1.pending_remote.is_empty());
+            assert!(!work.phase1.pending_quorum.is_empty());
+            work
+        }
+        _ => panic!("the update was answered before its local unique reserve reached a majority"),
+    }
+}
+
+#[tokio::test]
+async fn forwarded_update_with_a_local_unique_reserve_is_written_once_its_majority_confirms() {
+    let mut ctrl = cluster().await;
+    let work = forwarded_update_waiting_on_a_local_majority(&mut ctrl, 140).await;
+    assert_eq!(stored(&ctrl, "users", "u1").unwrap()["email"], "old@x");
+
+    finish_forwarded_unique(&mut ctrl, work, Vec::new()).await;
+
+    assert_eq!(forwarded_reply(&ctrl, 140)["status"], "ok");
+    assert_eq!(stored(&ctrl, "users", "u1").unwrap()["email"], "quorum@x");
+}
+
+#[tokio::test]
+async fn forwarded_update_with_a_local_unique_reserve_is_refused_when_its_majority_fails() {
+    let mut ctrl = cluster().await;
+    let work = forwarded_update_waiting_on_a_local_majority(&mut ctrl, 141).await;
+
+    ctrl.complete_pending_unique_work(
+        work.phase1.local_reserved,
+        Err((ReserveFailure::NotDurable("email".to_string()), Vec::new())),
+        work.continuation,
+    )
+    .await;
+
+    assert_eq!(forwarded_reply(&ctrl, 141)["code"], 503);
+    assert_eq!(stored(&ctrl, "users", "u1").unwrap()["email"], "old@x");
+}

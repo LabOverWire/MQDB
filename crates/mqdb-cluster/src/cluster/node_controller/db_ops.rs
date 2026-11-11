@@ -990,7 +990,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     );
                 }
                 Ok(phase1) => {
-                    if !phase1.pending_remote.is_empty() {
+                    if !phase1.pending_remote.is_empty() || !phase1.pending_quorum.is_empty() {
                         return (
                             Vec::new(),
                             Some(super::PendingConstraintWork::Unique(PendingUniqueWork {
