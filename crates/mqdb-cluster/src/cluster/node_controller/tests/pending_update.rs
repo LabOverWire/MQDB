@@ -5,7 +5,7 @@ use super::store_failure::{controller_where, publish_completing_unique, response
 use super::*;
 use crate::cluster::db::{ClusterConstraint, OnDeleteAction, data_partition, unique_partition};
 use crate::cluster::db_handler::{
-    DbPublishResponse, DbPublishResult, DbRequestHandler, FkCheckCompletion,
+    DbPublishResponse, DbPublishResult, DbRequestHandler, FkCheckCompletion, MqttRequestContext,
 };
 use serde_json::{Value, json};
 
@@ -810,5 +810,97 @@ async fn published_pending_update_is_validated_against_the_schema_when_it_comple
         ),
         (&json!(400), &json!("u2")),
         "{author}"
+    );
+}
+
+#[tokio::test]
+async fn published_pending_unique_update_refused_by_the_schema_answers_and_releases_its_claims() {
+    let mut ctrl = cluster().await;
+    ctrl.constraint_add(&ClusterConstraint::unique("users", "uniq_handle", "handle").unwrap())
+        .await
+        .unwrap();
+    assert!(!remote_partitions().contains(&unique_partition("users", "handle", &encoded("h1"))));
+    let handler = DbRequestHandler::new(node(1));
+    let bytes = serde_json::to_vec(&json!({"email": "new@x", "handle": "h1"})).unwrap();
+    let ctx = MqttRequestContext {
+        response_topic: Some("resp/schema"),
+        correlation_data: Some(b"corr-1"),
+        sender: None,
+        client_id: None,
+    };
+    let DbPublishResult::PendingUniqueCheck(work) = handler
+        .handle_publish(&mut ctrl, "$DB/users/u1/update", &bytes, &ctx)
+        .await
+    else {
+        panic!("the update should wait on the remote email reserve");
+    };
+    assert!(
+        ctrl.stores()
+            .unique_get("users", "handle", &encoded("h1"))
+            .is_some()
+    );
+    let schema = mqdb_core::schema::Schema::new("users").add_field(
+        mqdb_core::schema::FieldDefinition::new("name", mqdb_core::schema::FieldType::Number),
+    );
+    ctrl.schema_register("users", &serde_json::to_vec(&schema).unwrap())
+        .await
+        .unwrap();
+
+    let response = handler
+        .complete_pending_unique_check(
+            &mut ctrl,
+            work.phase1.local_reserved,
+            Ok(vec![("email".to_string(), encoded("new@x"), node(2))]),
+            work.continuation,
+        )
+        .await
+        .unwrap_or_else(|| panic!("the refused update was not answered"));
+    let reply: Value = serde_json::from_slice(&response.payload).unwrap();
+
+    assert_eq!(
+        (
+            reply["code"].clone(),
+            response.topic.as_str(),
+            response.correlation_data.as_deref(),
+            ctrl.stores()
+                .unique_get("users", "handle", &encoded("h1"))
+                .is_none(),
+            releases_sent_to_node2(&ctrl).contains(&encoded("new@x")),
+            stored(&ctrl, "users", "u1").unwrap()["email"].clone(),
+        ),
+        (
+            json!(400),
+            "resp/schema",
+            Some(&b"corr-1"[..]),
+            true,
+            true,
+            json!("old@x"),
+        ),
+        "{reply}"
+    );
+}
+
+#[tokio::test]
+async fn forwarded_update_with_a_stale_expected_version_and_a_moved_set_null_field_answers_412() {
+    let mut ctrl = cluster().await;
+
+    let pending = forward(
+        &mut ctrl,
+        &forwarded_update(
+            150,
+            "posts",
+            "p1",
+            &json!({"title": "x", "_expected_version": 5, "__mqdb_fk_expected": "author_id=u3"}),
+        ),
+    )
+    .await;
+
+    assert_eq!(
+        (
+            pending.is_none(),
+            forwarded_reply(&ctrl, 150)["code"].clone(),
+            stored(&ctrl, "posts", "p1").unwrap()["title"].clone(),
+        ),
+        (true, json!(412), json!("t0"))
     );
 }
