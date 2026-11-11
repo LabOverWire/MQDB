@@ -4,8 +4,8 @@
 use super::NodeId;
 use super::protocol::Operation;
 use bebytes::BeBytes;
-use std::collections::HashMap;
-use std::sync::RwLock;
+use std::collections::{HashMap, HashSet};
+use std::sync::{PoisonError, RwLock};
 
 #[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
 pub struct ClientLocationEntry {
@@ -18,18 +18,17 @@ pub struct ClientLocationEntry {
 }
 
 impl ClientLocationEntry {
-    #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub fn create(client_id: &str, connected_node: NodeId) -> Self {
         use std::time::{SystemTime, UNIX_EPOCH};
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis() as u64);
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
         let client_bytes = client_id.as_bytes().to_vec();
         Self {
             version: 2,
             timestamp_ms,
-            client_id_len: client_bytes.len() as u16,
+            client_id_len: u16::try_from(client_bytes.len()).unwrap_or(u16::MAX),
             client_id: client_bytes,
             connected_node: connected_node.get(),
         }
@@ -81,9 +80,11 @@ impl ClientLocationStore {
     }
 
     #[must_use]
-    #[allow(clippy::missing_panics_doc)]
     pub fn len(&self) -> usize {
-        self.entries.read().unwrap().len()
+        self.entries
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 
     #[must_use]
@@ -91,32 +92,50 @@ impl ClientLocationStore {
         self.len() == 0
     }
 
-    #[allow(clippy::missing_panics_doc)]
     pub fn set(&self, client_id: &str, node: NodeId) {
         self.entries
             .write()
-            .unwrap()
+            .unwrap_or_else(PoisonError::into_inner)
             .insert(client_id.to_string(), node);
     }
 
-    #[allow(clippy::missing_panics_doc)]
     pub fn remove(&self, client_id: &str) {
-        self.entries.write().unwrap().remove(client_id);
+        self.entries
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(client_id);
     }
 
     #[must_use]
-    #[allow(clippy::missing_panics_doc)]
     pub fn get(&self, client_id: &str) -> Option<NodeId> {
-        self.entries.read().unwrap().get(client_id).copied()
+        self.entries
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(client_id)
+            .copied()
     }
 
     #[must_use]
-    #[allow(clippy::missing_panics_doc)]
-    pub fn count(&self) -> usize {
-        self.entries.read().unwrap().len()
+    pub fn clients_on(&self, node: NodeId) -> HashSet<String> {
+        self.entries
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|(_, located)| **located == node)
+            .map(|(client_id, _)| client_id.clone())
+            .collect()
     }
 
-    #[allow(clippy::missing_errors_doc)]
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.entries
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
+    }
+
+    /// # Errors
+    /// Returns `SerializationError` if the entry bytes do not decode.
     pub fn apply_replicated(
         &self,
         operation: Operation,

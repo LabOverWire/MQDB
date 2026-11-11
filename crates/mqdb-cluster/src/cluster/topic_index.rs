@@ -5,7 +5,7 @@ use super::protocol::Operation;
 use super::{NUM_PARTITIONS, NodeId, PartitionId};
 use bebytes::BeBytes;
 use mqtt5::parse_shared_subscription;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::{PoisonError, RwLock};
 
@@ -355,6 +355,27 @@ impl TopicIndex {
                     .map(|s| (topic.clone(), s.qos))
             })
             .collect()
+    }
+
+    #[must_use]
+    pub fn subscriptions_of(
+        &self,
+        clients: &HashSet<String>,
+    ) -> HashMap<String, Vec<(String, u8)>> {
+        let entries = self.entries.read().unwrap_or_else(PoisonError::into_inner);
+        let mut found: HashMap<String, Vec<(String, u8)>> = HashMap::new();
+        for (topic, entry) in entries.iter() {
+            for subscriber in &entry.subscribers {
+                let client_id = subscriber.client_id_str();
+                if clients.contains(client_id) {
+                    found
+                        .entry(client_id.to_string())
+                        .or_default()
+                        .push((topic.clone(), subscriber.qos));
+                }
+            }
+        }
+        found
     }
 
     pub fn subscribe_with_data(

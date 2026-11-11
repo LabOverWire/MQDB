@@ -259,6 +259,7 @@ impl ClusteredAgent {
         if !batch.heartbeat_updates.is_empty() {
             let mut ctrl = self.controller.write().await;
             ctrl.apply_heartbeat_updates(&batch.heartbeat_updates);
+            ctrl.request_subscription_resyncs().await;
         }
 
         if !batch.dead_nodes.is_empty() {

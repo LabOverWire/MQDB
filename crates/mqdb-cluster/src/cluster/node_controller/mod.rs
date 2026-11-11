@@ -14,6 +14,7 @@ mod retained;
 mod session_ops;
 mod sharing;
 mod snapshot;
+mod subscription_resync;
 pub(crate) mod unique;
 
 #[cfg(test)]
@@ -457,6 +458,7 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) incoming_snapshots: HashMap<PartitionId, snapshot::IncomingSnapshot>,
     pub(super) deferred_snapshot_requests: VecDeque<(NodeId, PartitionId)>,
     pub(super) primary_taken_after_wait: bool,
+    pub(super) pending_resync_requests: HashSet<NodeId>,
     pub(super) held_primaries: Option<super::store_manager::HeldPrimaries>,
     pub(super) outgoing_snapshots: VecDeque<snapshot::OutgoingSnapshot>,
     pub(super) snapshot_clock_ms: u64,
@@ -538,6 +540,7 @@ impl<T: ClusterTransport> NodeController<T> {
             incoming_snapshots: HashMap::new(),
             deferred_snapshot_requests: VecDeque::new(),
             primary_taken_after_wait: false,
+            pending_resync_requests: HashSet::new(),
             held_primaries: None,
             outgoing_snapshots: VecDeque::new(),
             snapshot_clock_ms: 0,
@@ -1054,8 +1057,7 @@ impl<T: ClusterTransport> NodeController<T> {
         updates: &[super::message_processor::HeartbeatUpdate],
     ) {
         for update in updates {
-            self.heartbeat
-                .receive_heartbeat(update.from, &update.heartbeat, update.received_at);
+            self.receive_peer_heartbeat(update.from, &update.heartbeat, update.received_at);
         }
     }
 
@@ -1170,8 +1172,8 @@ impl<T: ClusterTransport> NodeController<T> {
     async fn handle_message(&mut self, msg: InboundMessage) {
         match msg.message {
             ClusterMessage::Heartbeat(hb) => {
-                self.heartbeat
-                    .receive_heartbeat(msg.from, &hb, msg.received_at);
+                self.receive_peer_heartbeat(msg.from, &hb, msg.received_at);
+                self.request_subscription_resyncs().await;
             }
             ClusterMessage::Write(ref write) => {
                 self.handle_write(msg.from, write).await;
@@ -1302,6 +1304,12 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             ClusterMessage::TopicSubscriptionBroadcast(broadcast) => {
                 self.handle_topic_subscription_broadcast(from, broadcast);
+            }
+            ClusterMessage::SubscriptionResyncRequest => {
+                self.handle_subscription_resync_request(from).await;
+            }
+            ClusterMessage::SubscriptionResync(resync) => {
+                self.handle_subscription_resync(from, resync);
             }
             ClusterMessage::PartitionUpdate(update) => {
                 tracing::debug!(

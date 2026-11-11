@@ -8,6 +8,7 @@ use super::{
     is_wildcard_pattern, validate_pattern,
 };
 use bebytes::BeBytes;
+use std::collections::{HashMap, HashSet};
 use std::sync::{PoisonError, RwLock};
 
 #[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
@@ -275,6 +276,24 @@ impl WildcardStore {
             .filter(|(_, sub)| sub.client_id == client_id)
             .map(|(pattern, sub)| (pattern, sub.qos))
             .collect()
+    }
+
+    #[must_use]
+    pub fn patterns_of(
+        &self,
+        clients: &HashSet<String>,
+    ) -> HashMap<String, Vec<(String, u8, SubscriptionType)>> {
+        let trie = self.trie.read().unwrap_or_else(PoisonError::into_inner);
+        let mut found: HashMap<String, Vec<(String, u8, SubscriptionType)>> = HashMap::new();
+        for (pattern, subscriber) in trie.all_subscriptions() {
+            if clients.contains(&subscriber.client_id) {
+                found
+                    .entry(subscriber.client_id.clone())
+                    .or_default()
+                    .push((pattern, subscriber.qos, subscriber.subscription_type));
+            }
+        }
+        found
     }
 
     #[must_use]

@@ -6,9 +6,10 @@ use super::protocol::{
     ChangeEventMark, FkCheckRequest, FkCheckResponse, FkReverseLookupRequest,
     FkReverseLookupResponse, ForwardedPublish, Heartbeat, JsonDbRequest, JsonDbResponse,
     PresenceBroadcast, QueryRequest, QueryResponse, ReplicationAck, ReplicationWrite,
-    TopicSubscriptionBroadcast, UniqueCommitRequest, UniqueCommitResponse, UniqueReassertRequest,
-    UniqueReleaseRequest, UniqueReleaseResponse, UniqueReplicateAck, UniqueReserveRequest,
-    UniqueReserveResponse, UniqueSealRequest, UniqueSealResponse, WildcardBroadcast,
+    SubscriptionResync, TopicSubscriptionBroadcast, UniqueCommitRequest, UniqueCommitResponse,
+    UniqueReassertRequest, UniqueReleaseRequest, UniqueReleaseResponse, UniqueReplicateAck,
+    UniqueReserveRequest, UniqueReserveResponse, UniqueSealRequest, UniqueSealResponse,
+    WildcardBroadcast,
 };
 use super::raft::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, PartitionUpdate,
@@ -55,6 +56,8 @@ pub enum ClusterMessage {
     PresenceBroadcast(PresenceBroadcast),
     WildcardBroadcast(WildcardBroadcast),
     TopicSubscriptionBroadcast(TopicSubscriptionBroadcast),
+    SubscriptionResyncRequest,
+    SubscriptionResync(SubscriptionResync),
     PartitionUpdate(PartitionUpdate),
     JsonDbRequest {
         partition: PartitionId,
@@ -138,6 +141,8 @@ impl ClusterMessage {
             Self::PresenceBroadcast(_) => 62,
             Self::WildcardBroadcast(_) => 60,
             Self::TopicSubscriptionBroadcast(_) => 61,
+            Self::SubscriptionResyncRequest => 63,
+            Self::SubscriptionResync(_) => 64,
             Self::PartitionUpdate(_) => 70,
             Self::JsonDbRequest { .. } => 54,
             Self::JsonDbResponse(_) => 55,
@@ -189,6 +194,8 @@ impl ClusterMessage {
             Self::PresenceBroadcast(_) => "PresenceBroadcast",
             Self::WildcardBroadcast(_) => "WildcardBroadcast",
             Self::TopicSubscriptionBroadcast(_) => "TopicSubscriptionBroadcast",
+            Self::SubscriptionResyncRequest => "SubscriptionResyncRequest",
+            Self::SubscriptionResync(_) => "SubscriptionResync",
             Self::PartitionUpdate(_) => "PartitionUpdate",
             Self::JsonDbRequest { .. } => "JsonDbRequest",
             Self::JsonDbResponse(_) => "JsonDbResponse",
@@ -210,7 +217,6 @@ impl ClusterMessage {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     pub fn encode_payload(&self, buf: &mut Vec<u8>) {
         match self {
             Self::Heartbeat(hb) => buf.extend_from_slice(&hb.to_be_bytes()),
@@ -264,6 +270,14 @@ impl ClusterMessage {
             Self::PresenceBroadcast(b) => buf.extend_from_slice(&b.to_be_bytes()),
             Self::WildcardBroadcast(b) => buf.extend_from_slice(&b.to_be_bytes()),
             Self::TopicSubscriptionBroadcast(b) => buf.extend_from_slice(&b.to_be_bytes()),
+            Self::SubscriptionResyncRequest => {}
+            Self::SubscriptionResync(resync) => match resync.to_bytes() {
+                Some(bytes) => buf.extend_from_slice(&bytes),
+                None => tracing::warn!(
+                    clients = resync.clients.len(),
+                    "subscription resync too long to encode"
+                ),
+            },
             Self::PartitionUpdate(u) => buf.extend_from_slice(&u.to_be_bytes()),
             Self::JsonDbRequest { partition, request } => {
                 buf.extend_from_slice(&partition.get().to_be_bytes());
@@ -283,6 +297,26 @@ impl ClusterMessage {
                     "json db response field too long to encode"
                 ),
             },
+            constraint @ (Self::UniqueReserveRequest(_)
+            | Self::UniqueReserveResponse(_)
+            | Self::UniqueCommitRequest(_)
+            | Self::UniqueCommitResponse(_)
+            | Self::UniqueReleaseRequest(_)
+            | Self::UniqueReleaseResponse(_)
+            | Self::UniqueReassertRequest(_)
+            | Self::UniqueReplicate { .. }
+            | Self::UniqueReplicateAck(_)
+            | Self::UniqueSealRequest(_)
+            | Self::UniqueSealResponse(_)
+            | Self::FkCheckRequest(_)
+            | Self::FkCheckResponse(_)
+            | Self::FkReverseLookupRequest(_)
+            | Self::FkReverseLookupResponse(_)) => constraint.encode_constraint_payload(buf),
+        }
+    }
+
+    fn encode_constraint_payload(&self, buf: &mut Vec<u8>) {
+        match self {
             Self::UniqueReserveRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
             Self::UniqueReserveResponse(resp) => buf.extend_from_slice(&resp.to_be_bytes()),
             Self::UniqueCommitRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
@@ -308,13 +342,13 @@ impl ClusterMessage {
             Self::FkCheckResponse(resp) => buf.extend_from_slice(&resp.to_be_bytes()),
             Self::FkReverseLookupRequest(req) => buf.extend_from_slice(&req.to_be_bytes()),
             Self::FkReverseLookupResponse(resp) => buf.extend_from_slice(&resp.to_be_bytes()),
+            _ => {}
         }
     }
 }
 
 impl ClusterMessage {
     #[must_use]
-    #[allow(clippy::too_many_lines)]
     pub fn decode_from_wire(msg_type: u8, data: &[u8]) -> Option<Self> {
         match msg_type {
             0 => {
@@ -393,10 +427,21 @@ impl ClusterMessage {
                 let (broadcast, _) = PresenceBroadcast::try_from_be_bytes(data).ok()?;
                 Some(Self::PresenceBroadcast(broadcast))
             }
+            63 => data.is_empty().then_some(Self::SubscriptionResyncRequest),
+            64 => Some(Self::SubscriptionResync(SubscriptionResync::from_bytes(
+                data,
+            )?)),
             70 => {
                 let (update, _) = PartitionUpdate::try_from_be_bytes(data).ok()?;
                 Some(Self::PartitionUpdate(update))
             }
+            80..=94 => Self::decode_constraint_message(msg_type, data),
+            _ => None,
+        }
+    }
+
+    fn decode_constraint_message(msg_type: u8, data: &[u8]) -> Option<Self> {
+        match msg_type {
             80 => {
                 let (req, _) = UniqueReserveRequest::try_from_be_bytes(data).ok()?;
                 Some(Self::UniqueReserveRequest(req))
