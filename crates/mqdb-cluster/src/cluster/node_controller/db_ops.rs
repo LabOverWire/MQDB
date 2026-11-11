@@ -383,6 +383,23 @@ impl<T: ClusterTransport> NodeController<T> {
         self.stores.db_get(entity_type, id)
     }
 
+    pub(crate) fn current_record(&self, entity_type: &str, id: &str) -> Option<Value> {
+        self.db_get(entity_type, id).map(|existing| {
+            serde_json::from_slice(&existing.data).unwrap_or(Value::Object(serde_json::Map::new()))
+        })
+    }
+
+    pub(crate) fn rebased_update(
+        &self,
+        entity_type: &str,
+        id: &str,
+        update: &super::PendingUpdate,
+    ) -> Result<Value, Vec<u8>> {
+        update
+            .apply_to(self.current_record(entity_type, id))
+            .map_err(|refusal| Self::json_error(refusal.code(), &refusal.message(entity_type, id)))
+    }
+
     #[must_use]
     pub fn db_list(&self, entity_type: &str) -> Vec<super::db::DbEntity> {
         self.stores.db_list(entity_type)
@@ -877,76 +894,44 @@ impl<T: ClusterTransport> NodeController<T> {
             Err(e) => return (Self::json_error(400, &e.to_string()), None),
         };
 
-        let (old_data, merged_data) = if let Some(existing) = self.db_get(entity, id) {
-            let existing_data: Value = serde_json::from_slice(&existing.data)
-                .unwrap_or(Value::Object(serde_json::Map::new()));
-
-            if let Some(expected) = expected_version {
-                let current = existing_data
-                    .get("_version")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-                if current != expected {
-                    return (
-                        Self::json_error(
-                            412,
-                            &format!(
-                                "{entity}/{id}: expected _version {expected}, found {current}"
-                            ),
-                        ),
-                        None,
-                    );
-                }
-            }
-
-            if let Some(ref expected) = fk_expected
-                && let Some((field, value)) = expected.split_once('=')
-            {
-                let current_fk = existing_data
-                    .get(field)
-                    .and_then(super::fk::extract_fk_string_value);
-                if current_fk.as_deref() != Some(value) {
-                    tracing::debug!(
-                        entity,
-                        id,
-                        field,
-                        expected = value,
-                        actual = ?current_fk,
-                        "skipping set-null: FK field was updated since cascade"
-                    );
-                    return (
-                        crate::cluster::db_handler::helpers::json_ok_with_id(id, &existing_data),
-                        None,
-                    );
-                }
-            }
-
-            let old_data = existing_data.clone();
-            let mut merged = existing_data;
-
-            if let (Value::Object(existing_obj), Value::Object(updates)) = (&mut merged, data) {
-                for (key, value) in updates {
-                    existing_obj.insert(key, value);
-                }
-            }
-
-            let existing_version = old_data
-                .get("_version")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            if let Value::Object(ref mut obj) = merged {
-                obj.insert(
-                    "_version".to_string(),
-                    Value::Number((existing_version + 1).into()),
-                );
-            }
-
-            (old_data, merged)
-        } else {
+        let Some(old_data) = self.current_record(entity, id) else {
             return (
                 Self::json_error(404, &format!("entity not found: {entity} id={id}")),
                 None,
             );
+        };
+
+        if let Some(ref expected) = fk_expected
+            && let Some((field, value)) = expected.split_once('=')
+        {
+            let current_fk = old_data
+                .get(field)
+                .and_then(super::fk::extract_fk_string_value);
+            if current_fk.as_deref() != Some(value) {
+                tracing::debug!(
+                    entity,
+                    id,
+                    field,
+                    expected = value,
+                    actual = ?current_fk,
+                    "skipping set-null: FK field was updated since cascade"
+                );
+                return (
+                    crate::cluster::db_handler::helpers::json_ok_with_id(id, &old_data),
+                    None,
+                );
+            }
+        }
+
+        let update = super::PendingUpdate::new(&old_data, data, expected_version);
+        let merged_data = match update.apply_to(Some(old_data.clone())) {
+            Ok(merged) => merged,
+            Err(refusal) => {
+                return (
+                    Self::json_error(refusal.code(), &refusal.message(entity, id)),
+                    None,
+                );
+            }
         };
 
         let now_ms = Self::current_time_ms();
@@ -969,7 +954,7 @@ impl<T: ClusterTransport> NodeController<T> {
                         from,
                         entity: entity.to_string(),
                         id: id.to_string(),
-                        merged_data,
+                        update,
                         partition,
                         request_id,
                         new_diff,
@@ -1006,7 +991,6 @@ impl<T: ClusterTransport> NodeController<T> {
                 }
                 Ok(phase1) => {
                     if !phase1.pending_remote.is_empty() {
-                        let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
                         return (
                             Vec::new(),
                             Some(super::PendingConstraintWork::Unique(PendingUniqueWork {
@@ -1015,8 +999,7 @@ impl<T: ClusterTransport> NodeController<T> {
                                     from,
                                     entity: entity.to_string(),
                                     id: id.to_string(),
-                                    merged_data,
-                                    data_bytes,
+                                    update,
                                     partition,
                                     request_id,
                                     now_ms,
@@ -2174,7 +2157,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 from,
                 entity,
                 id,
-                merged_data,
+                update,
                 partition,
                 request_id,
                 new_diff,
@@ -2185,7 +2168,6 @@ impl<T: ClusterTransport> NodeController<T> {
                 correlation_data,
             } => {
                 let now_ms = Self::current_time_ms();
-                let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
                 let phase1 = match self
                     .start_unique_constraint_check(
                         &entity,
@@ -2215,8 +2197,7 @@ impl<T: ClusterTransport> NodeController<T> {
                         from,
                         entity,
                         id,
-                        merged_data,
-                        data_bytes,
+                        update,
                         partition,
                         request_id,
                         now_ms,

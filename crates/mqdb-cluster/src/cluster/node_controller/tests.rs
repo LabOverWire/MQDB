@@ -3098,7 +3098,7 @@ async fn forwarded_writes_completed_after_a_unique_check_publish_their_events() 
     make_all_primary(&mut ctrl, node1);
     let partition = crate::cluster::db::data_partition("users", "u1");
     let data = serde_json::json!({"id": "u1", "email": "a@x"});
-    let merged_data = serde_json::json!({"id": "u1", "email": "b@x"});
+    let update = PendingUpdate::new(&data, serde_json::json!({"email": "b@x"}), None);
 
     ctrl.complete_pending_unique_work(
         Vec::new(),
@@ -3126,8 +3126,7 @@ async fn forwarded_writes_completed_after_a_unique_check_publish_their_events() 
             from: node2,
             entity: "users".to_string(),
             id: "u1".to_string(),
-            data_bytes: serde_json::to_vec(&merged_data).unwrap(),
-            merged_data,
+            update,
             partition,
             request_id: "req-2".to_string(),
             now_ms: 2000,
@@ -3211,6 +3210,7 @@ mod lost_snapshot_request;
 mod missing_record;
 mod owner_field;
 mod partition_map;
+mod pending_update;
 mod primary_role_wait;
 mod promoted_transfer;
 mod remote_fk_unique;
