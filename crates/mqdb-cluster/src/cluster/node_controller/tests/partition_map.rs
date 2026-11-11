@@ -2024,8 +2024,10 @@ async fn a_dead_node_no_longer_holds_its_clients() {
 #[tokio::test]
 async fn a_publish_is_forwarded_to_every_node_holding_the_client() {
     let ctrl = controller(2);
-    ctrl.stores().client_locations.claim("twice", node(1));
     ctrl.stores().client_locations.claim("twice", node(3));
+    ctrl.stores()
+        .client_locations
+        .claim_listed("twice", node(1));
 
     let mut forwarded: Vec<NodeId> = ctrl
         .remote_targets([crate::cluster::ForwardTarget::new("twice".to_string(), 1)])
@@ -2326,7 +2328,7 @@ async fn a_reply_that_arrives_after_the_retry_still_completes_the_round() {
     restarted.transport.take_sent();
 
     for _ in 0..8 {
-        now += 64 * step;
+        now += step;
         restarted.drive_subscription_resyncs(now).await;
     }
 

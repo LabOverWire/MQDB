@@ -4759,3 +4759,44 @@ async fn a_client_moving_from_a_node_whose_clock_runs_ahead_is_located_here() {
     ctrl.apply_dead_nodes(&[node2]);
     assert_eq!(ctrl.connected_nodes("mover"), [node1]);
 }
+
+#[tokio::test]
+async fn a_stale_claim_from_another_node_does_not_suppress_the_presence_disconnect() {
+    use mqtt5::broker::events::BrokerEventHandler;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let retained = Arc::clone(&transport.retained_publishes);
+    let ctrl = create_test_controller(node1, transport);
+    let stale = crate::cluster::ClientLocationEntry::create("seat-holder-9", node2);
+    ctrl.stores()
+        .client_locations
+        .apply_replicated(crate::cluster::Operation::Insert, &stale.to_be_bytes())
+        .unwrap();
+    let handler = crate::cluster::event_handler::ClusterEventHandler::new(
+        node1,
+        Arc::new(tokio::sync::RwLock::new(ctrl)),
+    )
+    .with_presence(true);
+
+    handler
+        .on_client_connect(cluster_connect_event("seat-holder-9"))
+        .await;
+    retained.lock().unwrap().clear();
+    handler
+        .on_client_disconnect(mqtt5::broker::events::ClientDisconnectEvent {
+            client_id: "seat-holder-9".into(),
+            user_id: Some("alice".into()),
+            reason: mqtt5::types::ReasonCode::Success,
+            unexpected: true,
+        })
+        .await;
+
+    let published = retained.lock().unwrap().clone();
+    assert_eq!(
+        published.len(),
+        1,
+        "the only live connection closed but no presence disconnect was published"
+    );
+}

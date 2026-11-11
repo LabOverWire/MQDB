@@ -271,6 +271,7 @@ impl std::error::Error for TopicIndexError {}
 struct IndexedEntries {
     by_topic: HashMap<String, TopicIndexEntry>,
     shared_by_filter: HashMap<String, BTreeSet<String>>,
+    topics_by_client: HashMap<String, HashSet<String>>,
 }
 
 impl Deref for IndexedEntries {
@@ -282,19 +283,48 @@ impl Deref for IndexedEntries {
 }
 
 impl IndexedEntries {
-    fn insert(&mut self, topic: String, entry: TopicIndexEntry) {
-        if let (filter, Some(_)) = parse_shared_subscription(&topic) {
+    fn link(&mut self, topic: &str, client_id: &str) {
+        self.topics_by_client
+            .entry(client_id.to_string())
+            .or_default()
+            .insert(topic.to_string());
+    }
+
+    fn unlink(&mut self, topic: &str, client_id: &str) {
+        if let Some(topics) = self.topics_by_client.get_mut(client_id) {
+            topics.remove(topic);
+            if topics.is_empty() {
+                self.topics_by_client.remove(client_id);
+            }
+        }
+    }
+
+    fn track_shared(&mut self, topic: &str) {
+        if let (filter, Some(_)) = parse_shared_subscription(topic) {
             self.shared_by_filter
                 .entry(filter.to_string())
                 .or_default()
-                .insert(topic.clone());
+                .insert(topic.to_string());
+        }
+    }
+
+    fn insert(&mut self, topic: String, entry: TopicIndexEntry) {
+        self.remove(&topic);
+        self.track_shared(&topic);
+        for subscriber in &entry.subscribers {
+            self.link(&topic, subscriber.client_id_str());
         }
         self.by_topic.insert(topic, entry);
     }
 
     fn remove(&mut self, topic: &str) {
-        if self.by_topic.remove(topic).is_some()
-            && let (filter, Some(_)) = parse_shared_subscription(topic)
+        let Some(entry) = self.by_topic.remove(topic) else {
+            return;
+        };
+        for subscriber in &entry.subscribers {
+            self.unlink(topic, subscriber.client_id_str());
+        }
+        if let (filter, Some(_)) = parse_shared_subscription(topic)
             && let Some(topics) = self.shared_by_filter.get_mut(filter)
         {
             topics.remove(topic);
@@ -304,20 +334,53 @@ impl IndexedEntries {
         }
     }
 
-    fn get_mut(&mut self, topic: &str) -> Option<&mut TopicIndexEntry> {
-        self.by_topic.get_mut(topic)
+    fn add_subscriber(
+        &mut self,
+        topic: &str,
+        client_id: &str,
+        client_partition: PartitionId,
+        qos: u8,
+    ) -> usize {
+        self.track_shared(topic);
+        self.link(topic, client_id);
+        let entry = self
+            .by_topic
+            .entry(topic.to_string())
+            .or_insert_with(|| TopicIndexEntry::create(topic));
+        entry.add_subscriber(client_id, client_partition, qos);
+        entry.subscribers.len()
     }
 
-    fn get_or_create(&mut self, topic: &str) -> &mut TopicIndexEntry {
-        if let (filter, Some(_)) = parse_shared_subscription(topic) {
-            self.shared_by_filter
-                .entry(filter.to_string())
-                .or_default()
-                .insert(topic.to_string());
+    fn remove_subscriber(&mut self, topic: &str, client_id: &str) -> Option<usize> {
+        let entry = self.by_topic.get_mut(topic)?;
+        let _ = entry.remove_subscriber(client_id);
+        let remaining = entry.subscribers.len();
+        self.unlink(topic, client_id);
+        if remaining == 0 {
+            self.remove(topic);
         }
-        self.by_topic
-            .entry(topic.to_string())
-            .or_insert_with(|| TopicIndexEntry::create(topic))
+        Some(remaining)
+    }
+
+    fn next_seq(&mut self, topic: &str) -> Option<u64> {
+        self.by_topic.get_mut(topic).map(TopicIndexEntry::next_seq)
+    }
+
+    fn client_subscriptions(&self, client_id: &str) -> Vec<(String, u8)> {
+        self.topics_by_client
+            .get(client_id)
+            .into_iter()
+            .flatten()
+            .filter_map(|topic| {
+                self.by_topic.get(topic).and_then(|entry| {
+                    entry
+                        .subscribers
+                        .iter()
+                        .find(|s| s.client_id_str() == client_id)
+                        .map(|s| (topic.clone(), s.qos))
+                })
+            })
+            .collect()
     }
 
     fn retain(&mut self, keep: impl Fn(&str) -> bool) {
@@ -370,14 +433,12 @@ impl TopicIndex {
         qos: u8,
     ) -> Result<(), TopicIndexError> {
         tracing::debug!(topic, client_id, "subscribe: local subscribe");
-        let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
-        let entry = entries.get_or_create(topic);
-        entry.add_subscriber(client_id, client_partition, qos);
-        tracing::debug!(
-            topic,
-            count = entry.subscribers.len(),
-            "subscribe: after add"
-        );
+        let count = self
+            .entries
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .add_subscriber(topic, client_id, client_partition, qos);
+        tracing::debug!(topic, count, "subscribe: after add");
         Ok(())
     }
 
@@ -385,16 +446,17 @@ impl TopicIndex {
     /// Returns `NotFound` if the topic does not exist.
     pub fn unsubscribe(&self, topic: &str, client_id: &str) -> Result<(), TopicIndexError> {
         tracing::debug!(topic, client_id, "unsubscribe called");
-        let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
-        if let Some(entry) = entries.get_mut(topic) {
-            let _ = entry.remove_subscriber(client_id);
-            if entry.subscribers.is_empty() {
-                tracing::debug!(topic, "unsubscribe: removing empty entry");
-                entries.remove(topic);
+        match self
+            .entries
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove_subscriber(topic, client_id)
+        {
+            Some(remaining) => {
+                tracing::debug!(topic, remaining, "unsubscribe: removed");
+                Ok(())
             }
-            Ok(())
-        } else {
-            Err(TopicIndexError::NotFound)
+            None => Err(TopicIndexError::NotFound),
         }
     }
 
@@ -447,8 +509,10 @@ impl TopicIndex {
 
     #[must_use]
     pub fn next_seq(&self, topic: &str) -> Option<u64> {
-        let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
-        entries.get_mut(topic).map(TopicIndexEntry::next_seq)
+        self.entries
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .next_seq(topic)
     }
 
     #[must_use]
@@ -475,15 +539,7 @@ impl TopicIndex {
         self.entries
             .read()
             .unwrap_or_else(PoisonError::into_inner)
-            .iter()
-            .filter_map(|(topic, entry)| {
-                entry
-                    .subscribers
-                    .iter()
-                    .find(|s| s.client_id_str() == client_id)
-                    .map(|s| (topic.clone(), s.qos))
-            })
-            .collect()
+            .client_subscriptions(client_id)
     }
 
     #[must_use]
@@ -492,19 +548,11 @@ impl TopicIndex {
         clients: &HashSet<String>,
     ) -> HashMap<String, Vec<(String, u8)>> {
         let entries = self.entries.read().unwrap_or_else(PoisonError::into_inner);
-        let mut found: HashMap<String, Vec<(String, u8)>> = HashMap::new();
-        for (topic, entry) in entries.iter() {
-            for subscriber in &entry.subscribers {
-                let client_id = subscriber.client_id_str();
-                if clients.contains(client_id) {
-                    found
-                        .entry(client_id.to_string())
-                        .or_default()
-                        .push((topic.clone(), subscriber.qos));
-                }
-            }
-        }
-        found
+        clients
+            .iter()
+            .map(|client_id| (client_id.clone(), entries.client_subscriptions(client_id)))
+            .filter(|(_, topics)| !topics.is_empty())
+            .collect()
     }
 
     #[must_use]
@@ -743,6 +791,63 @@ mod tests {
         let key = topic_index_key("sensors/temp");
         assert!(key.starts_with("_topic_index/p"));
         assert!(key.ends_with("/topics/sensors/temp"));
+    }
+
+    fn scanned_client_topics(
+        index: &TopicIndex,
+        topics: &[&str],
+        client_id: &str,
+    ) -> Vec<(String, u8)> {
+        let mut found: Vec<(String, u8)> = topics
+            .iter()
+            .flat_map(|topic| {
+                index
+                    .get_subscribers(topic)
+                    .into_iter()
+                    .filter(|s| s.client_id_str() == client_id)
+                    .map(|s| (topic.to_string(), s.qos))
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    #[test]
+    fn the_per_client_lookup_matches_a_full_scan_after_every_kind_of_change() {
+        let topics = ["a/1", "a/2", "b/1", "$share/g/a/1"];
+        let clients = ["c1", "c2", "c3"];
+        let index = TopicIndex::new(node(1));
+        index.subscribe("a/1", "c1", partition(1), 1).unwrap();
+        index.subscribe("a/2", "c1", partition(1), 0).unwrap();
+        index.subscribe("a/1", "c2", partition(2), 2).unwrap();
+        index
+            .subscribe("$share/g/a/1", "c3", partition(3), 1)
+            .unwrap();
+        index.unsubscribe("a/2", "c1").unwrap();
+
+        let mut replaced = TopicIndexEntry::create("a/1");
+        replaced.add_subscriber("c3", partition(3), 1);
+        let data = TopicIndex::serialize(&replaced).unwrap();
+        index
+            .apply_replicated(Operation::Insert, "a/1", &data)
+            .unwrap();
+
+        let other = TopicIndex::new(node(2));
+        other.subscribe("b/1", "c2", partition(2), 1).unwrap();
+        index
+            .import_entries(&other.export_for_partition(topic_partition("b/1")))
+            .unwrap();
+        index.clear_partition(topic_partition("$share/g/a/1"));
+
+        for client in clients {
+            let mut indexed = index.get_client_topics(client);
+            indexed.sort();
+            assert_eq!(
+                indexed,
+                scanned_client_topics(&index, &topics, client),
+                "{client}"
+            );
+        }
     }
 
     #[test]

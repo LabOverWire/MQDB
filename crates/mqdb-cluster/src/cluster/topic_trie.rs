@@ -62,6 +62,7 @@ pub struct TopicTrie {
     root: TrieNode,
     pattern_count: usize,
     shared_patterns: BTreeSet<String>,
+    patterns_by_client: HashMap<String, BTreeSet<String>>,
 }
 
 impl TopicTrie {
@@ -91,6 +92,10 @@ impl TopicTrie {
             .iter()
             .any(|s| s.client_id == subscriber.client_id)
         {
+            self.patterns_by_client
+                .entry(subscriber.client_id.clone())
+                .or_default()
+                .insert(pattern.to_string());
             node.subscribers.push(subscriber);
             self.pattern_count += 1;
         }
@@ -104,6 +109,12 @@ impl TopicTrie {
         let removed = Self::remove_recursive(&mut self.root, &levels, 0, client_id);
         if removed {
             self.pattern_count = self.pattern_count.saturating_sub(1);
+            if let Some(patterns) = self.patterns_by_client.get_mut(client_id) {
+                patterns.remove(pattern);
+                if patterns.is_empty() {
+                    self.patterns_by_client.remove(client_id);
+                }
+            }
             if self.shared_patterns.contains(pattern)
                 && self
                     .find(pattern)
@@ -113,6 +124,22 @@ impl TopicTrie {
             }
         }
         removed
+    }
+
+    #[must_use]
+    pub fn client_subscriptions(&self, client_id: &str) -> Vec<(String, &WildcardSubscriber)> {
+        self.patterns_by_client
+            .get(client_id)
+            .into_iter()
+            .flatten()
+            .filter_map(|pattern| {
+                self.find(pattern)?
+                    .subscribers
+                    .iter()
+                    .find(|sub| sub.client_id == client_id)
+                    .map(|sub| (pattern.clone(), sub))
+            })
+            .collect()
     }
 
     fn find(&self, pattern: &str) -> Option<&TrieNode> {

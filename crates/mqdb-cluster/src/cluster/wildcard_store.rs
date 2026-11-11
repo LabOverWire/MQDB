@@ -271,9 +271,8 @@ impl WildcardStore {
         self.trie
             .read()
             .unwrap_or_else(PoisonError::into_inner)
-            .all_subscriptions()
+            .client_subscriptions(client_id)
             .into_iter()
-            .filter(|(_, sub)| sub.client_id == client_id)
             .map(|(pattern, sub)| (pattern, sub.qos))
             .collect()
     }
@@ -284,16 +283,18 @@ impl WildcardStore {
         clients: &HashSet<String>,
     ) -> HashMap<String, Vec<(String, u8, SubscriptionType)>> {
         let trie = self.trie.read().unwrap_or_else(PoisonError::into_inner);
-        let mut found: HashMap<String, Vec<(String, u8, SubscriptionType)>> = HashMap::new();
-        for (pattern, subscriber) in trie.all_subscriptions() {
-            if clients.contains(&subscriber.client_id) {
-                found
-                    .entry(subscriber.client_id.clone())
-                    .or_default()
-                    .push((pattern, subscriber.qos, subscriber.subscription_type));
-            }
-        }
-        found
+        clients
+            .iter()
+            .map(|client_id| {
+                let patterns: Vec<(String, u8, SubscriptionType)> = trie
+                    .client_subscriptions(client_id)
+                    .into_iter()
+                    .map(|(pattern, sub)| (pattern, sub.qos, sub.subscription_type))
+                    .collect();
+                (client_id.clone(), patterns)
+            })
+            .filter(|(_, patterns)| !patterns.is_empty())
+            .collect()
     }
 
     #[must_use]
@@ -570,6 +571,28 @@ mod tests {
 
     fn partition(n: u16) -> PartitionId {
         PartitionId::new(n).unwrap()
+    }
+
+    #[test]
+    fn the_per_client_pattern_lookup_follows_every_kind_of_change() {
+        let store = WildcardStore::new(node(1));
+        store.subscribe_mqtt("a/+", "c1", 1).unwrap();
+        store.subscribe_mqtt("a/#", "c1", 0).unwrap();
+        store.subscribe_mqtt("a/+", "c2", 2).unwrap();
+        store.unsubscribe("a/#", "c1").unwrap();
+        store.subscribe_mqtt("a/+", "c1", 2).unwrap();
+        store.clear_partition(session_partition("c2"));
+
+        assert_eq!(
+            store.get_client_patterns("c1"),
+            vec![("a/+".to_string(), 1)]
+        );
+        assert!(store.get_client_patterns("c2").is_empty());
+        assert_eq!(
+            store.match_topic("a/x").len(),
+            1,
+            "the trie and the per-client lookup must agree"
+        );
     }
 
     #[test]

@@ -68,14 +68,16 @@ impl std::fmt::Display for ClientLocationError {
 impl std::error::Error for ClientLocationError {}
 
 pub struct ClientLocationStore {
+    owner: NodeId,
     claims: RwLock<HashMap<String, Vec<NodeId>>>,
     dead: RwLock<HashSet<NodeId>>,
 }
 
 impl ClientLocationStore {
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(owner: NodeId) -> Self {
         Self {
+            owner,
             claims: RwLock::new(HashMap::new()),
             dead: RwLock::new(HashSet::new()),
         }
@@ -94,19 +96,35 @@ impl ClientLocationStore {
         self.len() == 0
     }
 
-    pub fn claim(&self, client_id: &str, node: NodeId) {
-        if self
-            .dead
+    fn is_dead(&self, node: NodeId) -> bool {
+        self.dead
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .contains(&node)
-        {
+    }
+
+    pub fn claim(&self, client_id: &str, node: NodeId) {
+        if self.is_dead(node) {
+            return;
+        }
+        let mut claims = self.claims.write().unwrap_or_else(PoisonError::into_inner);
+        let nodes = claims.entry(client_id.to_string()).or_default();
+        let held_here = node != self.owner && nodes.contains(&self.owner);
+        nodes.clear();
+        if held_here {
+            nodes.push(self.owner);
+        }
+        nodes.push(node);
+    }
+
+    pub fn claim_listed(&self, client_id: &str, node: NodeId) {
+        if self.is_dead(node) {
             return;
         }
         let mut claims = self.claims.write().unwrap_or_else(PoisonError::into_inner);
         let nodes = claims.entry(client_id.to_string()).or_default();
         if !nodes.contains(&node) {
-            nodes.push(node);
+            nodes.insert(0, node);
         }
     }
 
@@ -205,12 +223,6 @@ impl ClientLocationStore {
     }
 }
 
-impl Default for ClientLocationStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,7 +248,7 @@ mod tests {
 
     #[test]
     fn a_location_is_set_and_removed_by_its_own_node() {
-        let store = ClientLocationStore::new();
+        let store = ClientLocationStore::new(node(9));
         store
             .apply_replicated(Operation::Insert, &entry_bytes("c", 3, 10))
             .unwrap();
@@ -250,7 +262,7 @@ mod tests {
 
     #[test]
     fn a_disconnect_from_the_old_node_keeps_the_new_location() {
-        let store = ClientLocationStore::new();
+        let store = ClientLocationStore::new(node(9));
         store
             .apply_replicated(Operation::Insert, &entry_bytes("c", 1, 10))
             .unwrap();
@@ -265,7 +277,7 @@ mod tests {
 
     #[test]
     fn a_move_from_a_node_whose_clock_runs_ahead_keeps_the_new_location() {
-        let store = ClientLocationStore::new();
+        let store = ClientLocationStore::new(node(9));
         store
             .apply_replicated(Operation::Insert, &entry_bytes("c", 1, 70_000))
             .unwrap();
@@ -278,7 +290,7 @@ mod tests {
 
     #[test]
     fn a_backward_clock_step_on_one_node_does_not_freeze_the_location() {
-        let store = ClientLocationStore::new();
+        let store = ClientLocationStore::new(node(9));
         store
             .apply_replicated(Operation::Insert, &entry_bytes("c", 1, 10_000))
             .unwrap();
@@ -292,29 +304,49 @@ mod tests {
     }
 
     #[test]
-    fn equal_stamps_from_two_nodes_converge_once_the_old_node_lets_go() {
-        let one = ClientLocationStore::new();
-        let two = ClientLocationStore::new();
-        one.apply_replicated(Operation::Insert, &entry_bytes("c", 1, 1000))
+    fn a_connect_replaces_claims_whose_disconnect_was_lost() {
+        let store = ClientLocationStore::new(node(9));
+        store
+            .apply_replicated(Operation::Insert, &entry_bytes("c", 1, 1000))
             .unwrap();
-        one.apply_replicated(Operation::Insert, &entry_bytes("c", 2, 1000))
+        store
+            .apply_replicated(Operation::Insert, &entry_bytes("c", 2, 1000))
             .unwrap();
-        two.apply_replicated(Operation::Insert, &entry_bytes("c", 2, 1000))
+        assert_eq!(store.claimants("c"), [node(2)]);
+
+        store
+            .apply_replicated(Operation::Delete, &entry_bytes("c", 2, 1000))
             .unwrap();
-        two.apply_replicated(Operation::Insert, &entry_bytes("c", 1, 1000))
+        assert_eq!(store.claimants("c"), []);
+    }
+
+    #[test]
+    fn a_connect_elsewhere_does_not_drop_a_client_connected_here() {
+        let store = ClientLocationStore::new(node(2));
+        store.claim("c", node(2));
+        store
+            .apply_replicated(Operation::Insert, &entry_bytes("c", 1, 10))
             .unwrap();
-        for store in [&one, &two] {
-            store
-                .apply_replicated(Operation::Delete, &entry_bytes("c", 1, 1000))
-                .unwrap();
-        }
-        assert_eq!(one.claimants("c"), two.claimants("c"));
-        assert_eq!(one.get("c"), Some(node(2)));
+
+        assert_eq!(store.claimants("c"), [node(2), node(1)]);
+        store.release_node(node(1));
+        assert_eq!(store.claimants("c"), [node(2)]);
+    }
+
+    #[test]
+    fn a_listed_claim_never_outranks_a_connect() {
+        let store = ClientLocationStore::new(node(9));
+        store.claim("c", node(3));
+        store.claim_listed("c", node(1));
+        store.claim_listed("c", node(3));
+
+        assert_eq!(store.claimants("c"), [node(1), node(3)]);
+        assert_eq!(store.get("c"), Some(node(3)));
     }
 
     #[test]
     fn a_location_from_a_node_declared_dead_is_ignored_until_it_comes_back() {
-        let store = ClientLocationStore::new();
+        let store = ClientLocationStore::new(node(9));
         store.release_node(node(1));
         store
             .apply_replicated(Operation::Insert, &entry_bytes("late", 1, 10))
@@ -330,11 +362,11 @@ mod tests {
 
     #[test]
     fn a_completed_resync_drops_claims_its_sender_no_longer_holds() {
-        let store = ClientLocationStore::new();
+        let store = ClientLocationStore::new(node(9));
         store.claim("gone", node(1));
         store.claim("kept", node(1));
-        store.claim("shared", node(1));
         store.claim("shared", node(2));
+        store.claim_listed("shared", node(1));
 
         let released = store.retain_claims_of(node(1), &HashSet::from(["kept".to_string()]));
 

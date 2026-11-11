@@ -13,9 +13,21 @@ use std::collections::{HashMap, HashSet};
 const RESYNC_MESSAGE_BUDGET: usize = 1024 * 1024;
 pub(crate) const RESYNC_RETRY_MS: u64 = 5_000;
 pub(crate) const MAX_RESYNC_ATTEMPTS: u32 = 6;
+pub(crate) const ANTI_ENTROPY_INTERVAL_MS: u64 = 300_000;
+const TRACKED_ROUNDS_PER_PEER: usize = 2 * MAX_RESYNC_ATTEMPTS as usize;
+const ROUND_IDS_PER_BOOT_MS: u64 = 1_000_000;
+
+pub(super) fn first_resync_round() -> u64 {
+    let boot_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        });
+    boot_ms.saturating_mul(ROUND_IDS_PER_BOOT_MS).max(1)
+}
 
 #[derive(Debug, Default)]
-struct RoundProgress {
+pub(crate) struct RoundProgress {
     next_part: u32,
     listed: HashSet<String>,
 }
@@ -25,7 +37,6 @@ pub(crate) struct ResyncRound {
     ask_back: bool,
     attempts: u32,
     next_ask_ms: Option<u64>,
-    progress: HashMap<u64, RoundProgress>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +108,7 @@ impl<T: ClusterTransport> NodeController<T> {
         self.heartbeat
             .receive_heartbeat(from, heartbeat, received_at);
         if revived {
+            self.silent_peers.remove(&from);
             self.stores.client_locations.revive_node(from);
             self.pending_resync_requests.insert(from, true);
         }
@@ -105,6 +117,8 @@ impl<T: ClusterTransport> NodeController<T> {
     pub(crate) fn forget_resync_peer(&mut self, peer: NodeId) {
         self.pending_resync_requests.remove(&peer);
         self.resync_rounds.remove(&peer);
+        self.resync_progress.remove(&peer);
+        self.silent_peers.remove(&peer);
     }
 
     pub async fn request_subscription_resyncs(&mut self) {
@@ -119,7 +133,6 @@ impl<T: ClusterTransport> NodeController<T> {
                     ask_back,
                     attempts: 0,
                     next_ask_ms: None,
-                    progress: HashMap::new(),
                 },
             );
             self.ask_for_resync(peer).await;
@@ -134,12 +147,16 @@ impl<T: ClusterTransport> NodeController<T> {
         self.next_resync_round += 1;
         state.attempts += 1;
         state.next_ask_ms = None;
-        state.progress.insert(round, RoundProgress::default());
         let request = ResyncRequest {
             round,
             ask_back: state.ask_back,
         };
         let attempt = state.attempts;
+        let tracked = self.resync_progress.entry(peer).or_default();
+        tracked.insert(round, RoundProgress::default());
+        while tracked.len() > TRACKED_ROUNDS_PER_PEER {
+            tracked.pop_first();
+        }
         match self
             .transport
             .send(peer, ClusterMessage::SubscriptionResyncRequest(request))
@@ -160,7 +177,32 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
+    fn queue_anti_entropy(&mut self, now_ms: u64) {
+        let next = *self
+            .next_anti_entropy_ms
+            .get_or_insert(now_ms.saturating_add(ANTI_ENTROPY_INTERVAL_MS));
+        if now_ms < next {
+            return;
+        }
+        self.next_anti_entropy_ms = Some(now_ms.saturating_add(ANTI_ENTROPY_INTERVAL_MS));
+        let peers: Vec<NodeId> = self
+            .heartbeat
+            .alive_nodes()
+            .into_iter()
+            .filter(|peer| {
+                *peer != self.node_id
+                    && !self.resync_rounds.contains_key(peer)
+                    && !self.silent_peers.contains(peer)
+            })
+            .collect();
+        tracing::debug!(peers = peers.len(), "queueing periodic subscription resync");
+        for peer in peers {
+            self.pending_resync_requests.entry(peer).or_insert(false);
+        }
+    }
+
     pub async fn drive_subscription_resyncs(&mut self, now_ms: u64) {
+        self.queue_anti_entropy(now_ms);
         let due: Vec<NodeId> = self
             .resync_rounds
             .iter_mut()
@@ -179,6 +221,7 @@ impl<T: ClusterTransport> NodeController<T> {
             if exhausted || self.heartbeat.node_status(peer) == NodeStatus::Dead {
                 self.resync_rounds.remove(&peer);
                 if exhausted {
+                    self.silent_peers.insert(peer);
                     tracing::info!(
                         peer = peer.get(),
                         attempts = MAX_RESYNC_ATTEMPTS,
@@ -294,7 +337,9 @@ impl<T: ClusterTransport> NodeController<T> {
     pub(crate) fn handle_subscription_resync(&mut self, from: NodeId, resync: &SubscriptionResync) {
         let announced = resync.round == SubscriptionResync::UNSOLICITED;
         for client in &resync.clients {
-            self.stores.client_locations.claim(&client.client_id, from);
+            self.stores
+                .client_locations
+                .claim_listed(&client.client_id, from);
         }
         let updates: Vec<(&ResyncedClient, IndexUpdate)> = resync
             .clients
@@ -344,10 +389,11 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     fn track_resync_part(&mut self, from: NodeId, resync: &SubscriptionResync) {
-        let Some(state) = self.resync_rounds.get_mut(&from) else {
+        self.silent_peers.remove(&from);
+        let Some(tracked) = self.resync_progress.get_mut(&from) else {
             return;
         };
-        let Some(progress) = state.progress.get_mut(&resync.round) else {
+        let Some(progress) = tracked.get_mut(&resync.round) else {
             return;
         };
         if resync.part != progress.next_part {
@@ -357,8 +403,10 @@ impl<T: ClusterTransport> NodeController<T> {
                 got = resync.part,
                 "subscription resync part missing, asking again"
             );
-            state.progress.remove(&resync.round);
-            state.next_ask_ms = Some(0);
+            tracked.remove(&resync.round);
+            if let Some(state) = self.resync_rounds.get_mut(&from) {
+                state.next_ask_ms = Some(0);
+            }
             return;
         }
         progress.next_part += 1;
@@ -367,9 +415,13 @@ impl<T: ClusterTransport> NodeController<T> {
             .extend(resync.clients.iter().map(|client| client.client_id.clone()));
         if progress.next_part == resync.parts {
             let listed = std::mem::take(&mut progress.listed);
+            tracked.retain(|round, _| *round > resync.round);
+            if tracked.is_empty() {
+                self.resync_progress.remove(&from);
+            }
             self.resync_rounds.remove(&from);
             let released = self.stores.client_locations.retain_claims_of(from, &listed);
-            tracing::info!(
+            tracing::debug!(
                 from = from.get(),
                 round = resync.round,
                 clients = listed.len(),

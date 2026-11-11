@@ -223,7 +223,7 @@ impl StoreManager {
             db_unique: UniqueStore::new(node_id),
             db_fk: FkValidationStore::new(node_id),
             db_constraints: ConstraintStore::new(node_id),
-            client_locations: ClientLocationStore::new(),
+            client_locations: ClientLocationStore::new(node_id),
             fk_reverse_index: FkReverseIndex::new(),
             transfer_windows: transfer_window::TransferWindows::default(),
         }
