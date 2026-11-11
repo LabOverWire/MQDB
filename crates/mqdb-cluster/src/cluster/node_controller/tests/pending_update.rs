@@ -537,11 +537,15 @@ async fn pending_update_keeps_a_record_recreated_during_the_wait() {
 
     finish_forwarded(&mut ctrl, work).await;
 
-    let record = stored(&ctrl, "posts", "p1").unwrap();
     assert_eq!(
-        (&record["author_id"], &record["title"]),
-        (&json!(REMOTE_AUTHOR), &json!("fresh")),
-        "{record}"
+        (
+            stored(&ctrl, "posts", "p1"),
+            forwarded_reply(&ctrl, 110)["status"].clone()
+        ),
+        (
+            Some(json!({"id": "p1", "author_id": REMOTE_AUTHOR, "title": "fresh", "_version": 2})),
+            json!("ok")
+        )
     );
 }
 
@@ -581,6 +585,201 @@ async fn forwarded_pending_update_with_an_expected_version_fails_when_the_record
         ),
         (&json!(412), &json!("u2"), &json!("t1")),
         "{record}"
+    );
+}
+
+#[tokio::test]
+async fn published_pending_update_with_an_expected_version_fails_when_the_record_moved() {
+    let mut ctrl = cluster().await;
+    let handler = DbRequestHandler::new(node(1));
+    let pending = publish(
+        &handler,
+        &mut ctrl,
+        "$DB/posts/p1/update",
+        &json!({"author_id": REMOTE_AUTHOR, "_expected_version": 1}),
+    )
+    .await;
+    let title =
+        publish_completing_unique(&mut ctrl, "$DB/posts/p1/update", &json!({"title": "t1"})).await;
+    assert_eq!(title["status"], "ok", "{title}");
+
+    let author = finish_published(&handler, &mut ctrl, pending).await;
+
+    let record = stored(&ctrl, "posts", "p1").unwrap();
+    assert_eq!(
+        (&author["code"], &record["author_id"], &record["title"]),
+        (&json!(412), &json!("u2"), &json!("t1")),
+        "{author} {record}"
+    );
+}
+
+#[tokio::test]
+async fn pending_set_null_whose_field_moved_keeps_the_new_value_and_acks_the_cascade() {
+    let mut ctrl = cluster().await;
+    let created = publish_completing_unique(
+        &mut ctrl,
+        "$DB/posts/create",
+        &json!({"id": "p1x", "author_id": "u2", "editor_id": REMOTE_AUTHOR}),
+    )
+    .await;
+    assert_eq!(created["status"], "ok", "{created}");
+    assert_ne!(
+        data_partition("posts", "p1x"),
+        data_partition("users", REMOTE_AUTHOR)
+    );
+    ctrl.constraint_add(
+        &ClusterConstraint::foreign_key(
+            "posts",
+            "posts_editor_fk",
+            "editor_id",
+            "users",
+            "id",
+            OnDeleteAction::SetNull,
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let handler = DbRequestHandler::new(node(1));
+    let Some(set_null) = forward(
+        &mut ctrl,
+        &forwarded_update(
+            140,
+            "posts",
+            "p1x",
+            &json!({"author_id": null, "__mqdb_fk_expected": "author_id=u2"}),
+        ),
+    )
+    .await
+    else {
+        panic!("the set-null should wait on the remote editor FK check");
+    };
+    let moved = publish(
+        &handler,
+        &mut ctrl,
+        "$DB/posts/p1x/update",
+        &json!({"author_id": "u3"}),
+    )
+    .await;
+    let moved = finish_published(&handler, &mut ctrl, moved).await;
+    assert_eq!(moved["status"], "ok", "{moved}");
+
+    finish_forwarded(&mut ctrl, set_null).await;
+    let (ack_tx, ack_rx) = oneshot::channel();
+    ctrl.pending_constraints.insert_cascade_ack(77, ack_tx);
+    ctrl.handle_json_db_response(&JsonDbResponse::new(
+        77,
+        serde_json::to_vec(&forwarded_reply(&ctrl, 140)).unwrap(),
+        "_mqdb/cascade_ack/1/77".to_string(),
+        None,
+    ))
+    .await;
+
+    assert_eq!(
+        (
+            stored(&ctrl, "posts", "p1x").unwrap()["author_id"].clone(),
+            ack_rx.await
+        ),
+        (json!("u3"), Ok(true))
+    );
+}
+
+async fn publish_as(
+    handler: &DbRequestHandler,
+    ctrl: &mut NodeController<MockTransport>,
+    topic: &str,
+    payload: &Value,
+    sender: &str,
+) -> DbPublishResult {
+    let bytes = serde_json::to_vec(payload).unwrap();
+    handler
+        .handle_publish(ctrl, topic, &bytes, &response_ctx(Some(sender)))
+        .await
+}
+
+#[tokio::test]
+async fn published_pending_fk_update_under_vault_keeps_a_concurrent_update_readable_by_its_owner() {
+    let mut ctrl = cluster().await;
+    let ownership = Arc::new(OwnershipConfig::new(
+        [("posts".to_string(), "owner".to_string())]
+            .into_iter()
+            .collect(),
+    ));
+    ctrl.set_ownership(Arc::clone(&ownership));
+    let key_store = Arc::new(mqdb_vault::VaultKeyStore::new());
+    let (crypto, raw_key) = mqdb_vault::VaultCrypto::derive_with_raw_key(
+        "passphrase",
+        &mqdb_vault::VaultCrypto::generate_salt(),
+    );
+    key_store.set("alice", raw_key);
+    let handler = DbRequestHandler::new(node(1))
+        .with_ownership(Arc::clone(&ownership))
+        .with_vault_key_store(key_store);
+    let DbPublishResult::Response(created) = publish_as(
+        &handler,
+        &mut ctrl,
+        "$DB/posts/create",
+        &json!({"id": "pv", "owner": "alice", "author_id": "u2", "title": "t0"}),
+        "alice",
+    )
+    .await
+    else {
+        panic!("the vault create should be answered at once");
+    };
+    let created: Value = serde_json::from_slice(&created.payload).unwrap();
+    assert_eq!(created["status"], "ok", "{created}");
+
+    let pending = publish_as(
+        &handler,
+        &mut ctrl,
+        "$DB/posts/pv/update",
+        &json!({"author_id": REMOTE_AUTHOR}),
+        "alice",
+    )
+    .await;
+    assert!(matches!(pending, DbPublishResult::PendingFkCheck(_)));
+    let DbPublishResult::Response(title) = publish_as(
+        &handler,
+        &mut ctrl,
+        "$DB/posts/pv/update",
+        &json!({"title": "t1"}),
+        "alice",
+    )
+    .await
+    else {
+        panic!("the title update should be answered at once");
+    };
+    let title: Value = serde_json::from_slice(&title.payload).unwrap();
+
+    let author = finish_published(&handler, &mut ctrl, pending).await;
+
+    let raw = stored(&ctrl, "posts", "pv").unwrap();
+    let mut readable = raw.clone();
+    mqdb_vault::transform::vault_decrypt_fields(
+        &crypto,
+        "posts",
+        "pv",
+        &mut readable,
+        &mqdb_vault::transform::build_vault_skip_fields("posts", &ownership),
+    );
+    assert_eq!(
+        (
+            raw["title"] != json!("t1"),
+            &readable["author_id"],
+            &readable["title"],
+            &readable["_version"],
+            versions(&[&title, &author]),
+            &author["data"]["title"],
+        ),
+        (
+            true,
+            &json!(REMOTE_AUTHOR),
+            &json!("t1"),
+            &json!(3),
+            vec![json!(2), json!(3)],
+            &json!("t1"),
+        ),
+        "{raw} {author}"
     );
 }
 
