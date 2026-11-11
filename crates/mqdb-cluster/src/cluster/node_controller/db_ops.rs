@@ -990,7 +990,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     );
                 }
                 Ok(phase1) => {
-                    if !phase1.pending_remote.is_empty() {
+                    if !phase1.pending_remote.is_empty() || !phase1.pending_quorum.is_empty() {
                         return (
                             Vec::new(),
                             Some(super::PendingConstraintWork::Unique(PendingUniqueWork {
@@ -2512,9 +2512,13 @@ impl<T: ClusterTransport> NodeController<T> {
             client_id: None,
             requested_owner: None,
         };
-        let (result, _) = self
+        let (result, pending) = self
             .handle_json_update_local(entity, id, payload, &request, self.node_id)
             .await;
+        assert!(
+            pending.is_none(),
+            "this update waits on a check; drive it through handle_json_db_request"
+        );
         result
     }
 }

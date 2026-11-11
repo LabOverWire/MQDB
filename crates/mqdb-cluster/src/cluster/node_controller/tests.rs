@@ -1805,14 +1805,48 @@ async fn db_update_releases_old_unique_value() {
     )
     .await;
 
-    let result = ctrl
-        .handle_json_update_local_for_test(
-            "users",
-            "user-a",
-            br#"{"email":"newalice@example.com"}"#,
+    let update = JsonDbRequest {
+        request_id: 7,
+        op: JsonDbOp::Update,
+        entity: "users".to_string(),
+        id: Some("user-a".to_string()),
+        payload: br#"{"email":"newalice@example.com"}"#.to_vec(),
+        response_topic: "resp/update".to_string(),
+        correlation_data: None,
+        sender: None,
+        client_id: None,
+        requested_owner: None,
+    };
+    let Some(PendingConstraintWork::Unique(pending)) = ctrl
+        .handle_json_db_request(
+            node1,
+            crate::cluster::db::data_partition("users", "user-a"),
+            &update,
         )
-        .await;
-    let response: serde_json::Value = serde_json::from_slice(&result).unwrap();
+        .await
+    else {
+        panic!("the update should wait on its unique reserve");
+    };
+    ctrl.complete_pending_unique_work(
+        pending.phase1.local_reserved,
+        Ok(Vec::new()),
+        pending.continuation,
+    )
+    .await;
+    let response: serde_json::Value = ctrl
+        .transport()
+        .sent_messages()
+        .into_iter()
+        .rev()
+        .find_map(|(_, message)| match message {
+            ClusterMessage::JsonDbResponse(response)
+                if response.response_topic == "resp/update" =>
+            {
+                serde_json::from_slice(&response.payload).ok()
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("the update was not answered"));
     assert_eq!(response["status"], "ok", "update failed: {response}");
 
     let partition_b = crate::cluster::db::data_partition("users", "user-b");
