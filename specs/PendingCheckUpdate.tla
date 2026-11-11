@@ -21,7 +21,11 @@
 \* incarnation (between deletes). The 409 on a changed field is not needed
 \* for these invariants (a later ack may overwrite an earlier one); it is
 \* there because the unique claim release, which this spec omits, frees the
-\* value the update read before the wait.
+\* value the update read before the wait. A record deleted and re-created
+\* during the wait is not distinguished from the one the update read: if
+\* the new record holds the same values in the fields the update sets, the
+\* update applies onto it, and an expected version can match the new
+\* incarnation's version.
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS Clients, Rebase
