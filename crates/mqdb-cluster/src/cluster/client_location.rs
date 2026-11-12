@@ -147,6 +147,13 @@ fn place(claims: &mut Vec<Claim>, claim: Claim) {
     claims.insert(at, claim);
 }
 
+fn live<'a>(
+    held: &'a [Claim],
+    down: &'a HashSet<NodeId>,
+) -> impl DoubleEndedIterator<Item = &'a Claim> {
+    held.iter().filter(move |claim| !down.contains(&claim.node))
+}
+
 fn newest_order(claims: &[Claim]) -> u64 {
     claims.iter().map(|claim| claim.order).max().unwrap_or(0)
 }
@@ -154,6 +161,7 @@ fn newest_order(claims: &[Claim]) -> u64 {
 pub struct ClientLocationStore {
     owner: NodeId,
     claims: RwLock<HashMap<String, Vec<Claim>>>,
+    down: RwLock<HashSet<NodeId>>,
     next_instance: AtomicU64,
 }
 
@@ -163,8 +171,32 @@ impl ClientLocationStore {
         Self {
             owner,
             claims: RwLock::new(HashMap::new()),
+            down: RwLock::new(HashSet::new()),
             next_instance: AtomicU64::new(boot_seeded_counter()),
         }
+    }
+
+    pub fn mark_down(&self, node: NodeId) {
+        if node != self.owner {
+            self.down
+                .write()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(node);
+        }
+    }
+
+    pub fn mark_up(&self, node: NodeId) {
+        self.down
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&node);
+    }
+
+    fn down_nodes(&self) -> HashSet<NodeId> {
+        self.down
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     #[must_use]
@@ -199,11 +231,12 @@ impl ClientLocationStore {
         let mut claims = self.claims.write().unwrap_or_else(PoisonError::into_inner);
         let held = claims.get_mut(client_id)?;
         let own = *held.iter().find(|claim| claim.node == self.owner)?;
-        let mut outranking = held
-            .iter()
+        let down = self.down_nodes();
+        let outranking: Vec<bool> = live(held, &down)
             .filter(|claim| claim.key() > own.key())
-            .peekable();
-        if outranking.peek().is_none() || !outranking.all(|claim| claim.listed) {
+            .map(|claim| claim.listed)
+            .collect();
+        if outranking.is_empty() || !outranking.iter().all(|listed| *listed) {
             return None;
         }
         let claim = Claim {
@@ -238,7 +271,12 @@ impl ClientLocationStore {
                 listed: false,
             },
         );
-        held.retain(|older| older.node == self.owner || older.key() > claim.key());
+        let down = self.down_nodes();
+        let sender_live = !down.contains(&node);
+        held.retain(|older| {
+            older.node == self.owner
+                || (older.key() > claim.key() && !(sender_live && down.contains(&older.node)))
+        });
         place(held, claim);
     }
 
@@ -297,8 +335,11 @@ impl ClientLocationStore {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .get(client_id)
-            .and_then(|held| held.last())
-            .map(|claim| claim.node)
+            .and_then(|held| {
+                live(held, &self.down_nodes())
+                    .next_back()
+                    .map(|claim| claim.node)
+            })
     }
 
     #[must_use]
@@ -307,7 +348,11 @@ impl ClientLocationStore {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .get(client_id)
-            .map(|held| held.iter().map(|claim| claim.node).collect())
+            .map(|held| {
+                live(held, &self.down_nodes())
+                    .map(|claim| claim.node)
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -332,17 +377,22 @@ impl ClientLocationStore {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .get(client_id)
-            .and_then(|held| held.last())
+            .and_then(|held| live(held, &self.down_nodes()).next_back().copied())
             .is_some_and(|newest| newest.node == self.owner && newest.key() > (order.0, node.get()))
     }
 
     #[must_use]
     pub fn authoritative_here(&self) -> HashSet<String> {
+        let down = self.down_nodes();
         self.claims
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .iter()
-            .filter(|(_, held)| held.last().is_some_and(|claim| claim.node == self.owner))
+            .filter(|(_, held)| {
+                live(held, &down)
+                    .next_back()
+                    .is_some_and(|claim| claim.node == self.owner)
+            })
             .map(|(client_id, _)| client_id.clone())
             .collect()
     }
@@ -718,5 +768,49 @@ mod tests {
             .apply_replicated(Operation::Delete, &entry.encode_ordered(old_connection))
             .unwrap();
         assert_eq!(observer.claimants("c"), [node(1)]);
+    }
+
+    #[test]
+    fn claims_of_a_node_down_here_do_not_decide_authority_until_it_is_back() {
+        let store = ClientLocationStore::new(node(1));
+        store.connect_here("c");
+        store
+            .apply_replicated(Operation::Insert, &ordered_bytes("c", 3, 2))
+            .unwrap();
+        assert!(!store.is_authority_here("c"));
+        assert!(!store.outranks_here("c", node(4), LocationOrder(0)));
+
+        store.mark_down(node(3));
+        assert!(store.is_authority_here("c"));
+        assert!(store.authoritative_here().contains("c"));
+        assert!(store.outranks_here("c", node(4), LocationOrder(0)));
+        assert_eq!(store.claimants("c"), [node(1)]);
+
+        store.mark_up(node(3));
+        assert!(!store.is_authority_here("c"));
+        assert_eq!(store.claimants("c"), [node(1), node(3)]);
+    }
+
+    #[test]
+    fn a_write_from_a_node_down_here_does_not_drop_other_down_nodes_claims() {
+        let store = ClientLocationStore::new(node(2));
+        store
+            .apply_replicated(Operation::Insert, &ordered_bytes("c", 3, 2))
+            .unwrap();
+        store.mark_down(node(3));
+        store.mark_down(node(4));
+        store
+            .apply_replicated(Operation::Insert, &ordered_bytes("c", 4, 1))
+            .unwrap();
+        store.mark_up(node(3));
+        store.mark_up(node(4));
+        assert_eq!(store.claimants("c"), [node(4), node(3)]);
+
+        store.mark_down(node(3));
+        store
+            .apply_replicated(Operation::Insert, &ordered_bytes("c", 1, 1))
+            .unwrap();
+        store.mark_up(node(3));
+        assert_eq!(store.claimants("c"), [node(1), node(4)]);
     }
 }

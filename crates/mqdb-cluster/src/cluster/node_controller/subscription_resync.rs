@@ -186,6 +186,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .receive_heartbeat(from, heartbeat, received_at);
         if revived {
             self.silent_peers.remove(&from);
+            self.stores.client_locations.mark_up(from);
             self.pending_resync_requests.insert(from, true);
         }
     }

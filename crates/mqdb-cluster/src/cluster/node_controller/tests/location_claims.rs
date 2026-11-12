@@ -2479,3 +2479,220 @@ async fn a_reply_for_an_untracked_round_teaches_nothing_for_the_boot_rerank() {
         Some(node(3))
     );
 }
+
+async fn share_target_after_connect_on_node_that_never_heard_the_dead_claim(
+    reconnect_node_restarted_after_death: bool,
+) -> (Option<NodeId>, Option<NodeId>) {
+    let client = "r15-sleeper";
+    let dead = node(3);
+    let mut observer = controller(2);
+    let gone = controller(3);
+    let order_on_3 = gone.stores().client_locations.connect_here(client);
+    observer.transport.inject_message(
+        dead,
+        ordered_location_write(client, dead, order_on_3, Operation::Insert),
+    );
+    observer.process_messages().await;
+    let mut reconnect_node = controller(1);
+    if !reconnect_node_restarted_after_death {
+        reconnect_node.transport.inject_message(
+            dead,
+            ordered_location_write(client, dead, order_on_3, Operation::Insert),
+        );
+        reconnect_node.process_messages().await;
+    }
+    observer.apply_dead_nodes(&[dead]);
+
+    let order_on_1 = reconnect_node
+        .stores()
+        .client_locations
+        .connect_here(client);
+    observer.transport.inject_message(
+        node(1),
+        ordered_location_write(client, node(1), order_on_1, Operation::Insert),
+    );
+    observer.process_messages().await;
+
+    revive(&reconnect_node, node(2));
+    reconnect_node.process_messages().await;
+    answer_resyncs(&mut reconnect_node, &mut observer).await;
+    revive(&observer, node(1));
+    observer.process_messages().await;
+    answer_resyncs(&mut observer, &mut reconnect_node).await;
+    run_periodic_resync(&mut observer).await;
+    answer_resyncs(&mut observer, &mut reconnect_node).await;
+
+    let eligible: std::collections::HashSet<NodeId> =
+        observer.alive_or_suspected_nodes().into_iter().collect();
+    let located = observer.connected_node(client);
+    (located, located.filter(|n| eligible.contains(n)))
+}
+
+#[tokio::test]
+async fn a_dead_nodes_claim_outranks_a_connect_on_a_node_restarted_after_the_death() {
+    assert_eq!(
+        share_target_after_connect_on_node_that_never_heard_the_dead_claim(true).await,
+        (Some(node(1)), Some(node(1))),
+        "(newest location, $share target) on node 2 for a client now connected only on node 1"
+    );
+}
+
+#[tokio::test]
+async fn a_connect_on_a_node_that_heard_the_dead_claim_outranks_it() {
+    assert_eq!(
+        share_target_after_connect_on_node_that_never_heard_the_dead_claim(false).await,
+        (Some(node(1)), Some(node(1)))
+    );
+}
+
+#[tokio::test]
+async fn a_peer_that_dies_mid_boot_resync_leaves_routing_on_the_live_connection() {
+    let client = "halfopen";
+    let older = controller(3);
+    let order_on_3 = older.stores().client_locations.connect_here(client);
+    let mut restarted = controller(1);
+    let order_on_1 = restarted.stores().client_locations.connect_here(client);
+    restarted.note_local_connect(client);
+    let mut observer = controller(2);
+    observer.transport.inject_message(
+        node(3),
+        ordered_location_write(client, node(3), order_on_3, Operation::Insert),
+    );
+    observer.transport.inject_message(
+        node(1),
+        ordered_location_write(client, node(1), order_on_1, Operation::Insert),
+    );
+    observer.process_messages().await;
+    assert_eq!(observer.connected_node(client), Some(node(3)));
+
+    revive(&restarted, node(3));
+    restarted.process_messages().await;
+    restarted.transport.take_sent();
+    restarted.transport.inject_message(
+        node(3),
+        ordered_location_write(client, node(3), order_on_3, Operation::Insert),
+    );
+    restarted.process_messages().await;
+    observer.apply_dead_nodes(&[node(3)]);
+    restarted.apply_dead_nodes(&[node(3)]);
+
+    assert_eq!(observer.connected_node(client), Some(node(1)));
+    assert_eq!(observer.connected_nodes(client), [node(1)]);
+    assert!(
+        restarted
+            .stores()
+            .client_locations
+            .is_authority_here(client)
+    );
+}
+
+#[tokio::test]
+async fn a_revived_nodes_claim_ranks_again_as_before_its_death() {
+    let client = "sleeper";
+    let mut observer = controller(2);
+    for (from, order) in [(node(1), 1), (node(3), 2)] {
+        observer.transport.inject_message(
+            from,
+            ordered_location_write(
+                client,
+                from,
+                crate::cluster::LocationStamp {
+                    order: crate::cluster::LocationOrder(order),
+                    instance: order,
+                },
+                Operation::Insert,
+            ),
+        );
+    }
+    observer.process_messages().await;
+    observer.stores().client_locations.claim_listed(
+        client,
+        node(1),
+        crate::cluster::LocationStamp {
+            order: crate::cluster::LocationOrder(1),
+            instance: 1,
+        },
+    );
+    assert_eq!(observer.connected_nodes(client), [node(1), node(3)]);
+
+    observer.apply_dead_nodes(&[node(3)]);
+    assert_eq!(observer.connected_node(client), Some(node(1)));
+    assert_eq!(observer.connected_nodes(client), [node(1)]);
+
+    revive(&observer, node(3));
+    observer.process_messages().await;
+    assert_eq!(observer.connected_node(client), Some(node(3)));
+    assert_eq!(observer.connected_nodes(client), [node(1), node(3)]);
+}
+
+#[tokio::test]
+async fn a_live_connect_drops_an_outranking_claim_of_a_dead_old_version_peer() {
+    let client = "legacy-mover";
+    let mut observer = controller(2);
+    revive(&observer, node(3));
+    observer.process_messages().await;
+    observer
+        .transport
+        .inject_message(node(3), location_write(client, node(3), Operation::Insert));
+    observer.process_messages().await;
+    observer.apply_dead_nodes(&[node(3)]);
+
+    let fresh = controller(1);
+    let order_on_1 = fresh.stores().client_locations.connect_here(client);
+    observer.transport.inject_message(
+        node(1),
+        ordered_location_write(client, node(1), order_on_1, Operation::Insert),
+    );
+    observer.process_messages().await;
+    revive(&observer, node(3));
+    observer.process_messages().await;
+
+    assert_eq!(observer.connected_nodes(client), [node(1)]);
+    assert_eq!(observer.connected_node(client), Some(node(1)));
+}
+
+#[tokio::test]
+async fn a_resync_replaces_entries_when_the_only_other_claimant_is_dead() {
+    let client = "replaced";
+    let mut peer = controller(1);
+    let order_on_1 = peer.stores().client_locations.connect_here(client);
+    peer.stores()
+        .topics
+        .subscribe("kept/t", client, session_partition(client), 1)
+        .unwrap();
+    let mut observer = controller(2);
+    observer.transport.inject_message(
+        node(3),
+        ordered_location_write(
+            client,
+            node(3),
+            crate::cluster::LocationStamp {
+                order: crate::cluster::LocationOrder(order_on_1.order.0 + 1),
+                instance: 1,
+            },
+            Operation::Insert,
+        ),
+    );
+    observer.process_messages().await;
+    observer
+        .stores()
+        .client_locations
+        .claim_listed(client, node(1), order_on_1);
+    for topic in ["kept/t", "stale/t"] {
+        observer
+            .stores()
+            .topics
+            .subscribe(topic, client, session_partition(client), 1)
+            .unwrap();
+    }
+    observer.apply_dead_nodes(&[node(3)]);
+
+    revive(&observer, node(1));
+    observer.process_messages().await;
+    answer_resyncs(&mut observer, &mut peer).await;
+
+    assert_eq!(
+        observer.stores().topics.get_client_topics(client),
+        [("kept/t".to_string(), 1)]
+    );
+}
