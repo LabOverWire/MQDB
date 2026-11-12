@@ -41,11 +41,16 @@ impl ListingDigest {
         ])
     }
 
-    pub fn add_client(&mut self, client_id: &str, order: u64, subscriptions: u64) {
+    pub fn add_client(&mut self, client_id: &str, order: u64, instance: u64, subscriptions: u64) {
         self.clients += 1;
         self.hash = self
             .hash
-            .wrapping_add(fnv(&[b"c", client_id.as_bytes(), &order.to_be_bytes()]))
+            .wrapping_add(fnv(&[
+                b"c",
+                client_id.as_bytes(),
+                &order.to_be_bytes(),
+                &instance.to_be_bytes(),
+            ]))
             .wrapping_add(subscriptions);
     }
 
@@ -64,7 +69,12 @@ impl ListingDigest {
                     pattern.subscription_type,
                 ))
             });
-            digest.add_client(&client.client_id, client.order, subscriptions);
+            digest.add_client(
+                &client.client_id,
+                client.order,
+                client.instance,
+                subscriptions,
+            );
             digest
         })
     }
@@ -101,6 +111,7 @@ impl ResyncedPattern {
 pub struct ResyncedClient {
     pub client_id: String,
     pub order: u64,
+    pub instance: u64,
     pub topics: Vec<ResyncedTopic>,
     pub patterns: Vec<ResyncedPattern>,
 }
@@ -110,12 +121,13 @@ impl ResyncedClient {
     pub fn encoded_len(&self) -> usize {
         let topics: usize = self.topics.iter().map(ResyncedTopic::encoded_len).sum();
         let patterns: usize = self.patterns.iter().map(ResyncedPattern::encoded_len).sum();
-        18 + self.client_id.len() + topics + patterns
+        26 + self.client_id.len() + topics + patterns
     }
 
     fn encode(&self, buf: &mut Vec<u8>) -> Option<()> {
         push_length_prefixed(buf, self.client_id.as_bytes(), false)?;
         buf.extend_from_slice(&self.order.to_be_bytes());
+        buf.extend_from_slice(&self.instance.to_be_bytes());
         buf.extend_from_slice(&u32::try_from(self.topics.len()).ok()?.to_be_bytes());
         for topic in &self.topics {
             push_length_prefixed(buf, topic.topic.as_bytes(), false)?;
@@ -134,6 +146,7 @@ impl ResyncedClient {
         let client_len = reader.length(true)?;
         let client_id = reader.text(client_len)?;
         let order = reader.u64()?;
+        let instance = reader.u64()?;
         let topic_count = reader.u32()?;
         let topics = (0..topic_count)
             .map(|_| {
@@ -160,6 +173,7 @@ impl ResyncedClient {
         Some(Self {
             client_id,
             order,
+            instance,
             topics,
             patterns,
         })
@@ -285,6 +299,7 @@ mod tests {
         ResyncedClient {
             client_id: id.to_string(),
             order: 0,
+            instance: 0,
             topics: vec![ResyncedTopic {
                 topic: "a/b".to_string(),
                 qos: 1,

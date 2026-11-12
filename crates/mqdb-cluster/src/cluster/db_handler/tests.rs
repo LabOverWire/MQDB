@@ -3434,7 +3434,7 @@ fn sent_location_orders(
             {
                 crate::cluster::ClientLocationEntry::decode_ordered(&write.data)
                     .filter(|(entry, _)| entry.client_id_str() == client_id)
-                    .map(|(_, order)| (write.operation, order))
+                    .map(|(_, stamp)| (write.operation, stamp.map(|stamp| stamp.order)))
             }
             _ => None,
         })

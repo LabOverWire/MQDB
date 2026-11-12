@@ -5,18 +5,18 @@ CONSTANTS Nodes, Clients, Topics, Crashable, NoNode,
           MaxOps, MaxCrashes, MaxDrops, MaxAsks, MaxChan,
           Resync, Claims, Supersede, AntiEntropy, LinkedTargets, ReleaseOnDeath,
           RetainOnComplete, AskBack, Retry, Announce, StaleDisk, FalseSuspicion,
-          UniqueRounds, AnsweredStaysRefreshed, Digest, GatedRefresh
+          UniqueRounds, AnsweredStaysRefreshed, Digest, GatedRefresh, ParkOnDeath
 
 Entries == Clients \X Topics
 Pairs == {p \in Nodes \X Nodes : p[1] # p[2]}
 
 VARIABLES up, links, view, dead, conn, sess, want, resub, loc, idx, chan,
           pending, outstanding, asks, ops, crashes, drops, ever, dirty, boot,
-          answered, silent
+          answered, silent, parked
 
 vars == <<up, links, view, dead, conn, sess, want, resub, loc, idx, chan,
           pending, outstanding, asks, ops, crashes, drops, ever, dirty, boot,
-          answered, silent>>
+          answered, silent, parked>>
 
 Linked(n, m) == {n, m} \in links
 
@@ -104,6 +104,7 @@ Init ==
     /\ dirty = [n \in Nodes |-> [m \in Nodes |-> FALSE]]
     /\ answered = [n \in Nodes |-> [m \in Nodes |-> FALSE]]
     /\ silent = [n \in Nodes |-> [m \in Nodes |-> FALSE]]
+    /\ parked = [n \in Nodes |-> [m \in Nodes |-> {}]]
     /\ boot = [n \in Nodes |-> 0]
 
 Connect(c, n, clean) ==
@@ -134,7 +135,7 @@ Connect(c, n, clean) ==
                THEN SendTo(afterLoc, n, TopicReceivers(n), announced)
                ELSE afterLoc
     /\ ops' = ops + 1
-    /\ UNCHANGED <<dirty, up, links, view, dead, want, idx, pending, outstanding, asks, crashes, drops, ever, boot, answered, silent>>
+    /\ UNCHANGED <<dirty, up, links, view, dead, want, idx, pending, outstanding, asks, crashes, drops, ever, boot, answered, silent, parked>>
 
 Resubscribe(c) ==
     LET n == conn[c] IN
@@ -143,7 +144,7 @@ Resubscribe(c) ==
     /\ idx' = [idx EXCEPT ![n] = @ \cup {<<c, t>> : t \in want[c]}]
     /\ chan' = SendTo(chan, n, TopicReceivers(n), [kind |-> "subs", c |-> c, ts |-> want[c]])
     /\ resub' = [resub EXCEPT ![c] = FALSE]
-    /\ UNCHANGED <<dirty, up, links, view, dead, conn, sess, want, loc, pending, outstanding, asks, ops, crashes, drops, ever, boot, answered, silent>>
+    /\ UNCHANGED <<dirty, up, links, view, dead, conn, sess, want, loc, pending, outstanding, asks, ops, crashes, drops, ever, boot, answered, silent, parked>>
 
 Disconnect(c) ==
     LET n == conn[c] IN
@@ -154,7 +155,7 @@ Disconnect(c) ==
     /\ loc' = [loc EXCEPT ![n][c] = Released(@, n)]
     /\ chan' = SendTo(chan, n, LocReceivers(n), [kind |-> "del", c |-> c, node |-> n, o |-> OrdOf(loc[n][c], n)])
     /\ ops' = ops + 1
-    /\ UNCHANGED <<dirty, up, links, view, dead, sess, want, idx, pending, outstanding, asks, crashes, drops, ever, boot, answered, silent>>
+    /\ UNCHANGED <<dirty, up, links, view, dead, sess, want, idx, pending, outstanding, asks, crashes, drops, ever, boot, answered, silent, parked>>
 
 Sub(c, t) ==
     LET n == conn[c] IN
@@ -166,7 +167,7 @@ Sub(c, t) ==
     /\ chan' = SendTo(chan, n, TopicReceivers(n), [kind |-> "sub", c |-> c, t |-> t])
     /\ ever' = ever \cup {<<c, t>>}
     /\ ops' = ops + 1
-    /\ UNCHANGED <<dirty, up, links, view, dead, conn, sess, resub, loc, pending, outstanding, asks, crashes, drops, boot, answered, silent>>
+    /\ UNCHANGED <<dirty, up, links, view, dead, conn, sess, resub, loc, pending, outstanding, asks, crashes, drops, boot, answered, silent, parked>>
 
 Unsub(c, t) ==
     LET n == conn[c] IN
@@ -177,7 +178,7 @@ Unsub(c, t) ==
     /\ idx' = [idx EXCEPT ![n] = @ \ {<<c, t>>}]
     /\ chan' = SendTo(chan, n, TopicReceivers(n), [kind |-> "unsub", c |-> c, t |-> t])
     /\ ops' = ops + 1
-    /\ UNCHANGED <<dirty, up, links, view, dead, conn, sess, resub, loc, pending, outstanding, asks, crashes, drops, ever, boot, answered, silent>>
+    /\ UNCHANGED <<dirty, up, links, view, dead, conn, sess, resub, loc, pending, outstanding, asks, crashes, drops, ever, boot, answered, silent, parked>>
 
 Crash(n) ==
     /\ n \in Crashable
@@ -190,6 +191,7 @@ Crash(n) ==
     /\ dirty' = [m \in Nodes |-> IF m = n THEN [x \in Nodes |-> FALSE] ELSE [dirty[m] EXCEPT ![n] = TRUE]]
     /\ answered' = [answered EXCEPT ![n] = [m \in Nodes |-> FALSE]]
     /\ silent' = [silent EXCEPT ![n] = [m \in Nodes |-> FALSE]]
+    /\ parked' = [parked EXCEPT ![n] = [m \in Nodes |-> {}]]
     /\ conn' = [c \in Clients |-> IF conn[c] = n THEN NoNode ELSE conn[c]]
     /\ sess' = [c \in Clients |-> IF sess[c] = n THEN NoNode ELSE sess[c]]
     /\ resub' = [c \in Clients |-> IF conn[c] = n THEN FALSE ELSE resub[c]]
@@ -207,7 +209,7 @@ Restart(n) ==
     /\ up' = [up EXCEPT ![n] = TRUE]
     /\ boot' = [boot EXCEPT ![n] = @ + 1]
     /\ chan' = [p \in Pairs |-> IF p[2] = n THEN <<>> ELSE chan[p]]
-    /\ UNCHANGED <<dirty, links, view, dead, conn, sess, want, resub, loc, pending, outstanding, asks, ops, crashes, drops, ever, answered, silent>>
+    /\ UNCHANGED <<dirty, links, view, dead, conn, sess, want, resub, loc, pending, outstanding, asks, ops, crashes, drops, ever, answered, silent, parked>>
 
 Heartbeat(n, m) ==
     /\ n # m
@@ -219,7 +221,13 @@ Heartbeat(n, m) ==
     /\ dead' = [dead EXCEPT ![n][m] = FALSE]
     /\ pending' = IF Resync THEN [pending EXCEPT ![n] = @ \cup {[peer |-> m, back |-> AskBack]}] ELSE pending
     /\ silent' = [silent EXCEPT ![n][m] = FALSE]
-    /\ UNCHANGED <<dirty, up, conn, sess, want, resub, loc, idx, chan, outstanding, asks, ops, crashes, drops, ever, boot, answered>>
+    /\ loc' = [loc EXCEPT ![n] = [c \in Clients |->
+                 LET back == {e.x : e \in {p \in parked[n][m] : p.c = c}}
+                 IN IF back # {} /\ ~\E y \in @[c] : \E x \in back : Newer(y, x)
+                    THEN Without(@[c], m) \cup back
+                    ELSE @[c]]]
+    /\ parked' = [parked EXCEPT ![n][m] = {}]
+    /\ UNCHANGED <<dirty, up, conn, sess, want, resub, idx, chan, outstanding, asks, ops, crashes, drops, ever, boot, answered>>
 
 DetectDeath(n, m) ==
     /\ n # m
@@ -236,6 +244,10 @@ DetectDeath(n, m) ==
     /\ dirty' = [dirty EXCEPT ![n][m] = FALSE]
     /\ answered' = [answered EXCEPT ![n][m] = FALSE]
     /\ silent' = [silent EXCEPT ![n][m] = FALSE]
+    /\ parked' = IF ReleaseOnDeath /\ ParkOnDeath
+                 THEN [parked EXCEPT ![n][m] =
+                         {[c |-> c, x |-> x] : c \in Clients, x \in {y \in loc[n][c] : y.n = m}}]
+                 ELSE parked
     /\ UNCHANGED <<up, links, conn, sess, want, resub, idx, chan, asks, ops, crashes, drops, ever, boot>>
 
 SendRequest(n, m) ==
@@ -246,7 +258,7 @@ SendRequest(n, m) ==
           /\ pending' = [pending EXCEPT ![n] = @ \ {q}]
           /\ outstanding' = [outstanding EXCEPT ![n] = {o \in @ : o.peer # m} \cup {q}]
           /\ asks' = [asks EXCEPT ![n][m] = 1]
-    /\ UNCHANGED <<dirty, up, links, view, dead, conn, sess, want, resub, loc, idx, ops, crashes, drops, ever, boot, answered, silent>>
+    /\ UNCHANGED <<dirty, up, links, view, dead, conn, sess, want, resub, loc, idx, ops, crashes, drops, ever, boot, answered, silent, parked>>
 
 InFlight(n, m) ==
     \/ \E i \in 1..Len(chan[<<n, m>>]) : chan[<<n, m>>][i].kind = "req"
@@ -260,7 +272,7 @@ ReAsk(n, m) ==
           /\ q.peer = m
           /\ chan' = [chan EXCEPT ![<<n, m>>] = Append(@, Request(n, m, q.back))]
     /\ asks' = [asks EXCEPT ![n][m] = @ + 1]
-    /\ UNCHANGED <<dirty, up, links, view, dead, conn, sess, want, resub, loc, idx, pending, outstanding, ops, crashes, drops, ever, boot, answered, silent>>
+    /\ UNCHANGED <<dirty, up, links, view, dead, conn, sess, want, resub, loc, idx, pending, outstanding, ops, crashes, drops, ever, boot, answered, silent, parked>>
 
 GiveUp(n, m) ==
     /\ asks[n][m] >= MaxAsks
@@ -269,7 +281,7 @@ GiveUp(n, m) ==
     /\ silent' = IF ~AnsweredStaysRefreshed \/ ~answered[n][m]
                  THEN [silent EXCEPT ![n][m] = TRUE]
                  ELSE silent
-    /\ UNCHANGED <<dirty, up, links, view, dead, conn, sess, want, resub, loc, idx, chan, pending, asks, ops, crashes, drops, ever, boot, answered>>
+    /\ UNCHANGED <<dirty, up, links, view, dead, conn, sess, want, resub, loc, idx, chan, pending, asks, ops, crashes, drops, ever, boot, answered, parked>>
 
 Lost(n, m) ==
     /\ drops < MaxDrops
@@ -280,7 +292,7 @@ Lost(n, m) ==
     /\ dirty' = IF Head(chan[<<n, m>>]).kind \in {"del", "loc"}
               THEN [dirty EXCEPT ![m] = AllPeers(m), ![n][m] = TRUE]
               ELSE [dirty EXCEPT ![m][n] = TRUE, ![n][m] = TRUE]
-    /\ UNCHANGED <<up, links, view, dead, conn, sess, want, resub, loc, idx, pending, outstanding, asks, ops, crashes, ever, boot, answered, silent>>
+    /\ UNCHANGED <<up, links, view, dead, conn, sess, want, resub, loc, idx, pending, outstanding, asks, ops, crashes, ever, boot, answered, silent, parked>>
 
 Named(list) == {e.c : e \in list}
 
@@ -326,22 +338,24 @@ Receive(from, to) ==
        CASE msg.kind = "sub" ->
               /\ idx' = [idx EXCEPT ![to] = @ \cup {<<msg.c, msg.t>>}]
               /\ chan' = rest
-              /\ UNCHANGED <<loc, pending, outstanding, dirty, answered, silent>>
+              /\ UNCHANGED <<loc, pending, outstanding, dirty, answered, silent, parked>>
          [] msg.kind = "subs" ->
               /\ idx' = [idx EXCEPT ![to] = @ \cup {<<msg.c, t>> : t \in msg.ts}]
               /\ chan' = rest
-              /\ UNCHANGED <<loc, pending, outstanding, dirty, answered, silent>>
+              /\ UNCHANGED <<loc, pending, outstanding, dirty, answered, silent, parked>>
          [] msg.kind = "unsub" ->
               /\ idx' = [idx EXCEPT ![to] = @ \ {<<msg.c, msg.t>>}]
               /\ chan' = rest
-              /\ UNCHANGED <<loc, pending, outstanding, dirty, answered, silent>>
+              /\ UNCHANGED <<loc, pending, outstanding, dirty, answered, silent, parked>>
          [] msg.kind = "loc" ->
               /\ loc' = [loc EXCEPT ![to][msg.c] = ConnectedAt(to, @, msg.node, msg.o)]
               /\ chan' = rest
               /\ dirty' = [dirty EXCEPT ![to] = AllPeers(to)]
-              /\ UNCHANGED <<idx, pending, outstanding, answered, silent>>
+              /\ UNCHANGED <<idx, pending, outstanding, answered, silent, parked>>
          [] msg.kind = "del" ->
               /\ loc' = [loc EXCEPT ![to][msg.c] = ReleasedUpTo(@, msg.node, msg.o)]
+              /\ parked' = [parked EXCEPT ![to][msg.node] =
+                               {p \in @ : p.c # msg.c \/ p.x.o > msg.o}]
               /\ chan' = rest
               /\ dirty' = [dirty EXCEPT ![to] = AllPeers(to)]
               /\ UNCHANGED <<idx, pending, outstanding, answered, silent>>
@@ -353,7 +367,7 @@ Receive(from, to) ==
               /\ pending' = IF msg.back
                             THEN [pending EXCEPT ![to] = @ \cup {[peer |-> from, back |-> FALSE]}]
                             ELSE pending
-              /\ UNCHANGED <<idx, loc, outstanding, dirty, answered, silent>>
+              /\ UNCHANGED <<idx, loc, outstanding, dirty, answered, silent, parked>>
          [] msg.kind = "reply" ->
               /\ LET current == ~UniqueRounds \/ msg.boot = boot[to]
                      r == Applied(to, from, msg.list, TRUE)
@@ -364,7 +378,7 @@ Receive(from, to) ==
                     ELSE /\ UNCHANGED <<idx, loc>>
                          /\ Answered(to, from, FALSE)
               /\ chan' = rest
-              /\ UNCHANGED pending
+              /\ UNCHANGED <<pending, parked>>
          [] msg.kind = "same" ->
               /\ IF (~UniqueRounds \/ msg.boot = boot[to]) /\ msg.view # AskerView(to, from)
                  THEN /\ answered' = [answered EXCEPT ![to][from] = TRUE]
@@ -372,14 +386,14 @@ Receive(from, to) ==
                       /\ UNCHANGED <<outstanding, dirty>>
                  ELSE Answered(to, from, ~UniqueRounds \/ msg.boot = boot[to])
               /\ chan' = rest
-              /\ UNCHANGED <<idx, loc, pending>>
+              /\ UNCHANGED <<idx, loc, pending, parked>>
          [] msg.kind = "announce" ->
               /\ LET r == Applied(to, from, msg.list, FALSE) IN
                     /\ idx' = [idx EXCEPT ![to] = r.idx]
                     /\ loc' = [loc EXCEPT ![to] = r.loc]
               /\ chan' = rest
-              /\ UNCHANGED <<pending, outstanding, dirty, answered, silent>>
-    /\ UNCHANGED <<up, links, view, dead, conn, sess, want, resub, asks, ops, crashes, drops, ever, boot>>
+              /\ UNCHANGED <<pending, outstanding, dirty, answered, silent, parked>>
+    /\ UNCHANGED <<up, links, view, dead, conn, sess, want, resub, asks, ops, crashes, drops, ever, boot, parked>>
 
 Refresh(n, m) ==
     /\ AntiEntropy
@@ -390,7 +404,7 @@ Refresh(n, m) ==
     /\ \A q \in pending[n] \cup outstanding[n] : q.peer # m
     /\ pending' = [pending EXCEPT ![n] = @ \cup {[peer |-> m, back |-> FALSE]}]
     /\ UNCHANGED <<dirty, up, links, view, dead, conn, sess, want, resub, loc, idx, chan,
-                   outstanding, asks, ops, crashes, drops, ever, boot, answered, silent>>
+                   outstanding, asks, ops, crashes, drops, ever, boot, answered, silent, parked>>
 
 Next ==
     \/ \E c \in Clients, n \in Nodes, clean \in BOOLEAN : Connect(c, n, clean)

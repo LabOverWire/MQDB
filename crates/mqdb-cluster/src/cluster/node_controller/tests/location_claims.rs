@@ -24,7 +24,7 @@ fn location_write(client_id: &str, on: NodeId, operation: Operation) -> ClusterM
 fn ordered_location_write(
     client_id: &str,
     on: NodeId,
-    order: crate::cluster::LocationOrder,
+    order: crate::cluster::LocationStamp,
     operation: Operation,
 ) -> ClusterMessage {
     let entry = crate::cluster::ClientLocationEntry::create(client_id, on);
@@ -649,6 +649,7 @@ async fn a_reply_to_a_round_no_longer_tracked_changes_nothing() {
                 crate::cluster::protocol::ResyncedClient {
                     client_id: "kept".to_string(),
                     order: 0,
+                    instance: 0,
                     topics: vec![crate::cluster::protocol::ResyncedTopic {
                         topic: "kept/a".to_string(),
                         qos: 1,
@@ -658,6 +659,7 @@ async fn a_reply_to_a_round_no_longer_tracked_changes_nothing() {
                 crate::cluster::protocol::ResyncedClient {
                     client_id: "listed-late".to_string(),
                     order: 0,
+                    instance: 0,
                     topics: vec![crate::cluster::protocol::ResyncedTopic {
                         topic: "late/t".to_string(),
                         qos: 1,
@@ -1223,7 +1225,10 @@ async fn two_close_connects_leave_one_authority() {
 #[tokio::test]
 async fn an_import_on_the_newest_node_after_a_late_older_connect_keeps_its_subscription() {
     let dup = "dup";
-    let order_1 = crate::cluster::LocationOrder(1);
+    let order_1 = crate::cluster::LocationStamp {
+        order: crate::cluster::LocationOrder(1),
+        instance: 1,
+    };
     let topic = "t/x";
     let mut latest = controller(3);
     let order_3 = latest.stores().client_locations.connect_here(dup);
@@ -1319,7 +1324,10 @@ async fn a_connect_heard_before_the_restarted_nodes_heartbeat_keeps_the_single_l
 #[tokio::test]
 async fn control_import_without_the_late_older_connect() {
     let dup = "dup";
-    let order_1 = crate::cluster::LocationOrder(1);
+    let order_1 = crate::cluster::LocationStamp {
+        order: crate::cluster::LocationOrder(1),
+        instance: 1,
+    };
     let topic = "t/x";
     let mut latest = controller(3);
     let order_3 = latest.stores().client_locations.connect_here(dup);
@@ -1522,7 +1530,7 @@ async fn a_resync_listing_ranks_a_lower_numbered_node_by_its_connect_order() {
     );
     later.process_messages().await;
     let second_order = later.stores().client_locations.connect_here(mover);
-    assert!(second_order.0 > first_order.0);
+    assert!(second_order.order.0 > first_order.order.0);
 
     let mut third = controller(2);
     third.transport.inject_message(
@@ -1536,4 +1544,177 @@ async fn a_resync_listing_ranks_a_lower_numbered_node_by_its_connect_order() {
 
     assert_eq!(third.connected_node(mover), Some(node(1)));
     assert_eq!(third.connected_nodes(mover), [node(3), node(1)]);
+}
+
+#[tokio::test]
+async fn a_late_copy_of_an_older_disconnect_keeps_the_nodes_reconnect() {
+    let client = "flapper";
+    let first = controller(1);
+    let first_order = first.stores().client_locations.connect_here(client);
+    first.stores().client_locations.disconnect_here(client);
+    let second_order = first.stores().client_locations.connect_here(client);
+    assert!(second_order.order.0 <= first_order.order.0);
+
+    let mut ctrl = controller(2);
+    ctrl.transport.inject_message(
+        node(1),
+        ordered_location_write(client, node(1), first_order, Operation::Insert),
+    );
+    ctrl.transport.inject_message(
+        node(1),
+        ordered_location_write(client, node(1), first_order, Operation::Delete),
+    );
+    ctrl.transport.inject_message(
+        node(1),
+        ordered_location_write(client, node(1), second_order, Operation::Insert),
+    );
+    ctrl.process_messages().await;
+    ctrl.transport.inject_message(
+        node(3),
+        ordered_location_write(client, node(1), first_order, Operation::Delete),
+    );
+    ctrl.process_messages().await;
+
+    assert_eq!(ctrl.connected_nodes(client), [node(1)]);
+}
+
+async fn share_target_after_restarted_node_connects(
+    restarted_learned_first: bool,
+) -> Option<NodeId> {
+    let client = "roamer";
+    let crashed = controller(1);
+    let order_on_1 = crashed.stores().client_locations.connect_here(client);
+    let mut moved_to = controller(3);
+    moved_to.transport.inject_message(
+        node(1),
+        ordered_location_write(client, node(1), order_on_1, Operation::Insert),
+    );
+    moved_to.process_messages().await;
+    let order_on_3 = moved_to.stores().client_locations.connect_here(client);
+
+    let mut restarted = controller(1);
+    if restarted_learned_first {
+        restarted.transport.inject_message(
+            node(3),
+            ordered_location_write(client, node(3), order_on_3, Operation::Insert),
+        );
+        restarted.process_messages().await;
+    }
+    let order_after_restart = restarted.stores().client_locations.connect_here(client);
+
+    let mut third = controller(2);
+    third.transport.inject_message(
+        node(1),
+        ordered_location_write(client, node(1), order_on_1, Operation::Insert),
+    );
+    third.transport.inject_message(
+        node(3),
+        ordered_location_write(client, node(3), order_on_3, Operation::Insert),
+    );
+    third.process_messages().await;
+    third.transport.inject_message(
+        node(1),
+        ordered_location_write(client, node(1), order_after_restart, Operation::Insert),
+    );
+    third.process_messages().await;
+    third.connected_node(client)
+}
+
+#[tokio::test]
+async fn a_restarted_node_that_knew_the_older_claim_outranks_it() {
+    assert_eq!(
+        share_target_after_restarted_node_connects(true).await,
+        Some(node(1)),
+        "$share and will routing on node 2 pick the client's older connection on node 3"
+    );
+}
+
+async fn older_node_index_after_resync(restarted_learned_first: bool) -> Vec<(String, u8)> {
+    let client = "roamer";
+    let crashed = controller(1);
+    let order_on_1 = crashed.stores().client_locations.connect_here(client);
+    let mut older = controller(3);
+    older.transport.inject_message(
+        node(1),
+        ordered_location_write(client, node(1), order_on_1, Operation::Insert),
+    );
+    older.process_messages().await;
+    let order_on_3 = older.stores().client_locations.connect_here(client);
+
+    let mut restarted = controller(1);
+    if restarted_learned_first {
+        restarted.transport.inject_message(
+            node(3),
+            ordered_location_write(client, node(3), order_on_3, Operation::Insert),
+        );
+        restarted.process_messages().await;
+    }
+    let order_after_restart = restarted.stores().client_locations.connect_here(client);
+    restarted
+        .stores()
+        .topics
+        .subscribe("t/new", client, session_partition(client), 1)
+        .unwrap();
+
+    older.transport.inject_message(
+        node(1),
+        ordered_location_write(client, node(1), order_after_restart, Operation::Insert),
+    );
+    older.process_messages().await;
+    revive(&older, node(1));
+    older.process_messages().await;
+    answer_resyncs(&mut older, &mut restarted).await;
+    older.stores().topics.get_client_topics(client)
+}
+
+#[tokio::test]
+async fn a_resync_from_a_restarted_node_that_knew_the_older_claim_reaches_the_older_node() {
+    assert_eq!(
+        older_node_index_after_resync(true).await,
+        [("t/new".to_string(), 1)],
+        "node 3 kept its own view of the client and ignored the subscription made on its newest connection"
+    );
+}
+
+async fn legacy_location_after_old_peer_goes_quiet(declared_dead: bool) -> Vec<NodeId> {
+    let mut ctrl = controller(2);
+    revive(&ctrl, node(1));
+    ctrl.process_messages().await;
+    ctrl.transport.inject_message(
+        node(1),
+        location_write("legacy", node(1), Operation::Insert),
+    );
+    ctrl.process_messages().await;
+    assert_eq!(ctrl.connected_nodes("legacy"), [node(1)]);
+
+    if declared_dead {
+        ctrl.apply_dead_nodes(&[node(1)]);
+        revive(&ctrl, node(1));
+        ctrl.process_messages().await;
+    }
+    let mut now = LATER_MS;
+    for _ in 0..2_000 {
+        ctrl.drive_subscription_resyncs(now).await;
+        ctrl.transport.take_sent();
+        now += crate::cluster::node_controller::subscription_resync::RESYNC_RETRY_MS;
+    }
+    ctrl.connected_nodes("legacy")
+}
+
+#[tokio::test]
+async fn an_old_version_peer_missing_heartbeats_keeps_its_clients_routed() {
+    assert_eq!(
+        legacy_location_after_old_peer_goes_quiet(true).await,
+        [node(1)],
+        "publishes on node 2 are no longer forwarded to the client still connected to old-version node 1"
+    );
+}
+
+#[tokio::test]
+async fn an_old_version_peer_without_missed_heartbeats_keeps_its_clients_routed() {
+    assert_eq!(
+        legacy_location_after_old_peer_goes_quiet(false).await,
+        [node(1)],
+        "publishes on node 2 are no longer forwarded to the client still connected to old-version node 1"
+    );
 }

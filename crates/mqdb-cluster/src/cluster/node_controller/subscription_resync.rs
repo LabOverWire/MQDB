@@ -7,7 +7,9 @@ use super::super::protocol::{
     SubscriptionResync,
 };
 use super::super::transport::{ClusterMessage, ClusterTransport};
-use super::super::{LocationOrder, NodeId, SubscriptionType, is_response_topic, session_partition};
+use super::super::{
+    LocationOrder, LocationStamp, NodeId, SubscriptionType, is_response_topic, session_partition,
+};
 use super::NodeController;
 use std::collections::{HashMap, HashSet};
 
@@ -16,15 +18,9 @@ pub(crate) const RESYNC_RETRY_MS: u64 = 5_000;
 pub(crate) const MAX_RESYNC_ATTEMPTS: u32 = 6;
 pub(crate) const ANTI_ENTROPY_INTERVAL_MS: u64 = 300_000;
 const TRACKED_ROUNDS_PER_PEER: usize = 2 * MAX_RESYNC_ATTEMPTS as usize;
-const ROUND_IDS_PER_BOOT_MS: u64 = 1_000_000;
 
 pub(super) fn first_resync_round() -> u64 {
-    let boot_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| {
-            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-        });
-    boot_ms.saturating_mul(ROUND_IDS_PER_BOOT_MS).max(1)
+    super::super::client_location::boot_seeded_counter()
 }
 
 #[derive(Debug, Default)]
@@ -82,12 +78,14 @@ fn pieces_of(client: ResyncedClient) -> Vec<ResyncedClient> {
     let ResyncedClient {
         client_id,
         order,
+        instance,
         topics,
         patterns,
     } = client;
     let bare = ResyncedClient {
         client_id,
         order,
+        instance,
         topics: Vec::new(),
         patterns: Vec::new(),
     };
@@ -386,7 +384,8 @@ impl<T: ClusterTransport> NodeController<T> {
     pub(super) fn listing_digest(&self, node: NodeId, clients: &HashSet<String>) -> ListingDigest {
         let mut digest = ListingDigest::default();
         for client_id in clients {
-            digest.add_client(client_id, self.connect_order(client_id, node), 0);
+            let stamp = self.connect_stamp(client_id, node);
+            digest.add_client(client_id, stamp.order.0, stamp.instance, 0);
         }
         digest.hash = digest
             .hash
@@ -401,7 +400,8 @@ impl<T: ClusterTransport> NodeController<T> {
         let mut resynced: Vec<ResyncedClient> = clients
             .iter()
             .map(|client_id| ResyncedClient {
-                order: self.connect_order(client_id, self.node_id),
+                order: self.connect_stamp(client_id, self.node_id).order.0,
+                instance: self.connect_stamp(client_id, self.node_id).instance,
                 topics: topics
                     .remove(client_id)
                     .unwrap_or_default()
@@ -426,11 +426,14 @@ impl<T: ClusterTransport> NodeController<T> {
         resynced
     }
 
-    fn connect_order(&self, client_id: &str, node: NodeId) -> u64 {
+    fn connect_stamp(&self, client_id: &str, node: NodeId) -> LocationStamp {
         self.stores
             .client_locations
-            .order_of(client_id, node)
-            .map_or(0, |order| order.0)
+            .stamp_of(client_id, node)
+            .unwrap_or(LocationStamp {
+                order: LocationOrder(0),
+                instance: 0,
+            })
     }
 
     fn index_update_for(
@@ -472,7 +475,10 @@ impl<T: ClusterTransport> NodeController<T> {
             self.stores.client_locations.claim_listed(
                 &client.client_id,
                 from,
-                LocationOrder(client.order),
+                LocationStamp {
+                    order: LocationOrder(client.order),
+                    instance: client.instance,
+                },
             );
         }
         let in_order = self
@@ -687,6 +693,7 @@ mod tests {
         ResyncedClient {
             client_id: id.to_string(),
             order: 0,
+            instance: 0,
             topics: vec![ResyncedTopic {
                 topic: "t".repeat(topic_len),
                 qos: 1,
@@ -762,6 +769,7 @@ mod tests {
         let heavy = ResyncedClient {
             client_id: "a-gateway".to_string(),
             order: 0,
+            instance: 0,
             topics: topics.clone(),
             patterns: patterns.clone(),
         };

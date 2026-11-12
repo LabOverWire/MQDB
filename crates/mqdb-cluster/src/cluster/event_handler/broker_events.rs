@@ -188,7 +188,7 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 ctrl.write_or_forward(write).await;
             }
 
-            let order = ctrl.stores().client_locations.order_of(client_id, node_id);
+            let order = ctrl.stores().client_locations.stamp_of(client_id, node_id);
             ctrl.stores().client_locations.disconnect_here(client_id);
             let location_entry = ClientLocationEntry::create(client_id, node_id);
             let location_delete = ReplicationWrite::new(

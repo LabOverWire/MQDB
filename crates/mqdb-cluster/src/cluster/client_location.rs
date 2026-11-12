@@ -5,6 +5,7 @@ use super::NodeId;
 use super::protocol::Operation;
 use bebytes::BeBytes;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{PoisonError, RwLock};
 
 #[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
@@ -67,25 +68,52 @@ impl std::fmt::Display for ClientLocationError {
 
 impl std::error::Error for ClientLocationError {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct LocationOrder(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocationStamp {
+    pub order: LocationOrder,
+    pub instance: u64,
+}
+
+const STAMP_LEN: usize = 16;
+const INSTANCES_PER_BOOT_MS: u64 = 1_000_000;
+
+#[must_use]
+pub(crate) fn boot_seeded_counter() -> u64 {
+    let boot_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        });
+    boot_ms.saturating_mul(INSTANCES_PER_BOOT_MS).max(1)
+}
 
 impl ClientLocationEntry {
     #[must_use]
-    pub fn encode_ordered(&self, order: LocationOrder) -> Vec<u8> {
+    pub fn encode_ordered(&self, stamp: LocationStamp) -> Vec<u8> {
         let mut bytes = self.to_be_bytes();
-        bytes.extend_from_slice(&order.0.to_be_bytes());
+        bytes.extend_from_slice(&stamp.order.0.to_be_bytes());
+        bytes.extend_from_slice(&stamp.instance.to_be_bytes());
         bytes
     }
 
     #[must_use]
-    pub fn decode_ordered(data: &[u8]) -> Option<(Self, Option<LocationOrder>)> {
+    pub fn decode_ordered(data: &[u8]) -> Option<(Self, Option<LocationStamp>)> {
         let (entry, consumed) = Self::try_from_be_bytes(data).ok()?;
-        match data.len() - consumed {
+        let tail = &data[consumed..];
+        match tail.len() {
             0 => Some((entry, None)),
-            8 => {
-                let order = u64::from_be_bytes(data[consumed..].try_into().ok()?);
-                Some((entry, Some(LocationOrder(order))))
+            STAMP_LEN => {
+                let (order, instance) = tail.split_at(8);
+                Some((
+                    entry,
+                    Some(LocationStamp {
+                        order: LocationOrder(u64::from_be_bytes(order.try_into().ok()?)),
+                        instance: u64::from_be_bytes(instance.try_into().ok()?),
+                    }),
+                ))
             }
             _ => None,
         }
@@ -96,11 +124,19 @@ impl ClientLocationEntry {
 struct Claim {
     order: u64,
     node: NodeId,
+    instance: u64,
 }
 
 impl Claim {
     fn key(self) -> (u64, u16) {
         (self.order, self.node.get())
+    }
+
+    fn stamp(self) -> LocationStamp {
+        LocationStamp {
+            order: LocationOrder(self.order),
+            instance: self.instance,
+        }
     }
 }
 
@@ -118,6 +154,8 @@ pub struct ClientLocationStore {
     owner: NodeId,
     claims: RwLock<HashMap<String, Vec<Claim>>>,
     dead: RwLock<HashSet<NodeId>>,
+    parked: RwLock<HashMap<NodeId, Vec<(String, Claim)>>>,
+    next_instance: AtomicU64,
 }
 
 impl ClientLocationStore {
@@ -127,6 +165,8 @@ impl ClientLocationStore {
             owner,
             claims: RwLock::new(HashMap::new()),
             dead: RwLock::new(HashSet::new()),
+            parked: RwLock::new(HashMap::new()),
+            next_instance: AtomicU64::new(boot_seeded_counter()),
         }
     }
 
@@ -150,35 +190,47 @@ impl ClientLocationStore {
             .contains(&node)
     }
 
-    pub fn connect_here(&self, client_id: &str) -> LocationOrder {
+    pub fn connect_here(&self, client_id: &str) -> LocationStamp {
+        let instance = self.next_instance.fetch_add(1, AtomicOrdering::Relaxed);
         let mut claims = self.claims.write().unwrap_or_else(PoisonError::into_inner);
         let held = claims.entry(client_id.to_string()).or_default();
-        let order = newest_order(held) + 1;
-        held.clear();
-        held.push(Claim {
-            order,
+        let claim = Claim {
+            order: newest_order(held) + 1,
             node: self.owner,
-        });
-        LocationOrder(order)
+            instance,
+        };
+        held.clear();
+        held.push(claim);
+        claim.stamp()
     }
 
     pub fn disconnect_here(&self, client_id: &str) {
         self.release(client_id, self.owner);
     }
 
-    pub fn claim(&self, client_id: &str, node: NodeId, order: Option<LocationOrder>) {
+    pub fn claim(&self, client_id: &str, node: NodeId, stamp: Option<LocationStamp>) {
         if node == self.owner || self.is_dead(node) {
             return;
         }
         let mut claims = self.claims.write().unwrap_or_else(PoisonError::into_inner);
         let held = claims.entry(client_id.to_string()).or_default();
-        let order = order.map_or_else(|| newest_order(held) + 1, |order| order.0);
-        let claim = Claim { order, node };
+        let claim = stamp.map_or_else(
+            || Claim {
+                order: newest_order(held) + 1,
+                node,
+                instance: 0,
+            },
+            |stamp| Claim {
+                order: stamp.order.0,
+                node,
+                instance: stamp.instance,
+            },
+        );
         held.retain(|older| older.node == self.owner || older.key() > claim.key());
         place(held, claim);
     }
 
-    pub fn claim_listed(&self, client_id: &str, node: NodeId, order: LocationOrder) {
+    pub fn claim_listed(&self, client_id: &str, node: NodeId, stamp: LocationStamp) {
         if node == self.owner || self.is_dead(node) {
             return;
         }
@@ -186,8 +238,9 @@ impl ClientLocationStore {
         place(
             claims.entry(client_id.to_string()).or_default(),
             Claim {
-                order: order.0,
+                order: stamp.order.0,
                 node,
+                instance: stamp.instance,
             },
         );
     }
@@ -196,12 +249,19 @@ impl ClientLocationStore {
         self.release_up_to(client_id, node, None);
     }
 
-    fn release_up_to(&self, client_id: &str, node: NodeId, order: Option<LocationOrder>) {
+    fn release_up_to(&self, client_id: &str, node: NodeId, instance: Option<u64>) {
+        let released = |claim: &Claim| instance.is_none_or(|instance| claim.instance <= instance);
+        if let Some(parked) = self
+            .parked
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_mut(&node)
+        {
+            parked.retain(|(parked_client, claim)| parked_client != client_id || !released(claim));
+        }
         let mut claims = self.claims.write().unwrap_or_else(PoisonError::into_inner);
         if let Some(held) = claims.get_mut(client_id) {
-            held.retain(|claim| {
-                claim.node != node || order.is_some_and(|order| claim.order > order.0)
-            });
+            held.retain(|claim| claim.node != node || !released(claim));
             if held.is_empty() {
                 claims.remove(client_id);
             }
@@ -213,14 +273,45 @@ impl ClientLocationStore {
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(node);
-        self.retain_claims_of(node, &HashSet::new())
+        let mut claims = self.claims.write().unwrap_or_else(PoisonError::into_inner);
+        let mut parked = Vec::new();
+        claims.retain(|client_id, held| {
+            if let Some(claim) = held.iter().find(|claim| claim.node == node) {
+                parked.push((client_id.clone(), *claim));
+                held.retain(|claim| claim.node != node);
+            }
+            !held.is_empty()
+        });
+        let released = parked.len();
+        self.parked
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(node, parked);
+        released
     }
 
-    pub fn revive_node(&self, node: NodeId) {
+    pub fn revive_node(&self, node: NodeId) -> usize {
         self.dead
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&node);
+        let parked = self
+            .parked
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&node)
+            .unwrap_or_default();
+        let mut claims = self.claims.write().unwrap_or_else(PoisonError::into_inner);
+        let mut restored = 0;
+        for (client_id, claim) in parked {
+            let held = claims.entry(client_id).or_default();
+            if !held.iter().any(|newer| newer.key() > claim.key()) {
+                place(held, claim);
+                restored += 1;
+            }
+        }
+        claims.retain(|_, held| !held.is_empty());
+        restored
     }
 
     pub fn retain_claims_of(&self, node: NodeId, kept: &HashSet<String>) -> usize {
@@ -257,13 +348,13 @@ impl ClientLocationStore {
     }
 
     #[must_use]
-    pub fn order_of(&self, client_id: &str, node: NodeId) -> Option<LocationOrder> {
+    pub fn stamp_of(&self, client_id: &str, node: NodeId) -> Option<LocationStamp> {
         self.claims
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .get(client_id)
             .and_then(|held| held.iter().find(|claim| claim.node == node))
-            .map(|claim| LocationOrder(claim.order))
+            .map(|claim| claim.stamp())
     }
 
     #[must_use]
@@ -318,14 +409,18 @@ impl ClientLocationStore {
         if data.is_empty() {
             return Ok(());
         }
-        let (entry, order) = ClientLocationEntry::decode_ordered(data)
+        let (entry, stamp) = ClientLocationEntry::decode_ordered(data)
             .ok_or(ClientLocationError::SerializationError)?;
         if let Some(node) = entry.node().filter(|node| *node != self.owner) {
             match operation {
                 Operation::Insert | Operation::Update => {
-                    self.claim(entry.client_id_str(), node, order);
+                    self.claim(entry.client_id_str(), node, stamp);
                 }
-                Operation::Delete => self.release_up_to(entry.client_id_str(), node, order),
+                Operation::Delete => self.release_up_to(
+                    entry.client_id_str(),
+                    node,
+                    stamp.map(|stamp| stamp.instance),
+                ),
             }
         }
         Ok(())
@@ -429,8 +524,15 @@ mod tests {
         assert_eq!(store.claimants("c"), []);
     }
 
+    fn stamp(order: u64) -> LocationStamp {
+        LocationStamp {
+            order: LocationOrder(order),
+            instance: order,
+        }
+    }
+
     fn ordered_bytes(client_id: &str, node_id: u16, order: u64) -> Vec<u8> {
-        ClientLocationEntry::create(client_id, node(node_id)).encode_ordered(LocationOrder(order))
+        ClientLocationEntry::create(client_id, node(node_id)).encode_ordered(stamp(order))
     }
 
     #[test]
@@ -438,10 +540,10 @@ mod tests {
         let ordered = ordered_bytes("c", 3, 7);
         let (entry, order) = ClientLocationEntry::decode_ordered(&ordered).unwrap();
         assert_eq!((entry.client_id_str(), entry.connected_node), ("c", 3));
-        assert_eq!(order, Some(LocationOrder(7)));
+        assert_eq!(order, Some(stamp(7)));
         let (legacy_view, consumed) = ClientLocationEntry::try_from_be_bytes(&ordered).unwrap();
         assert_eq!(legacy_view.connected_node, 3);
-        assert_eq!(consumed + 8, ordered.len());
+        assert_eq!(consumed + 16, ordered.len());
 
         let legacy = entry_bytes("c", 3, 10);
         assert_eq!(
@@ -458,10 +560,16 @@ mod tests {
         let first_order = first.connect_here("c");
         let second_order = second.connect_here("c");
         first
-            .apply_replicated(Operation::Insert, &ordered_bytes("c", 3, second_order.0))
+            .apply_replicated(
+                Operation::Insert,
+                &ordered_bytes("c", 3, second_order.order.0),
+            )
             .unwrap();
         second
-            .apply_replicated(Operation::Insert, &ordered_bytes("c", 1, first_order.0))
+            .apply_replicated(
+                Operation::Insert,
+                &ordered_bytes("c", 1, first_order.order.0),
+            )
             .unwrap();
 
         assert_eq!(first.get("c"), second.get("c"));
@@ -479,10 +587,10 @@ mod tests {
         let low = ClientLocationStore::new(node(1));
         let high = ClientLocationStore::new(node(3));
         let older = high.connect_here("c");
-        low.apply_replicated(Operation::Insert, &ordered_bytes("c", 3, older.0))
+        low.apply_replicated(Operation::Insert, &ordered_bytes("c", 3, older.order.0))
             .unwrap();
         let newer = low.connect_here("c");
-        high.apply_replicated(Operation::Insert, &ordered_bytes("c", 1, newer.0))
+        high.apply_replicated(Operation::Insert, &ordered_bytes("c", 1, newer.order.0))
             .unwrap();
 
         assert_eq!(low.get("c"), Some(node(1)));
@@ -523,12 +631,12 @@ mod tests {
     #[test]
     fn a_listed_claim_ranks_by_its_order_and_drops_no_other_claim() {
         let store = ClientLocationStore::new(node(9));
-        store.claim("c", node(3), Some(LocationOrder(5)));
-        store.claim_listed("c", node(1), LocationOrder(2));
+        store.claim("c", node(3), Some(stamp(5)));
+        store.claim_listed("c", node(1), stamp(2));
         assert_eq!(store.claimants("c"), [node(1), node(3)]);
         assert_eq!(store.get("c"), Some(node(3)));
 
-        store.claim_listed("c", node(1), LocationOrder(7));
+        store.claim_listed("c", node(1), stamp(7));
         assert_eq!(store.claimants("c"), [node(3), node(1)]);
         assert_eq!(store.get("c"), Some(node(1)));
     }
@@ -555,7 +663,7 @@ mod tests {
         store.claim("gone", node(1), None);
         store.claim("kept", node(1), None);
         store.claim("shared", node(2), None);
-        store.claim_listed("shared", node(1), LocationOrder(0));
+        store.claim_listed("shared", node(1), stamp(0));
 
         let released = store.retain_claims_of(node(1), &HashSet::from(["kept".to_string()]));
 
@@ -591,18 +699,67 @@ mod tests {
     #[test]
     fn the_newest_connect_in_the_order_is_the_authority() {
         let store = ClientLocationStore::new(node(1));
-        assert_eq!(store.connect_here("mover"), LocationOrder(1));
+        assert_eq!(store.connect_here("mover").order, LocationOrder(1));
         assert!(store.is_authority_here("mover"));
-        store.claim("mover", node(3), Some(LocationOrder(2)));
+        store.claim("mover", node(3), Some(stamp(2)));
         assert_eq!(store.claimants("mover"), [node(1), node(3)]);
         assert!(!store.is_authority_here("mover"));
         assert!(!store.authoritative_here().contains("mover"));
-        assert_eq!(store.connect_here("mover"), LocationOrder(3));
-        store.claim_listed("mover", node(3), LocationOrder(2));
+        assert_eq!(store.connect_here("mover").order, LocationOrder(3));
+        store.claim_listed("mover", node(3), stamp(2));
         assert!(store.is_authority_here("mover"));
         assert_eq!(
             store.authoritative_here(),
             HashSet::from(["mover".to_string()])
         );
+    }
+
+    #[test]
+    fn a_node_heard_from_again_gets_back_the_claims_it_held_when_declared_dead() {
+        let store = ClientLocationStore::new(node(2));
+        store
+            .apply_replicated(Operation::Insert, &ordered_bytes("kept", 1, 1))
+            .unwrap();
+        store
+            .apply_replicated(Operation::Insert, &ordered_bytes("moved", 1, 1))
+            .unwrap();
+        store
+            .apply_replicated(Operation::Insert, &ordered_bytes("left", 1, 1))
+            .unwrap();
+        assert_eq!(store.release_node(node(1)), 3);
+        assert_eq!(store.claimants("kept"), []);
+
+        store
+            .apply_replicated(Operation::Insert, &ordered_bytes("moved", 3, 2))
+            .unwrap();
+        store
+            .apply_replicated(Operation::Delete, &ordered_bytes("left", 1, 1))
+            .unwrap();
+        assert_eq!(store.revive_node(node(1)), 1);
+
+        assert_eq!(store.claimants("kept"), [node(1)]);
+        assert_eq!(store.claimants("moved"), [node(3)]);
+        assert_eq!(store.claimants("left"), []);
+    }
+
+    #[test]
+    fn a_restarted_node_numbers_its_connections_above_those_of_its_previous_run() {
+        let before_restart = ClientLocationStore::new(node(1));
+        let old_connection = before_restart.connect_here("c");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let after_restart = ClientLocationStore::new(node(1));
+        let new_connection = after_restart.connect_here("c");
+        assert_eq!(new_connection.order, old_connection.order);
+        assert!(new_connection.instance > old_connection.instance);
+
+        let observer = ClientLocationStore::new(node(2));
+        let entry = ClientLocationEntry::create("c", node(1));
+        observer
+            .apply_replicated(Operation::Insert, &entry.encode_ordered(new_connection))
+            .unwrap();
+        observer
+            .apply_replicated(Operation::Delete, &entry.encode_ordered(old_connection))
+            .unwrap();
+        assert_eq!(observer.claimants("c"), [node(1)]);
     }
 }

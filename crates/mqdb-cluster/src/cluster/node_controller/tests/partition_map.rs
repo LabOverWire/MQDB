@@ -2037,9 +2037,14 @@ async fn a_dead_node_no_longer_holds_its_clients() {
 async fn a_publish_is_forwarded_to_every_node_holding_the_client() {
     let ctrl = controller(2);
     ctrl.stores().client_locations.claim("twice", node(3), None);
-    ctrl.stores()
-        .client_locations
-        .claim_listed("twice", node(1), crate::cluster::LocationOrder(0));
+    ctrl.stores().client_locations.claim_listed(
+        "twice",
+        node(1),
+        crate::cluster::LocationStamp {
+            order: crate::cluster::LocationOrder(0),
+            instance: 0,
+        },
+    );
 
     let mut forwarded: Vec<NodeId> = ctrl
         .remote_targets([crate::cluster::ForwardTarget::new("twice".to_string(), 1)])
