@@ -3,7 +3,8 @@
 
 use super::super::heartbeat::NodeStatus;
 use super::super::protocol::{
-    Heartbeat, ResyncRequest, ResyncedClient, ResyncedPattern, ResyncedTopic, SubscriptionResync,
+    Heartbeat, ListingDigest, ResyncRequest, ResyncedClient, ResyncedPattern, ResyncedTopic,
+    SubscriptionResync,
 };
 use super::super::transport::{ClusterMessage, ClusterTransport};
 use super::super::{NodeId, SubscriptionType, is_response_topic, session_partition};
@@ -30,6 +31,7 @@ pub(super) fn first_resync_round() -> u64 {
 pub(crate) struct RoundProgress {
     next_part: u32,
     listed: HashSet<String>,
+    digest: ListingDigest,
 }
 
 #[derive(Debug)]
@@ -46,42 +48,73 @@ enum IndexUpdate {
     Keep,
 }
 
-fn type_code(subscription_type: SubscriptionType) -> u8 {
-    match subscription_type {
-        SubscriptionType::Mqtt => 0,
-        SubscriptionType::Db => 1,
-    }
-}
-
-fn type_from_code(code: u8) -> SubscriptionType {
-    match code {
-        1 => SubscriptionType::Db,
-        _ => SubscriptionType::Mqtt,
-    }
-}
-
 fn retry_delay_ms(attempts: u32) -> u64 {
     RESYNC_RETRY_MS.saturating_mul(1 << attempts.saturating_sub(1).min(16))
+}
+
+fn chunk_by_budget<T>(
+    items: impl IntoIterator<Item = T>,
+    overhead: usize,
+    mut len_of: impl FnMut(&T) -> usize,
+) -> Vec<Vec<T>> {
+    let mut chunks: Vec<Vec<T>> = Vec::new();
+    let mut current: Vec<T> = Vec::new();
+    let mut current_len = overhead;
+    for item in items {
+        let item_len = len_of(&item);
+        if !current.is_empty() && current_len + item_len > RESYNC_MESSAGE_BUDGET {
+            chunks.push(std::mem::take(&mut current));
+            current_len = overhead;
+        }
+        current_len += item_len;
+        current.push(item);
+    }
+    chunks.push(current);
+    chunks
+}
+
+fn pieces_of(client: ResyncedClient) -> Vec<ResyncedClient> {
+    let empty_message = SubscriptionResync::encoded_len(&[]);
+    if empty_message + client.encoded_len() <= RESYNC_MESSAGE_BUDGET {
+        return vec![client];
+    }
+    let ResyncedClient {
+        client_id,
+        topics,
+        patterns,
+    } = client;
+    let bare = ResyncedClient {
+        client_id,
+        topics: Vec::new(),
+        patterns: Vec::new(),
+    };
+    let overhead = empty_message + bare.encoded_len();
+    let topic_pieces = chunk_by_budget(topics, overhead, ResyncedTopic::encoded_len)
+        .into_iter()
+        .filter(|piece| !piece.is_empty())
+        .map(|topics| ResyncedClient {
+            topics,
+            ..bare.clone()
+        });
+    let pattern_pieces = chunk_by_budget(patterns, overhead, ResyncedPattern::encoded_len)
+        .into_iter()
+        .filter(|piece| !piece.is_empty())
+        .map(|patterns| ResyncedClient {
+            patterns,
+            ..bare.clone()
+        });
+    topic_pieces.chain(pattern_pieces).collect()
 }
 
 fn split_into_messages(
     clients: Vec<ResyncedClient>,
     round: u64,
 ) -> Option<Vec<SubscriptionResync>> {
-    let mut chunks: Vec<Vec<ResyncedClient>> = vec![Vec::new()];
-    for client in clients {
-        let fits = chunks.last().is_some_and(|chunk| {
-            chunk.is_empty()
-                || SubscriptionResync::encoded_len(chunk) + client.encoded_len()
-                    <= RESYNC_MESSAGE_BUDGET
-        });
-        if !fits {
-            chunks.push(Vec::new());
-        }
-        if let Some(chunk) = chunks.last_mut() {
-            chunk.push(client);
-        }
-    }
+    let chunks = chunk_by_budget(
+        clients.into_iter().flat_map(pieces_of),
+        SubscriptionResync::encoded_len(&[]),
+        ResyncedClient::encoded_len,
+    );
     let parts = u32::try_from(chunks.len()).ok()?;
     chunks
         .into_iter()
@@ -91,6 +124,7 @@ fn split_into_messages(
                 round,
                 part: u32::try_from(index).ok()?,
                 parts,
+                unchanged: false,
                 clients,
             })
         })
@@ -119,6 +153,7 @@ impl<T: ClusterTransport> NodeController<T> {
         self.resync_rounds.remove(&peer);
         self.resync_progress.remove(&peer);
         self.silent_peers.remove(&peer);
+        self.answered_peers.remove(&peer);
     }
 
     pub async fn request_subscription_resyncs(&mut self) {
@@ -140,6 +175,7 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     async fn ask_for_resync(&mut self, peer: NodeId) {
+        let digest = self.listing_digest(&self.stores.client_locations.clients_on(peer));
         let Some(state) = self.resync_rounds.get_mut(&peer) else {
             return;
         };
@@ -150,10 +186,17 @@ impl<T: ClusterTransport> NodeController<T> {
         let request = ResyncRequest {
             round,
             ask_back: state.ask_back,
+            digest,
         };
         let attempt = state.attempts;
         let tracked = self.resync_progress.entry(peer).or_default();
-        tracked.insert(round, RoundProgress::default());
+        tracked.insert(
+            round,
+            RoundProgress {
+                digest,
+                ..RoundProgress::default()
+            },
+        );
         while tracked.len() > TRACKED_ROUNDS_PER_PEER {
             tracked.pop_first();
         }
@@ -220,8 +263,10 @@ impl<T: ClusterTransport> NodeController<T> {
                 .is_some_and(|state| state.attempts >= MAX_RESYNC_ATTEMPTS);
             if exhausted || self.heartbeat.node_status(peer) == NodeStatus::Dead {
                 self.resync_rounds.remove(&peer);
-                if exhausted {
+                if exhausted && !self.answered_peers.contains(&peer) {
                     self.silent_peers.insert(peer);
+                }
+                if exhausted {
                     tracing::info!(
                         peer = peer.get(),
                         attempts = MAX_RESYNC_ATTEMPTS,
@@ -244,7 +289,20 @@ impl<T: ClusterTransport> NodeController<T> {
         from: NodeId,
         request: ResyncRequest,
     ) {
-        match split_into_messages(self.connected_subscribers(), request.round) {
+        let connected = self.stores.client_locations.clients_on(self.node_id);
+        let unchanged = self.listing_digest(&connected) == request.digest;
+        let reply = if unchanged {
+            Some(vec![SubscriptionResync {
+                round: request.round,
+                part: 0,
+                parts: 1,
+                unchanged: true,
+                clients: Vec::new(),
+            }])
+        } else {
+            split_into_messages(self.resynced_clients(&connected), request.round)
+        };
+        match reply {
             Some(messages) => {
                 let clients: usize = messages.iter().map(|m| m.clients.len()).sum();
                 tracing::info!(
@@ -252,6 +310,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     round = request.round,
                     clients,
                     messages = messages.len(),
+                    unchanged,
                     "sending connected subscribers to peer"
                 );
                 for message in messages {
@@ -278,6 +337,7 @@ impl<T: ClusterTransport> NodeController<T> {
             round: SubscriptionResync::UNSOLICITED,
             part: 0,
             parts: 1,
+            unchanged: false,
             clients: self.resynced_clients(&HashSet::from([client_id.to_string()])),
         };
         if let Err(error) = self
@@ -289,11 +349,19 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    fn connected_subscribers(&self) -> Vec<ResyncedClient> {
-        self.resynced_clients(&self.stores.client_locations.clients_on(self.node_id))
+    pub(super) fn listing_digest(&self, clients: &HashSet<String>) -> ListingDigest {
+        let mut digest = ListingDigest::default();
+        for client_id in clients {
+            digest.add_client(client_id, 0);
+        }
+        digest.hash = digest
+            .hash
+            .wrapping_add(self.stores.topics.digest_of(clients))
+            .wrapping_add(self.stores.wildcards.digest_of(clients));
+        digest
     }
 
-    fn resynced_clients(&self, clients: &HashSet<String>) -> Vec<ResyncedClient> {
+    pub(super) fn resynced_clients(&self, clients: &HashSet<String>) -> Vec<ResyncedClient> {
         let mut topics = self.stores.topics.subscriptions_of(clients);
         let mut patterns = self.stores.wildcards.patterns_of(clients);
         let mut resynced: Vec<ResyncedClient> = clients
@@ -313,7 +381,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     .map(|(pattern, qos, subscription_type)| ResyncedPattern {
                         pattern,
                         qos,
-                        subscription_type: type_code(subscription_type),
+                        subscription_type: subscription_type.code(),
                     })
                     .collect(),
                 client_id: client_id.clone(),
@@ -323,11 +391,11 @@ impl<T: ClusterTransport> NodeController<T> {
         resynced
     }
 
-    fn index_update_for(&self, from: NodeId, client_id: &str, announced: bool) -> IndexUpdate {
+    fn index_update_for(&self, from: NodeId, client_id: &str, replaceable: bool) -> IndexUpdate {
         let claimants = self.stores.client_locations.claimants(client_id);
         if claimants.contains(&self.node_id) {
             IndexUpdate::Keep
-        } else if !announced && claimants == [from] {
+        } else if replaceable && claimants == [from] {
             IndexUpdate::Replace
         } else {
             IndexUpdate::Add
@@ -341,13 +409,22 @@ impl<T: ClusterTransport> NodeController<T> {
                 .client_locations
                 .claim_listed(&client.client_id, from);
         }
+        let listed_earlier = self
+            .resync_progress
+            .get(&from)
+            .and_then(|tracked| tracked.get(&resync.round))
+            .map(|progress| &progress.listed);
+        let mut seen: HashSet<&str> = HashSet::new();
         let updates: Vec<(&ResyncedClient, IndexUpdate)> = resync
             .clients
             .iter()
             .map(|client| {
+                let first_piece = listed_earlier
+                    .is_some_and(|listed| !listed.contains(&client.client_id))
+                    && seen.insert(client.client_id.as_str());
                 (
                     client,
-                    self.index_update_for(from, &client.client_id, announced),
+                    self.index_update_for(from, &client.client_id, first_piece),
                 )
             })
             .collect();
@@ -389,19 +466,25 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     fn track_resync_part(&mut self, from: NodeId, resync: &SubscriptionResync) {
-        self.silent_peers.remove(&from);
+        let digest_now = resync
+            .unchanged
+            .then(|| self.listing_digest(&self.stores.client_locations.clients_on(from)));
         let Some(tracked) = self.resync_progress.get_mut(&from) else {
             return;
         };
         let Some(progress) = tracked.get_mut(&resync.round) else {
             return;
         };
-        if resync.part != progress.next_part {
+        self.silent_peers.remove(&from);
+        self.answered_peers.insert(from);
+        let changed_since_asked = digest_now.is_some_and(|digest| digest != progress.digest);
+        if resync.part != progress.next_part || changed_since_asked {
             tracing::debug!(
                 from = from.get(),
                 expected = progress.next_part,
                 got = resync.part,
-                "subscription resync part missing, asking again"
+                changed_since_asked,
+                "subscription resync part missing or view changed since asked, asking again"
             );
             tracked.remove(&resync.round);
             if let Some(state) = self.resync_rounds.get_mut(&from) {
@@ -420,7 +503,11 @@ impl<T: ClusterTransport> NodeController<T> {
                 self.resync_progress.remove(&from);
             }
             self.resync_rounds.remove(&from);
-            let released = self.stores.client_locations.retain_claims_of(from, &listed);
+            let released = if resync.unchanged {
+                0
+            } else {
+                self.stores.client_locations.retain_claims_of(from, &listed)
+            };
             tracing::debug!(
                 from = from.get(),
                 round = resync.round,
@@ -454,7 +541,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .map(|p| {
                 (
                     p.pattern.as_str(),
-                    (p.qos, type_from_code(p.subscription_type)),
+                    (p.qos, SubscriptionType::from_code(p.subscription_type)),
                 )
             })
             .collect();
@@ -487,7 +574,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 &pattern.pattern,
                 client_id,
                 pattern.qos,
-                type_from_code(pattern.subscription_type),
+                SubscriptionType::from_code(pattern.subscription_type),
             ) {
                 tracing::warn!(
                     pattern = pattern.pattern,
@@ -546,9 +633,68 @@ mod tests {
                 round: 2,
                 part: 0,
                 parts: 1,
+                unchanged: false,
                 clients: Vec::new()
             }]
         );
+    }
+
+    #[test]
+    fn splitting_measures_each_item_once() {
+        let mut measured = 0_usize;
+        let chunks = chunk_by_budget(0..200_000_u32, 22, |_| {
+            measured += 1;
+            40
+        });
+        assert_eq!(measured, 200_000);
+        assert_eq!(chunks.iter().map(Vec::len).sum::<usize>(), 200_000);
+    }
+
+    #[test]
+    fn one_client_with_many_subscriptions_is_split_below_the_budget() {
+        let topics: Vec<ResyncedTopic> = (0..200_000)
+            .map(|n| ResyncedTopic {
+                topic: format!("gateway/devices/{n:08}/telemetry/measurements/v1/raw"),
+                qos: 1,
+            })
+            .collect();
+        let patterns: Vec<ResyncedPattern> = (0..30_000)
+            .map(|n| ResyncedPattern {
+                pattern: format!("gateway/{n:08}/+/#"),
+                qos: 0,
+                subscription_type: 0,
+            })
+            .collect();
+        let heavy = ResyncedClient {
+            client_id: "a-gateway".to_string(),
+            topics: topics.clone(),
+            patterns: patterns.clone(),
+        };
+        let light = client("b-sensor", 3);
+        let messages = split_into_messages(vec![heavy, light.clone()], 3).unwrap();
+
+        let sizes: Vec<usize> = messages
+            .iter()
+            .map(|m| m.to_bytes().unwrap().len())
+            .collect();
+        assert!(
+            sizes.iter().all(|size| *size <= RESYNC_MESSAGE_BUDGET),
+            "resync parts {sizes:?} exceed the budget"
+        );
+        let sent: Vec<ResyncedClient> = messages.into_iter().flat_map(|m| m.clients).collect();
+        let heavy_topics: Vec<ResyncedTopic> = sent
+            .iter()
+            .filter(|c| c.client_id == "a-gateway")
+            .flat_map(|c| c.topics.clone())
+            .collect();
+        let heavy_patterns: Vec<ResyncedPattern> = sent
+            .iter()
+            .filter(|c| c.client_id == "a-gateway")
+            .flat_map(|c| c.patterns.clone())
+            .collect();
+        assert_eq!(heavy_topics, topics);
+        assert_eq!(heavy_patterns, patterns);
+        assert_eq!(sent.last(), Some(&light));
     }
 
     #[test]

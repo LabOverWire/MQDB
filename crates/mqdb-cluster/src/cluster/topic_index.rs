@@ -1,7 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use super::protocol::Operation;
+use super::protocol::{ListingDigest, Operation};
 use super::{NUM_PARTITIONS, NodeId, PartitionId};
 use bebytes::BeBytes;
 use mqtt5::parse_shared_subscription;
@@ -272,6 +272,15 @@ struct IndexedEntries {
     by_topic: HashMap<String, TopicIndexEntry>,
     shared_by_filter: HashMap<String, BTreeSet<String>>,
     topics_by_client: HashMap<String, HashSet<String>>,
+    digest_by_client: HashMap<String, u64>,
+}
+
+fn digest_term(topic: &str, client_id: &str, qos: u8) -> u64 {
+    if is_response_topic(topic) {
+        0
+    } else {
+        ListingDigest::topic_term(client_id, topic, qos)
+    }
 }
 
 impl Deref for IndexedEntries {
@@ -283,19 +292,33 @@ impl Deref for IndexedEntries {
 }
 
 impl IndexedEntries {
-    fn link(&mut self, topic: &str, client_id: &str) {
-        self.topics_by_client
+    fn link(&mut self, topic: &str, client_id: &str, qos: u8) {
+        let linked = self
+            .topics_by_client
             .entry(client_id.to_string())
             .or_default()
             .insert(topic.to_string());
+        if linked {
+            let digest = self
+                .digest_by_client
+                .entry(client_id.to_string())
+                .or_default();
+            *digest = digest.wrapping_add(digest_term(topic, client_id, qos));
+        }
     }
 
-    fn unlink(&mut self, topic: &str, client_id: &str) {
-        if let Some(topics) = self.topics_by_client.get_mut(client_id) {
-            topics.remove(topic);
-            if topics.is_empty() {
-                self.topics_by_client.remove(client_id);
-            }
+    fn unlink(&mut self, topic: &str, client_id: &str, qos: u8) {
+        let Some(topics) = self.topics_by_client.get_mut(client_id) else {
+            return;
+        };
+        if !topics.remove(topic) {
+            return;
+        }
+        if topics.is_empty() {
+            self.topics_by_client.remove(client_id);
+            self.digest_by_client.remove(client_id);
+        } else if let Some(digest) = self.digest_by_client.get_mut(client_id) {
+            *digest = digest.wrapping_sub(digest_term(topic, client_id, qos));
         }
     }
 
@@ -312,7 +335,7 @@ impl IndexedEntries {
         self.remove(&topic);
         self.track_shared(&topic);
         for subscriber in &entry.subscribers {
-            self.link(&topic, subscriber.client_id_str());
+            self.link(&topic, subscriber.client_id_str(), subscriber.qos);
         }
         self.by_topic.insert(topic, entry);
     }
@@ -322,7 +345,7 @@ impl IndexedEntries {
             return;
         };
         for subscriber in &entry.subscribers {
-            self.unlink(topic, subscriber.client_id_str());
+            self.unlink(topic, subscriber.client_id_str(), subscriber.qos);
         }
         if let (filter, Some(_)) = parse_shared_subscription(topic)
             && let Some(topics) = self.shared_by_filter.get_mut(filter)
@@ -342,20 +365,36 @@ impl IndexedEntries {
         qos: u8,
     ) -> usize {
         self.track_shared(topic);
-        self.link(topic, client_id);
         let entry = self
             .by_topic
             .entry(topic.to_string())
             .or_insert_with(|| TopicIndexEntry::create(topic));
-        entry.add_subscriber(client_id, client_partition, qos);
-        entry.subscribers.len()
+        let present = entry
+            .subscribers
+            .iter()
+            .any(|s| s.client_id_str() == client_id);
+        if !present {
+            entry.add_subscriber(client_id, client_partition, qos);
+        }
+        let subscribers = entry.subscribers.len();
+        if !present {
+            self.link(topic, client_id, qos);
+        }
+        subscribers
     }
 
     fn remove_subscriber(&mut self, topic: &str, client_id: &str) -> Option<usize> {
         let entry = self.by_topic.get_mut(topic)?;
+        let removed_qos = entry
+            .subscribers
+            .iter()
+            .find(|s| s.client_id_str() == client_id)
+            .map(|s| s.qos);
         let _ = entry.remove_subscriber(client_id);
         let remaining = entry.subscribers.len();
-        self.unlink(topic, client_id);
+        if let Some(qos) = removed_qos {
+            self.unlink(topic, client_id, qos);
+        }
         if remaining == 0 {
             self.remove(topic);
         }
@@ -366,20 +405,25 @@ impl IndexedEntries {
         self.by_topic.get_mut(topic).map(TopicIndexEntry::next_seq)
     }
 
-    fn client_subscriptions(&self, client_id: &str) -> Vec<(String, u8)> {
+    fn client_topics<'a>(&'a self, client_id: &'a str) -> impl Iterator<Item = (&'a String, u8)> {
         self.topics_by_client
             .get(client_id)
             .into_iter()
             .flatten()
-            .filter_map(|topic| {
+            .filter_map(move |topic| {
                 self.by_topic.get(topic).and_then(|entry| {
                     entry
                         .subscribers
                         .iter()
                         .find(|s| s.client_id_str() == client_id)
-                        .map(|s| (topic.clone(), s.qos))
+                        .map(|s| (topic, s.qos))
                 })
             })
+    }
+
+    fn client_subscriptions(&self, client_id: &str) -> Vec<(String, u8)> {
+        self.client_topics(client_id)
+            .map(|(topic, qos)| (topic.clone(), qos))
             .collect()
     }
 
@@ -540,6 +584,20 @@ impl TopicIndex {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .client_subscriptions(client_id)
+    }
+
+    #[must_use]
+    pub fn digest_of(&self, clients: &HashSet<String>) -> u64 {
+        let entries = self.entries.read().unwrap_or_else(PoisonError::into_inner);
+        clients.iter().fold(0_u64, |sum, client_id| {
+            sum.wrapping_add(
+                entries
+                    .digest_by_client
+                    .get(client_id)
+                    .copied()
+                    .unwrap_or_default(),
+            )
+        })
     }
 
     #[must_use]
@@ -814,10 +872,12 @@ mod tests {
 
     #[test]
     fn the_per_client_lookup_matches_a_full_scan_after_every_kind_of_change() {
-        let topics = ["a/1", "a/2", "b/1", "$share/g/a/1"];
+        let topics = ["a/1", "a/2", "b/1", "$share/g/a/1", "resp/c1/x"];
         let clients = ["c1", "c2", "c3"];
         let index = TopicIndex::new(node(1));
         index.subscribe("a/1", "c1", partition(1), 1).unwrap();
+        index.subscribe("resp/c1/x", "c1", partition(1), 1).unwrap();
+        index.subscribe("a/1", "c1", partition(1), 2).unwrap();
         index.subscribe("a/2", "c1", partition(1), 0).unwrap();
         index.subscribe("a/1", "c2", partition(2), 2).unwrap();
         index
@@ -842,9 +902,14 @@ mod tests {
         for client in clients {
             let mut indexed = index.get_client_topics(client);
             indexed.sort();
+            let scanned = scanned_client_topics(&index, &topics, client);
+            let scanned_digest = scanned.iter().fold(0_u64, |sum, (topic, qos)| {
+                sum.wrapping_add(digest_term(topic, client, *qos))
+            });
+            assert_eq!(indexed, scanned, "{client}");
             assert_eq!(
-                indexed,
-                scanned_client_topics(&index, &topics, client),
+                index.digest_of(&HashSet::from([client.to_string()])),
+                scanned_digest,
                 "{client}"
             );
         }

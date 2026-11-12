@@ -26,7 +26,8 @@ pub use publish::{ForwardTarget, ForwardedPublish};
 pub use query::{BatchReadRequest, BatchReadResponse, QueryRequest, QueryResponse};
 pub use replication::{CatchupRequest, CatchupResponse, ReplicationAck, ReplicationWrite};
 pub use subscription_resync::{
-    ResyncRequest, ResyncedClient, ResyncedPattern, ResyncedTopic, SubscriptionResync,
+    ListingDigest, ResyncRequest, ResyncedClient, ResyncedPattern, ResyncedTopic,
+    SubscriptionResync,
 };
 pub use types::{AckStatus, JsonDbOp, MessageType, Operation, QueryStatus};
 pub use unique::{

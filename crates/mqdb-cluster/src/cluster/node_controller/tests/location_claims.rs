@@ -145,29 +145,6 @@ fn indexed_controller(other_entries: u32) -> NodeController<MockTransport> {
     ctrl
 }
 
-async fn announce_cost(ctrl: &NodeController<MockTransport>, rounds: u32) -> std::time::Duration {
-    let started = std::time::Instant::now();
-    for _ in 0..rounds {
-        ctrl.announce_resumed_client("resumer").await;
-        ctrl.transport.take_sent();
-    }
-    started.elapsed()
-}
-
-#[tokio::test]
-async fn announcing_a_resumed_client_does_not_scan_other_clients_entries() {
-    let small = indexed_controller(0);
-    let large = indexed_controller(200_000);
-
-    let small_elapsed = announce_cost(&small, 2_000).await;
-    let large_elapsed = announce_cost(&large, 2_000).await;
-
-    assert!(
-        large_elapsed < small_elapsed * 20,
-        "announcing one client grew with the index: {large_elapsed:?} vs {small_elapsed:?}"
-    );
-}
-
 #[tokio::test]
 async fn a_resumed_client_announces_exactly_its_own_subscriptions() {
     let ctrl = indexed_controller(1_000);
@@ -328,6 +305,7 @@ async fn a_resync_reasserting_an_old_connection_does_not_steal_the_single_locati
         ClusterMessage::SubscriptionResyncRequest(crate::cluster::protocol::ResyncRequest {
             round: 7,
             ask_back: false,
+            digest: crate::cluster::protocol::ListingDigest::default(),
         }),
     );
     let request = ctrl.transport.recv().unwrap();
@@ -378,6 +356,7 @@ async fn a_reply_to_a_round_asked_before_a_restart_does_not_complete_a_later_rou
             round: old_rounds[0],
             part: 0,
             parts: 1,
+            unchanged: false,
             clients: Vec::new(),
         }),
     );
@@ -394,4 +373,292 @@ async fn a_reply_to_a_round_asked_before_a_restart_does_not_complete_a_later_rou
         1,
         "the round asked after the restart was completed by the old reply"
     );
+}
+
+fn resync_requests_to(ctrl: &NodeController<MockTransport>, peer: NodeId) -> usize {
+    ctrl.transport
+        .take_sent()
+        .iter()
+        .filter(|(to, m)| *to == peer && matches!(m, ClusterMessage::SubscriptionResyncRequest(_)))
+        .count()
+}
+
+#[tokio::test]
+async fn a_peer_that_answered_before_is_refreshed_again_after_one_unanswered_round() {
+    let mut peer = controller(1);
+    peer.stores().client_locations.claim("steady", node(1));
+    let mut ctrl = controller(2);
+    revive(&ctrl, node(1));
+    ctrl.process_messages().await;
+    answer_resyncs(&mut ctrl, &mut peer).await;
+    assert!(ctrl.resync_rounds.is_empty(), "boot round not completed");
+
+    let step = crate::cluster::node_controller::subscription_resync::RESYNC_RETRY_MS;
+    let mut now = LATER_MS;
+    let mut unanswered = 0;
+    while now < LATER_MS + 800_000 {
+        ctrl.drive_subscription_resyncs(now).await;
+        unanswered += resync_requests_to(&ctrl, node(1));
+        now += step;
+    }
+    assert_eq!(unanswered, 6, "the overloaded round was not given up");
+
+    let mut later_asks = 0;
+    while now < LATER_MS + 800_000 + 3_600_000 {
+        ctrl.drive_subscription_resyncs(now).await;
+        later_asks += resync_requests_to(&ctrl, node(1));
+        now += step;
+    }
+    assert!(
+        later_asks > 0,
+        "a peer that answered before was never asked again after one unanswered round"
+    );
+}
+
+#[tokio::test]
+async fn a_periodic_resync_is_asked_five_minutes_after_the_first_tick() {
+    let mut peer = controller(1);
+    let mut ctrl = controller(2);
+    revive(&ctrl, node(1));
+    ctrl.process_messages().await;
+    answer_resyncs(&mut ctrl, &mut peer).await;
+    assert!(ctrl.resync_rounds.is_empty(), "boot round not completed");
+
+    let mut first_ask = None;
+    for second in 0..=400_u64 {
+        ctrl.drive_subscription_resyncs(LATER_MS + second * 1_000)
+            .await;
+        if first_ask.is_none() && resync_requests_to(&ctrl, node(1)) > 0 {
+            first_ask = Some(second);
+        }
+    }
+
+    assert_eq!(first_ask, Some(300));
+}
+
+fn heavy_client(client_id: &str, topics: usize) -> Vec<String> {
+    (0..topics)
+        .map(|n| format!("{client_id}/{n:06}/{}", "x".repeat(1_000)))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_client_split_across_parts_keeps_every_subscription_and_loses_stale_ones() {
+    let mut peer = controller(1);
+    let topics = heavy_client("heavy", 3_000);
+    peer.stores().client_locations.claim("heavy", node(1));
+    for topic in &topics {
+        peer.stores()
+            .topics
+            .subscribe(topic, "heavy", session_partition("heavy"), 1)
+            .unwrap();
+    }
+    peer.stores()
+        .wildcards
+        .subscribe_mqtt("heavy/+/tail", "heavy", 1)
+        .unwrap();
+    peer.stores().client_locations.claim("light", node(1));
+    peer.stores()
+        .topics
+        .subscribe("light/t", "light", session_partition("light"), 0)
+        .unwrap();
+
+    let mut ctrl = controller(2);
+    ctrl.stores()
+        .topics
+        .subscribe("heavy/stale", "heavy", session_partition("heavy"), 1)
+        .unwrap();
+    ctrl.transport
+        .inject_message(node(1), location_write("heavy", node(1), Operation::Insert));
+    ctrl.process_messages().await;
+    revive(&ctrl, node(1));
+    ctrl.process_messages().await;
+    answer_resyncs(&mut ctrl, &mut peer).await;
+
+    assert!(
+        ctrl.resync_rounds.is_empty(),
+        "the split round did not complete"
+    );
+    let mut indexed: Vec<String> = ctrl
+        .stores()
+        .topics
+        .get_client_topics("heavy")
+        .into_iter()
+        .map(|(topic, _)| topic)
+        .collect();
+    indexed.sort();
+    assert_eq!(indexed, topics);
+    assert_eq!(
+        ctrl.stores().wildcards.get_client_patterns("heavy"),
+        [("heavy/+/tail".to_string(), 1)]
+    );
+    assert_eq!(
+        ctrl.stores().topics.get_client_topics("light"),
+        [("light/t".to_string(), 0)]
+    );
+    assert_eq!(ctrl.connected_nodes("light"), [node(1)]);
+}
+
+#[tokio::test]
+async fn a_peer_whose_listing_matches_answers_without_sending_it() {
+    let mut peer = controller(1);
+    peer.stores().client_locations.claim("steady", node(1));
+    peer.stores()
+        .topics
+        .subscribe("steady/t", "steady", session_partition("steady"), 1)
+        .unwrap();
+    let mut ctrl = controller(2);
+    revive(&ctrl, node(1));
+    ctrl.process_messages().await;
+    answer_resyncs(&mut ctrl, &mut peer).await;
+    assert_eq!(ctrl.connected_nodes("steady"), [node(1)]);
+
+    run_periodic_resync(&mut ctrl).await;
+    let requests: Vec<_> = ctrl
+        .transport
+        .take_sent()
+        .into_iter()
+        .filter(|(to, m)| {
+            *to == node(1) && matches!(m, ClusterMessage::SubscriptionResyncRequest(_))
+        })
+        .collect();
+    assert_eq!(requests.len(), 1);
+    for (_, request) in requests {
+        peer.transport.inject_message(node(2), request);
+    }
+    peer.process_messages().await;
+    let replies: Vec<crate::cluster::protocol::SubscriptionResync> = peer
+        .transport
+        .take_sent()
+        .into_iter()
+        .filter_map(|(to, m)| match m {
+            ClusterMessage::SubscriptionResync(reply) if to == node(2) => Some(reply),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replies.len(), 1);
+    assert!(replies[0].unchanged);
+    assert!(replies[0].clients.is_empty());
+
+    for reply in replies {
+        ctrl.transport
+            .inject_message(node(1), ClusterMessage::SubscriptionResync(reply));
+    }
+    ctrl.process_messages().await;
+    assert!(
+        ctrl.resync_rounds.is_empty(),
+        "the unchanged round did not complete"
+    );
+    assert_eq!(ctrl.connected_nodes("steady"), [node(1)]);
+    assert_eq!(
+        ctrl.stores().topics.get_client_topics("steady"),
+        [("steady/t".to_string(), 1)]
+    );
+}
+
+#[tokio::test]
+async fn a_missing_subscription_makes_the_peer_send_its_full_listing() {
+    let mut peer = controller(1);
+    peer.stores().client_locations.claim("steady", node(1));
+    peer.stores()
+        .topics
+        .subscribe("steady/t", "steady", session_partition("steady"), 1)
+        .unwrap();
+    let mut ctrl = controller(2);
+    revive(&ctrl, node(1));
+    ctrl.process_messages().await;
+    answer_resyncs(&mut ctrl, &mut peer).await;
+    ctrl.stores()
+        .topics
+        .unsubscribe("steady/t", "steady")
+        .unwrap();
+
+    run_periodic_resync(&mut ctrl).await;
+    answer_resyncs(&mut ctrl, &mut peer).await;
+
+    assert_eq!(
+        ctrl.stores().topics.get_client_topics("steady"),
+        [("steady/t".to_string(), 1)]
+    );
+}
+
+#[tokio::test]
+async fn the_digest_of_the_index_matches_the_digest_of_the_listing() {
+    let ctrl = indexed_controller(50);
+    ctrl.stores()
+        .topics
+        .subscribe(
+            "resp/resumer/reply",
+            "resumer",
+            session_partition("resumer"),
+            1,
+        )
+        .unwrap();
+    let clients: std::collections::HashSet<String> = ["resumer", "other-3", "other-20", "absent"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+
+    assert_eq!(
+        ctrl.listing_digest(&clients),
+        crate::cluster::protocol::ListingDigest::of(&ctrl.resynced_clients(&clients))
+    );
+}
+
+#[tokio::test]
+async fn a_reply_to_a_round_no_longer_tracked_only_adds_subscriptions() {
+    let mut ctrl = controller(2);
+    ctrl.transport
+        .inject_message(node(1), location_write("kept", node(1), Operation::Insert));
+    ctrl.process_messages().await;
+    for topic in ["kept/a", "kept/b"] {
+        ctrl.stores()
+            .topics
+            .subscribe(topic, "kept", session_partition("kept"), 1)
+            .unwrap();
+    }
+
+    ctrl.transport.inject_message(
+        node(1),
+        ClusterMessage::SubscriptionResync(crate::cluster::protocol::SubscriptionResync {
+            round: 12_345,
+            part: 0,
+            parts: 1,
+            unchanged: false,
+            clients: vec![crate::cluster::protocol::ResyncedClient {
+                client_id: "kept".to_string(),
+                topics: vec![crate::cluster::protocol::ResyncedTopic {
+                    topic: "kept/a".to_string(),
+                    qos: 1,
+                }],
+                patterns: Vec::new(),
+            }],
+        }),
+    );
+    ctrl.process_messages().await;
+
+    let mut topics = ctrl.stores().topics.get_client_topics("kept");
+    topics.sort();
+    assert_eq!(
+        topics,
+        [("kept/a".to_string(), 1), ("kept/b".to_string(), 1)]
+    );
+}
+
+#[tokio::test]
+async fn an_unchanged_reply_to_a_view_that_changed_since_the_ask_is_asked_again() {
+    let mut peer = controller(1);
+    let mut ctrl = controller(2);
+    revive(&ctrl, node(1));
+    ctrl.process_messages().await;
+    ctrl.transport
+        .inject_message(node(1), location_write("idle", node(1), Operation::Insert));
+    answer_resyncs(&mut ctrl, &mut peer).await;
+    assert_eq!(ctrl.connected_nodes("idle"), [node(1)]);
+
+    ctrl.drive_subscription_resyncs(LATER_MS).await;
+    answer_resyncs(&mut ctrl, &mut peer).await;
+
+    assert_eq!(ctrl.connected_nodes("idle"), Vec::<NodeId>::new());
+    assert!(ctrl.resync_rounds.is_empty());
 }

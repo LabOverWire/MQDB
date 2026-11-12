@@ -2145,6 +2145,7 @@ async fn a_lost_resync_reply_is_asked_for_again() {
         ClusterMessage::SubscriptionResyncRequest(crate::cluster::protocol::ResyncRequest {
             round: retried,
             ask_back: true,
+            digest: crate::cluster::protocol::ListingDigest::default(),
         }),
     );
     owner.process_messages().await;
@@ -2196,6 +2197,7 @@ async fn a_missing_resync_part_is_asked_for_again() {
             round,
             part: 1,
             parts: 2,
+            unchanged: false,
             clients: Vec::new(),
         }),
     );

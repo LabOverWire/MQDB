@@ -278,6 +278,14 @@ impl WildcardStore {
     }
 
     #[must_use]
+    pub fn digest_of(&self, clients: &HashSet<String>) -> u64 {
+        let trie = self.trie.read().unwrap_or_else(PoisonError::into_inner);
+        clients.iter().fold(0_u64, |sum, client_id| {
+            sum.wrapping_add(trie.client_digest(client_id))
+        })
+    }
+
+    #[must_use]
     pub fn patterns_of(
         &self,
         clients: &HashSet<String>,
@@ -563,6 +571,7 @@ impl std::fmt::Debug for WildcardStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cluster::protocol::ListingDigest;
     use crate::cluster::session_partition;
 
     fn node(id: u16) -> NodeId {
@@ -588,6 +597,11 @@ mod tests {
             vec![("a/+".to_string(), 1)]
         );
         assert!(store.get_client_patterns("c2").is_empty());
+        assert_eq!(
+            store.digest_of(&HashSet::from(["c1".to_string()])),
+            ListingDigest::pattern_term("c1", "a/+", 1, SubscriptionType::Mqtt.code())
+        );
+        assert_eq!(store.digest_of(&HashSet::from(["c2".to_string()])), 0);
         assert_eq!(
             store.match_topic("a/x").len(),
             1,

@@ -4,7 +4,71 @@
 use super::wire::{WireReader, push_length_prefixed};
 
 const VERSION: u8 = 2;
-const HEADER_LEN: usize = 21;
+const HEADER_LEN: usize = 22;
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0100_0000_01b3;
+
+fn fnv(fields: &[&[u8]]) -> u64 {
+    fields.iter().fold(FNV_OFFSET, |hash, field| {
+        field
+            .iter()
+            .chain(std::iter::once(&0xff))
+            .fold(hash, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
+            })
+    })
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ListingDigest {
+    pub clients: u64,
+    pub hash: u64,
+}
+
+impl ListingDigest {
+    #[must_use]
+    pub fn topic_term(client_id: &str, topic: &str, qos: u8) -> u64 {
+        fnv(&[b"t", client_id.as_bytes(), topic.as_bytes(), &[qos]])
+    }
+
+    #[must_use]
+    pub fn pattern_term(client_id: &str, pattern: &str, qos: u8, subscription_type: u8) -> u64 {
+        fnv(&[
+            b"p",
+            client_id.as_bytes(),
+            pattern.as_bytes(),
+            &[qos, subscription_type],
+        ])
+    }
+
+    pub fn add_client(&mut self, client_id: &str, subscriptions: u64) {
+        self.clients += 1;
+        self.hash = self
+            .hash
+            .wrapping_add(fnv(&[b"c", client_id.as_bytes()]))
+            .wrapping_add(subscriptions);
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn of(clients: &[ResyncedClient]) -> Self {
+        clients.iter().fold(Self::default(), |mut digest, client| {
+            let topics = client.topics.iter().fold(0_u64, |sum, topic| {
+                sum.wrapping_add(Self::topic_term(&client.client_id, &topic.topic, topic.qos))
+            });
+            let subscriptions = client.patterns.iter().fold(topics, |sum, pattern| {
+                sum.wrapping_add(Self::pattern_term(
+                    &client.client_id,
+                    &pattern.pattern,
+                    pattern.qos,
+                    pattern.subscription_type,
+                ))
+            });
+            digest.add_client(&client.client_id, subscriptions);
+            digest
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResyncedTopic {
@@ -12,11 +76,25 @@ pub struct ResyncedTopic {
     pub qos: u8,
 }
 
+impl ResyncedTopic {
+    #[must_use]
+    pub fn encoded_len(&self) -> usize {
+        3 + self.topic.len()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResyncedPattern {
     pub pattern: String,
     pub qos: u8,
     pub subscription_type: u8,
+}
+
+impl ResyncedPattern {
+    #[must_use]
+    pub fn encoded_len(&self) -> usize {
+        4 + self.pattern.len()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,8 +107,8 @@ pub struct ResyncedClient {
 impl ResyncedClient {
     #[must_use]
     pub fn encoded_len(&self) -> usize {
-        let topics: usize = self.topics.iter().map(|t| 3 + t.topic.len()).sum();
-        let patterns: usize = self.patterns.iter().map(|p| 4 + p.pattern.len()).sum();
+        let topics: usize = self.topics.iter().map(ResyncedTopic::encoded_len).sum();
+        let patterns: usize = self.patterns.iter().map(ResyncedPattern::encoded_len).sum();
         10 + self.client_id.len() + topics + patterns
     }
 
@@ -88,6 +166,7 @@ impl ResyncedClient {
 pub struct ResyncRequest {
     pub round: u64,
     pub ask_back: bool,
+    pub digest: ListingDigest,
 }
 
 impl ResyncRequest {
@@ -96,6 +175,8 @@ impl ResyncRequest {
         let mut buf = vec![VERSION];
         buf.extend_from_slice(&self.round.to_be_bytes());
         buf.push(u8::from(self.ask_back));
+        buf.extend_from_slice(&self.digest.clients.to_be_bytes());
+        buf.extend_from_slice(&self.digest.hash.to_be_bytes());
         buf
     }
 
@@ -111,7 +192,15 @@ impl ResyncRequest {
             1 => true,
             _ => return None,
         };
-        reader.is_exhausted().then_some(Self { round, ask_back })
+        let digest = ListingDigest {
+            clients: reader.u64()?,
+            hash: reader.u64()?,
+        };
+        reader.is_exhausted().then_some(Self {
+            round,
+            ask_back,
+            digest,
+        })
     }
 }
 
@@ -120,6 +209,7 @@ pub struct SubscriptionResync {
     pub round: u64,
     pub part: u32,
     pub parts: u32,
+    pub unchanged: bool,
     pub clients: Vec<ResyncedClient>,
 }
 
@@ -141,6 +231,7 @@ impl SubscriptionResync {
         buf.extend_from_slice(&self.round.to_be_bytes());
         buf.extend_from_slice(&self.part.to_be_bytes());
         buf.extend_from_slice(&self.parts.to_be_bytes());
+        buf.push(u8::from(self.unchanged));
         buf.extend_from_slice(&u32::try_from(self.clients.len()).ok()?.to_be_bytes());
         for client in &self.clients {
             client.encode(&mut buf)?;
@@ -160,6 +251,11 @@ impl SubscriptionResync {
         if part >= parts {
             return None;
         }
+        let unchanged = match reader.u8()? {
+            0 => false,
+            1 => true,
+            _ => return None,
+        };
         let count = reader.u32()?;
         let clients = (0..count)
             .map(|_| ResyncedClient::decode(&mut reader))
@@ -168,6 +264,7 @@ impl SubscriptionResync {
             round,
             part,
             parts,
+            unchanged,
             clients,
         })
     }
@@ -197,6 +294,7 @@ mod tests {
             round: 7,
             part: 1,
             parts: 3,
+            unchanged: false,
             clients,
         }
     }
@@ -217,11 +315,37 @@ mod tests {
         let request = ResyncRequest {
             round: 9,
             ask_back: true,
+            digest: ListingDigest::of(&[client("c1")]),
         };
         assert_eq!(
             ResyncRequest::from_bytes(&request.to_bytes()),
             Some(request)
         );
+    }
+
+    #[test]
+    fn an_unchanged_reply_survives_the_wire() {
+        let mut unchanged = resync(Vec::new());
+        unchanged.unchanged = true;
+        let bytes = unchanged.to_bytes().unwrap();
+        assert_eq!(SubscriptionResync::from_bytes(&bytes), Some(unchanged));
+    }
+
+    #[test]
+    fn a_digest_ignores_listing_order_and_sees_every_field() {
+        let mut first = client("c1");
+        let second = client("c2");
+        let digest = ListingDigest::of(&[first.clone(), second.clone()]);
+        assert_eq!(ListingDigest::of(&[second.clone(), first.clone()]), digest);
+        first.topics[0].qos = 0;
+        assert_ne!(ListingDigest::of(&[first.clone(), second.clone()]), digest);
+        let mut moved = client("c1");
+        moved.patterns[0].subscription_type = 1;
+        assert_ne!(ListingDigest::of(&[moved, second.clone()]), digest);
+        let mut renamed = client("c1");
+        renamed.topics[0].topic = "a/c".to_string();
+        assert_ne!(ListingDigest::of(&[renamed, second]), digest);
+        assert_ne!(ListingDigest::of(&[client("c1")]), digest);
     }
 
     #[test]
