@@ -230,7 +230,7 @@ impl StoreManager {
         match entity_name {
             entity::TOPIC_INDEX => self
                 .topics
-                .import_entries(store_data)
+                .import_entries(store_data, &self.client_locations.clients_here())
                 .map_err(|_| StoreApplyError::TopicIndexError),
             entity::WILDCARDS => self
                 .wildcards

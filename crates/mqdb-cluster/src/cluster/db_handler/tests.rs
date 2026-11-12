@@ -3397,6 +3397,28 @@ async fn reconnecting_to_the_same_node_restores_the_client_location() {
     );
 }
 
+#[tokio::test]
+async fn a_disconnect_here_releases_this_nodes_claim() {
+    use mqtt5::broker::events::BrokerEventHandler;
+
+    let (handler, ctrl) = session_harness();
+    handler
+        .on_client_connect(session_connect("phone", false, 300))
+        .await;
+    assert_eq!(
+        ctrl.read().await.stores().client_locations.get("phone"),
+        NodeId::validated(1)
+    );
+    handler
+        .on_client_disconnect(session_disconnect("phone"))
+        .await;
+
+    assert_eq!(
+        ctrl.read().await.stores().client_locations.get("phone"),
+        None
+    );
+}
+
 async fn announced_topics(
     ctrl: &Arc<tokio::sync::RwLock<NodeController<MockTransport>>>,
     client_id: &str,

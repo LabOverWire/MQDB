@@ -186,6 +186,11 @@ impl ClientLocationStore {
     }
 
     #[must_use]
+    pub fn clients_here(&self) -> HashSet<String> {
+        self.clients_on(self.owner)
+    }
+
+    #[must_use]
     pub fn clients_on(&self, node: NodeId) -> HashSet<String> {
         self.claims
             .read()
@@ -216,7 +221,7 @@ impl ClientLocationStore {
             .filter(|(_, consumed)| *consumed == data.len())
             .map(|(entry, _)| entry)
             .ok_or(ClientLocationError::SerializationError)?;
-        if let Some(node) = entry.node() {
+        if let Some(node) = entry.node().filter(|node| *node != self.owner) {
             match operation {
                 Operation::Insert | Operation::Update => self.claim(entry.client_id_str(), node),
                 Operation::Delete => self.release(entry.client_id_str(), node),

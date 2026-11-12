@@ -103,6 +103,9 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 Err(e) => warn!(client_id, error = ?e, "failed to update session"),
             }
 
+            ctrl.stores()
+                .client_locations
+                .claim(client_id, self.node_id);
             let location_entry = ClientLocationEntry::create(client_id, self.node_id);
             let location_write = ReplicationWrite::new(
                 session_partition(client_id),
@@ -187,6 +190,7 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 ctrl.write_or_forward(write).await;
             }
 
+            ctrl.stores().client_locations.release(client_id, node_id);
             let location_entry = ClientLocationEntry::create(client_id, node_id);
             let location_delete = ReplicationWrite::new(
                 session_partition(client_id),

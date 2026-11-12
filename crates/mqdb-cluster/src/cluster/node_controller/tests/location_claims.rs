@@ -817,10 +817,10 @@ async fn the_incremental_digest_matches_a_recomputation_after_random_changes() {
             }
             6 => {
                 let _ = other.subscribe(t, c, session_partition(c), q);
-                let _ = ctrl
-                    .stores()
-                    .topics
-                    .import_entries(&other.export_for_partition(topic_partition(t)));
+                let _ = ctrl.stores().topics.import_entries(
+                    &other.export_for_partition(topic_partition(t)),
+                    &std::collections::HashSet::new(),
+                );
             }
             7 | 8 => {
                 let _ = if next(2) == 0 {
@@ -883,4 +883,156 @@ async fn a_resumed_client_with_many_subscriptions_is_announced_in_parts() {
         .collect();
     sent.sort();
     assert_eq!(sent, topics);
+}
+
+#[tokio::test]
+async fn a_snapshot_import_on_the_owner_does_not_spread_a_lost_subscription() {
+    let owned = "owned";
+    let topic = "t/x";
+    let mut owner = controller(1);
+    owner.stores().client_locations.claim(owned, node(1));
+    owner
+        .stores()
+        .topics
+        .subscribe(topic, owned, session_partition(owned), 1)
+        .unwrap();
+    let mut asker = controller(2);
+    revive(&asker, node(1));
+    asker.process_messages().await;
+    answer_resyncs(&mut asker, &mut owner).await;
+    assert_eq!(
+        asker.stores().topics.get_client_topics(owned),
+        [(topic.to_string(), 1)]
+    );
+
+    let source = controller(3);
+    source
+        .stores()
+        .topics
+        .subscribe(topic, "other", session_partition("other"), 0)
+        .unwrap();
+    let partition = crate::cluster::topic_partition(topic);
+    let snapshot = source.stores().export_partition(partition).unwrap();
+    owner
+        .stores()
+        .import_partition(partition, &snapshot)
+        .unwrap();
+
+    run_periodic_resync(&mut asker).await;
+    answer_resyncs(&mut asker, &mut owner).await;
+
+    assert_eq!(
+        owner.stores().topics.get_client_topics(owned),
+        [(topic.to_string(), 1)],
+        "the owner's own index lost its local client's subscription"
+    );
+    assert_eq!(
+        asker.stores().topics.get_client_topics(owned),
+        [(topic.to_string(), 1)],
+        "the asker dropped a subscription the client still holds on its own node"
+    );
+}
+
+#[tokio::test]
+async fn the_asker_keeps_a_subscription_the_owner_had_before_a_snapshot() {
+    let owned = "owned";
+    let topic = "t/x";
+    let mut owner = controller(1);
+    owner.stores().client_locations.claim(owned, node(1));
+    owner
+        .stores()
+        .topics
+        .subscribe(topic, owned, session_partition(owned), 1)
+        .unwrap();
+    let mut asker = controller(2);
+    revive(&asker, node(1));
+    asker.process_messages().await;
+    answer_resyncs(&mut asker, &mut owner).await;
+    assert_eq!(
+        asker.stores().topics.get_client_topics(owned),
+        [(topic.to_string(), 1)]
+    );
+
+    let source = controller(3);
+    source
+        .stores()
+        .topics
+        .subscribe(topic, "other", session_partition("other"), 0)
+        .unwrap();
+    let partition = crate::cluster::topic_partition(topic);
+    let snapshot = source.stores().export_partition(partition).unwrap();
+    owner
+        .stores()
+        .import_partition(partition, &snapshot)
+        .unwrap();
+
+    run_periodic_resync(&mut asker).await;
+    answer_resyncs(&mut asker, &mut owner).await;
+
+    assert_eq!(
+        asker.stores().topics.get_client_topics(owned),
+        [(topic.to_string(), 1)],
+        "the asker dropped a subscription the client still holds on its own node"
+    );
+}
+
+#[tokio::test]
+async fn a_replicated_write_naming_this_node_does_not_make_it_list_a_client_it_does_not_hold() {
+    let ghost = "ghost";
+    let mut owner = controller(1);
+    owner
+        .stores()
+        .topics
+        .subscribe("g/t", ghost, session_partition(ghost), 1)
+        .unwrap();
+    let entry = crate::cluster::ClientLocationEntry::create(ghost, node(1));
+    let replicated_insert = ReplicationWrite::new(
+        session_partition(ghost),
+        Operation::Insert,
+        Epoch::new(0),
+        0,
+        crate::cluster::entity::CLIENT_LOCATIONS.to_string(),
+        crate::cluster::client_location_key(ghost),
+        bebytes::BeBytes::to_be_bytes(&entry),
+    );
+    owner.stores().apply_write(&replicated_insert).unwrap();
+
+    let mut asker = controller(2);
+    revive(&asker, node(1));
+    asker.process_messages().await;
+    answer_resyncs(&mut asker, &mut owner).await;
+
+    assert_eq!(
+        asker.connected_nodes(ghost),
+        Vec::<NodeId>::new(),
+        "node 1 lists a client that never connected to it"
+    );
+}
+
+#[tokio::test]
+async fn a_replicated_write_naming_this_node_does_not_outlive_the_clients_next_connect() {
+    let ghost = "ghost";
+    let mut owner = controller(1);
+    let entry = crate::cluster::ClientLocationEntry::create(ghost, node(1));
+    let replicated_insert = ReplicationWrite::new(
+        session_partition(ghost),
+        Operation::Insert,
+        Epoch::new(0),
+        0,
+        crate::cluster::entity::CLIENT_LOCATIONS.to_string(),
+        crate::cluster::client_location_key(ghost),
+        bebytes::BeBytes::to_be_bytes(&entry),
+    );
+    owner.stores().apply_write(&replicated_insert).unwrap();
+
+    owner
+        .transport
+        .inject_message(node(3), location_write(ghost, node(3), Operation::Insert));
+    owner.process_messages().await;
+
+    assert_eq!(
+        owner.connected_node(ghost),
+        Some(node(3)),
+        "$share and will routing still pick this node for a client connected to node 3"
+    );
 }

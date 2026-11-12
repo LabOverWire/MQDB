@@ -725,7 +725,11 @@ impl TopicIndex {
 
     /// # Errors
     /// Returns `SerializationError` if UTF-8 parsing fails.
-    pub fn import_entries(&self, data: &[u8]) -> Result<usize, TopicIndexError> {
+    pub fn import_entries(
+        &self,
+        data: &[u8],
+        local_clients: &HashSet<String>,
+    ) -> Result<usize, TopicIndexError> {
         if data.len() < 4 {
             return Ok(0);
         }
@@ -765,16 +769,33 @@ impl TopicIndex {
             let entry_data = &data[offset..offset + data_len];
             offset += data_len;
 
-            if let Some(entry) = Self::deserialize(entry_data) {
+            if let Some(mut entry) = Self::deserialize(entry_data) {
+                let mut entries = self.entries.write().unwrap_or_else(PoisonError::into_inner);
+                let kept: Vec<SubscriberLocation> = entries
+                    .get(topic)
+                    .map(|existing| {
+                        existing
+                            .subscribers
+                            .iter()
+                            .filter(|local| {
+                                local_clients.contains(local.client_id_str())
+                                    && !entry
+                                        .subscribers
+                                        .iter()
+                                        .any(|incoming| incoming.client_id == local.client_id)
+                            })
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 tracing::debug!(
                     topic,
                     subscribers = entry.subscribers.len(),
+                    kept_local = kept.len(),
                     "import_entries: replacing entry"
                 );
-                self.entries
-                    .write()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(topic.to_string(), entry);
+                entry.subscribers.extend(kept);
+                entries.insert(topic.to_string(), entry);
                 imported += 1;
             }
         }
@@ -934,7 +955,10 @@ mod tests {
         let other = TopicIndex::new(node(2));
         other.subscribe("b/1", "c2", partition(2), 1).unwrap();
         index
-            .import_entries(&other.export_for_partition(topic_partition("b/1")))
+            .import_entries(
+                &other.export_for_partition(topic_partition("b/1")),
+                &HashSet::new(),
+            )
             .unwrap();
         index.clear_partition(topic_partition("$share/g/a/1"));
 
@@ -1057,7 +1081,10 @@ mod tests {
         let dst = TopicIndex::new(node(2));
 
         assert_eq!(
-            dst.import_entries(&src.export_for_partition(topic_partition("a/b"))),
+            dst.import_entries(
+                &src.export_for_partition(topic_partition("a/b")),
+                &HashSet::new()
+            ),
             Ok(1)
         );
         assert_eq!(dst.get_client_topics(&id), vec![("a/b".to_string(), 1)]);
@@ -1216,5 +1243,31 @@ mod tests {
             bytes.push(0);
             assert_eq!(TopicIndexEntry::from_bytes(&bytes), None);
         }
+    }
+
+    #[test]
+    fn an_import_keeps_local_clients_it_lacks_and_replaces_the_rest() {
+        let index = TopicIndex::new(node(1));
+        index.subscribe("a/b", "local", partition(1), 1).unwrap();
+        index.subscribe("a/b", "remote", partition(2), 1).unwrap();
+        let source = TopicIndex::new(node(2));
+        source.subscribe("a/b", "other", partition(3), 0).unwrap();
+
+        index
+            .import_entries(
+                &source.export_for_partition(topic_partition("a/b")),
+                &HashSet::from(["local".to_string()]),
+            )
+            .unwrap();
+
+        let mut clients: Vec<String> = index
+            .get_subscribers("a/b")
+            .iter()
+            .map(|s| s.client_id_str().to_string())
+            .collect();
+        clients.sort();
+        assert_eq!(clients, ["local", "other"]);
+        assert_eq!(index.get_client_topics("local"), [("a/b".to_string(), 1)]);
+        assert!(index.get_client_topics("remote").is_empty());
     }
 }
