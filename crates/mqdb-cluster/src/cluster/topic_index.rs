@@ -777,17 +777,14 @@ impl TopicIndex {
                         existing
                             .subscribers
                             .iter()
-                            .filter(|local| {
-                                local_clients.contains(local.client_id_str())
-                                    && !entry
-                                        .subscribers
-                                        .iter()
-                                        .any(|incoming| incoming.client_id == local.client_id)
-                            })
+                            .filter(|local| local_clients.contains(local.client_id_str()))
                             .cloned()
                             .collect()
                     })
                     .unwrap_or_default();
+                entry
+                    .subscribers
+                    .retain(|incoming| !local_clients.contains(incoming.client_id_str()));
                 tracing::debug!(
                     topic,
                     subscribers = entry.subscribers.len(),
@@ -795,7 +792,11 @@ impl TopicIndex {
                     "import_entries: replacing entry"
                 );
                 entry.subscribers.extend(kept);
-                entries.insert(topic.to_string(), entry);
+                if entry.subscribers.is_empty() {
+                    entries.remove(topic);
+                } else {
+                    entries.insert(topic.to_string(), entry);
+                }
                 imported += 1;
             }
         }
@@ -1269,5 +1270,41 @@ mod tests {
         assert_eq!(clients, ["local", "other"]);
         assert_eq!(index.get_client_topics("local"), [("a/b".to_string(), 1)]);
         assert!(index.get_client_topics("remote").is_empty());
+    }
+
+    #[test]
+    fn an_import_does_not_restore_a_topic_a_local_client_left() {
+        let index = TopicIndex::new(node(1));
+        index.subscribe("a/b", "local", partition(1), 1).unwrap();
+        let source = TopicIndex::new(node(2));
+        source.subscribe("a/b", "local", partition(1), 1).unwrap();
+        index.unsubscribe("a/b", "local").unwrap();
+
+        index
+            .import_entries(
+                &source.export_for_partition(topic_partition("a/b")),
+                &HashSet::from(["local".to_string()]),
+            )
+            .unwrap();
+
+        assert!(index.get_client_topics("local").is_empty());
+        assert!(index.get_entry("a/b").is_none());
+    }
+
+    #[test]
+    fn an_import_keeps_a_local_clients_qos_over_the_snapshots() {
+        let index = TopicIndex::new(node(1));
+        index.subscribe("a/b", "local", partition(1), 2).unwrap();
+        let source = TopicIndex::new(node(2));
+        source.subscribe("a/b", "local", partition(1), 0).unwrap();
+
+        index
+            .import_entries(
+                &source.export_for_partition(topic_partition("a/b")),
+                &HashSet::from(["local".to_string()]),
+            )
+            .unwrap();
+
+        assert_eq!(index.get_client_topics("local"), [("a/b".to_string(), 2)]);
     }
 }
