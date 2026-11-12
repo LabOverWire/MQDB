@@ -41,6 +41,7 @@ pub(crate) struct BootWindow {
     closed: bool,
     settled: HashSet<NodeId>,
     connects: HashSet<String>,
+    taught: HashMap<NodeId, HashSet<String>>,
     due: Vec<(String, NodeId)>,
 }
 
@@ -300,11 +301,15 @@ impl<T: ClusterTransport> NodeController<T> {
         if self.boot_window.closed || !self.boot_window.settled.insert(peer) {
             return;
         }
+        if !answered {
+            self.boot_window.taught.remove(&peer);
+        }
         if answered {
+            let taught = self.boot_window.taught.remove(&peer).unwrap_or_default();
             let due: Vec<(String, NodeId)> = self
                 .boot_window
                 .connects
-                .iter()
+                .intersection(&taught)
                 .map(|client_id| (client_id.clone(), peer))
                 .collect();
             self.boot_window.due.extend(due);
@@ -316,8 +321,28 @@ impl<T: ClusterTransport> NodeController<T> {
         if !self.boot_window.closed && now_ms.saturating_sub(started) >= BOOT_WINDOW_MS {
             self.boot_window.closed = true;
             self.boot_window.connects.clear();
+            self.boot_window.taught.clear();
             tracing::debug!("subscription resync boot window closed");
         }
+    }
+
+    fn note_taught_claims(&mut self, from: NodeId, clients: &[ResyncedClient]) {
+        let taught: Vec<String> = clients
+            .iter()
+            .filter(|client| self.boot_window.connects.contains(&client.client_id))
+            .filter(|client| {
+                self.stores
+                    .client_locations
+                    .stamp_of(&client.client_id, from)
+                    .is_none()
+            })
+            .map(|client| client.client_id.clone())
+            .collect();
+        self.boot_window
+            .taught
+            .entry(from)
+            .or_default()
+            .extend(taught);
     }
 
     pub(crate) async fn rerank_boot_connects(&mut self) {
@@ -536,6 +561,9 @@ impl<T: ClusterTransport> NodeController<T> {
 
     pub(crate) fn handle_subscription_resync(&mut self, from: NodeId, resync: &SubscriptionResync) {
         let announced = resync.round == SubscriptionResync::UNSOLICITED;
+        if !announced && !self.boot_window.settled.contains(&from) {
+            self.note_taught_claims(from, &resync.clients);
+        }
         let tracked = self
             .resync_progress
             .get(&from)

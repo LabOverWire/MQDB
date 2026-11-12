@@ -2141,3 +2141,100 @@ async fn a_peer_given_up_on_closes_its_boot_window_without_a_rerank() {
     );
     assert!(location_writes_to(&restarted, node(3)).is_empty());
 }
+
+async fn newest_after_a_move_heard_live(
+    boot_resync_first: bool,
+) -> (Option<NodeId>, Option<NodeId>) {
+    let client = "mover12";
+    let mut restarted = controller(1);
+    let mut later = controller(3);
+    if boot_resync_first {
+        revive(&restarted, node(3));
+        restarted.process_messages().await;
+        answer_resyncs(&mut restarted, &mut later).await;
+    }
+    let order_on_1 = restarted.stores().client_locations.connect_here(client);
+    restarted.note_local_connect(client);
+    later.transport.inject_message(
+        node(1),
+        ordered_location_write(client, node(1), order_on_1, Operation::Insert),
+    );
+    later.process_messages().await;
+    let order_on_3 = later.stores().client_locations.connect_here(client);
+    restarted.transport.inject_message(
+        node(3),
+        ordered_location_write(client, node(3), order_on_3, Operation::Insert),
+    );
+    restarted.process_messages().await;
+
+    if !boot_resync_first {
+        revive(&restarted, node(3));
+        restarted.process_messages().await;
+        answer_resyncs(&mut restarted, &mut later).await;
+    }
+    for message in location_writes_to(&restarted, node(3)) {
+        later.transport.inject_message(node(1), message);
+    }
+    later.process_messages().await;
+    (
+        restarted.stores().client_locations.get(client),
+        later.stores().client_locations.get(client),
+    )
+}
+
+#[tokio::test]
+async fn a_move_heard_live_during_the_boot_window_is_not_outranked_by_the_rerank() {
+    assert_eq!(
+        newest_after_a_move_heard_live(false).await,
+        (Some(node(3)), Some(node(3))),
+        "(node 1 view, node 3 view): the re-rank put the older connection on node 1 above the client's move to node 3"
+    );
+}
+
+#[tokio::test]
+async fn a_move_heard_live_after_the_boot_resync_is_the_newest_connection() {
+    assert_eq!(
+        newest_after_a_move_heard_live(true).await,
+        (Some(node(3)), Some(node(3))),
+        "(node 1 view, node 3 view)"
+    );
+}
+
+#[tokio::test]
+async fn a_move_heard_live_is_not_outranked_when_the_listing_also_differs() {
+    let client = "mover12";
+    let mut restarted = controller(1);
+    let mut later = controller(3);
+    let order_on_1 = restarted.stores().client_locations.connect_here(client);
+    restarted.note_local_connect(client);
+    later.transport.inject_message(
+        node(1),
+        ordered_location_write(client, node(1), order_on_1, Operation::Insert),
+    );
+    later.process_messages().await;
+    let order_on_3 = later.stores().client_locations.connect_here(client);
+    later
+        .stores()
+        .topics
+        .subscribe("t/missed", client, session_partition(client), 1)
+        .unwrap();
+    restarted.transport.inject_message(
+        node(3),
+        ordered_location_write(client, node(3), order_on_3, Operation::Insert),
+    );
+    restarted.process_messages().await;
+
+    revive(&restarted, node(3));
+    restarted.process_messages().await;
+    answer_resyncs(&mut restarted, &mut later).await;
+
+    assert!(location_writes_to(&restarted, node(3)).is_empty());
+    assert_eq!(
+        restarted.stores().client_locations.get(client),
+        Some(node(3))
+    );
+    assert_eq!(
+        restarted.stores().topics.get_client_topics(client),
+        [("t/missed".to_string(), 1)]
+    );
+}
