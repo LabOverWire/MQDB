@@ -634,6 +634,10 @@ mod tests {
             let mut cursor: Option<Vec<u8>> = None;
             loop {
                 let (page, has_more, next) = store.query(2, cursor.as_deref());
+                assert!(page.len() <= 2);
+                if has_more {
+                    assert_eq!(page.len(), 2);
+                }
                 seen.extend(
                     page.iter()
                         .map(|e| (e.pattern_str().to_string(), e.client_id_str().to_string())),

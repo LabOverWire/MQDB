@@ -876,6 +876,10 @@ mod tests {
             let mut cursor: Option<Vec<u8>> = None;
             loop {
                 let (page, has_more, next) = index.query(2, cursor.as_deref());
+                assert!(page.len() <= 2);
+                if has_more {
+                    assert_eq!(page.len(), 2);
+                }
                 seen.extend(page.iter().map(|e| e.topic_str().to_string()));
                 if !has_more {
                     break;
