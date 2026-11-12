@@ -525,28 +525,34 @@ impl WildcardStore {
     #[must_use]
     pub fn query(
         &self,
-        _filter: Option<&str>,
         limit: u32,
         cursor: Option<&[u8]>,
     ) -> (Vec<WildcardEntry>, bool, Option<Vec<u8>>) {
         let trie = self.trie.read().unwrap_or_else(PoisonError::into_inner);
-        let start_key = cursor.and_then(|c| std::str::from_utf8(c).ok());
+        let after = cursor
+            .and_then(|c| std::str::from_utf8(c).ok())
+            .map(|c| c.split_once('\0').unwrap_or((c, "")));
 
         let mut results: Vec<_> = trie
             .all_subscriptions()
             .into_iter()
-            .filter(|(pattern, _)| start_key.is_none_or(|sk| pattern.as_str() > sk))
-            .take(limit as usize + 1)
+            .filter(|(pattern, sub)| {
+                after.is_none_or(|key| (pattern.as_str(), sub.client_id.as_str()) > key)
+            })
             .collect();
-
-        results.sort_by_key(|(k, _)| k.clone());
+        results.sort_unstable_by(|(a, x), (b, y)| {
+            (a.as_str(), x.client_id.as_str()).cmp(&(b.as_str(), y.client_id.as_str()))
+        });
+        results.truncate(limit as usize + 1);
         let has_more = results.len() > limit as usize;
         if has_more {
             results.pop();
         }
 
         let next_cursor = if has_more {
-            results.last().map(|(k, _)| k.as_bytes().to_vec())
+            results
+                .last()
+                .map(|(pattern, sub)| format!("{pattern}\0{}", sub.client_id).into_bytes())
         } else {
             None
         };
@@ -607,6 +613,38 @@ mod tests {
             1,
             "the trie and the per-client lookup must agree"
         );
+    }
+
+    #[test]
+    fn query_pages_cover_every_subscriber_exactly_once() {
+        let patterns: Vec<String> = (0..10).map(|n| format!("p{n}/+")).collect();
+        let mut expected: Vec<(String, String)> = patterns
+            .iter()
+            .flat_map(|p| ["c1", "c2", "c3"].map(|c| (p.clone(), c.to_string())))
+            .collect();
+        expected.sort();
+        for _ in 0..20 {
+            let store = WildcardStore::new(node(1));
+            for pattern in &patterns {
+                for client in ["c3", "c1", "c2"] {
+                    store.subscribe_mqtt(pattern, client, 0).unwrap();
+                }
+            }
+            let mut seen = Vec::new();
+            let mut cursor: Option<Vec<u8>> = None;
+            loop {
+                let (page, has_more, next) = store.query(2, cursor.as_deref());
+                seen.extend(
+                    page.iter()
+                        .map(|e| (e.pattern_str().to_string(), e.client_id_str().to_string())),
+                );
+                if !has_more {
+                    break;
+                }
+                cursor = next;
+            }
+            assert_eq!(seen, expected);
+        }
     }
 
     #[test]

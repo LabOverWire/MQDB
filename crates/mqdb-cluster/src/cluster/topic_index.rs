@@ -801,7 +801,6 @@ impl TopicIndex {
     #[must_use]
     pub fn query(
         &self,
-        _filter: Option<&str>,
         limit: u32,
         cursor: Option<&[u8]>,
     ) -> (Vec<TopicIndexEntry>, bool, Option<Vec<u8>>) {
@@ -811,10 +810,9 @@ impl TopicIndex {
         let mut results: Vec<_> = entries
             .iter()
             .filter(|(key, _)| start_key.is_none_or(|sk| key.as_str() > sk))
-            .take(limit as usize + 1)
             .collect();
-
-        results.sort_by_key(|(k, _)| k.as_str());
+        results.sort_unstable_by_key(|(k, _)| k.as_str());
+        results.truncate(limit as usize + 1);
         let has_more = results.len() > limit as usize;
         if has_more {
             results.pop();
@@ -864,6 +862,28 @@ mod tests {
         let key = topic_index_key("sensors/temp");
         assert!(key.starts_with("_topic_index/p"));
         assert!(key.ends_with("/topics/sensors/temp"));
+    }
+
+    #[test]
+    fn query_pages_cover_every_topic_exactly_once() {
+        let expected: Vec<String> = (0..10).map(|n| format!("t/{n}")).collect();
+        for _ in 0..20 {
+            let index = TopicIndex::new(node(1));
+            for topic in &expected {
+                index.subscribe(topic, "c", partition(1), 0).unwrap();
+            }
+            let mut seen = Vec::new();
+            let mut cursor: Option<Vec<u8>> = None;
+            loop {
+                let (page, has_more, next) = index.query(2, cursor.as_deref());
+                seen.extend(page.iter().map(|e| e.topic_str().to_string()));
+                if !has_more {
+                    break;
+                }
+                cursor = next;
+            }
+            assert_eq!(seen, expected);
+        }
     }
 
     fn scanned_client_topics(

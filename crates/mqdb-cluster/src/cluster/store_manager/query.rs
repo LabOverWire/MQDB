@@ -36,7 +36,7 @@ impl StoreManager {
                 Ok((data, has_more, next_cursor))
             }
             entity::TOPIC_INDEX => {
-                let (entries, has_more, next_cursor) = self.topics.query(filter, limit, cursor);
+                let (entries, has_more, next_cursor) = self.topics.query(limit, cursor);
                 let data = entries
                     .iter()
                     .filter_map(TopicIndex::serialize)
@@ -45,7 +45,7 @@ impl StoreManager {
                 Ok((data, has_more, next_cursor))
             }
             entity::WILDCARDS => {
-                let (entries, has_more, next_cursor) = self.wildcards.query(filter, limit, cursor);
+                let (entries, has_more, next_cursor) = self.wildcards.query(limit, cursor);
                 let data = entries.into_iter().flat_map(|e| e.to_be_bytes()).collect();
                 Ok((data, has_more, next_cursor))
             }
