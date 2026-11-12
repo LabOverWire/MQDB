@@ -204,6 +204,22 @@ impl ClientLocationStore {
         claim.stamp()
     }
 
+    pub fn rerank_here(&self, client_id: &str, above: NodeId) -> Option<LocationStamp> {
+        let mut claims = self.claims.write().unwrap_or_else(PoisonError::into_inner);
+        let held = claims.get_mut(client_id)?;
+        let own = *held.iter().find(|claim| claim.node == self.owner)?;
+        let theirs = *held.iter().find(|claim| claim.node == above)?;
+        if own.key() > theirs.key() {
+            return None;
+        }
+        let claim = Claim {
+            order: newest_order(held) + 1,
+            ..own
+        };
+        place(held, claim);
+        Some(claim.stamp())
+    }
+
     pub fn disconnect_here(&self, client_id: &str) {
         self.release(client_id, self.owner);
     }

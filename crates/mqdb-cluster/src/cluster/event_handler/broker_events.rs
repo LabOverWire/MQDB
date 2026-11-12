@@ -104,6 +104,7 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
             }
 
             let order = ctrl.stores().client_locations.connect_here(client_id);
+            ctrl.note_local_connect(client_id);
             let location_entry = ClientLocationEntry::create(client_id, self.node_id);
             let location_write = ReplicationWrite::new(
                 session_partition(client_id),
@@ -190,6 +191,7 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
 
             let order = ctrl.stores().client_locations.stamp_of(client_id, node_id);
             ctrl.stores().client_locations.disconnect_here(client_id);
+            ctrl.forget_local_connect(client_id);
             let location_entry = ClientLocationEntry::create(client_id, node_id);
             let location_delete = ReplicationWrite::new(
                 session_partition(client_id),

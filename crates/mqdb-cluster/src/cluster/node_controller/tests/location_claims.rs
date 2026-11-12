@@ -1718,3 +1718,426 @@ async fn an_old_version_peer_without_missed_heartbeats_keeps_its_clients_routed(
         "publishes on node 2 are no longer forwarded to the client still connected to old-version node 1"
     );
 }
+
+fn location_writes_to(
+    sender: &NodeController<MockTransport>,
+    target: NodeId,
+) -> Vec<ClusterMessage> {
+    sender
+        .transport
+        .take_sent()
+        .into_iter()
+        .filter(|(to, message)| {
+            *to == target
+                && matches!(
+                    message,
+                    ClusterMessage::WriteRequest(_) | ClusterMessage::SubscriptionResync(_)
+                )
+        })
+        .map(|(_, message)| message)
+        .collect()
+}
+
+async fn share_target_after_the_restarted_nodes_boot_resync() -> Option<NodeId> {
+    let client = "roamer";
+    let crashed = controller(1);
+    let order_on_1 = crashed.stores().client_locations.connect_here(client);
+    let mut moved_to = controller(3);
+    moved_to.transport.inject_message(
+        node(1),
+        ordered_location_write(client, node(1), order_on_1, Operation::Insert),
+    );
+    moved_to.process_messages().await;
+    let order_on_3 = moved_to.stores().client_locations.connect_here(client);
+
+    let mut restarted = controller(1);
+    let order_after_restart = restarted.stores().client_locations.connect_here(client);
+    restarted.note_local_connect(client);
+
+    let mut third = controller(2);
+    third.transport.inject_message(
+        node(1),
+        ordered_location_write(client, node(1), order_on_1, Operation::Insert),
+    );
+    third.transport.inject_message(
+        node(3),
+        ordered_location_write(client, node(3), order_on_3, Operation::Insert),
+    );
+    third.process_messages().await;
+    third.transport.inject_message(
+        node(1),
+        ordered_location_write(client, node(1), order_after_restart, Operation::Insert),
+    );
+    third.process_messages().await;
+
+    revive(&restarted, node(2));
+    revive(&restarted, node(3));
+    restarted.process_messages().await;
+    answer_resyncs(&mut restarted, &mut moved_to).await;
+    for message in location_writes_to(&restarted, node(2)) {
+        third.transport.inject_message(node(1), message);
+    }
+    third.process_messages().await;
+    third.connected_node(client)
+}
+
+#[tokio::test]
+async fn a_connect_on_a_restarted_node_outranks_the_clients_older_open_connection() {
+    assert_eq!(
+        share_target_after_the_restarted_nodes_boot_resync().await,
+        Some(node(1)),
+        "$share and will routing on node 2 pick the client's older connection on node 3"
+    );
+}
+
+async fn older_node_index_after_the_restarted_nodes_boot_resync() -> Vec<(String, u8)> {
+    let client = "roamer";
+    let crashed = controller(1);
+    let order_on_1 = crashed.stores().client_locations.connect_here(client);
+    let mut older = controller(3);
+    older.transport.inject_message(
+        node(1),
+        ordered_location_write(client, node(1), order_on_1, Operation::Insert),
+    );
+    older.process_messages().await;
+    older.stores().client_locations.connect_here(client);
+
+    let mut restarted = controller(1);
+    let order_after_restart = restarted.stores().client_locations.connect_here(client);
+    restarted.note_local_connect(client);
+    restarted
+        .stores()
+        .topics
+        .subscribe("t/new", client, session_partition(client), 1)
+        .unwrap();
+
+    older.transport.inject_message(
+        node(1),
+        ordered_location_write(client, node(1), order_after_restart, Operation::Insert),
+    );
+    older.process_messages().await;
+
+    revive(&restarted, node(3));
+    restarted.process_messages().await;
+    answer_resyncs(&mut restarted, &mut older).await;
+    for message in location_writes_to(&restarted, node(3)) {
+        older.transport.inject_message(node(1), message);
+    }
+    older.process_messages().await;
+
+    revive(&older, node(1));
+    older.process_messages().await;
+    answer_resyncs(&mut older, &mut restarted).await;
+    older.stores().topics.get_client_topics(client)
+}
+
+#[tokio::test]
+async fn a_resync_from_a_restarted_node_reaches_the_node_holding_the_older_connection() {
+    assert_eq!(
+        older_node_index_after_the_restarted_nodes_boot_resync().await,
+        [("t/new".to_string(), 1)],
+        "node 3 kept its own view of the client and ignored the subscription made on its newest connection"
+    );
+}
+
+#[tokio::test]
+async fn a_connect_made_after_the_boot_resync_is_not_reranked_by_a_later_listing() {
+    let client = "steady";
+    let mut peer = controller(3);
+    let mut local = controller(1);
+    revive(&local, node(3));
+    local.process_messages().await;
+    answer_resyncs(&mut local, &mut peer).await;
+    assert!(local.resync_rounds.is_empty(), "boot round not completed");
+
+    let local_order = local.stores().client_locations.connect_here(client);
+    local.note_local_connect(client);
+    peer.transport.inject_message(
+        node(1),
+        ordered_location_write(client, node(1), local_order, Operation::Insert),
+    );
+    peer.process_messages().await;
+    peer.stores().client_locations.connect_here(client);
+
+    run_periodic_resync(&mut local).await;
+    answer_resyncs(&mut local, &mut peer).await;
+
+    assert_eq!(
+        local.stores().client_locations.stamp_of(client, node(1)),
+        Some(local_order)
+    );
+    assert!(!local.stores().client_locations.is_authority_here(client));
+}
+
+#[tokio::test]
+async fn a_rerank_leaves_every_node_agreeing_on_the_newest_connection() {
+    let client = "roamer";
+    let crashed = controller(1);
+    let order_on_1 = crashed.stores().client_locations.connect_here(client);
+    let mut moved_to = controller(3);
+    moved_to.transport.inject_message(
+        node(1),
+        ordered_location_write(client, node(1), order_on_1, Operation::Insert),
+    );
+    moved_to.process_messages().await;
+    let order_on_3 = moved_to.stores().client_locations.connect_here(client);
+
+    let mut restarted = controller(1);
+    let order_after_restart = restarted.stores().client_locations.connect_here(client);
+    restarted.note_local_connect(client);
+    let mut third = controller(2);
+    for (from, stamp) in [
+        (node(1), order_on_1),
+        (node(3), order_on_3),
+        (node(1), order_after_restart),
+    ] {
+        third.transport.inject_message(
+            from,
+            ordered_location_write(client, from, stamp, Operation::Insert),
+        );
+        moved_to.transport.inject_message(
+            from,
+            ordered_location_write(client, from, stamp, Operation::Insert),
+        );
+    }
+    third.process_messages().await;
+    moved_to.process_messages().await;
+
+    revive(&restarted, node(2));
+    revive(&restarted, node(3));
+    restarted.process_messages().await;
+    answer_resyncs(&mut restarted, &mut moved_to).await;
+    let sent = restarted.transport.take_sent();
+    for (to, message) in sent {
+        if matches!(message, ClusterMessage::WriteRequest(_)) {
+            match to.get() {
+                2 => third.transport.inject_message(node(1), message),
+                3 => moved_to.transport.inject_message(node(1), message),
+                _ => {}
+            }
+        }
+    }
+    third.process_messages().await;
+    moved_to.process_messages().await;
+
+    let views = [
+        restarted.connected_node(client),
+        third.connected_node(client),
+        moved_to.stores().client_locations.get(client),
+    ];
+    assert_eq!(views, [Some(node(1)); 3]);
+    let authorities = [
+        restarted
+            .stores()
+            .client_locations
+            .is_authority_here(client),
+        third.stores().client_locations.is_authority_here(client),
+        moved_to.stores().client_locations.is_authority_here(client),
+    ];
+    assert_eq!(authorities, [true, false, false]);
+}
+
+async fn restarted_after_boot_resync(
+    restarted_learned_first: bool,
+) -> (NodeController<MockTransport>, Vec<ClusterMessage>) {
+    let client = "roamer";
+    let crashed = controller(1);
+    let order_on_1 = crashed.stores().client_locations.connect_here(client);
+    let mut older = controller(3);
+    older.transport.inject_message(
+        node(1),
+        ordered_location_write(client, node(1), order_on_1, Operation::Insert),
+    );
+    older.process_messages().await;
+    let order_on_3 = older.stores().client_locations.connect_here(client);
+
+    let mut restarted = controller(1);
+    if restarted_learned_first {
+        restarted.transport.inject_message(
+            node(3),
+            ordered_location_write(client, node(3), order_on_3, Operation::Insert),
+        );
+        restarted.process_messages().await;
+    }
+    restarted.stores().client_locations.connect_here(client);
+    restarted.note_local_connect(client);
+    restarted
+        .stores()
+        .topics
+        .subscribe("t/new", client, session_partition(client), 1)
+        .unwrap();
+    revive(&restarted, node(3));
+    restarted.process_messages().await;
+    answer_resyncs(&mut restarted, &mut older).await;
+    let sent = restarted
+        .transport
+        .take_sent()
+        .into_iter()
+        .filter(|(to, message)| match message {
+            ClusterMessage::WriteRequest(_) => *to == node(3),
+            ClusterMessage::SubscriptionResync(resync) => {
+                resync.round == crate::cluster::protocol::SubscriptionResync::UNSOLICITED
+            }
+            _ => false,
+        })
+        .map(|(_, message)| message)
+        .collect();
+    (restarted, sent)
+}
+
+#[tokio::test]
+async fn a_rerank_broadcasts_the_new_order_and_announces_the_clients_subscriptions() {
+    let (restarted, sent) = restarted_after_boot_resync(false).await;
+    let stamp = restarted
+        .stores()
+        .client_locations
+        .stamp_of("roamer", node(1))
+        .unwrap();
+    assert_eq!(stamp.order, crate::cluster::LocationOrder(3));
+    let orders: Vec<_> = sent
+        .iter()
+        .filter_map(|message| match message {
+            ClusterMessage::WriteRequest(write) => {
+                crate::cluster::ClientLocationEntry::decode_ordered(&write.data)
+                    .and_then(|(_, stamp)| stamp)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(orders, [stamp]);
+    let announced: Vec<(u64, Vec<String>)> = sent
+        .iter()
+        .filter_map(|message| match message {
+            ClusterMessage::SubscriptionResync(resync)
+                if resync.round == crate::cluster::protocol::SubscriptionResync::UNSOLICITED =>
+            {
+                Some(resync.clients.clone())
+            }
+            _ => None,
+        })
+        .flatten()
+        .map(|client| {
+            (
+                client.order,
+                client.topics.into_iter().map(|t| t.topic).collect(),
+            )
+        })
+        .collect();
+    assert_eq!(announced, [(3, vec!["t/new".to_string()])]);
+}
+
+#[tokio::test]
+async fn a_boot_connect_that_already_ranks_newest_is_not_reranked() {
+    let (restarted, sent) = restarted_after_boot_resync(true).await;
+    assert_eq!(
+        restarted
+            .stores()
+            .client_locations
+            .stamp_of("roamer", node(1))
+            .map(|stamp| stamp.order),
+        Some(crate::cluster::LocationOrder(3))
+    );
+    assert!(sent.is_empty());
+}
+
+#[tokio::test]
+async fn a_boot_connect_is_not_reranked_once_the_window_has_closed() {
+    let client = "roamer";
+    let mut older = controller(3);
+    older.stores().client_locations.connect_here(client);
+    let mut restarted = controller(1);
+    restarted.stores().client_locations.connect_here(client);
+    restarted.note_local_connect(client);
+    older.transport.inject_message(
+        node(1),
+        ordered_location_write(
+            client,
+            node(1),
+            restarted
+                .stores()
+                .client_locations
+                .stamp_of(client, node(1))
+                .unwrap(),
+            Operation::Insert,
+        ),
+    );
+    older.process_messages().await;
+    restarted
+        .stores()
+        .client_locations
+        .claim(client, node(3), None);
+    restarted.drive_subscription_resyncs(LATER_MS).await;
+    restarted
+        .drive_subscription_resyncs(
+            LATER_MS + crate::cluster::node_controller::subscription_resync::BOOT_WINDOW_MS,
+        )
+        .await;
+    restarted.transport.take_sent();
+
+    revive(&restarted, node(3));
+    restarted.process_messages().await;
+    answer_resyncs(&mut restarted, &mut older).await;
+
+    assert!(
+        !restarted
+            .stores()
+            .client_locations
+            .is_authority_here(client)
+    );
+    assert!(location_writes_to(&restarted, node(3)).is_empty());
+}
+
+#[tokio::test]
+async fn a_peer_given_up_on_closes_its_boot_window_without_a_rerank() {
+    let client = "roamer";
+    let mut older = controller(3);
+    let mut restarted = controller(1);
+    let restarted_order = restarted.stores().client_locations.connect_here(client);
+    restarted.note_local_connect(client);
+    older.transport.inject_message(
+        node(1),
+        ordered_location_write(client, node(1), restarted_order, Operation::Insert),
+    );
+    older.process_messages().await;
+    older.stores().client_locations.connect_here(client);
+    revive(&restarted, node(3));
+    restarted.process_messages().await;
+    let late_requests: Vec<ClusterMessage> = restarted
+        .transport
+        .take_sent()
+        .into_iter()
+        .filter(|(to, m)| {
+            *to == node(3) && matches!(m, ClusterMessage::SubscriptionResyncRequest(_))
+        })
+        .map(|(_, m)| m)
+        .collect();
+    let mut now = LATER_MS;
+    for _ in 0..70 {
+        restarted.drive_subscription_resyncs(now).await;
+        restarted.transport.take_sent();
+        now += crate::cluster::node_controller::subscription_resync::RESYNC_RETRY_MS;
+    }
+    assert!(
+        restarted.resync_rounds.is_empty(),
+        "the asks were not given up"
+    );
+    assert!(now - LATER_MS < crate::cluster::node_controller::subscription_resync::BOOT_WINDOW_MS);
+    for request in late_requests {
+        older.transport.inject_message(node(1), request);
+    }
+    older.process_messages().await;
+    for (to, message) in older.transport.take_sent() {
+        if to == node(1) && matches!(message, ClusterMessage::SubscriptionResync(_)) {
+            restarted.transport.inject_message(node(3), message);
+        }
+    }
+    restarted.process_messages().await;
+
+    assert!(
+        !restarted
+            .stores()
+            .client_locations
+            .is_authority_here(client)
+    );
+    assert!(location_writes_to(&restarted, node(3)).is_empty());
+}

@@ -466,6 +466,7 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) next_anti_entropy_ms: Option<u64>,
     pub(super) silent_peers: HashSet<NodeId>,
     pub(super) answered_peers: HashSet<NodeId>,
+    pub(super) boot_window: subscription_resync::BootWindow,
     pub(super) held_primaries: Option<super::store_manager::HeldPrimaries>,
     pub(super) outgoing_snapshots: VecDeque<snapshot::OutgoingSnapshot>,
     pub(super) snapshot_clock_ms: u64,
@@ -554,6 +555,7 @@ impl<T: ClusterTransport> NodeController<T> {
             next_anti_entropy_ms: None,
             silent_peers: HashSet::new(),
             answered_peers: HashSet::new(),
+            boot_window: subscription_resync::BootWindow::default(),
             held_primaries: None,
             outgoing_snapshots: VecDeque::new(),
             snapshot_clock_ms: 0,
@@ -1333,6 +1335,7 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             ClusterMessage::SubscriptionResync(resync) => {
                 self.handle_subscription_resync(from, resync);
+                self.rerank_boot_connects().await;
             }
             ClusterMessage::PartitionUpdate(update) => {
                 tracing::debug!(

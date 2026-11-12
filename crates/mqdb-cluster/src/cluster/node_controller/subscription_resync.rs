@@ -1,12 +1,14 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use super::super::client_location::{ClientLocationEntry, client_location_key};
 use super::super::heartbeat::NodeStatus;
 use super::super::protocol::{
-    Heartbeat, ListingDigest, ResyncRequest, ResyncedClient, ResyncedPattern, ResyncedTopic,
-    SubscriptionResync,
+    Heartbeat, ListingDigest, Operation, ReplicationWrite, ResyncRequest, ResyncedClient,
+    ResyncedPattern, ResyncedTopic, SubscriptionResync,
 };
 use super::super::transport::{ClusterMessage, ClusterTransport};
+use super::super::{Epoch, entity};
 use super::super::{
     LocationOrder, LocationStamp, NodeId, SubscriptionType, is_response_topic, session_partition,
 };
@@ -29,6 +31,17 @@ pub(crate) struct RoundProgress {
     listed: HashSet<String>,
     digest: ListingDigest,
     partial: Option<ResyncedClient>,
+}
+
+pub(crate) const BOOT_WINDOW_MS: u64 = 2 * ANTI_ENTROPY_INTERVAL_MS;
+
+#[derive(Debug, Default)]
+pub(crate) struct BootWindow {
+    started_ms: Option<u64>,
+    closed: bool,
+    settled: HashSet<NodeId>,
+    connects: HashSet<String>,
+    due: Vec<(String, NodeId)>,
 }
 
 #[derive(Debug)]
@@ -273,7 +286,68 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
+    pub(crate) fn note_local_connect(&mut self, client_id: &str) {
+        if !self.boot_window.closed {
+            self.boot_window.connects.insert(client_id.to_string());
+        }
+    }
+
+    pub(crate) fn forget_local_connect(&mut self, client_id: &str) {
+        self.boot_window.connects.remove(client_id);
+    }
+
+    fn settle_boot_peer(&mut self, peer: NodeId, answered: bool) {
+        if self.boot_window.closed || !self.boot_window.settled.insert(peer) {
+            return;
+        }
+        if answered {
+            let due: Vec<(String, NodeId)> = self
+                .boot_window
+                .connects
+                .iter()
+                .map(|client_id| (client_id.clone(), peer))
+                .collect();
+            self.boot_window.due.extend(due);
+        }
+    }
+
+    fn close_boot_window_at(&mut self, now_ms: u64) {
+        let started = *self.boot_window.started_ms.get_or_insert(now_ms);
+        if !self.boot_window.closed && now_ms.saturating_sub(started) >= BOOT_WINDOW_MS {
+            self.boot_window.closed = true;
+            self.boot_window.connects.clear();
+            tracing::debug!("subscription resync boot window closed");
+        }
+    }
+
+    pub(crate) async fn rerank_boot_connects(&mut self) {
+        let due = std::mem::take(&mut self.boot_window.due);
+        for (client_id, peer) in due {
+            let Some(stamp) = self.stores.client_locations.rerank_here(&client_id, peer) else {
+                continue;
+            };
+            tracing::info!(
+                client_id,
+                order = stamp.order.0,
+                "re-ranked a connection made before this node had resynced with a peer"
+            );
+            let entry = ClientLocationEntry::create(&client_id, self.node_id);
+            let write = ReplicationWrite::new(
+                session_partition(&client_id),
+                Operation::Insert,
+                Epoch::new(0),
+                0,
+                entity::CLIENT_LOCATIONS.to_string(),
+                client_location_key(&client_id),
+                entry.encode_ordered(stamp),
+            );
+            self.write_or_forward(write).await;
+            self.announce_resumed_client(&client_id).await;
+        }
+    }
+
     pub async fn drive_subscription_resyncs(&mut self, now_ms: u64) {
+        self.close_boot_window_at(now_ms);
         self.queue_anti_entropy(now_ms);
         let due: Vec<NodeId> = self
             .resync_rounds
@@ -294,6 +368,9 @@ impl<T: ClusterTransport> NodeController<T> {
                 self.resync_rounds.remove(&peer);
                 if exhausted && !self.answered_peers.contains(&peer) {
                     self.silent_peers.insert(peer);
+                }
+                if exhausted {
+                    self.settle_boot_peer(peer, false);
                 }
                 if exhausted {
                     tracing::info!(
@@ -601,6 +678,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 self.resync_progress.remove(&from);
             }
             self.resync_rounds.remove(&from);
+            self.settle_boot_peer(from, true);
             let released = if resync.unchanged {
                 0
             } else {
