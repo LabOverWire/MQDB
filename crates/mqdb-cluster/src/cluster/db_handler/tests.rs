@@ -3419,6 +3419,71 @@ async fn a_disconnect_here_releases_this_nodes_claim() {
     );
 }
 
+fn sent_location_orders(
+    outbox: &[(NodeId, ClusterMessage)],
+    client_id: &str,
+) -> Vec<(
+    crate::cluster::protocol::Operation,
+    Option<crate::cluster::LocationOrder>,
+)> {
+    outbox
+        .iter()
+        .filter_map(|(_, message)| match message {
+            ClusterMessage::WriteRequest(write)
+                if write.entity == crate::cluster::entity::CLIENT_LOCATIONS =>
+            {
+                crate::cluster::ClientLocationEntry::decode_ordered(&write.data)
+                    .filter(|(entry, _)| entry.client_id_str() == client_id)
+                    .map(|(_, order)| (write.operation, order))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn connects_and_disconnects_broadcast_their_connect_order() {
+    use mqtt5::broker::events::BrokerEventHandler;
+
+    let (handler, ctrl) = session_harness();
+    let peer = NodeId::validated(2).unwrap();
+    ctrl.write().await.receive_peer_heartbeat(
+        peer,
+        &crate::cluster::protocol::Heartbeat::create(peer, 0),
+        1,
+    );
+    handler
+        .on_client_connect(session_connect("phone", false, 300))
+        .await;
+    handler
+        .on_client_disconnect(session_disconnect("phone"))
+        .await;
+    handler
+        .on_client_connect(session_connect("phone", false, 300))
+        .await;
+
+    let outbox = ctrl.read().await.transport().outbox.lock().unwrap().clone();
+    let mut sent = sent_location_orders(&outbox, "phone");
+    sent.dedup();
+    assert_eq!(
+        sent,
+        [
+            (
+                crate::cluster::protocol::Operation::Insert,
+                Some(crate::cluster::LocationOrder(1))
+            ),
+            (
+                crate::cluster::protocol::Operation::Delete,
+                Some(crate::cluster::LocationOrder(1))
+            ),
+            (
+                crate::cluster::protocol::Operation::Insert,
+                Some(crate::cluster::LocationOrder(1))
+            ),
+        ]
+    );
+}
+
 async fn announced_topics(
     ctrl: &Arc<tokio::sync::RwLock<NodeController<MockTransport>>>,
     client_id: &str,
@@ -3700,7 +3765,7 @@ async fn a_forwarded_publish_reaches_local_subscribers_without_being_forwarded_a
         .unwrap();
     ctrl.stores()
         .client_locations
-        .claim("remote-dashboard", node2);
+        .claim("remote-dashboard", node2, None);
     let ctrl = Arc::new(tokio::sync::RwLock::new(ctrl));
     let handler = Arc::new(crate::cluster::event_handler::ClusterEventHandler::new(
         node1,

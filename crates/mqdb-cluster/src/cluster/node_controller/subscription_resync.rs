@@ -7,7 +7,7 @@ use super::super::protocol::{
     SubscriptionResync,
 };
 use super::super::transport::{ClusterMessage, ClusterTransport};
-use super::super::{NodeId, SubscriptionType, is_response_topic, session_partition};
+use super::super::{LocationOrder, NodeId, SubscriptionType, is_response_topic, session_partition};
 use super::NodeController;
 use std::collections::{HashMap, HashSet};
 
@@ -81,11 +81,13 @@ fn pieces_of(client: ResyncedClient) -> Vec<ResyncedClient> {
     }
     let ResyncedClient {
         client_id,
+        order,
         topics,
         patterns,
     } = client;
     let bare = ResyncedClient {
         client_id,
+        order,
         topics: Vec::new(),
         patterns: Vec::new(),
     };
@@ -204,7 +206,7 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     async fn ask_for_resync(&mut self, peer: NodeId) {
-        let digest = self.listing_digest(&self.stores.client_locations.clients_on(peer));
+        let digest = self.listing_digest(peer, &self.stores.client_locations.clients_on(peer));
         let Some(state) = self.resync_rounds.get_mut(&peer) else {
             return;
         };
@@ -319,7 +321,7 @@ impl<T: ClusterTransport> NodeController<T> {
         request: ResyncRequest,
     ) {
         let connected = self.stores.client_locations.clients_on(self.node_id);
-        let unchanged = self.listing_digest(&connected) == request.digest;
+        let unchanged = self.listing_digest(self.node_id, &connected) == request.digest;
         let reply = if unchanged {
             Some(vec![SubscriptionResync {
                 round: request.round,
@@ -381,10 +383,10 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    pub(super) fn listing_digest(&self, clients: &HashSet<String>) -> ListingDigest {
+    pub(super) fn listing_digest(&self, node: NodeId, clients: &HashSet<String>) -> ListingDigest {
         let mut digest = ListingDigest::default();
         for client_id in clients {
-            digest.add_client(client_id, 0);
+            digest.add_client(client_id, self.connect_order(client_id, node), 0);
         }
         digest.hash = digest
             .hash
@@ -399,6 +401,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let mut resynced: Vec<ResyncedClient> = clients
             .iter()
             .map(|client_id| ResyncedClient {
+                order: self.connect_order(client_id, self.node_id),
                 topics: topics
                     .remove(client_id)
                     .unwrap_or_default()
@@ -423,9 +426,26 @@ impl<T: ClusterTransport> NodeController<T> {
         resynced
     }
 
-    fn index_update_for(&self, from: NodeId, client_id: &str, replaceable: bool) -> IndexUpdate {
+    fn connect_order(&self, client_id: &str, node: NodeId) -> u64 {
+        self.stores
+            .client_locations
+            .order_of(client_id, node)
+            .map_or(0, |order| order.0)
+    }
+
+    fn index_update_for(
+        &self,
+        from: NodeId,
+        client: &ResyncedClient,
+        replaceable: bool,
+    ) -> IndexUpdate {
+        let client_id = client.client_id.as_str();
         let claimants = self.stores.client_locations.claimants(client_id);
-        if self.stores.client_locations.is_authority_here(client_id) {
+        if self
+            .stores
+            .client_locations
+            .outranks_here(client_id, from, LocationOrder(client.order))
+        {
             IndexUpdate::Keep
         } else if replaceable && claimants == [from] {
             IndexUpdate::Replace
@@ -449,9 +469,11 @@ impl<T: ClusterTransport> NodeController<T> {
             return;
         }
         for client in &resync.clients {
-            self.stores
-                .client_locations
-                .claim_listed(&client.client_id, from);
+            self.stores.client_locations.claim_listed(
+                &client.client_id,
+                from,
+                LocationOrder(client.order),
+            );
         }
         let in_order = self
             .resync_progress
@@ -486,10 +508,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     continuing.as_ref() == Some(&client.client_id)
                         || !listed.contains(&client.client_id)
                 });
-                (
-                    client,
-                    self.index_update_for(from, &client.client_id, replaceable),
-                )
+                (client, self.index_update_for(from, client, replaceable))
             })
             .collect();
         let replaced: HashSet<String> = updates
@@ -541,7 +560,7 @@ impl<T: ClusterTransport> NodeController<T> {
     fn track_resync_part(&mut self, from: NodeId, resync: &SubscriptionResync) {
         let digest_now = resync
             .unchanged
-            .then(|| self.listing_digest(&self.stores.client_locations.clients_on(from)));
+            .then(|| self.listing_digest(from, &self.stores.client_locations.clients_on(from)));
         let Some(tracked) = self.resync_progress.get_mut(&from) else {
             return;
         };
@@ -667,6 +686,7 @@ mod tests {
     fn client(id: &str, topic_len: usize) -> ResyncedClient {
         ResyncedClient {
             client_id: id.to_string(),
+            order: 0,
             topics: vec![ResyncedTopic {
                 topic: "t".repeat(topic_len),
                 qos: 1,
@@ -741,6 +761,7 @@ mod tests {
             .collect();
         let heavy = ResyncedClient {
             client_id: "a-gateway".to_string(),
+            order: 0,
             topics: topics.clone(),
             patterns: patterns.clone(),
         };

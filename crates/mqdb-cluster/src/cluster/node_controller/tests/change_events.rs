@@ -73,7 +73,11 @@ fn watch(ctrl: &NodeController<MockTransport>, client: &str, on: NodeId) {
             1,
         )
         .unwrap();
-    ctrl.stores().client_locations.claim(client, on);
+    if on == ctrl.node_id() {
+        ctrl.stores().client_locations.connect_here(client);
+    } else {
+        ctrl.stores().client_locations.claim(client, on, None);
+    }
 }
 
 fn assign(

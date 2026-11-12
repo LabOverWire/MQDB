@@ -3,7 +3,7 @@
 
 use super::wire::{WireReader, push_length_prefixed};
 
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 const HEADER_LEN: usize = 22;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0100_0000_01b3;
@@ -41,11 +41,11 @@ impl ListingDigest {
         ])
     }
 
-    pub fn add_client(&mut self, client_id: &str, subscriptions: u64) {
+    pub fn add_client(&mut self, client_id: &str, order: u64, subscriptions: u64) {
         self.clients += 1;
         self.hash = self
             .hash
-            .wrapping_add(fnv(&[b"c", client_id.as_bytes()]))
+            .wrapping_add(fnv(&[b"c", client_id.as_bytes(), &order.to_be_bytes()]))
             .wrapping_add(subscriptions);
     }
 
@@ -64,7 +64,7 @@ impl ListingDigest {
                     pattern.subscription_type,
                 ))
             });
-            digest.add_client(&client.client_id, subscriptions);
+            digest.add_client(&client.client_id, client.order, subscriptions);
             digest
         })
     }
@@ -100,6 +100,7 @@ impl ResyncedPattern {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResyncedClient {
     pub client_id: String,
+    pub order: u64,
     pub topics: Vec<ResyncedTopic>,
     pub patterns: Vec<ResyncedPattern>,
 }
@@ -109,11 +110,12 @@ impl ResyncedClient {
     pub fn encoded_len(&self) -> usize {
         let topics: usize = self.topics.iter().map(ResyncedTopic::encoded_len).sum();
         let patterns: usize = self.patterns.iter().map(ResyncedPattern::encoded_len).sum();
-        10 + self.client_id.len() + topics + patterns
+        18 + self.client_id.len() + topics + patterns
     }
 
     fn encode(&self, buf: &mut Vec<u8>) -> Option<()> {
         push_length_prefixed(buf, self.client_id.as_bytes(), false)?;
+        buf.extend_from_slice(&self.order.to_be_bytes());
         buf.extend_from_slice(&u32::try_from(self.topics.len()).ok()?.to_be_bytes());
         for topic in &self.topics {
             push_length_prefixed(buf, topic.topic.as_bytes(), false)?;
@@ -131,6 +133,7 @@ impl ResyncedClient {
     fn decode(reader: &mut WireReader<'_>) -> Option<Self> {
         let client_len = reader.length(true)?;
         let client_id = reader.text(client_len)?;
+        let order = reader.u64()?;
         let topic_count = reader.u32()?;
         let topics = (0..topic_count)
             .map(|_| {
@@ -156,6 +159,7 @@ impl ResyncedClient {
             .collect::<Option<Vec<_>>>()?;
         Some(Self {
             client_id,
+            order,
             topics,
             patterns,
         })
@@ -280,6 +284,7 @@ mod tests {
     fn client(id: &str) -> ResyncedClient {
         ResyncedClient {
             client_id: id.to_string(),
+            order: 0,
             topics: vec![ResyncedTopic {
                 topic: "a/b".to_string(),
                 qos: 1,
@@ -360,6 +365,12 @@ mod tests {
         renamed.topics[0].topic = "a/c".to_string();
         assert_ne!(ListingDigest::of(&[renamed, second]), digest);
         assert_ne!(ListingDigest::of(&[client("c1")]), digest);
+        let mut reconnected = client("c1");
+        reconnected.order = 9;
+        assert_ne!(
+            ListingDigest::of(&[reconnected, client("c2")]),
+            ListingDigest::of(&[client("c1"), client("c2")])
+        );
     }
 
     #[test]

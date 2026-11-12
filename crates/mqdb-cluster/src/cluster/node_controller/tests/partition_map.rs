@@ -764,7 +764,7 @@ async fn a_primary_built_from_a_topic_index_snapshot_trusts_its_disk_after_a_res
 
 fn connect_subscriber(owner: &NodeController<MockTransport>, client_id: &str, filters: &[&str]) {
     let stores = owner.stores();
-    stores.client_locations.claim(client_id, owner.node_id());
+    stores.client_locations.connect_here(client_id);
     for filter in filters {
         if filter.contains('+') || filter.contains('#') {
             stores
@@ -878,7 +878,10 @@ async fn a_restarted_node_relearns_exact_and_wildcard_subscribers_connected_to_a
             1,
         )
         .unwrap();
-    owner.stores().client_locations.claim("elsewhere", node(3));
+    owner
+        .stores()
+        .client_locations
+        .claim("elsewhere", node(3), None);
 
     let mut restarted = controller(2);
     hear_from_peer_after_restart(&mut restarted, &mut owner).await;
@@ -1966,7 +1969,10 @@ async fn a_late_reply_for_a_client_that_moved_to_a_third_node_does_not_lose_the_
     let mut owner = controller(1);
     connect_subscriber(&owner, &client, &["probe/old"]);
     let mut restarted = controller(2);
-    restarted.stores().client_locations.claim(&client, node(3));
+    restarted
+        .stores()
+        .client_locations
+        .claim(&client, node(3), None);
     restarted
         .stores()
         .topics
@@ -1997,7 +2003,7 @@ async fn a_peer_restarted_quickly_drops_the_clients_it_no_longer_has() {
     restarted
         .stores()
         .client_locations
-        .claim("gone-client", peer.node_id());
+        .claim("gone-client", peer.node_id(), None);
     connect_subscriber(&peer, "live-client", &["probe/live"]);
 
     hear_from_peer_after_restart(&mut restarted, &mut peer).await;
@@ -2009,9 +2015,15 @@ async fn a_peer_restarted_quickly_drops_the_clients_it_no_longer_has() {
 #[tokio::test]
 async fn a_dead_node_no_longer_holds_its_clients() {
     let mut ctrl = controller(2);
-    ctrl.stores().client_locations.claim("client-a", node(1));
-    ctrl.stores().client_locations.claim("client-b", node(1));
-    ctrl.stores().client_locations.claim("client-b", node(3));
+    ctrl.stores()
+        .client_locations
+        .claim("client-a", node(1), None);
+    ctrl.stores()
+        .client_locations
+        .claim("client-b", node(1), None);
+    ctrl.stores()
+        .client_locations
+        .claim("client-b", node(3), None);
 
     ctrl.transport
         .inject_message(node(3), ClusterMessage::DeathNotice { node_id: node(1) });
@@ -2024,10 +2036,10 @@ async fn a_dead_node_no_longer_holds_its_clients() {
 #[tokio::test]
 async fn a_publish_is_forwarded_to_every_node_holding_the_client() {
     let ctrl = controller(2);
-    ctrl.stores().client_locations.claim("twice", node(3));
+    ctrl.stores().client_locations.claim("twice", node(3), None);
     ctrl.stores()
         .client_locations
-        .claim_listed("twice", node(1));
+        .claim_listed("twice", node(1), crate::cluster::LocationOrder(0));
 
     let mut forwarded: Vec<NodeId> = ctrl
         .remote_targets([crate::cluster::ForwardTarget::new("twice".to_string(), 1)])

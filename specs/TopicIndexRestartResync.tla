@@ -22,7 +22,20 @@ Linked(n, m) == {n, m} \in links
 
 SubsOf(n, c) == {t \in Topics : <<c, t>> \in idx[n]}
 
-Listing(n) == {[c |-> c, subs |-> SubsOf(n, c)] : c \in {x \in Clients : n \in loc[n][x]}}
+Rank == CHOOSE f \in [Nodes -> 1..Cardinality(Nodes)] : \A x, y \in Nodes : x # y => f[x] # f[y]
+
+Newer(x, y) == x.o > y.o \/ (x.o = y.o /\ Rank[x.n] > Rank[y.n])
+
+NodesOf(set) == {x.n : x \in set}
+
+OrdOf(set, node) == IF \E x \in set : x.n = node THEN (CHOOSE x \in set : x.n = node).o ELSE 0
+
+TopOrd(set) == IF set = {} THEN 0 ELSE (CHOOSE x \in set : \A y \in set : x.o >= y.o).o
+
+Newest(set) == CHOOSE x \in set : \A y \in set : y = x \/ Newer(x, y)
+
+Listing(n) == {[c |-> c, subs |-> SubsOf(n, c), o |-> OrdOf(loc[n][c], n)] :
+                  c \in {x \in Clients : n \in NodesOf(loc[n][x])}}
 
 LocReceivers(n) ==
     IF LinkedTargets THEN {m \in Nodes \ {n} : Linked(n, m)}
@@ -33,20 +46,26 @@ TopicReceivers(n) == {m \in Nodes \ {n} : Linked(n, m)}
 SendTo(ch, from, targets, msg) ==
     [p \in Pairs |-> IF p[1] = from /\ p[2] \in targets THEN Append(ch[p], msg) ELSE ch[p]]
 
-Claimed(set, node) == IF Claims THEN set \cup {node} ELSE {node}
+Without(set, node) == {x \in set : x.n # node}
 
-Connected(set, node) == IF Supersede \/ ~Claims THEN {node} ELSE set \cup {node}
+Claimed(set, node, o) ==
+    IF Claims THEN Without(set, node) \cup {[n |-> node, o |-> o]} ELSE {[n |-> node, o |-> o]}
 
-ClaimedAt(to, set, node) == IF ReleaseOnDeath /\ dead[to][node] THEN set ELSE Claimed(set, node)
+ClaimedAt(to, set, node, o) == IF ReleaseOnDeath /\ dead[to][node] THEN set ELSE Claimed(set, node, o)
 
-ConnectedAt(to, set, node) ==
+ConnectedAt(to, set, node, o) ==
+    LET new == [n |-> node, o |-> o] IN
     IF ReleaseOnDeath /\ dead[to][node] THEN set
-    ELSE IF Claims THEN Connected(set, node) \cup (set \cap {to})
-    ELSE Connected(set, node)
+    ELSE IF ~Claims THEN {new}
+    ELSE IF Supersede THEN {x \in Without(set, node) : x.n = to \/ Newer(x, new)} \cup {new}
+    ELSE Without(set, node) \cup {new}
 
-Released(set, node) == IF Claims THEN set \ {node} ELSE {}
+Released(set, node) == IF Claims THEN Without(set, node) ELSE {}
 
-AskerView(n, m) == {[c |-> c, subs |-> SubsOf(n, c)] : c \in {x \in Clients : m \in loc[n][x]}}
+ReleasedUpTo(set, node, o) == IF Claims THEN {x \in set : x.n # node \/ x.o > o} ELSE {}
+
+AskerView(n, m) == {[c |-> c, subs |-> SubsOf(n, c), o |-> OrdOf(loc[n][c], m)] :
+                      c \in {x \in Clients : m \in NodesOf(loc[n][x])}}
 
 Request(n, m, back) ==
     [kind |-> "req", back |-> back, boot |-> boot[n],
@@ -90,9 +109,10 @@ Init ==
 Connect(c, n, clean) ==
     LET old == conn[c]
         resumed == ~clean /\ sess[c] = n
-        located == [kind |-> "loc", c |-> c, node |-> n]
-        released == [kind |-> "del", c |-> c, node |-> old]
-        announced == [kind |-> "announce", list |-> {[c |-> c, subs |-> SubsOf(n, c)]}]
+        ord == TopOrd(loc[n][c]) + 1
+        located == [kind |-> "loc", c |-> c, node |-> n, o |-> ord]
+        released == [kind |-> "del", c |-> c, node |-> old, o |-> OrdOf(loc[old][c], old)]
+        announced == [kind |-> "announce", list |-> {[c |-> c, subs |-> SubsOf(n, c), o |-> ord]}]
         afterOld == IF old # NoNode /\ old # n
                     THEN SendTo(chan, old, LocReceivers(old), released)
                     ELSE chan
@@ -105,7 +125,9 @@ Connect(c, n, clean) ==
     /\ sess' = [sess EXCEPT ![c] = n]
     /\ resub' = [resub EXCEPT ![c] = ~resumed]
     /\ loc' = [m \in Nodes |->
-                 IF m = n THEN [loc[m] EXCEPT ![c] = Connected(@, n)]
+                 IF m = n THEN [loc[m] EXCEPT ![c] = IF Supersede \/ ~Claims
+                                                     THEN {[n |-> n, o |-> ord]}
+                                                     ELSE Without(@, n) \cup {[n |-> n, o |-> ord]}]
                  ELSE IF m = old THEN [loc[m] EXCEPT ![c] = Released(@, old)]
                  ELSE loc[m]]
     /\ chan' = IF Announce /\ ~clean
@@ -130,7 +152,7 @@ Disconnect(c) ==
     /\ conn' = [conn EXCEPT ![c] = NoNode]
     /\ resub' = [resub EXCEPT ![c] = FALSE]
     /\ loc' = [loc EXCEPT ![n][c] = Released(@, n)]
-    /\ chan' = SendTo(chan, n, LocReceivers(n), [kind |-> "del", c |-> c, node |-> n])
+    /\ chan' = SendTo(chan, n, LocReceivers(n), [kind |-> "del", c |-> c, node |-> n, o |-> OrdOf(loc[n][c], n)])
     /\ ops' = ops + 1
     /\ UNCHANGED <<dirty, up, links, view, dead, sess, want, idx, pending, outstanding, asks, crashes, drops, ever, boot, answered, silent>>
 
@@ -252,10 +274,10 @@ GiveUp(n, m) ==
 Lost(n, m) ==
     /\ drops < MaxDrops
     /\ chan[<<n, m>>] # <<>>
-    /\ Head(chan[<<n, m>>]).kind \in {"req", "reply", "same", "del"}
+    /\ Head(chan[<<n, m>>]).kind \in {"req", "reply", "same", "del", "loc"}
     /\ chan' = [chan EXCEPT ![<<n, m>>] = Tail(@)]
     /\ drops' = drops + 1
-    /\ dirty' = IF Head(chan[<<n, m>>]).kind = "del"
+    /\ dirty' = IF Head(chan[<<n, m>>]).kind \in {"del", "loc"}
               THEN [dirty EXCEPT ![m] = AllPeers(m), ![n][m] = TRUE]
               ELSE [dirty EXCEPT ![m][n] = TRUE, ![n][m] = TRUE]
     /\ UNCHANGED <<up, links, view, dead, conn, sess, want, resub, loc, idx, pending, outstanding, asks, ops, crashes, ever, boot, answered, silent>>
@@ -263,16 +285,21 @@ Lost(n, m) ==
 Named(list) == {e.c : e \in list}
 
 AfterClaims(to, from, list) ==
-    [c \in Clients |-> IF c \in Named(list) THEN ClaimedAt(to, loc[to][c], from) ELSE loc[to][c]]
+    [c \in Clients |-> IF c \in Named(list)
+                       THEN ClaimedAt(to, loc[to][c], from, (CHOOSE e \in list : e.c = c).o)
+                       ELSE loc[to][c]]
 
-Replaces(to, from, claims, c) == to \notin claims[c] /\ claims[c] = {from}
+Outranks(to, from, claims, e) ==
+    /\ claims[e.c] # {}
+    /\ Newest(claims[e.c]).n = to
+    /\ Newer(Newest(claims[e.c]), [n |-> from, o |-> e.o])
 
-Adds(to, claims, c) == to \notin claims[c]
+Replaces(to, from, claims, c) == NodesOf(claims[c]) = {from}
 
 Applied(to, from, list, replacing) ==
     LET claims == AfterClaims(to, from, list)
-        replaced == {e.c : e \in {x \in list : replacing /\ Replaces(to, from, claims, x.c)}}
-        added == {x \in list : Adds(to, claims, x.c)}
+        added == {x \in list : ~Outranks(to, from, claims, x)}
+        replaced == {e.c : e \in {x \in added : replacing /\ Replaces(to, from, claims, x.c)}}
     IN [ loc |-> claims,
          idx |-> {x \in idx[to] : x[1] \notin replaced}
                  \cup UNION {{<<e.c, t>> : t \in e.subs} : e \in added} ]
@@ -309,12 +336,12 @@ Receive(from, to) ==
               /\ chan' = rest
               /\ UNCHANGED <<loc, pending, outstanding, dirty, answered, silent>>
          [] msg.kind = "loc" ->
-              /\ loc' = [loc EXCEPT ![to][msg.c] = ConnectedAt(to, @, msg.node)]
+              /\ loc' = [loc EXCEPT ![to][msg.c] = ConnectedAt(to, @, msg.node, msg.o)]
               /\ chan' = rest
               /\ dirty' = [dirty EXCEPT ![to] = AllPeers(to)]
               /\ UNCHANGED <<idx, pending, outstanding, answered, silent>>
          [] msg.kind = "del" ->
-              /\ loc' = [loc EXCEPT ![to][msg.c] = Released(@, msg.node)]
+              /\ loc' = [loc EXCEPT ![to][msg.c] = ReleasedUpTo(@, msg.node, msg.o)]
               /\ chan' = rest
               /\ dirty' = [dirty EXCEPT ![to] = AllPeers(to)]
               /\ UNCHANGED <<idx, pending, outstanding, answered, silent>>
@@ -382,7 +409,7 @@ InvConverged ==
     Settled =>
         \A n \in Nodes, c \in Clients :
             up[n] =>
-                /\ loc[n][c] = IF conn[c] = NoNode THEN {} ELSE {conn[c]}
+                /\ NodesOf(loc[n][c]) = IF conn[c] = NoNode THEN {} ELSE {conn[c]}
                 /\ (conn[c] # NoNode => want[c] \subseteq SubsOf(n, c))
 
 InvNoInventedEntries == \A n \in Nodes : idx[n] \subseteq ever
