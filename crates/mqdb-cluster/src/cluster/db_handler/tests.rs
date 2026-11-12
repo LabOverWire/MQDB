@@ -3398,6 +3398,152 @@ async fn reconnecting_to_the_same_node_restores_the_client_location() {
 }
 
 #[tokio::test]
+async fn a_disconnect_here_releases_this_nodes_claim() {
+    use mqtt5::broker::events::BrokerEventHandler;
+
+    let (handler, ctrl) = session_harness();
+    handler
+        .on_client_connect(session_connect("phone", false, 300))
+        .await;
+    assert_eq!(
+        ctrl.read().await.stores().client_locations.get("phone"),
+        NodeId::validated(1)
+    );
+    handler
+        .on_client_disconnect(session_disconnect("phone"))
+        .await;
+
+    assert_eq!(
+        ctrl.read().await.stores().client_locations.get("phone"),
+        None
+    );
+}
+
+fn sent_location_orders(
+    outbox: &[(NodeId, ClusterMessage)],
+    client_id: &str,
+) -> Vec<(
+    crate::cluster::protocol::Operation,
+    Option<crate::cluster::LocationOrder>,
+)> {
+    outbox
+        .iter()
+        .filter_map(|(_, message)| match message {
+            ClusterMessage::WriteRequest(write)
+                if write.entity == crate::cluster::entity::CLIENT_LOCATIONS =>
+            {
+                crate::cluster::ClientLocationEntry::decode_ordered(&write.data)
+                    .filter(|(entry, _)| entry.client_id_str() == client_id)
+                    .map(|(_, stamp)| (write.operation, stamp.map(|stamp| stamp.order)))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn connects_and_disconnects_broadcast_their_connect_order() {
+    use mqtt5::broker::events::BrokerEventHandler;
+
+    let (handler, ctrl) = session_harness();
+    let peer = NodeId::validated(2).unwrap();
+    ctrl.write().await.receive_peer_heartbeat(
+        peer,
+        &crate::cluster::protocol::Heartbeat::create(peer, 0),
+        1,
+    );
+    handler
+        .on_client_connect(session_connect("phone", false, 300))
+        .await;
+    handler
+        .on_client_disconnect(session_disconnect("phone"))
+        .await;
+    handler
+        .on_client_connect(session_connect("phone", false, 300))
+        .await;
+
+    let outbox = ctrl.read().await.transport().outbox.lock().unwrap().clone();
+    let mut sent = sent_location_orders(&outbox, "phone");
+    sent.dedup();
+    assert_eq!(
+        sent,
+        [
+            (
+                crate::cluster::protocol::Operation::Insert,
+                Some(crate::cluster::LocationOrder(1))
+            ),
+            (
+                crate::cluster::protocol::Operation::Delete,
+                Some(crate::cluster::LocationOrder(1))
+            ),
+            (
+                crate::cluster::protocol::Operation::Insert,
+                Some(crate::cluster::LocationOrder(1))
+            ),
+        ]
+    );
+}
+
+async fn announced_topics(
+    ctrl: &Arc<tokio::sync::RwLock<NodeController<MockTransport>>>,
+    client_id: &str,
+) -> Vec<Vec<String>> {
+    ctrl.read()
+        .await
+        .transport()
+        .outbox
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|(_, message)| match message {
+            ClusterMessage::SubscriptionResync(resync) => Some(resync),
+            _ => None,
+        })
+        .flat_map(|resync| resync.clients.iter())
+        .filter(|client| client.client_id == client_id)
+        .map(|client| client.topics.iter().map(|t| t.topic.clone()).collect())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_resumed_session_announces_its_subscriptions_to_peers() {
+    use mqtt5::broker::events::BrokerEventHandler;
+
+    let (handler, ctrl) = session_harness();
+    handler
+        .on_client_connect(session_connect("meter", true, 300))
+        .await;
+    handler
+        .on_client_subscribe(session_subscribe("meter", "plant/temp"))
+        .await;
+    handler
+        .on_client_disconnect(session_disconnect("meter"))
+        .await;
+    assert!(announced_topics(&ctrl, "meter").await.is_empty());
+
+    handler
+        .on_client_connect(session_connect("meter", false, 300))
+        .await;
+
+    assert_eq!(
+        announced_topics(&ctrl, "meter").await,
+        vec![vec!["plant/temp".to_string()]]
+    );
+}
+
+#[tokio::test]
+async fn a_clean_start_does_not_announce_subscriptions() {
+    use mqtt5::broker::events::BrokerEventHandler;
+
+    let (handler, ctrl) = session_harness();
+    handler
+        .on_client_connect(session_connect("valve", true, 300))
+        .await;
+
+    assert!(announced_topics(&ctrl, "valve").await.is_empty());
+}
+
+#[tokio::test]
 async fn disconnect_keeps_subscriptions_of_a_session_that_outlives_it() {
     use mqtt5::broker::events::BrokerEventHandler;
 
@@ -3619,7 +3765,7 @@ async fn a_forwarded_publish_reaches_local_subscribers_without_being_forwarded_a
         .unwrap();
     ctrl.stores()
         .client_locations
-        .set("remote-dashboard", node2);
+        .claim("remote-dashboard", node2, None);
     let ctrl = Arc::new(tokio::sync::RwLock::new(ctrl));
     let handler = Arc::new(crate::cluster::event_handler::ClusterEventHandler::new(
         node1,
@@ -4673,4 +4819,71 @@ async fn per_id_writes_on_a_replica_still_waiting_for_its_data_go_to_the_primary
         .handle_publish(&mut ctrl, "$DB/docs/d/update", &update, &ctx)
         .await;
     assert!(matches!(response, super::DbPublishResult::NoResponse));
+}
+
+#[tokio::test]
+async fn a_client_moving_from_a_node_whose_clock_runs_ahead_is_located_here() {
+    use mqtt5::broker::events::BrokerEventHandler;
+
+    let (handler, ctrl) = session_harness();
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let mut ahead = crate::cluster::ClientLocationEntry::create("mover", node2);
+    ahead.timestamp_ms += 60_000;
+    ctrl.read()
+        .await
+        .stores()
+        .client_locations
+        .apply_replicated(crate::cluster::Operation::Insert, &ahead.to_be_bytes())
+        .unwrap();
+
+    handler
+        .on_client_connect(session_connect("mover", true, 0))
+        .await;
+
+    let mut ctrl = ctrl.write().await;
+    assert_eq!(ctrl.connected_node("mover"), Some(node1));
+    ctrl.apply_dead_nodes(&[node2]);
+    assert_eq!(ctrl.connected_nodes("mover"), [node1]);
+}
+
+#[tokio::test]
+async fn a_stale_claim_from_another_node_does_not_suppress_the_presence_disconnect() {
+    use mqtt5::broker::events::BrokerEventHandler;
+
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let transport = MockTransport::new(node1);
+    let retained = Arc::clone(&transport.retained_publishes);
+    let ctrl = create_test_controller(node1, transport);
+    let stale = crate::cluster::ClientLocationEntry::create("seat-holder-9", node2);
+    ctrl.stores()
+        .client_locations
+        .apply_replicated(crate::cluster::Operation::Insert, &stale.to_be_bytes())
+        .unwrap();
+    let handler = crate::cluster::event_handler::ClusterEventHandler::new(
+        node1,
+        Arc::new(tokio::sync::RwLock::new(ctrl)),
+    )
+    .with_presence(true);
+
+    handler
+        .on_client_connect(cluster_connect_event("seat-holder-9"))
+        .await;
+    retained.lock().unwrap().clear();
+    handler
+        .on_client_disconnect(mqtt5::broker::events::ClientDisconnectEvent {
+            client_id: "seat-holder-9".into(),
+            user_id: Some("alice".into()),
+            reason: mqtt5::types::ReasonCode::Success,
+            unexpected: true,
+        })
+        .await;
+
+    let published = retained.lock().unwrap().clone();
+    assert_eq!(
+        published.len(),
+        1,
+        "the only live connection closed but no presence disconnect was published"
+    );
 }

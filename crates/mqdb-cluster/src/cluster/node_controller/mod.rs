@@ -14,6 +14,7 @@ mod retained;
 mod session_ops;
 mod sharing;
 mod snapshot;
+mod subscription_resync;
 pub(crate) mod unique;
 
 #[cfg(test)]
@@ -457,6 +458,15 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) incoming_snapshots: HashMap<PartitionId, snapshot::IncomingSnapshot>,
     pub(super) deferred_snapshot_requests: VecDeque<(NodeId, PartitionId)>,
     pub(super) primary_taken_after_wait: bool,
+    pub(super) pending_resync_requests: HashMap<NodeId, bool>,
+    pub(super) resync_rounds: HashMap<NodeId, subscription_resync::ResyncRound>,
+    pub(super) next_resync_round: u64,
+    pub(super) resync_progress:
+        HashMap<NodeId, std::collections::BTreeMap<u64, subscription_resync::RoundProgress>>,
+    pub(super) next_anti_entropy_ms: Option<u64>,
+    pub(super) silent_peers: HashSet<NodeId>,
+    pub(super) answered_peers: HashSet<NodeId>,
+    pub(super) boot_window: subscription_resync::BootWindow,
     pub(super) held_primaries: Option<super::store_manager::HeldPrimaries>,
     pub(super) outgoing_snapshots: VecDeque<snapshot::OutgoingSnapshot>,
     pub(super) snapshot_clock_ms: u64,
@@ -538,6 +548,14 @@ impl<T: ClusterTransport> NodeController<T> {
             incoming_snapshots: HashMap::new(),
             deferred_snapshot_requests: VecDeque::new(),
             primary_taken_after_wait: false,
+            pending_resync_requests: HashMap::new(),
+            resync_rounds: HashMap::new(),
+            next_resync_round: subscription_resync::first_resync_round(),
+            resync_progress: HashMap::new(),
+            next_anti_entropy_ms: None,
+            silent_peers: HashSet::new(),
+            answered_peers: HashSet::new(),
+            boot_window: subscription_resync::BootWindow::default(),
             held_primaries: None,
             outgoing_snapshots: VecDeque::new(),
             snapshot_clock_ms: 0,
@@ -958,6 +976,8 @@ impl<T: ClusterTransport> NodeController<T> {
         let start = std::time::Instant::now();
 
         tracing::warn!(?dead_node, "node death detected");
+        self.forget_resync_peer(dead_node);
+        self.stores.client_locations.mark_down(dead_node);
         self.dead_nodes_for_session_update.push_back(dead_node);
         self.change_events_node_gone(dead_node);
         self.snapshots_node_gone(dead_node);
@@ -1054,8 +1074,7 @@ impl<T: ClusterTransport> NodeController<T> {
         updates: &[super::message_processor::HeartbeatUpdate],
     ) {
         for update in updates {
-            self.heartbeat
-                .receive_heartbeat(update.from, &update.heartbeat, update.received_at);
+            self.receive_peer_heartbeat(update.from, &update.heartbeat, update.received_at);
         }
     }
 
@@ -1170,8 +1189,8 @@ impl<T: ClusterTransport> NodeController<T> {
     async fn handle_message(&mut self, msg: InboundMessage) {
         match msg.message {
             ClusterMessage::Heartbeat(hb) => {
-                self.heartbeat
-                    .receive_heartbeat(msg.from, &hb, msg.received_at);
+                self.receive_peer_heartbeat(msg.from, &hb, msg.received_at);
+                self.request_subscription_resyncs().await;
             }
             ClusterMessage::Write(ref write) => {
                 self.handle_write(msg.from, write).await;
@@ -1303,6 +1322,14 @@ impl<T: ClusterTransport> NodeController<T> {
             ClusterMessage::TopicSubscriptionBroadcast(broadcast) => {
                 self.handle_topic_subscription_broadcast(from, broadcast);
             }
+            ClusterMessage::SubscriptionResyncRequest(request) => {
+                self.handle_subscription_resync_request(from, *request)
+                    .await;
+            }
+            ClusterMessage::SubscriptionResync(resync) => {
+                self.handle_subscription_resync(from, resync);
+                self.rerank_boot_connects().await;
+            }
             ClusterMessage::PartitionUpdate(update) => {
                 tracing::debug!(
                     from = from.get(),
@@ -1371,7 +1398,11 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     pub(crate) fn connected_node(&self, client_id: &str) -> Option<NodeId> {
-        self.stores.client_locations.get(client_id).or_else(|| {
+        let claimants = self.stores.client_locations.claimants(client_id);
+        if claimants.contains(&self.node_id) {
+            return Some(self.node_id);
+        }
+        claimants.last().copied().or_else(|| {
             self.stores
                 .sessions
                 .get(client_id)
@@ -1380,16 +1411,28 @@ impl<T: ClusterTransport> NodeController<T> {
         })
     }
 
+    pub(crate) fn connected_nodes(&self, client_id: &str) -> Vec<NodeId> {
+        let claimed = self.stores.client_locations.claimants(client_id);
+        if claimed.is_empty() {
+            self.connected_node(client_id).into_iter().collect()
+        } else {
+            claimed
+        }
+    }
+
     pub(crate) fn remote_targets(
         &self,
         targets: impl IntoIterator<Item = ForwardTarget>,
     ) -> HashMap<NodeId, Vec<ForwardTarget>> {
         let mut remote_nodes: HashMap<NodeId, Vec<ForwardTarget>> = HashMap::new();
         for target in targets {
-            if let Some(target_node) = self.connected_node(&target.client_id)
-                && target_node != self.node_id
-            {
-                remote_nodes.entry(target_node).or_default().push(target);
+            for target_node in self.connected_nodes(&target.client_id) {
+                if target_node != self.node_id {
+                    remote_nodes
+                        .entry(target_node)
+                        .or_default()
+                        .push(target.clone());
+                }
             }
         }
         remote_nodes

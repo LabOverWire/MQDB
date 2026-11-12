@@ -103,6 +103,8 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 Err(e) => warn!(client_id, error = ?e, "failed to update session"),
             }
 
+            let order = ctrl.stores().client_locations.connect_here(client_id);
+            ctrl.note_local_connect(client_id);
             let location_entry = ClientLocationEntry::create(client_id, self.node_id);
             let location_write = ReplicationWrite::new(
                 session_partition(client_id),
@@ -111,9 +113,12 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 0,
                 entity::CLIENT_LOCATIONS.to_string(),
                 client_location_key(client_id),
-                location_entry.to_be_bytes(),
+                location_entry.encode_ordered(order),
             );
             ctrl.write_or_forward(location_write).await;
+            if !event.clean_start {
+                ctrl.announce_resumed_client(client_id).await;
+            }
         })
     }
 
@@ -184,6 +189,9 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 ctrl.write_or_forward(write).await;
             }
 
+            let order = ctrl.stores().client_locations.stamp_of(client_id, node_id);
+            ctrl.stores().client_locations.disconnect_here(client_id);
+            ctrl.forget_local_connect(client_id);
             let location_entry = ClientLocationEntry::create(client_id, node_id);
             let location_delete = ReplicationWrite::new(
                 session_partition(client_id),
@@ -192,7 +200,10 @@ impl<T: ClusterTransport + 'static> BrokerEventHandler for ClusterEventHandler<T
                 0,
                 entity::CLIENT_LOCATIONS.to_string(),
                 client_location_key(client_id),
-                location_entry.to_be_bytes(),
+                order.map_or_else(
+                    || location_entry.to_be_bytes(),
+                    |order| location_entry.encode_ordered(order),
+                ),
             );
             ctrl.write_or_forward(location_delete).await;
 

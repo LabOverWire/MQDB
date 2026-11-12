@@ -8,6 +8,7 @@ use super::{
     is_wildcard_pattern, validate_pattern,
 };
 use bebytes::BeBytes;
+use std::collections::{HashMap, HashSet};
 use std::sync::{PoisonError, RwLock};
 
 #[derive(Debug, Clone, PartialEq, Eq, BeBytes)]
@@ -270,10 +271,37 @@ impl WildcardStore {
         self.trie
             .read()
             .unwrap_or_else(PoisonError::into_inner)
-            .all_subscriptions()
+            .client_subscriptions(client_id)
             .into_iter()
-            .filter(|(_, sub)| sub.client_id == client_id)
             .map(|(pattern, sub)| (pattern, sub.qos))
+            .collect()
+    }
+
+    #[must_use]
+    pub fn digest_of(&self, clients: &HashSet<String>) -> u64 {
+        let trie = self.trie.read().unwrap_or_else(PoisonError::into_inner);
+        clients.iter().fold(0_u64, |sum, client_id| {
+            sum.wrapping_add(trie.client_digest(client_id))
+        })
+    }
+
+    #[must_use]
+    pub fn patterns_of(
+        &self,
+        clients: &HashSet<String>,
+    ) -> HashMap<String, Vec<(String, u8, SubscriptionType)>> {
+        let trie = self.trie.read().unwrap_or_else(PoisonError::into_inner);
+        clients
+            .iter()
+            .map(|client_id| {
+                let patterns: Vec<(String, u8, SubscriptionType)> = trie
+                    .client_subscriptions(client_id)
+                    .into_iter()
+                    .map(|(pattern, sub)| (pattern, sub.qos, sub.subscription_type))
+                    .collect();
+                (client_id.clone(), patterns)
+            })
+            .filter(|(_, patterns)| !patterns.is_empty())
             .collect()
     }
 
@@ -440,7 +468,11 @@ impl WildcardStore {
 
     /// # Errors
     /// Returns `SerializationError` if UTF-8 parsing fails.
-    pub fn import_wildcards(&self, data: &[u8]) -> Result<usize, WildcardStoreError> {
+    pub fn import_wildcards(
+        &self,
+        data: &[u8],
+        local_clients: &HashSet<String>,
+    ) -> Result<usize, WildcardStoreError> {
         if data.len() < 4 {
             return Ok(0);
         }
@@ -478,7 +510,9 @@ impl WildcardStore {
             let entry_data = &data[offset..offset + data_len];
             offset += data_len;
 
-            if let Some(entry) = Self::deserialize_entry(entry_data) {
+            if let Some(entry) = Self::deserialize_entry(entry_data)
+                && !local_clients.contains(entry.client_id_str())
+            {
                 self.insert_entry(&entry);
                 imported += 1;
             }
@@ -497,28 +531,34 @@ impl WildcardStore {
     #[must_use]
     pub fn query(
         &self,
-        _filter: Option<&str>,
         limit: u32,
         cursor: Option<&[u8]>,
     ) -> (Vec<WildcardEntry>, bool, Option<Vec<u8>>) {
         let trie = self.trie.read().unwrap_or_else(PoisonError::into_inner);
-        let start_key = cursor.and_then(|c| std::str::from_utf8(c).ok());
+        let after = cursor
+            .and_then(|c| std::str::from_utf8(c).ok())
+            .map(|c| c.split_once('\0').unwrap_or((c, "")));
 
         let mut results: Vec<_> = trie
             .all_subscriptions()
             .into_iter()
-            .filter(|(pattern, _)| start_key.is_none_or(|sk| pattern.as_str() > sk))
-            .take(limit as usize + 1)
+            .filter(|(pattern, sub)| {
+                after.is_none_or(|key| (pattern.as_str(), sub.client_id.as_str()) > key)
+            })
             .collect();
-
-        results.sort_by_key(|(k, _)| k.clone());
+        results.sort_unstable_by(|(a, x), (b, y)| {
+            (a.as_str(), x.client_id.as_str()).cmp(&(b.as_str(), y.client_id.as_str()))
+        });
+        results.truncate(limit as usize + 1);
         let has_more = results.len() > limit as usize;
         if has_more {
             results.pop();
         }
 
         let next_cursor = if has_more {
-            results.last().map(|(k, _)| k.as_bytes().to_vec())
+            results
+                .last()
+                .map(|(pattern, sub)| format!("{pattern}\0{}", sub.client_id).into_bytes())
         } else {
             None
         };
@@ -543,6 +583,7 @@ impl std::fmt::Debug for WildcardStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cluster::protocol::ListingDigest;
     use crate::cluster::session_partition;
 
     fn node(id: u16) -> NodeId {
@@ -551,6 +592,69 @@ mod tests {
 
     fn partition(n: u16) -> PartitionId {
         PartitionId::new(n).unwrap()
+    }
+
+    #[test]
+    fn the_per_client_pattern_lookup_follows_every_kind_of_change() {
+        let store = WildcardStore::new(node(1));
+        store.subscribe_mqtt("a/+", "c1", 1).unwrap();
+        store.subscribe_mqtt("a/#", "c1", 0).unwrap();
+        store.subscribe_mqtt("a/+", "c2", 2).unwrap();
+        store.unsubscribe("a/#", "c1").unwrap();
+        store.subscribe_mqtt("a/+", "c1", 2).unwrap();
+        store.clear_partition(session_partition("c2"));
+
+        assert_eq!(
+            store.get_client_patterns("c1"),
+            vec![("a/+".to_string(), 1)]
+        );
+        assert!(store.get_client_patterns("c2").is_empty());
+        assert_eq!(
+            store.digest_of(&HashSet::from(["c1".to_string()])),
+            ListingDigest::pattern_term("c1", "a/+", 1, SubscriptionType::Mqtt.code())
+        );
+        assert_eq!(store.digest_of(&HashSet::from(["c2".to_string()])), 0);
+        assert_eq!(
+            store.match_topic("a/x").len(),
+            1,
+            "the trie and the per-client lookup must agree"
+        );
+    }
+
+    #[test]
+    fn query_pages_cover_every_subscriber_exactly_once() {
+        let patterns: Vec<String> = (0..10).map(|n| format!("p{n}/+")).collect();
+        let mut expected: Vec<(String, String)> = patterns
+            .iter()
+            .flat_map(|p| ["c1", "c2", "c3"].map(|c| (p.clone(), c.to_string())))
+            .collect();
+        expected.sort();
+        for _ in 0..20 {
+            let store = WildcardStore::new(node(1));
+            for pattern in &patterns {
+                for client in ["c3", "c1", "c2"] {
+                    store.subscribe_mqtt(pattern, client, 0).unwrap();
+                }
+            }
+            let mut seen = Vec::new();
+            let mut cursor: Option<Vec<u8>> = None;
+            loop {
+                let (page, has_more, next) = store.query(2, cursor.as_deref());
+                assert!(page.len() <= 2);
+                if has_more {
+                    assert_eq!(page.len(), 2);
+                }
+                seen.extend(
+                    page.iter()
+                        .map(|e| (e.pattern_str().to_string(), e.client_id_str().to_string())),
+                );
+                if !has_more {
+                    break;
+                }
+                cursor = next;
+            }
+            assert_eq!(seen, expected);
+        }
     }
 
     #[test]
@@ -750,7 +854,7 @@ mod tests {
         let snapshot = src.export_for_partition(session_partition(&client));
         let dst = WildcardStore::new(node(2));
 
-        assert_eq!(dst.import_wildcards(&snapshot), Ok(3));
+        assert_eq!(dst.import_wildcards(&snapshot, &HashSet::new()), Ok(3));
         let long_topic = format!("{}/x", "a".repeat(65_450));
         assert_eq!(dst.match_topic(&long_topic).len(), 1);
         assert_eq!(dst.match_topic("short/x").len(), 1);
@@ -784,7 +888,7 @@ mod tests {
         let snapshot = src.export_for_partition(session_partition("client1"));
         let dst = WildcardStore::new(node(2));
 
-        assert_eq!(dst.import_wildcards(&snapshot), Ok(1));
+        assert_eq!(dst.import_wildcards(&snapshot, &HashSet::new()), Ok(1));
         assert_eq!(
             dst.get_client_patterns("client1"),
             vec![("urn:dev/+".to_string(), 1)]
