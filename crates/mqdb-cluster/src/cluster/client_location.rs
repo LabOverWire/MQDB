@@ -211,8 +211,11 @@ impl ClientLocationStore {
         if data.is_empty() {
             return Ok(());
         }
-        let (entry, _) = ClientLocationEntry::try_from_be_bytes(data)
-            .map_err(|_| ClientLocationError::SerializationError)?;
+        let entry = ClientLocationEntry::try_from_be_bytes(data)
+            .ok()
+            .filter(|(_, consumed)| *consumed == data.len())
+            .map(|(entry, _)| entry)
+            .ok_or(ClientLocationError::SerializationError)?;
         if let Some(node) = entry.node() {
             match operation {
                 Operation::Insert | Operation::Update => self.claim(entry.client_id_str(), node),
@@ -374,5 +377,28 @@ mod tests {
         assert_eq!(store.claimants("gone"), []);
         assert_eq!(store.claimants("kept"), [node(1)]);
         assert_eq!(store.claimants("shared"), [node(2)]);
+    }
+
+    #[test]
+    fn truncated_or_padded_location_writes_are_refused() {
+        let store = ClientLocationStore::new(node(2));
+        let bytes = entry_bytes("mover", 1, 5);
+        let mut padded = bytes.clone();
+        padded.push(0);
+
+        assert!(
+            store
+                .apply_replicated(Operation::Insert, &bytes[..bytes.len() - 1])
+                .is_err()
+        );
+        assert!(
+            store
+                .apply_replicated(Operation::Insert, &bytes[..bytes.len() - 3])
+                .is_err()
+        );
+        assert!(store.apply_replicated(Operation::Insert, &padded).is_err());
+        assert_eq!(store.claimants("mover"), []);
+        assert!(store.apply_replicated(Operation::Insert, &bytes).is_ok());
+        assert_eq!(store.claimants("mover"), [node(1)]);
     }
 }

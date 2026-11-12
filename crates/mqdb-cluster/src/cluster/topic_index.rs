@@ -91,6 +91,24 @@ struct WideEntry {
     subscribers: Vec<WideSubscriber>,
 }
 
+fn decode_exact<T: BeBytes>(bytes: &[u8]) -> Option<T> {
+    let (value, consumed) = T::try_from_be_bytes(bytes).ok()?;
+    (consumed == bytes.len()).then_some(value)
+}
+
+impl NarrowEntry {
+    fn is_complete(&self) -> bool {
+        self.subscribers.len() == usize::from(self.subscriber_count)
+    }
+}
+
+impl WideEntry {
+    fn is_complete(&self) -> bool {
+        self.narrow_reader_guard == NARROW_READER_GUARD
+            && u32::try_from(self.subscribers.len()).ok() == Some(self.subscriber_count)
+    }
+}
+
 impl TopicIndexEntry {
     #[must_use]
     pub fn create(topic: &str) -> Self {
@@ -160,7 +178,7 @@ impl TopicIndexEntry {
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         match *bytes.first()? {
             NARROW_ENTRY_VERSION => {
-                let (entry, _) = NarrowEntry::try_from_be_bytes(bytes).ok()?;
+                let entry = decode_exact::<NarrowEntry>(bytes).filter(NarrowEntry::is_complete)?;
                 Some(Self {
                     topic: entry.topic,
                     last_seq: entry.last_seq,
@@ -176,10 +194,7 @@ impl TopicIndexEntry {
                 })
             }
             WIDE_ENTRY_VERSION => {
-                let (entry, _) = WideEntry::try_from_be_bytes(bytes).ok()?;
-                if entry.narrow_reader_guard != NARROW_READER_GUARD {
-                    return None;
-                }
+                let entry = decode_exact::<WideEntry>(bytes).filter(WideEntry::is_complete)?;
                 Some(Self {
                     topic: entry.topic,
                     last_seq: entry.last_seq,
@@ -1121,5 +1136,61 @@ mod tests {
 
         let subs = index.get_subscribers("topic/a");
         assert_eq!(subs.len(), 1);
+    }
+
+    #[test]
+    fn a_wide_entry_declaring_more_subscribers_than_it_carries_is_refused() {
+        let mut bytes = vec![WIDE_ENTRY_VERSION, 0xff, 0xff, 0, 1, b'a'];
+        bytes.extend_from_slice(&0u64.to_be_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(TopicIndexEntry::from_bytes(&bytes), None);
+    }
+
+    fn entry_with(client_ids: &[&str]) -> TopicIndexEntry {
+        let mut entry = TopicIndexEntry::create("a");
+        for client_id in client_ids {
+            entry
+                .subscribers
+                .push(SubscriberLocation::create(client_id, partition(1), 1));
+        }
+        entry
+    }
+
+    #[test]
+    fn truncated_entries_are_refused() {
+        let narrow = entry_with(&["c1", "c2"]).to_bytes().unwrap();
+        assert_eq!(narrow[0], NARROW_ENTRY_VERSION);
+        let wide_client = "w".repeat(300);
+        let wide = entry_with(&["c1", "c2", &wide_client]).to_bytes().unwrap();
+        assert_eq!(wide[0], WIDE_ENTRY_VERSION);
+
+        assert_eq!(
+            TopicIndexEntry::from_bytes(&narrow[..narrow.len() - 6]),
+            None
+        );
+        assert_eq!(
+            TopicIndexEntry::from_bytes(&narrow[..narrow.len() - 1]),
+            None
+        );
+        assert_eq!(TopicIndexEntry::from_bytes(&wide[..wide.len() - 306]), None);
+        assert_eq!(TopicIndexEntry::from_bytes(&wide[..wide.len() - 1]), None);
+    }
+
+    #[test]
+    fn a_wide_entry_without_the_narrow_reader_guard_is_refused() {
+        let mut bytes = entry_with(&[&"w".repeat(300)]).to_bytes().unwrap();
+        assert_eq!(bytes[0], WIDE_ENTRY_VERSION);
+        bytes[1] = 0;
+        assert_eq!(TopicIndexEntry::from_bytes(&bytes), None);
+    }
+
+    #[test]
+    fn entries_with_trailing_bytes_are_refused() {
+        for entry in [entry_with(&["c1"]), entry_with(&[&"w".repeat(300)])] {
+            let mut bytes = entry.to_bytes().unwrap();
+            assert_eq!(TopicIndexEntry::from_bytes(&bytes), Some(entry));
+            bytes.push(0);
+            assert_eq!(TopicIndexEntry::from_bytes(&bytes), None);
+        }
     }
 }
