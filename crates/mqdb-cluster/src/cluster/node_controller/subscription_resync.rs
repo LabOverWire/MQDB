@@ -425,7 +425,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
     fn index_update_for(&self, from: NodeId, client_id: &str, replaceable: bool) -> IndexUpdate {
         let claimants = self.stores.client_locations.claimants(client_id);
-        if claimants.contains(&self.node_id) {
+        if self.stores.client_locations.is_authority_here(client_id) {
             IndexUpdate::Keep
         } else if replaceable && claimants == [from] {
             IndexUpdate::Replace

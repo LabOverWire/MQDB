@@ -468,7 +468,11 @@ impl WildcardStore {
 
     /// # Errors
     /// Returns `SerializationError` if UTF-8 parsing fails.
-    pub fn import_wildcards(&self, data: &[u8]) -> Result<usize, WildcardStoreError> {
+    pub fn import_wildcards(
+        &self,
+        data: &[u8],
+        local_clients: &HashSet<String>,
+    ) -> Result<usize, WildcardStoreError> {
         if data.len() < 4 {
             return Ok(0);
         }
@@ -506,7 +510,9 @@ impl WildcardStore {
             let entry_data = &data[offset..offset + data_len];
             offset += data_len;
 
-            if let Some(entry) = Self::deserialize_entry(entry_data) {
+            if let Some(entry) = Self::deserialize_entry(entry_data)
+                && !local_clients.contains(entry.client_id_str())
+            {
                 self.insert_entry(&entry);
                 imported += 1;
             }
@@ -848,7 +854,7 @@ mod tests {
         let snapshot = src.export_for_partition(session_partition(&client));
         let dst = WildcardStore::new(node(2));
 
-        assert_eq!(dst.import_wildcards(&snapshot), Ok(3));
+        assert_eq!(dst.import_wildcards(&snapshot, &HashSet::new()), Ok(3));
         let long_topic = format!("{}/x", "a".repeat(65_450));
         assert_eq!(dst.match_topic(&long_topic).len(), 1);
         assert_eq!(dst.match_topic("short/x").len(), 1);
@@ -882,7 +888,7 @@ mod tests {
         let snapshot = src.export_for_partition(session_partition("client1"));
         let dst = WildcardStore::new(node(2));
 
-        assert_eq!(dst.import_wildcards(&snapshot), Ok(1));
+        assert_eq!(dst.import_wildcards(&snapshot, &HashSet::new()), Ok(1));
         assert_eq!(
             dst.get_client_patterns("client1"),
             vec![("urn:dev/+".to_string(), 1)]

@@ -1036,3 +1036,137 @@ async fn a_replicated_write_naming_this_node_does_not_outlive_the_clients_next_c
         "$share and will routing still pick this node for a client connected to node 3"
     );
 }
+
+#[tokio::test]
+async fn a_wildcard_import_does_not_restore_a_pattern_a_local_client_left() {
+    let owned = "owned";
+    let mut owner = controller(1);
+    owner.stores().client_locations.claim(owned, node(1));
+    let source = controller(3);
+    source
+        .stores()
+        .wildcards
+        .subscribe_mqtt("w/+", owned, 1)
+        .unwrap();
+    let partition = session_partition(owned);
+    let snapshot = source.stores().export_partition(partition).unwrap();
+    owner
+        .stores()
+        .wildcards
+        .subscribe_mqtt("w/+", owned, 1)
+        .unwrap();
+    owner.stores().wildcards.unsubscribe("w/+", owned).unwrap();
+
+    owner
+        .stores()
+        .import_partition(partition, &snapshot)
+        .unwrap();
+
+    let clients = std::collections::HashSet::from([owned.to_string()]);
+    let mut asker = controller(2);
+    revive(&asker, node(1));
+    asker.process_messages().await;
+    answer_resyncs(&mut asker, &mut owner).await;
+
+    assert!(
+        asker.stores().wildcards.patterns_of(&clients).is_empty(),
+        "a pattern the local client left was restored by the import and spread to the asker"
+    );
+    assert!(
+        owner.stores().wildcards.patterns_of(&clients).is_empty(),
+        "the import restored a pattern the local client left"
+    );
+}
+
+#[tokio::test]
+async fn an_import_keeps_a_subscription_a_moved_client_made_on_its_new_node() {
+    let mover = "mover";
+    let topic = "t/x";
+    let mut old = controller(1);
+    old.stores().client_locations.claim(mover, node(1));
+    old.transport
+        .inject_message(node(3), location_write(mover, node(3), Operation::Insert));
+    old.process_messages().await;
+    assert_eq!(
+        old.stores().client_locations.claimants(mover),
+        [node(1), node(3)]
+    );
+
+    let source = controller(3);
+    source
+        .stores()
+        .topics
+        .subscribe(topic, mover, session_partition(mover), 1)
+        .unwrap();
+    let partition = crate::cluster::topic_partition(topic);
+    let snapshot = source.stores().export_partition(partition).unwrap();
+    old.stores().import_partition(partition, &snapshot).unwrap();
+
+    assert_eq!(
+        old.stores().topics.get_client_topics(mover),
+        [(topic.to_string(), 1)],
+        "the import dropped the subscription the client made on node 3"
+    );
+}
+
+#[tokio::test]
+async fn a_resync_from_the_new_node_reaches_a_client_still_held_here() {
+    let mover = "mover";
+    let topic = "t/x";
+    let mut old = controller(1);
+    old.stores().client_locations.claim(mover, node(1));
+    let mut new = controller(3);
+    new.stores().client_locations.claim(mover, node(3));
+    new.stores()
+        .topics
+        .subscribe(topic, mover, session_partition(mover), 1)
+        .unwrap();
+    old.transport
+        .inject_message(node(3), location_write(mover, node(3), Operation::Insert));
+    old.process_messages().await;
+
+    let partition = crate::cluster::topic_partition(topic);
+    let snapshot = new.stores().export_partition(partition).unwrap();
+    old.stores().import_partition(partition, &snapshot).unwrap();
+    revive(&old, node(3));
+    old.process_messages().await;
+    answer_resyncs(&mut old, &mut new).await;
+    run_periodic_resync(&mut old).await;
+    answer_resyncs(&mut old, &mut new).await;
+
+    assert_eq!(
+        old.stores().topics.get_client_topics(mover),
+        [(topic.to_string(), 1)],
+        "node 1 never relearns the subscription while it still claims the client"
+    );
+}
+
+#[tokio::test]
+async fn a_resync_adds_what_a_client_still_held_here_subscribed_on_its_newer_node() {
+    let mover = "mover";
+    let mut old = controller(1);
+    old.stores().client_locations.claim(mover, node(1));
+    let mut new = controller(3);
+    new.stores().client_locations.claim(mover, node(3));
+    new.stores()
+        .topics
+        .subscribe("t/new", mover, session_partition(mover), 1)
+        .unwrap();
+    old.transport
+        .inject_message(node(3), location_write(mover, node(3), Operation::Insert));
+    old.process_messages().await;
+    assert_eq!(
+        old.stores().client_locations.claimants(mover),
+        [node(1), node(3)]
+    );
+    assert!(old.stores().topics.get_client_topics(mover).is_empty());
+
+    revive(&old, node(3));
+    old.process_messages().await;
+    answer_resyncs(&mut old, &mut new).await;
+
+    assert_eq!(
+        old.stores().topics.get_client_topics(mover),
+        [("t/new".to_string(), 1)]
+    );
+}

@@ -186,8 +186,19 @@ impl ClientLocationStore {
     }
 
     #[must_use]
-    pub fn clients_here(&self) -> HashSet<String> {
-        self.clients_on(self.owner)
+    pub fn is_authority_here(&self, client_id: &str) -> bool {
+        self.get(client_id) == Some(self.owner)
+    }
+
+    #[must_use]
+    pub fn authoritative_here(&self) -> HashSet<String> {
+        self.claims
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|(_, nodes)| nodes.last() == Some(&self.owner))
+            .map(|(client_id, _)| client_id.clone())
+            .collect()
     }
 
     #[must_use]
@@ -405,5 +416,24 @@ mod tests {
         assert_eq!(store.claimants("mover"), []);
         assert!(store.apply_replicated(Operation::Insert, &bytes).is_ok());
         assert_eq!(store.claimants("mover"), [node(1)]);
+    }
+
+    #[test]
+    fn the_latest_connect_decides_which_node_is_the_authority() {
+        let store = ClientLocationStore::new(node(1));
+        store.claim("mover", node(1));
+        assert!(store.is_authority_here("mover"));
+        store.claim_listed("mover", node(3));
+        assert!(store.is_authority_here("mover"));
+        store.claim("mover", node(3));
+        assert_eq!(store.claimants("mover"), [node(1), node(3)]);
+        assert!(!store.is_authority_here("mover"));
+        assert!(!store.authoritative_here().contains("mover"));
+        store.claim("mover", node(1));
+        assert!(store.is_authority_here("mover"));
+        assert_eq!(
+            store.authoritative_here(),
+            HashSet::from(["mover".to_string()])
+        );
     }
 }
