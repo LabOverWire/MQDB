@@ -5,7 +5,7 @@ CONSTANTS Nodes, Clients, Topics, Crashable, NoNode,
           MaxOps, MaxCrashes, MaxDrops, MaxAsks, MaxChan,
           Resync, Claims, Supersede, AntiEntropy, LinkedTargets, ReleaseOnDeath,
           RetainOnComplete, AskBack, Retry, Announce, StaleDisk, FalseSuspicion,
-          UniqueRounds, AnsweredStaysRefreshed, Digest
+          UniqueRounds, AnsweredStaysRefreshed, Digest, GatedRefresh
 
 Entries == Clients \X Topics
 Pairs == {p \in Nodes \X Nodes : p[1] # p[2]}
@@ -329,11 +329,13 @@ Receive(from, to) ==
               /\ UNCHANGED <<idx, loc, outstanding, dirty, answered, silent>>
          [] msg.kind = "reply" ->
               /\ LET current == ~UniqueRounds \/ msg.boot = boot[to]
-                     r == Applied(to, from, msg.list, current)
-                 IN /\ idx' = [idx EXCEPT ![to] = r.idx]
-                    /\ loc' = [loc EXCEPT ![to] =
-                                 IF current THEN Completed(to, from, r.loc, msg.list) ELSE r.loc]
-                    /\ Answered(to, from, current)
+                     r == Applied(to, from, msg.list, TRUE)
+                 IN IF current
+                    THEN /\ idx' = [idx EXCEPT ![to] = r.idx]
+                         /\ loc' = [loc EXCEPT ![to] = Completed(to, from, r.loc, msg.list)]
+                         /\ Answered(to, from, TRUE)
+                    ELSE /\ UNCHANGED <<idx, loc>>
+                         /\ Answered(to, from, FALSE)
               /\ chan' = rest
               /\ UNCHANGED pending
          [] msg.kind = "same" ->
@@ -356,7 +358,7 @@ Refresh(n, m) ==
     /\ AntiEntropy
     /\ up[n]
     /\ Linked(n, m)
-    /\ dirty[n][m]
+    /\ (GatedRefresh => dirty[n][m])
     /\ ~silent[n][m]
     /\ \A q \in pending[n] \cup outstanding[n] : q.peer # m
     /\ pending' = [pending EXCEPT ![n] = @ \cup {[peer |-> m, back |-> FALSE]}]

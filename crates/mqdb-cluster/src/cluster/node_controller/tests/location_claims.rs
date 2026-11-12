@@ -357,6 +357,7 @@ async fn a_reply_to_a_round_asked_before_a_restart_does_not_complete_a_later_rou
             part: 0,
             parts: 1,
             unchanged: false,
+            continued: false,
             clients: Vec::new(),
         }),
     );
@@ -606,7 +607,7 @@ async fn the_digest_of_the_index_matches_the_digest_of_the_listing() {
 }
 
 #[tokio::test]
-async fn a_reply_to_a_round_no_longer_tracked_only_adds_subscriptions() {
+async fn a_reply_to_a_round_no_longer_tracked_changes_nothing() {
     let mut ctrl = controller(2);
     ctrl.transport
         .inject_message(node(1), location_write("kept", node(1), Operation::Insert));
@@ -625,14 +626,25 @@ async fn a_reply_to_a_round_no_longer_tracked_only_adds_subscriptions() {
             part: 0,
             parts: 1,
             unchanged: false,
-            clients: vec![crate::cluster::protocol::ResyncedClient {
-                client_id: "kept".to_string(),
-                topics: vec![crate::cluster::protocol::ResyncedTopic {
-                    topic: "kept/a".to_string(),
-                    qos: 1,
-                }],
-                patterns: Vec::new(),
-            }],
+            continued: false,
+            clients: vec![
+                crate::cluster::protocol::ResyncedClient {
+                    client_id: "kept".to_string(),
+                    topics: vec![crate::cluster::protocol::ResyncedTopic {
+                        topic: "kept/a".to_string(),
+                        qos: 1,
+                    }],
+                    patterns: Vec::new(),
+                },
+                crate::cluster::protocol::ResyncedClient {
+                    client_id: "listed-late".to_string(),
+                    topics: vec![crate::cluster::protocol::ResyncedTopic {
+                        topic: "late/t".to_string(),
+                        qos: 1,
+                    }],
+                    patterns: Vec::new(),
+                },
+            ],
         }),
     );
     ctrl.process_messages().await;
@@ -642,6 +654,13 @@ async fn a_reply_to_a_round_no_longer_tracked_only_adds_subscriptions() {
     assert_eq!(
         topics,
         [("kept/a".to_string(), 1), ("kept/b".to_string(), 1)]
+    );
+    assert_eq!(ctrl.connected_nodes("listed-late"), Vec::<NodeId>::new());
+    assert!(
+        ctrl.stores()
+            .topics
+            .get_client_topics("listed-late")
+            .is_empty()
     );
 }
 
@@ -661,4 +680,207 @@ async fn an_unchanged_reply_to_a_view_that_changed_since_the_ask_is_asked_again(
 
     assert_eq!(ctrl.connected_nodes("idle"), Vec::<NodeId>::new());
     assert!(ctrl.resync_rounds.is_empty());
+}
+
+#[tokio::test]
+async fn a_lost_later_part_drops_nothing_the_asker_already_had() {
+    let mut peer = controller(1);
+    let topics = heavy_client("heavy", 3_000);
+    peer.stores().client_locations.claim("heavy", node(1));
+    for topic in &topics {
+        peer.stores()
+            .topics
+            .subscribe(topic, "heavy", session_partition("heavy"), 1)
+            .unwrap();
+    }
+    peer.stores()
+        .wildcards
+        .subscribe_mqtt("heavy/+/tail", "heavy", 1)
+        .unwrap();
+    peer.stores().client_locations.claim("light", node(1));
+    peer.stores()
+        .topics
+        .subscribe("light/t", "light", session_partition("light"), 0)
+        .unwrap();
+
+    let mut ctrl = controller(2);
+    revive(&ctrl, node(1));
+    ctrl.process_messages().await;
+    answer_resyncs(&mut ctrl, &mut peer).await;
+    assert!(ctrl.resync_rounds.is_empty(), "boot round not completed");
+    assert_eq!(ctrl.stores().topics.get_client_topics("heavy").len(), 3_000);
+    assert_eq!(
+        ctrl.stores().wildcards.get_client_patterns("heavy").len(),
+        1
+    );
+
+    ctrl.stores()
+        .topics
+        .unsubscribe("light/t", "light")
+        .unwrap();
+    run_periodic_resync(&mut ctrl).await;
+    for (to, message) in ctrl.transport.take_sent() {
+        if to == node(1) && matches!(message, ClusterMessage::SubscriptionResyncRequest(_)) {
+            peer.transport.inject_message(node(2), message);
+        }
+    }
+    peer.process_messages().await;
+    let replies: Vec<crate::cluster::protocol::SubscriptionResync> = peer
+        .transport
+        .take_sent()
+        .into_iter()
+        .filter_map(|(to, m)| match m {
+            ClusterMessage::SubscriptionResync(reply) if to == node(2) => Some(reply),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        replies.len() >= 2,
+        "expected a multi-part reply, got {}",
+        replies.len()
+    );
+    let first = replies.into_iter().next().unwrap();
+    assert_eq!(first.part, 0);
+    ctrl.transport
+        .inject_message(node(1), ClusterMessage::SubscriptionResync(first));
+    ctrl.process_messages().await;
+
+    assert_eq!(
+        ctrl.stores().wildcards.get_client_patterns("heavy"),
+        [("heavy/+/tail".to_string(), 1)],
+        "pattern the asker already had was dropped by the first piece"
+    );
+    assert_eq!(
+        ctrl.stores().topics.get_client_topics("heavy").len(),
+        3_000,
+        "topics the asker already had were dropped by the first piece"
+    );
+}
+
+#[tokio::test]
+async fn the_incremental_digest_matches_a_recomputation_after_random_changes() {
+    use crate::cluster::{SubscriberLocation, TopicIndex, TopicIndexEntry, topic_partition};
+    let ctrl = controller(1);
+    let other = crate::cluster::TopicIndex::new(node(3));
+    let clients = ["c0", "c1", "c2", "c3"];
+    let topics = ["a/b", "a/c", "resp/c0/x", "$share/g/a/b", "x/y/z", "q"];
+    let patterns = ["a/+", "a/#", "+/b", "$share/g/a/+", "#"];
+    let mut seed: u64 = 0x1234_5678;
+    let mut next = |bound: u64| {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (seed >> 33) % bound
+    };
+    let all: std::collections::HashSet<String> = clients.iter().map(|c| c.to_string()).collect();
+    for step in 0..20_000 {
+        let c = clients[next(4) as usize];
+        let t = topics[next(6) as usize];
+        let p = patterns[next(5) as usize];
+        let q = next(3) as u8;
+        match next(11) {
+            0 | 1 => {
+                let _ = ctrl
+                    .stores()
+                    .topics
+                    .subscribe(t, c, session_partition(c), q);
+            }
+            2 => {
+                let _ = ctrl.stores().topics.unsubscribe(t, c);
+            }
+            3 => {
+                let subs: Vec<SubscriberLocation> = (0..next(4))
+                    .map(|_| {
+                        let sc = clients[next(4) as usize];
+                        SubscriberLocation::create(sc, session_partition(sc), next(3) as u8)
+                    })
+                    .collect();
+                let entry = TopicIndexEntry {
+                    topic: t.as_bytes().to_vec(),
+                    last_seq: 0,
+                    subscribers: subs,
+                };
+                let data = TopicIndex::serialize(&entry).unwrap();
+                let _ = ctrl
+                    .stores()
+                    .topics
+                    .apply_replicated(Operation::Insert, t, &data);
+            }
+            4 => {
+                let _ = ctrl
+                    .stores()
+                    .topics
+                    .apply_replicated(Operation::Delete, t, &[]);
+            }
+            5 => {
+                ctrl.stores().topics.clear_partition(topic_partition(t));
+            }
+            6 => {
+                let _ = other.subscribe(t, c, session_partition(c), q);
+                let _ = ctrl
+                    .stores()
+                    .topics
+                    .import_entries(&other.export_for_partition(topic_partition(t)));
+            }
+            7 | 8 => {
+                let _ = if next(2) == 0 {
+                    ctrl.stores().wildcards.subscribe_mqtt(p, c, q)
+                } else {
+                    ctrl.stores().wildcards.subscribe_db(p, c, q)
+                };
+            }
+            9 => {
+                let _ = ctrl.stores().wildcards.unsubscribe(p, c);
+            }
+            _ => {
+                ctrl.stores()
+                    .wildcards
+                    .clear_partition(session_partition(c));
+            }
+        }
+        assert_eq!(
+            ctrl.listing_digest(&all),
+            crate::cluster::protocol::ListingDigest::of(&ctrl.resynced_clients(&all)),
+            "digest drifted at step {step}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_resumed_client_with_many_subscriptions_is_announced_in_parts() {
+    let ctrl = controller(1);
+    let topics = heavy_client("heavy", 3_000);
+    ctrl.stores().client_locations.claim("heavy", node(1));
+    for topic in &topics {
+        ctrl.stores()
+            .topics
+            .subscribe(topic, "heavy", session_partition("heavy"), 1)
+            .unwrap();
+    }
+
+    ctrl.announce_resumed_client("heavy").await;
+
+    let announced: Vec<crate::cluster::protocol::SubscriptionResync> = ctrl
+        .transport
+        .take_sent()
+        .into_iter()
+        .filter_map(|(_, m)| match m {
+            ClusterMessage::SubscriptionResync(resync) => Some(resync),
+            _ => None,
+        })
+        .collect();
+    assert!(announced.len() > 1);
+    assert!(
+        announced
+            .iter()
+            .all(|m| m.to_bytes().unwrap().len() <= 1024 * 1024)
+    );
+    let mut sent: Vec<String> = announced
+        .into_iter()
+        .flat_map(|m| m.clients)
+        .flat_map(|c| c.topics)
+        .map(|t| t.topic)
+        .collect();
+    sent.sort();
+    assert_eq!(sent, topics);
 }

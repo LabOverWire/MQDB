@@ -2198,6 +2198,7 @@ async fn a_missing_resync_part_is_asked_for_again() {
             part: 1,
             parts: 2,
             unchanged: false,
+            continued: false,
             clients: Vec::new(),
         }),
     );

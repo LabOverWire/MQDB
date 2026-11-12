@@ -210,6 +210,7 @@ pub struct SubscriptionResync {
     pub part: u32,
     pub parts: u32,
     pub unchanged: bool,
+    pub continued: bool,
     pub clients: Vec<ResyncedClient>,
 }
 
@@ -231,7 +232,7 @@ impl SubscriptionResync {
         buf.extend_from_slice(&self.round.to_be_bytes());
         buf.extend_from_slice(&self.part.to_be_bytes());
         buf.extend_from_slice(&self.parts.to_be_bytes());
-        buf.push(u8::from(self.unchanged));
+        buf.push(u8::from(self.unchanged) | (u8::from(self.continued) << 1));
         buf.extend_from_slice(&u32::try_from(self.clients.len()).ok()?.to_be_bytes());
         for client in &self.clients {
             client.encode(&mut buf)?;
@@ -251,11 +252,12 @@ impl SubscriptionResync {
         if part >= parts {
             return None;
         }
-        let unchanged = match reader.u8()? {
-            0 => false,
-            1 => true,
-            _ => return None,
-        };
+        let flags = reader.u8()?;
+        if flags > 0b11 {
+            return None;
+        }
+        let unchanged = flags & 0b01 != 0;
+        let continued = flags & 0b10 != 0;
         let count = reader.u32()?;
         let clients = (0..count)
             .map(|_| ResyncedClient::decode(&mut reader))
@@ -265,6 +267,7 @@ impl SubscriptionResync {
             part,
             parts,
             unchanged,
+            continued,
             clients,
         })
     }
@@ -295,6 +298,7 @@ mod tests {
             part: 1,
             parts: 3,
             unchanged: false,
+            continued: false,
             clients,
         }
     }
@@ -329,6 +333,16 @@ mod tests {
         unchanged.unchanged = true;
         let bytes = unchanged.to_bytes().unwrap();
         assert_eq!(SubscriptionResync::from_bytes(&bytes), Some(unchanged));
+    }
+
+    #[test]
+    fn a_continued_part_survives_the_wire_and_unknown_flags_are_refused() {
+        let mut continued = resync(vec![client("c1")]);
+        continued.continued = true;
+        let mut bytes = continued.to_bytes().unwrap();
+        assert_eq!(SubscriptionResync::from_bytes(&bytes), Some(continued));
+        bytes[17] = 0b100;
+        assert_eq!(SubscriptionResync::from_bytes(&bytes), None);
     }
 
     #[test]
