@@ -125,6 +125,7 @@ struct Claim {
     order: u64,
     node: NodeId,
     instance: u64,
+    listed: bool,
 }
 
 impl Claim {
@@ -153,8 +154,6 @@ fn newest_order(claims: &[Claim]) -> u64 {
 pub struct ClientLocationStore {
     owner: NodeId,
     claims: RwLock<HashMap<String, Vec<Claim>>>,
-    dead: RwLock<HashSet<NodeId>>,
-    parked: RwLock<HashMap<NodeId, Vec<(String, Claim)>>>,
     next_instance: AtomicU64,
 }
 
@@ -164,8 +163,6 @@ impl ClientLocationStore {
         Self {
             owner,
             claims: RwLock::new(HashMap::new()),
-            dead: RwLock::new(HashSet::new()),
-            parked: RwLock::new(HashMap::new()),
             next_instance: AtomicU64::new(boot_seeded_counter()),
         }
     }
@@ -183,13 +180,6 @@ impl ClientLocationStore {
         self.len() == 0
     }
 
-    fn is_dead(&self, node: NodeId) -> bool {
-        self.dead
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .contains(&node)
-    }
-
     pub fn connect_here(&self, client_id: &str) -> LocationStamp {
         let instance = self.next_instance.fetch_add(1, AtomicOrdering::Relaxed);
         let mut claims = self.claims.write().unwrap_or_else(PoisonError::into_inner);
@@ -198,18 +188,22 @@ impl ClientLocationStore {
             order: newest_order(held) + 1,
             node: self.owner,
             instance,
+            listed: false,
         };
         held.clear();
         held.push(claim);
         claim.stamp()
     }
 
-    pub fn rerank_here(&self, client_id: &str, above: NodeId) -> Option<LocationStamp> {
+    pub fn rerank_here(&self, client_id: &str) -> Option<LocationStamp> {
         let mut claims = self.claims.write().unwrap_or_else(PoisonError::into_inner);
         let held = claims.get_mut(client_id)?;
         let own = *held.iter().find(|claim| claim.node == self.owner)?;
-        let theirs = *held.iter().find(|claim| claim.node == above)?;
-        if own.key() > theirs.key() {
+        let mut outranking = held
+            .iter()
+            .filter(|claim| claim.key() > own.key())
+            .peekable();
+        if outranking.peek().is_none() || !outranking.all(|claim| claim.listed) {
             return None;
         }
         let claim = Claim {
@@ -225,7 +219,7 @@ impl ClientLocationStore {
     }
 
     pub fn claim(&self, client_id: &str, node: NodeId, stamp: Option<LocationStamp>) {
-        if node == self.owner || self.is_dead(node) {
+        if node == self.owner {
             return;
         }
         let mut claims = self.claims.write().unwrap_or_else(PoisonError::into_inner);
@@ -235,11 +229,13 @@ impl ClientLocationStore {
                 order: newest_order(held) + 1,
                 node,
                 instance: 0,
+                listed: false,
             },
             |stamp| Claim {
                 order: stamp.order.0,
                 node,
                 instance: stamp.instance,
+                listed: false,
             },
         );
         held.retain(|older| older.node == self.owner || older.key() > claim.key());
@@ -247,18 +243,24 @@ impl ClientLocationStore {
     }
 
     pub fn claim_listed(&self, client_id: &str, node: NodeId, stamp: LocationStamp) {
-        if node == self.owner || self.is_dead(node) {
+        if node == self.owner {
             return;
         }
         let mut claims = self.claims.write().unwrap_or_else(PoisonError::into_inner);
-        place(
-            claims.entry(client_id.to_string()).or_default(),
-            Claim {
-                order: stamp.order.0,
-                node,
-                instance: stamp.instance,
-            },
-        );
+        let held = claims.entry(client_id.to_string()).or_default();
+        let listed = Claim {
+            order: stamp.order.0,
+            node,
+            instance: stamp.instance,
+            listed: true,
+        };
+        if held
+            .iter()
+            .any(|claim| claim.node == node && claim.key() >= listed.key())
+        {
+            return;
+        }
+        place(held, listed);
     }
 
     pub fn release(&self, client_id: &str, node: NodeId) {
@@ -267,14 +269,6 @@ impl ClientLocationStore {
 
     fn release_up_to(&self, client_id: &str, node: NodeId, instance: Option<u64>) {
         let released = |claim: &Claim| instance.is_none_or(|instance| claim.instance <= instance);
-        if let Some(parked) = self
-            .parked
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get_mut(&node)
-        {
-            parked.retain(|(parked_client, claim)| parked_client != client_id || !released(claim));
-        }
         let mut claims = self.claims.write().unwrap_or_else(PoisonError::into_inner);
         if let Some(held) = claims.get_mut(client_id) {
             held.retain(|claim| claim.node != node || !released(claim));
@@ -282,52 +276,6 @@ impl ClientLocationStore {
                 claims.remove(client_id);
             }
         }
-    }
-
-    pub fn release_node(&self, node: NodeId) -> usize {
-        self.dead
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(node);
-        let mut claims = self.claims.write().unwrap_or_else(PoisonError::into_inner);
-        let mut parked = Vec::new();
-        claims.retain(|client_id, held| {
-            if let Some(claim) = held.iter().find(|claim| claim.node == node) {
-                parked.push((client_id.clone(), *claim));
-                held.retain(|claim| claim.node != node);
-            }
-            !held.is_empty()
-        });
-        let released = parked.len();
-        self.parked
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(node, parked);
-        released
-    }
-
-    pub fn revive_node(&self, node: NodeId) -> usize {
-        self.dead
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&node);
-        let parked = self
-            .parked
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&node)
-            .unwrap_or_default();
-        let mut claims = self.claims.write().unwrap_or_else(PoisonError::into_inner);
-        let mut restored = 0;
-        for (client_id, claim) in parked {
-            let held = claims.entry(client_id).or_default();
-            if !held.iter().any(|newer| newer.key() > claim.key()) {
-                place(held, claim);
-                restored += 1;
-            }
-        }
-        claims.retain(|_, held| !held.is_empty());
-        restored
     }
 
     pub fn retain_claims_of(&self, node: NodeId, kept: &HashSet<String>) -> usize {
@@ -504,7 +452,6 @@ mod tests {
         store
             .apply_replicated(Operation::Insert, &entry_bytes("c", 2, 10_000))
             .unwrap();
-        store.release_node(node(1));
         assert_eq!(store.get("c"), Some(node(2)));
     }
 
@@ -640,8 +587,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(store.claimants("c"), [node(2), node(1)]);
-        store.release_node(node(1));
-        assert_eq!(store.claimants("c"), [node(2)]);
     }
 
     #[test]
@@ -655,22 +600,6 @@ mod tests {
         store.claim_listed("c", node(1), stamp(7));
         assert_eq!(store.claimants("c"), [node(3), node(1)]);
         assert_eq!(store.get("c"), Some(node(1)));
-    }
-
-    #[test]
-    fn a_location_from_a_node_declared_dead_is_ignored_until_it_comes_back() {
-        let store = ClientLocationStore::new(node(9));
-        store.release_node(node(1));
-        store
-            .apply_replicated(Operation::Insert, &entry_bytes("late", 1, 10))
-            .unwrap();
-        assert_eq!(store.claimants("late"), []);
-
-        store.revive_node(node(1));
-        store
-            .apply_replicated(Operation::Insert, &entry_bytes("late", 1, 20))
-            .unwrap();
-        assert_eq!(store.claimants("late"), [node(1)]);
     }
 
     #[test]
@@ -731,31 +660,43 @@ mod tests {
     }
 
     #[test]
-    fn a_node_heard_from_again_gets_back_the_claims_it_held_when_declared_dead() {
+    fn a_claim_stays_until_a_newer_connect_or_its_own_disconnect_removes_it() {
         let store = ClientLocationStore::new(node(2));
-        store
-            .apply_replicated(Operation::Insert, &ordered_bytes("kept", 1, 1))
-            .unwrap();
-        store
-            .apply_replicated(Operation::Insert, &ordered_bytes("moved", 1, 1))
-            .unwrap();
-        store
-            .apply_replicated(Operation::Insert, &ordered_bytes("left", 1, 1))
-            .unwrap();
-        assert_eq!(store.release_node(node(1)), 3);
-        assert_eq!(store.claimants("kept"), []);
-
+        for client in ["kept", "moved", "left"] {
+            store
+                .apply_replicated(Operation::Insert, &ordered_bytes(client, 1, 1))
+                .unwrap();
+        }
         store
             .apply_replicated(Operation::Insert, &ordered_bytes("moved", 3, 2))
             .unwrap();
         store
             .apply_replicated(Operation::Delete, &ordered_bytes("left", 1, 1))
             .unwrap();
-        assert_eq!(store.revive_node(node(1)), 1);
 
         assert_eq!(store.claimants("kept"), [node(1)]);
         assert_eq!(store.claimants("moved"), [node(3)]);
         assert_eq!(store.claimants("left"), []);
+    }
+
+    #[test]
+    fn a_listed_claim_never_replaces_a_same_or_newer_claim_heard_live() {
+        let store = ClientLocationStore::new(node(2));
+        store.connect_here("c");
+        store
+            .apply_replicated(Operation::Insert, &ordered_bytes("c", 1, 4))
+            .unwrap();
+        store.claim_listed("c", node(1), stamp(3));
+        store.claim_listed("c", node(1), stamp(4));
+        assert_eq!(store.stamp_of("c", node(1)), Some(stamp(4)));
+        assert_eq!(store.rerank_here("c"), None);
+
+        store.claim_listed("c", node(1), stamp(5));
+        assert_eq!(store.stamp_of("c", node(1)), Some(stamp(5)));
+        assert_eq!(
+            store.rerank_here("c").map(|own| own.order),
+            Some(LocationOrder(6))
+        );
     }
 
     #[test]

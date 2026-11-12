@@ -423,7 +423,7 @@ InvConverged ==
     Settled =>
         \A n \in Nodes, c \in Clients :
             up[n] =>
-                /\ NodesOf(loc[n][c]) = IF conn[c] = NoNode THEN {} ELSE {conn[c]}
+                /\ {m \in NodesOf(loc[n][c]) : up[m]} = IF conn[c] = NoNode THEN {} ELSE {conn[c]}
                 /\ (conn[c] # NoNode => want[c] \subseteq SubsOf(n, c))
 
 InvNoInventedEntries == \A n \in Nodes : idx[n] \subseteq ever

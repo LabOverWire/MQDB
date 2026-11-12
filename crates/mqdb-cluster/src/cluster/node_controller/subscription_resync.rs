@@ -42,7 +42,7 @@ pub(crate) struct BootWindow {
     settled: HashSet<NodeId>,
     connects: HashSet<String>,
     taught: HashMap<NodeId, HashSet<String>>,
-    due: Vec<(String, NodeId)>,
+    due: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -186,7 +186,6 @@ impl<T: ClusterTransport> NodeController<T> {
             .receive_heartbeat(from, heartbeat, received_at);
         if revived {
             self.silent_peers.remove(&from);
-            self.stores.client_locations.revive_node(from);
             self.pending_resync_requests.insert(from, true);
         }
     }
@@ -306,11 +305,11 @@ impl<T: ClusterTransport> NodeController<T> {
         }
         if answered {
             let taught = self.boot_window.taught.remove(&peer).unwrap_or_default();
-            let due: Vec<(String, NodeId)> = self
+            let due: Vec<String> = self
                 .boot_window
                 .connects
                 .intersection(&taught)
-                .map(|client_id| (client_id.clone(), peer))
+                .cloned()
                 .collect();
             self.boot_window.due.extend(due);
         }
@@ -347,8 +346,8 @@ impl<T: ClusterTransport> NodeController<T> {
 
     pub(crate) async fn rerank_boot_connects(&mut self) {
         let due = std::mem::take(&mut self.boot_window.due);
-        for (client_id, peer) in due {
-            let Some(stamp) = self.stores.client_locations.rerank_here(&client_id, peer) else {
+        for client_id in due {
+            let Some(stamp) = self.stores.client_locations.rerank_here(&client_id) else {
                 continue;
             };
             tracing::info!(
@@ -561,9 +560,6 @@ impl<T: ClusterTransport> NodeController<T> {
 
     pub(crate) fn handle_subscription_resync(&mut self, from: NodeId, resync: &SubscriptionResync) {
         let announced = resync.round == SubscriptionResync::UNSOLICITED;
-        if !announced && !self.boot_window.settled.contains(&from) {
-            self.note_taught_claims(from, &resync.clients);
-        }
         let tracked = self
             .resync_progress
             .get(&from)
@@ -575,6 +571,9 @@ impl<T: ClusterTransport> NodeController<T> {
                 "subscription resync for a round this node is not tracking, ignored"
             );
             return;
+        }
+        if !announced && !self.boot_window.settled.contains(&from) {
+            self.note_taught_claims(from, &resync.clients);
         }
         for client in &resync.clients {
             self.stores.client_locations.claim_listed(

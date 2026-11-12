@@ -2013,27 +2013,6 @@ async fn a_peer_restarted_quickly_drops_the_clients_it_no_longer_has() {
 }
 
 #[tokio::test]
-async fn a_dead_node_no_longer_holds_its_clients() {
-    let mut ctrl = controller(2);
-    ctrl.stores()
-        .client_locations
-        .claim("client-a", node(1), None);
-    ctrl.stores()
-        .client_locations
-        .claim("client-b", node(1), None);
-    ctrl.stores()
-        .client_locations
-        .claim("client-b", node(3), None);
-
-    ctrl.transport
-        .inject_message(node(3), ClusterMessage::DeathNotice { node_id: node(1) });
-    ctrl.process_messages().await;
-
-    assert_eq!(ctrl.connected_nodes("client-a"), []);
-    assert_eq!(ctrl.connected_nodes("client-b"), [node(3)]);
-}
-
-#[tokio::test]
 async fn a_publish_is_forwarded_to_every_node_holding_the_client() {
     let ctrl = controller(2);
     ctrl.stores().client_locations.claim("twice", node(3), None);

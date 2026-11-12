@@ -977,14 +977,6 @@ impl<T: ClusterTransport> NodeController<T> {
 
         tracing::warn!(?dead_node, "node death detected");
         self.forget_resync_peer(dead_node);
-        let released = self.stores.client_locations.release_node(dead_node);
-        if released > 0 {
-            tracing::info!(
-                ?dead_node,
-                released,
-                "released client locations held by a dead node"
-            );
-        }
         self.dead_nodes_for_session_update.push_back(dead_node);
         self.change_events_node_gone(dead_node);
         self.snapshots_node_gone(dead_node);
