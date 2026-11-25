@@ -12,6 +12,8 @@ use super::super::{
 };
 use super::{ClusterEventHandler, LwtForwardingData, qos_to_u8};
 use crate::cluster::{LocalShare, RemoteForward, remote_forwards};
+use mqdb_agent::response_limit::{ReplyKind, fit_write_reply};
+use mqdb_core::protocol::parse_db_topic;
 use mqtt5::broker::events::ClientPublishEvent;
 use std::collections::HashMap;
 use tokio::sync::RwLockWriteGuard;
@@ -179,13 +181,18 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
         match result {
             DbPublishResult::Response(response) => {
                 let t_handle = crate::cluster::node_controller::elapsed_micros(start);
-                ctrl.transport()
-                    .queue_local_response(
-                        response.topic,
+                let kind = parse_db_topic(event.topic.as_ref())
+                    .map_or(ReplyKind::Read, |op| ReplyKind::from(op.operation));
+                let payload = match kind {
+                    ReplyKind::Write => fit_write_reply(
                         response.payload,
-                        qos,
-                        response.correlation_data,
-                    )
+                        &response.topic,
+                        response.correlation_data.as_deref(),
+                    ),
+                    ReplyKind::Read => response.payload,
+                };
+                ctrl.transport()
+                    .queue_local_response(response.topic, payload, qos, response.correlation_data)
                     .await;
                 let t_queue = crate::cluster::node_controller::elapsed_micros(start);
                 tracing::info!(
@@ -232,13 +239,13 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             )
             .await
         {
+            let payload = fit_write_reply(
+                response.payload,
+                &response.topic,
+                response.correlation_data.as_deref(),
+            );
             ctrl.transport()
-                .queue_local_response(
-                    response.topic,
-                    response.payload,
-                    qos,
-                    response.correlation_data,
-                )
+                .queue_local_response(response.topic, payload, qos, response.correlation_data)
                 .await;
         }
     }
@@ -265,13 +272,13 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             .await
         {
             FkCheckCompletion::Done(Some(response)) => {
+                let payload = fit_write_reply(
+                    response.payload,
+                    &response.topic,
+                    response.correlation_data.as_deref(),
+                );
                 ctrl.transport()
-                    .queue_local_response(
-                        response.topic,
-                        response.payload,
-                        qos,
-                        response.correlation_data,
-                    )
+                    .queue_local_response(response.topic, payload, qos, response.correlation_data)
                     .await;
             }
             FkCheckCompletion::NeedUniqueCheck(unique) => {
@@ -312,13 +319,13 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             .complete_pending_fk_delete(&mut ctrl, restrict_error, side_effects, continuation)
             .await
         {
+            let payload = fit_write_reply(
+                response.payload,
+                &response.topic,
+                response.correlation_data.as_deref(),
+            );
             ctrl.transport()
-                .queue_local_response(
-                    response.topic,
-                    response.payload,
-                    qos,
-                    response.correlation_data,
-                )
+                .queue_local_response(response.topic, payload, qos, response.correlation_data)
                 .await;
         }
     }

@@ -11,7 +11,7 @@ use crate::cluster::{
     TopicSubscriptionBroadcast, WildcardBroadcast,
 };
 use mqdb_agent::auth_config::AuthSetupResult;
-use mqdb_agent::response_limit::too_large_response;
+use mqdb_agent::response_limit::{ReplyKind, publish_reply};
 use mqtt5::broker::router::MessageRouter;
 use mqtt5::time::Duration;
 use std::sync::Arc;
@@ -697,21 +697,12 @@ impl ClusteredAgent {
         let client = admin_client.clone();
         tokio::spawn(async move {
             let options = local_publish_options(&req);
-            let published = match client
-                .publish_with_options(&req.topic, req.payload, options.clone())
+            if req.kind == LocalPublishKind::Response {
+                publish_reply(&client, &req.topic, req.payload, options, ReplyKind::Read).await;
+            } else if let Err(e) = client
+                .publish_with_options(&req.topic, req.payload, options)
                 .await
             {
-                Err(mqtt5::error::MqttError::PacketTooLarge { size, max })
-                    if req.kind == LocalPublishKind::Response =>
-                {
-                    warn!(topic = %req.topic, size, max, "response too large for one packet");
-                    client
-                        .publish_with_options(&req.topic, too_large_response(size, max), options)
-                        .await
-                }
-                other => other,
-            };
-            if let Err(e) = published {
                 warn!(error = %e, topic = %req.topic, "failed to publish local request");
             }
             drop(permit);

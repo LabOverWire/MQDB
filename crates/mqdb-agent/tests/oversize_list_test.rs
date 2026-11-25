@@ -101,3 +101,54 @@ async fn a_list_too_large_for_one_packet_is_answered_with_a_size_refusal() {
 
     agent.stop().await;
 }
+
+fn answered(reply: Option<Value>, topic: &str) -> Value {
+    reply.unwrap_or_else(|| panic!("no answer on {topic}"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn r385_an_applied_update_is_not_reported_as_an_error() {
+    let password = uuid::Uuid::new_v4().to_string();
+    let agent = start_agent(&password).await;
+    let client = connect(agent.port, &password).await;
+    let part = 3 * 1024 * 1024;
+
+    let created = request(
+        &client,
+        "$DB/grow/create",
+        &json!({"id": "k", "a": "x".repeat(part)}),
+    )
+    .await;
+    let mut updated = None;
+    for field in ["b", "c", "d"] {
+        updated = request(
+            &client,
+            "$DB/grow/k/update",
+            &json!({field: "y".repeat(part)}),
+        )
+        .await;
+    }
+    let has_b = request(
+        &client,
+        "$DB/grow/list",
+        &json!({"filters": [{"field": "d", "op": "is_not_null"}], "projection": ["id"]}),
+    )
+    .await;
+    agent.stop().await;
+
+    let created = answered(created, "$DB/grow/create");
+    let updated = answered(updated, "$DB/grow/k/update");
+    let has_b = answered(has_b, "$DB/grow/list");
+    assert_eq!(created["status"], "ok", "create: {}", created["message"]);
+    let applied = has_b["data"]
+        .as_array()
+        .is_some_and(|rows| !rows.is_empty());
+    assert!(
+        !(updated["status"] == "error" && applied),
+        "the update was applied (field d stored) but the client was told status=error code={}: {}",
+        updated["code"],
+        updated["message"]
+    );
+    assert!(applied, "{has_b}");
+    assert_eq!(updated["data"]["id"], "k", "{updated}");
+}

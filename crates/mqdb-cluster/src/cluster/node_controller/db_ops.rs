@@ -15,7 +15,7 @@ use crate::cluster::store_manager::outbox::{
 };
 use crate::cluster::transport::TransportError;
 use crate::cluster::{PublishRouter, RoutedPublish};
-use mqdb_agent::response_limit::too_large_response;
+use mqdb_agent::response_limit::{fit_write_reply, too_large_response};
 use mqdb_core::events::ChangeEvent;
 use mqdb_core::types::{AccessLevel, MAX_LIST_RESULTS, OwnershipDecision, owner_change_refusal};
 use serde_json::Value;
@@ -658,6 +658,20 @@ impl<T: ClusterTransport> NodeController<T> {
                     request.response_topic.clone(),
                     request.correlation_data.clone(),
                 ))
+            };
+            let response_payload = match request.op {
+                JsonDbOp::Create
+                | JsonDbOp::Update
+                | JsonDbOp::Delete
+                | JsonDbOp::Share
+                | JsonDbOp::Unshare => fit_write_reply(
+                    response_payload,
+                    &request.response_topic,
+                    request.correlation_data.as_deref(),
+                ),
+                JsonDbOp::Read | JsonDbOp::List | JsonDbOp::Shares | JsonDbOp::Shared => {
+                    response_payload
+                }
             };
             if let Err(TransportError::MessageTooLarge { size, max }) =
                 self.transport.send(from, reply(response_payload)).await

@@ -134,3 +134,56 @@ async fn a_peer_refusal_of_a_scatter_list_reaches_the_client() {
         [(RESPONSE_TOPIC.to_string(), Some(b"corr".to_vec()))]
     );
 }
+
+#[tokio::test]
+async fn a_forwarded_update_too_large_to_echo_is_acknowledged_without_the_record() {
+    let partition = crate::cluster::db::data_partition("grow", "k");
+    let mut ctrl = create_test_controller(node(2), MockTransport::new(node(2)));
+    ctrl.become_primary(partition, Epoch::new(1));
+    let mut map = crate::cluster::PartitionMap::default();
+    map.set(
+        partition,
+        crate::cluster::PartitionAssignment::new(node(2), Vec::new(), Epoch::new(1)),
+    );
+    ctrl.update_partition_map(map);
+    let original = serde_json::to_vec(&json!({"a": "x".repeat(8 * 1024 * 1024)})).unwrap();
+    put_record(&ctrl.stores.db_data, "grow", "k", &original, 1000);
+    let request = JsonDbRequest {
+        request_id: 9,
+        op: JsonDbOp::Update,
+        entity: "grow".to_string(),
+        id: Some("k".to_string()),
+        payload: serde_json::to_vec(&json!({"d": "y".repeat(3 * 1024 * 1024)})).unwrap(),
+        response_topic: RESPONSE_TOPIC.to_string(),
+        correlation_data: None,
+        sender: None,
+        client_id: None,
+        requested_owner: None,
+    };
+
+    ctrl.handle_json_db_request(node(1), partition, &request)
+        .await;
+
+    let replies: Vec<Value> = ctrl
+        .transport()
+        .take_sent()
+        .into_iter()
+        .filter_map(|(to, message)| match message {
+            ClusterMessage::JsonDbResponse(response) if to == node(1) => {
+                Some(parse(&response.payload))
+            }
+            _ => None,
+        })
+        .collect();
+    let stored: Value = serde_json::from_slice(&ctrl.db_get("grow", "k").unwrap().data).unwrap();
+    assert!(stored.get("d").is_some(), "the update was not applied");
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0]["status"], "ok", "{}", replies[0]["message"]);
+    assert_eq!(replies[0]["data"]["id"], "k");
+    assert!(
+        replies[0]["data"].get("_version").is_some(),
+        "{}",
+        replies[0]
+    );
+    assert!(replies[0]["data"].get("a").is_none());
+}
