@@ -55,11 +55,12 @@ fn queue_frame<T>(lane: &flume::Sender<T>, item: T) -> Result<(), QueueRefused> 
     })
 }
 
-const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
+pub(crate) const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalPublishKind {
     Plain,
+    Response,
     Routed,
     Retained,
     RetainedRefresh,
@@ -514,10 +515,10 @@ impl QuicDirectTransport {
     fn frame_message(&self, message: &ClusterMessage) -> Result<Vec<u8>, TransportError> {
         let payload = self.serialize_message(message);
         if payload.len() > MAX_MESSAGE_SIZE {
-            return Err(TransportError::SendFailed(format!(
-                "message of {} bytes is over the {MAX_MESSAGE_SIZE} byte limit",
-                payload.len()
-            )));
+            return Err(TransportError::MessageTooLarge {
+                size: payload.len(),
+                max: MAX_MESSAGE_SIZE,
+            });
         }
         let len = u32::try_from(payload.len())
             .map_err(|_| TransportError::SendFailed("message too large to frame".to_string()))?;
@@ -706,7 +707,7 @@ impl ClusterTransport for QuicDirectTransport {
             topic,
             payload,
             qos,
-            kind: LocalPublishKind::Plain,
+            kind: LocalPublishKind::Response,
             user_properties: Vec::new(),
             correlation_data,
             order_key: None,

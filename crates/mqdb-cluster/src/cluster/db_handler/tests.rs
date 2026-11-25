@@ -4674,3 +4674,58 @@ async fn per_id_writes_on_a_replica_still_waiting_for_its_data_go_to_the_primary
         .await;
     assert!(matches!(response, super::DbPublishResult::NoResponse));
 }
+
+async fn local_list(payload: &serde_json::Value) -> serde_json::Value {
+    let handler = DbRequestHandler::new(NodeId::validated(1).unwrap());
+    let mut ctrl = setup_controller_all_partitions();
+    for (id, n) in [("a", 1), ("b", 3), ("c", 2)] {
+        let data = serde_json::json!({"n": n, "label": format!("row-{id}")});
+        ctrl.db_create("rows", id, &serde_json::to_vec(&data).unwrap(), 1000)
+            .await
+            .unwrap();
+    }
+    let response = handler
+        .handle_publish(
+            &mut ctrl,
+            "$DB/rows/list",
+            &serde_json::to_vec(payload).unwrap(),
+            &MqttRequestContext {
+                response_topic: Some("resp/t"),
+                correlation_data: None,
+                sender: None,
+                client_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    parse_json_response(&response.payload)
+}
+
+fn listed_ids(body: &serde_json::Value) -> Vec<String> {
+    body["data"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no data in {body}"))
+        .iter()
+        .map(|item| item["id"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn local_list_sorts_before_paging() {
+    let body = local_list(&serde_json::json!({
+        "sort": [{"field": "n", "direction": "desc"}],
+        "limit": 2
+    }))
+    .await;
+    assert_eq!(listed_ids(&body), ["b", "c"], "{body}");
+}
+
+#[tokio::test]
+async fn local_list_sorts_on_a_field_left_out_of_the_projection() {
+    let body = local_list(&serde_json::json!({
+        "sort": [{"field": "n", "direction": "asc"}],
+        "projection": ["label"]
+    }))
+    .await;
+    assert_eq!(listed_ids(&body), ["a", "c", "b"], "{body}");
+}

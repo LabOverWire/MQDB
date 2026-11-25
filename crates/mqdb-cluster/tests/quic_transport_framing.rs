@@ -663,7 +663,11 @@ async fn a_frame_over_the_receive_limit_is_refused_at_send() {
     ));
     let result = transport.send(peer, oversized).await;
     assert!(
-        matches!(result, Err(TransportError::SendFailed(_))),
+        matches!(
+            result,
+            Err(TransportError::MessageTooLarge { size, max })
+                if size > max && max == 10 * 1024 * 1024
+        ),
         "a frame the receiver would reject was accepted: {result:?}"
     );
 

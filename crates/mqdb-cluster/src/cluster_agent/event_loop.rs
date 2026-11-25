@@ -11,6 +11,7 @@ use crate::cluster::{
     TopicSubscriptionBroadcast, WildcardBroadcast,
 };
 use mqdb_agent::auth_config::AuthSetupResult;
+use mqdb_agent::response_limit::too_large_response;
 use mqtt5::broker::router::MessageRouter;
 use mqtt5::time::Duration;
 use std::sync::Arc;
@@ -672,7 +673,7 @@ impl ClusteredAgent {
         req: LocalPublishRequest,
     ) {
         match req.kind {
-            LocalPublishKind::Plain => {
+            LocalPublishKind::Plain | LocalPublishKind::Response => {
                 Self::spawn_local_publish(admin_client, semaphore, req).await
             }
             LocalPublishKind::Routed => routed.deliver(req).await,
@@ -696,10 +697,21 @@ impl ClusteredAgent {
         let client = admin_client.clone();
         tokio::spawn(async move {
             let options = local_publish_options(&req);
-            if let Err(e) = client
-                .publish_with_options(&req.topic, req.payload, options)
+            let published = match client
+                .publish_with_options(&req.topic, req.payload, options.clone())
                 .await
             {
+                Err(mqtt5::error::MqttError::PacketTooLarge { size, max })
+                    if req.kind == LocalPublishKind::Response =>
+                {
+                    warn!(topic = %req.topic, size, max, "response too large for one packet");
+                    client
+                        .publish_with_options(&req.topic, too_large_response(size, max), options)
+                        .await
+                }
+                other => other,
+            };
+            if let Err(e) = published {
                 warn!(error = %e, topic = %req.topic, "failed to publish local request");
             }
             drop(permit);
@@ -1053,6 +1065,74 @@ mod tests {
         )
         .await;
         assert_eq!(router.retained_count().await, 0);
+    }
+
+    async fn start_broker_with_max_packet_size(max_packet_size: usize) -> String {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let config = mqtt5::broker::BrokerConfig::default()
+            .with_bind_address(std::net::SocketAddr::from(([127, 0, 0, 1], port)))
+            .with_max_packet_size(max_packet_size);
+        let mut broker = mqtt5::broker::MqttBroker::with_config(config)
+            .await
+            .unwrap();
+        let mut ready = broker.ready_receiver();
+        tokio::spawn(async move { broker.run().await });
+        ready.changed().await.unwrap();
+        format!("127.0.0.1:{port}")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_response_too_large_for_one_packet_is_answered_with_a_size_refusal() {
+        let address = start_broker_with_max_packet_size(1024).await;
+        let admin_client = mqtt5::MqttClient::new("mqdb-admin-test");
+        admin_client.connect(&address).await.unwrap();
+        let client = mqtt5::MqttClient::new("requester");
+        client.connect(&address).await.unwrap();
+        let (tx, rx) = flume::bounded::<Vec<u8>>(1);
+        client
+            .subscribe("resp/t", move |message| {
+                let _ = tx.try_send(message.payload.clone());
+            })
+            .await
+            .unwrap();
+        let router = Arc::new(MessageRouter::new());
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+
+        ClusteredAgent::dispatch_local_publish(
+            &admin_client,
+            &RoutedDeliveryLanes::spawn(&router),
+            &retained_writer_for(&router),
+            &semaphore,
+            LocalPublishRequest {
+                topic: "resp/t".to_string(),
+                payload: vec![b'x'; 4096],
+                qos: 1,
+                kind: LocalPublishKind::Response,
+                user_properties: Vec::new(),
+                correlation_data: None,
+                order_key: None,
+                share_groups: None,
+            },
+        )
+        .await;
+
+        let reply = tokio::time::timeout(Duration::from_secs(5), rx.recv_async())
+            .await
+            .expect("the oversized response got no answer")
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&reply).unwrap();
+        assert_eq!(body["code"], 413, "{body}");
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap()
+                .contains("1024 byte limit"),
+            "{body}"
+        );
     }
 
     #[test]

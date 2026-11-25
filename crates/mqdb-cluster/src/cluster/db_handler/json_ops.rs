@@ -1435,7 +1435,7 @@ impl DbRequestHandler {
                     } else {
                         filters.clone()
                     },
-                    sorts,
+                    sorts.clone(),
                     projection.clone(),
                     pagination.clone(),
                     sender,
@@ -1478,17 +1478,13 @@ impl DbRequestHandler {
                     }
                     None => (e.id_str().to_string(), data),
                 };
-                let item_data = if let Some(ref fields) = projection {
-                    mqdb_core::types::project_fields(item_data, fields)
-                } else {
-                    item_data
-                };
                 Some(json!({
                     "id": item_id,
                     "data": item_data
                 }))
             })
             .collect();
+        NodeController::<T>::sort_list_items(&mut items, &sorts);
         if let Some(ref pagination) = pagination {
             items = items
                 .into_iter()
@@ -1497,7 +1493,8 @@ impl DbRequestHandler {
                 .collect();
         }
         items.truncate(MAX_LIST_RESULTS);
-        let flattened = helpers::flatten_list_items(items);
+        let projected = NodeController::<T>::apply_list_projection(items, projection.as_deref());
+        let flattened = helpers::flatten_list_items(projected);
 
         let result = json!({
             "status": "ok",

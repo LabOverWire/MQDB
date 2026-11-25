@@ -6,6 +6,7 @@
 use super::protocol::ForwardedPublish;
 use super::transport::{ClusterMessage, ClusterTransport, InboundMessage, TransportError};
 use super::{NodeId, PartitionId};
+use mqdb_agent::response_limit::too_large_response;
 use mqtt5::QoS;
 use mqtt5::client::MqttClient;
 use std::collections::VecDeque;
@@ -468,10 +469,16 @@ impl ClusterTransport for MqttTransport {
             ..Default::default()
         };
         options.properties.correlation_data = correlation_data;
-        let _ = self
+        if let Err(mqtt5::error::MqttError::PacketTooLarge { size, max }) = self
             .forward_client
-            .publish_with_options(&topic, payload, options)
-            .await;
+            .publish_with_options(&topic, payload, options.clone())
+            .await
+        {
+            let _ = self
+                .forward_client
+                .publish_with_options(&topic, too_large_response(size, max), options)
+                .await;
+        }
     }
 
     async fn queue_local_publish_with_properties(

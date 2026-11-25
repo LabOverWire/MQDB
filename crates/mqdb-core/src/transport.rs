@@ -125,6 +125,7 @@ pub enum ErrorCode {
     NotFound = 404,
     Conflict = 409,
     PreconditionFailed = 412,
+    PayloadTooLarge = 413,
     RateLimited = 429,
     Internal = 500,
 }
@@ -144,7 +145,7 @@ impl ErrorCode {
             ErrorCode::NotFound => 5,
             ErrorCode::Conflict => 6,
             ErrorCode::PreconditionFailed => 9,
-            ErrorCode::RateLimited => 8,
+            ErrorCode::PayloadTooLarge | ErrorCode::RateLimited => 8,
             ErrorCode::Internal => 13,
         }
     }
@@ -296,6 +297,7 @@ mod tests {
         assert_eq!(ErrorCode::BadRequest.as_u16(), 400);
         assert_eq!(ErrorCode::Conflict.as_u16(), 409);
         assert_eq!(ErrorCode::Internal.as_u16(), 500);
+        assert_eq!(ErrorCode::PayloadTooLarge.as_u16(), 413);
 
         assert_eq!(ErrorCode::NotFound.as_grpc_code(), 5);
         assert_eq!(ErrorCode::BadRequest.as_grpc_code(), 3);

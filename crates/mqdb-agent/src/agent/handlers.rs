@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use crate::database::Database;
+use crate::response_limit::too_large_response;
 use crate::vault_backend::{VaultBackend, VaultError};
 use mqdb_core::constraint::Constraint;
 use mqdb_core::protocol::{AdminOperation, build_request, parse_admin_topic, parse_db_topic};
@@ -53,19 +54,30 @@ async fn publish_response(
     correlation_data: Option<&[u8]>,
     payload: Vec<u8>,
 ) {
-    let props = mqtt5::types::PublishProperties {
-        correlation_data: correlation_data.map(Vec::from),
-        ..Default::default()
-    };
-    let options = mqtt5::PublishOptions {
+    let options = || mqtt5::PublishOptions {
         qos: QoS::AtLeastOnce,
-        properties: props,
+        properties: mqtt5::types::PublishProperties {
+            correlation_data: correlation_data.map(Vec::from),
+            ..Default::default()
+        },
         ..Default::default()
     };
-    if let Err(e) = client
-        .publish_with_options(response_topic, payload, options)
+    let published = match client
+        .publish_with_options(response_topic, payload, options())
         .await
     {
+        Err(mqtt5::error::MqttError::PacketTooLarge { size, max }) => {
+            warn!(
+                response_topic,
+                size, max, "response too large for one packet"
+            );
+            client
+                .publish_with_options(response_topic, too_large_response(size, max), options())
+                .await
+        }
+        other => other,
+    };
+    if let Err(e) = published {
         error!("Failed to publish response to {response_topic}: {e}");
     }
 }

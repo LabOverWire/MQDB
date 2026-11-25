@@ -13,7 +13,9 @@ use crate::cluster::replication::{ReplicaRole, ReplicaState};
 use crate::cluster::store_manager::outbox::{
     CascadeOutboxPayload, CascadePendingEntry, CascadeRemoteOp,
 };
+use crate::cluster::transport::TransportError;
 use crate::cluster::{PublishRouter, RoutedPublish};
+use mqdb_agent::response_limit::too_large_response;
 use mqdb_core::events::ChangeEvent;
 use mqdb_core::types::{AccessLevel, MAX_LIST_RESULTS, OwnershipDecision, owner_change_refusal};
 use serde_json::Value;
@@ -649,16 +651,23 @@ impl<T: ClusterTransport> NodeController<T> {
         }
 
         if !request.response_topic.is_empty() {
-            let response = JsonDbResponse::new(
-                request.request_id,
-                response_payload,
-                request.response_topic.clone(),
-                request.correlation_data.clone(),
-            );
-            let _ = self
-                .transport
-                .send(from, ClusterMessage::JsonDbResponse(response))
-                .await;
+            let reply = |payload| {
+                ClusterMessage::JsonDbResponse(JsonDbResponse::new(
+                    request.request_id,
+                    payload,
+                    request.response_topic.clone(),
+                    request.correlation_data.clone(),
+                ))
+            };
+            if let Err(TransportError::MessageTooLarge { size, max }) =
+                self.transport.send(from, reply(response_payload)).await
+            {
+                tracing::warn!(to = from.get(), size, max, "reply too large for one frame");
+                let _ = self
+                    .transport
+                    .send(from, reply(too_large_response(size, max)))
+                    .await;
+            }
         }
 
         None
@@ -679,12 +688,17 @@ impl<T: ClusterTransport> NodeController<T> {
             && let Ok(request_id) = request_id_str.parse::<u64>()
         {
             tracing::debug!(request_id, "matched scatter response");
-            let items: Vec<serde_json::Value> =
+            let items: Option<Vec<serde_json::Value>> =
                 serde_json::from_slice::<serde_json::Value>(&response.payload)
                     .ok()
-                    .and_then(|parsed| parsed.get("data").and_then(|d| d.as_array()).cloned())
-                    .unwrap_or_default();
-            self.handle_scatter_list_response(request_id, items).await;
+                    .and_then(|parsed| parsed.get("data").and_then(|d| d.as_array()).cloned());
+            match items {
+                Some(items) => self.handle_scatter_list_response(request_id, items).await,
+                None => {
+                    self.fail_scatter_list_request(request_id, response.payload.clone())
+                        .await;
+                }
+            }
             return;
         }
 

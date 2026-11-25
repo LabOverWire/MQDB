@@ -132,6 +132,14 @@ impl ClusterTransport for MockTransport {
         {
             return Err(super::super::transport::TransportError::SendQueueFull(to));
         }
+        let mut encoded = Vec::new();
+        message.encode_payload(&mut encoded);
+        if encoded.len() > crate::cluster::quic_transport::MAX_MESSAGE_SIZE {
+            return Err(super::super::transport::TransportError::MessageTooLarge {
+                size: encoded.len(),
+                max: crate::cluster::quic_transport::MAX_MESSAGE_SIZE,
+            });
+        }
         self.outbox.lock().unwrap().push((to, message));
         Ok(())
     }
@@ -3242,6 +3250,7 @@ mod change_events;
 mod forwarded_write;
 mod lost_snapshot_request;
 mod missing_record;
+mod oversize_list;
 mod owner_field;
 mod partition_map;
 mod pending_update;
