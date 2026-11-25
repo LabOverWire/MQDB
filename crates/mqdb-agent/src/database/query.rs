@@ -6,13 +6,110 @@ use super::crud::VisibleChildren;
 use mqdb_core::entity::Entity;
 use mqdb_core::error::{Error, Result};
 use mqdb_core::keys;
-use mqdb_core::query::RangeBound;
+use mqdb_core::query::{RangeBound, compare_by_sort};
 use mqdb_core::types::{Filter, FilterOp, MAX_FILTERS, MAX_SORT_FIELDS, Pagination, SortOrder};
 use serde_json::Value;
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::future::Future;
 use std::pin::Pin;
 
 type RangeBounds = (String, Option<RangeBound>, Option<RangeBound>);
+
+struct RankedRow<'a> {
+    sort: &'a [SortOrder],
+    scan_position: usize,
+    row: Value,
+}
+
+impl Ord for RankedRow<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        compare_by_sort(&self.row, &other.row, self.sort)
+            .then(self.scan_position.cmp(&other.scan_position))
+    }
+}
+
+impl PartialOrd for RankedRow<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for RankedRow<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for RankedRow<'_> {}
+
+enum RowSink<'a> {
+    First {
+        limit: usize,
+        rows: Vec<Value>,
+    },
+    Best {
+        sort: &'a [SortOrder],
+        capacity: usize,
+        scanned: usize,
+        kept: BinaryHeap<RankedRow<'a>>,
+    },
+}
+
+impl<'a> RowSink<'a> {
+    fn best(sort: &'a [SortOrder], capacity: usize) -> Self {
+        Self::Best {
+            sort,
+            capacity,
+            scanned: 0,
+            kept: BinaryHeap::new(),
+        }
+    }
+
+    fn is_full(&self) -> bool {
+        match self {
+            Self::First { limit, rows } => rows.len() >= *limit,
+            Self::Best { capacity, .. } => *capacity == 0,
+        }
+    }
+
+    fn offer(&mut self, row: Value) {
+        match self {
+            Self::First { rows, .. } => rows.push(row),
+            Self::Best {
+                sort,
+                capacity,
+                scanned,
+                kept,
+            } => {
+                let candidate = RankedRow {
+                    sort,
+                    scan_position: *scanned,
+                    row,
+                };
+                *scanned += 1;
+                if kept.len() < *capacity {
+                    kept.push(candidate);
+                } else if let Some(mut worst) = kept.peek_mut()
+                    && candidate < *worst
+                {
+                    *worst = candidate;
+                }
+            }
+        }
+    }
+
+    fn into_rows(self) -> Vec<Value> {
+        match self {
+            Self::First { rows, .. } => rows,
+            Self::Best { kept, .. } => kept
+                .into_sorted_vec()
+                .into_iter()
+                .map(|ranked| ranked.row)
+                .collect(),
+        }
+    }
+}
 
 pub(crate) struct ListQuery {
     pub(crate) entity: String,
@@ -139,28 +236,16 @@ impl Database {
             )));
         }
 
-        let (mut results, early_pagination_applied) = if filters.is_empty() && sort.is_empty() {
-            (
-                self.list_with_early_pagination(&entity_name, pagination.as_ref(), &mut scope)?,
-                true,
-            )
-        } else if filters.is_empty() {
-            (self.scan_all_entities(&entity_name, &mut scope)?, false)
+        let mut paginated = if filters.is_empty() && sort.is_empty() {
+            self.list_with_early_pagination(&entity_name, pagination.as_ref(), &mut scope)?
         } else {
-            (
-                self.list_with_filters(&entity_name, &filters, &mut scope)
-                    .await?,
-                false,
-            )
-        };
-
-        if !sort.is_empty() {
-            Self::sort_results(&mut results, &sort);
-        }
-
-        let mut paginated = if early_pagination_applied {
-            results
-        } else {
+            let sink = self.list_sink(&sort, pagination.as_ref(), filters.is_empty());
+            let results = if filters.is_empty() {
+                self.collect_rows(&entity_name, &[], sink, &mut scope)?
+            } else {
+                self.list_with_filters(&entity_name, &filters, sink, &mut scope)
+                    .await?
+            };
             self.apply_pagination(&results, pagination.as_ref())
         };
 
@@ -236,6 +321,28 @@ impl Database {
         Ok(results)
     }
 
+    fn list_sink<'s>(
+        &self,
+        sort: &'s [SortOrder],
+        pagination: Option<&Pagination>,
+        unfiltered: bool,
+    ) -> RowSink<'s> {
+        let list_cap = self.config.max_list_results.unwrap_or(usize::MAX);
+        if sort.is_empty() {
+            return RowSink::First {
+                limit: list_cap,
+                rows: Vec::new(),
+            };
+        }
+        let scan_cap = if unfiltered {
+            list_cap.min(self.config.max_sort_buffer)
+        } else {
+            list_cap
+        };
+        let requested_end = pagination.map_or(usize::MAX, |p| p.offset.saturating_add(p.limit));
+        RowSink::best(sort, requested_end.min(scan_cap))
+    }
+
     fn row_json(entity_name: &str, key: &[u8], value: &[u8]) -> Result<Value> {
         let (_, id) = keys::decode_data_key(key)?;
         let entity = Entity::deserialize(entity_name.to_string(), id, value)?;
@@ -246,6 +353,7 @@ impl Database {
         &self,
         entity_name: &str,
         filters: &[Filter],
+        sink: RowSink<'_>,
         scope: &mut RowScope<'_>,
     ) -> Result<Vec<Value>> {
         let index_manager = self.index_manager.read().await;
@@ -264,7 +372,7 @@ impl Database {
                 return if ids.is_empty() {
                     Ok(vec![])
                 } else {
-                    self.list_from_index_ids(entity_name, &ids, filters, scope)
+                    self.list_from_index_ids(entity_name, &ids, filters, sink, scope)
                         .await
                 };
             }
@@ -282,13 +390,12 @@ impl Database {
             )?;
             if !ids.is_empty() {
                 return self
-                    .list_from_index_ids(entity_name, &ids, filters, scope)
+                    .list_from_index_ids(entity_name, &ids, filters, sink, scope)
                     .await;
             }
         }
 
-        let max_results = self.config.max_list_results.unwrap_or(usize::MAX);
-        self.scan_filtered_entities(entity_name, filters, max_results, scope)
+        self.collect_rows(entity_name, filters, sink, scope)
     }
 
     fn collect_range_bounds(
@@ -314,12 +421,11 @@ impl Database {
         entity_name: &str,
         ids: &[String],
         filters: &[Filter],
+        mut sink: RowSink<'_>,
         scope: &mut RowScope<'_>,
     ) -> Result<Vec<Value>> {
-        let max_results = self.config.max_list_results.unwrap_or(usize::MAX);
-        let mut results = Vec::new();
         for id in ids {
-            if results.len() >= max_results {
+            if sink.is_full() {
                 break;
             }
             match self
@@ -330,7 +436,7 @@ impl Database {
                     if Self::matches_filters(&entity_data, filters)
                         && scope.admits(self, &entity_data)?
                     {
-                        results.push(entity_data);
+                        sink.offer(entity_data);
                     }
                 }
                 Err(Error::NotFound { .. }) => {
@@ -357,7 +463,7 @@ impl Database {
                 Err(e) => return Err(e),
             }
         }
-        Ok(results)
+        Ok(sink.into_rows())
     }
 
     fn purge_stale_index_entries(&self, entity_name: &str, id: &str) -> Result<usize> {
@@ -421,25 +527,6 @@ impl Database {
         )
     }
 
-    fn scan_all_entities(&self, entity_name: &str, scope: &mut RowScope<'_>) -> Result<Vec<Value>> {
-        let max_results = self.config.max_sort_buffer;
-        let prefix = format!("data/{entity_name}/");
-        let items = self.storage.prefix_scan(prefix.as_bytes())?;
-        let mut results = Vec::new();
-        for (key, value) in items {
-            if results.len() >= max_results {
-                break;
-            }
-            let (_, id) = keys::decode_data_key(&key)?;
-            let entity = Entity::deserialize(entity_name.to_string(), id, &value)?;
-            let row = entity.to_json();
-            if scope.admits(self, &row)? {
-                results.push(row);
-            }
-        }
-        Ok(results)
-    }
-
     pub(super) fn scan_filtered_entities(
         &self,
         entity_name: &str,
@@ -447,21 +534,34 @@ impl Database {
         max_results: usize,
         scope: &mut RowScope<'_>,
     ) -> Result<Vec<Value>> {
+        let sink = RowSink::First {
+            limit: max_results,
+            rows: Vec::new(),
+        };
+        self.collect_rows(entity_name, filters, sink, scope)
+    }
+
+    fn collect_rows(
+        &self,
+        entity_name: &str,
+        filters: &[Filter],
+        mut sink: RowSink<'_>,
+        scope: &mut RowScope<'_>,
+    ) -> Result<Vec<Value>> {
         let prefix = format!("data/{entity_name}/");
         let items = self.storage.prefix_scan(prefix.as_bytes())?;
-        let mut results = Vec::new();
         for (key, value) in items {
-            if results.len() >= max_results {
+            if sink.is_full() {
                 break;
             }
             let (_, id) = keys::decode_data_key(&key)?;
             let entity = Entity::deserialize(entity_name.to_string(), id, &value)?;
             let entity_data = entity.to_json();
             if Self::matches_filters(&entity_data, filters) && scope.admits(self, &entity_data)? {
-                results.push(entity_data);
+                sink.offer(entity_data);
             }
         }
-        Ok(results)
+        Ok(sink.into_rows())
     }
 
     fn apply_pagination(&self, results: &[Value], pagination: Option<&Pagination>) -> Vec<Value> {
@@ -483,14 +583,9 @@ impl Database {
             requested_end
         };
 
-        if offset >= results.len() {
-            return vec![];
-        }
-        results[offset..final_end].to_vec()
-    }
-
-    fn sort_results(results: &mut [Value], sort: &[SortOrder]) {
-        mqdb_core::query::sort_results(results, sort);
+        results
+            .get(offset..final_end)
+            .map_or_else(Vec::new, <[Value]>::to_vec)
     }
 
     pub(super) fn matches_filters(entity: &Value, filters: &[Filter]) -> bool {
