@@ -21,30 +21,30 @@ pub fn compare_json_values(a: &Value, b: &Value) -> Ordering {
     }
 }
 
-pub fn sort_results(results: &mut [Value], sort: &[SortOrder]) {
-    results.sort_by(|a, b| {
-        for order in sort {
-            let a_val = a.get(&order.field);
-            let b_val = b.get(&order.field);
+#[must_use]
+pub fn compare_by_sort(a: &Value, b: &Value, sort: &[SortOrder]) -> Ordering {
+    for order in sort {
+        let cmp = match (a.get(&order.field), b.get(&order.field)) {
+            (Some(av), Some(bv)) => compare_json_values(av, bv),
+            (Some(_), None) => Ordering::Greater,
+            (None, Some(_)) => Ordering::Less,
+            (None, None) => Ordering::Equal,
+        };
 
-            let cmp = match (a_val, b_val) {
-                (Some(av), Some(bv)) => compare_json_values(av, bv),
-                (Some(_), None) => Ordering::Greater,
-                (None, Some(_)) => Ordering::Less,
-                (None, None) => Ordering::Equal,
-            };
+        let cmp = match order.direction {
+            SortDirection::Asc => cmp,
+            SortDirection::Desc => cmp.reverse(),
+        };
 
-            let cmp = match order.direction {
-                SortDirection::Asc => cmp,
-                SortDirection::Desc => cmp.reverse(),
-            };
-
-            if cmp != Ordering::Equal {
-                return cmp;
-            }
+        if cmp != Ordering::Equal {
+            return cmp;
         }
-        Ordering::Equal
-    });
+    }
+    Ordering::Equal
+}
+
+pub fn sort_results(results: &mut [Value], sort: &[SortOrder]) {
+    results.sort_by(|a, b| compare_by_sort(a, b, sort));
 }
 
 #[must_use]
