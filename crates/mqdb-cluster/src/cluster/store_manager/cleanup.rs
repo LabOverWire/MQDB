@@ -71,25 +71,25 @@ impl StoreManager {
     }
 
     /// # Errors
-    /// Returns `PersistenceError` if the removals cannot be written to storage.
+    /// Returns `PersistenceError` if the removals cannot be written to storage; the offsets
+    /// then stay in memory and the next cleanup retries them.
     pub fn cleanup_stale_offsets(&self, now: u64) -> Result<usize, StoreApplyError> {
-        let removals: Vec<ReplicationWrite> = self
-            .offsets
-            .cleanup_stale(now)
-            .into_iter()
-            .map(|(consumer_id, partition_num)| {
-                ReplicationWrite::new(
-                    session_partition(&consumer_id),
-                    Operation::Delete,
-                    Epoch::ZERO,
-                    0,
-                    entity::OFFSETS.to_string(),
-                    format!("{consumer_id}:{partition_num}"),
-                    Vec::new(),
-                )
-            })
-            .collect();
-        self.persist_writes_batch(&removals)?;
-        Ok(removals.len())
+        self.offsets.cleanup_stale(now, |stale| {
+            let removals: Vec<ReplicationWrite> = stale
+                .iter()
+                .map(|(consumer_id, partition_num)| {
+                    ReplicationWrite::new(
+                        session_partition(consumer_id),
+                        Operation::Delete,
+                        Epoch::ZERO,
+                        0,
+                        entity::OFFSETS.to_string(),
+                        format!("{consumer_id}:{partition_num}"),
+                        Vec::new(),
+                    )
+                })
+                .collect();
+            self.persist_writes_batch(&removals)
+        })
     }
 }

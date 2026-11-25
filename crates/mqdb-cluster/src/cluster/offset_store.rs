@@ -176,19 +176,39 @@ impl OffsetStore {
 
     /// # Panics
     /// Panics if the internal lock is poisoned.
-    pub fn cleanup_stale(&self, now: u64) -> Vec<OffsetKey> {
-        self.cleanup_stale_with_ttl(now, OFFSET_STALE_TTL_MS)
+    ///
+    /// # Errors
+    /// Returns the error from `persist`, in which case nothing is removed.
+    pub fn cleanup_stale<E>(
+        &self,
+        now: u64,
+        persist: impl FnOnce(&[OffsetKey]) -> Result<(), E>,
+    ) -> Result<usize, E> {
+        self.cleanup_stale_with_ttl(now, OFFSET_STALE_TTL_MS, persist)
     }
 
     /// # Panics
     /// Panics if the internal lock is poisoned.
-    pub fn cleanup_stale_with_ttl(&self, now: u64, ttl_ms: u64) -> Vec<OffsetKey> {
-        self.offsets
-            .write()
-            .unwrap()
-            .extract_if(|_, offset| offset.is_stale(now, ttl_ms))
-            .map(|(key, _)| key)
-            .collect()
+    ///
+    /// # Errors
+    /// Returns the error from `persist`, in which case nothing is removed.
+    pub fn cleanup_stale_with_ttl<E>(
+        &self,
+        now: u64,
+        ttl_ms: u64,
+        persist: impl FnOnce(&[OffsetKey]) -> Result<(), E>,
+    ) -> Result<usize, E> {
+        let mut offsets = self.offsets.write().unwrap();
+        let stale: Vec<OffsetKey> = offsets
+            .iter()
+            .filter(|(_, offset)| offset.is_stale(now, ttl_ms))
+            .map(|(key, _)| key.clone())
+            .collect();
+        persist(&stale)?;
+        for key in &stale {
+            offsets.remove(key);
+        }
+        Ok(stale.len())
     }
 
     /// # Panics
@@ -508,9 +528,14 @@ mod tests {
 
         let ttl_ms = 5000;
         let now = 10000;
-        let removed = store.cleanup_stale_with_ttl(now, ttl_ms);
+        let mut persisted = Vec::new();
+        let removed = store.cleanup_stale_with_ttl(now, ttl_ms, |keys| {
+            persisted.extend_from_slice(keys);
+            Ok::<(), OffsetStoreError>(())
+        });
 
-        assert_eq!(removed, vec![("old-consumer".to_string(), 0)]);
+        assert_eq!(removed, Ok(1));
+        assert_eq!(persisted, vec![("old-consumer".to_string(), 0)]);
         assert_eq!(store.count(), 2);
         assert!(store.get("old-consumer", partition(0)).is_none());
         assert!(store.get("recent-consumer", partition(0)).is_some());
@@ -576,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn query_with_zero_limit_reports_more_without_a_cursor() {
+    fn query_with_zero_limit_returns_an_empty_final_page() {
         let store = OffsetStore::new(node(1));
         store.commit("c", partition(1), 1, 1);
 

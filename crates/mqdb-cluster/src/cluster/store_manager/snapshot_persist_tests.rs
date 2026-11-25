@@ -341,6 +341,36 @@ fn a_stale_offset_cleaned_up_is_not_recovered_after_a_restart() {
 }
 
 #[test]
+fn a_failed_stale_offset_removal_is_retried() {
+    let consumer = "dev:1";
+    let offset_partition = PartitionId::new(10).unwrap();
+    let faulty = FaultyBackend::shared();
+    let store_disk: Arc<dyn StorageBackend> = faulty.clone();
+    let store = with_storage(1, &store_disk);
+    persist(
+        &store,
+        store
+            .commit_offset_replicated(consumer, offset_partition, 42, 1)
+            .1,
+    );
+
+    faulty.fail_writes(true);
+    let first = store.cleanup_stale_offsets(u64::MAX);
+    faulty.fail_writes(false);
+    let second = store.cleanup_stale_offsets(u64::MAX);
+
+    let in_memory = store.offsets.get(consumer, offset_partition).is_some();
+    let on_disk_after_restart = recovered(&store_disk)
+        .offsets
+        .get(consumer, offset_partition)
+        .is_some();
+    assert!(
+        in_memory == on_disk_after_restart,
+        "first={first:?} second={second:?} in_memory={in_memory} recovered={on_disk_after_restart}"
+    );
+}
+
+#[test]
 fn an_import_writes_the_keys_and_values_normal_writes_write() {
     let source_disk: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
     let source = written_by_normal_paths(&source_disk);
