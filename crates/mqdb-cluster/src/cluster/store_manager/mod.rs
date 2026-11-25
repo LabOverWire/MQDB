@@ -43,6 +43,7 @@ use mqdb_core::storage::StorageBackend;
 use std::sync::Arc;
 
 pub(crate) use primary_marker::HeldPrimaries;
+pub(crate) use recovery::is_recovered_from_storage;
 #[cfg(test)]
 pub(crate) use transfer_window::TRANSFER_WINDOW_CAPACITY;
 

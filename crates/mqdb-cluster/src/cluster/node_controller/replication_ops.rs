@@ -5,7 +5,9 @@ use super::super::entity;
 use super::super::protocol::{self, ChangeEventRecord, ReplicationAck, ReplicationWrite};
 use super::super::quorum::{QuorumResult, QuorumTracker};
 use super::super::replication::{ReplicaRole, ReplicaState};
-use super::super::store_manager::{HeldPrimaries, StoreApplyError, StoreManager};
+use super::super::store_manager::{
+    HeldPrimaries, StoreApplyError, StoreManager, is_recovered_from_storage,
+};
 use super::super::transport::{ClusterMessage, ClusterTransport};
 use super::super::{Epoch, NodeId, PartitionAssignment, PartitionId, PartitionMap};
 use super::{
@@ -527,6 +529,21 @@ impl<T: ClusterTransport> NodeController<T> {
     ) -> Result<(), ReplicationError> {
         match self.stores.apply_write(write) {
             Ok(()) => {}
+            Err(StoreApplyError::PersistenceError) if !is_recovered_from_storage(&write.entity) => {
+                tracing::warn!(
+                    entity = write.entity,
+                    id = write.id,
+                    "broadcast write not stored on this node, applied in memory and sent"
+                );
+                if let Err(error) = self.stores.apply_write_unpersisted(write) {
+                    tracing::warn!(
+                        entity = write.entity,
+                        id = write.id,
+                        %error,
+                        "unstored broadcast write not applied in memory"
+                    );
+                }
+            }
             Err(StoreApplyError::PersistenceError) => {
                 tracing::error!(
                     entity = write.entity,

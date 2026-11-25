@@ -52,6 +52,13 @@ impl StoreManager {
     }
 
     /// # Errors
+    /// Returns `StoreApplyError` if the entity type is unknown or the write does not apply.
+    pub fn apply_write_unpersisted(&self, write: &ReplicationWrite) -> Result<(), StoreApplyError> {
+        self.note_transfer_write(write);
+        self.apply_to_memory(write)
+    }
+
+    /// # Errors
     /// Returns `StoreApplyError` if persistence fails or the entity type is unknown.
     pub fn apply_write_with_outbox(
         &self,
