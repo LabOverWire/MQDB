@@ -79,6 +79,7 @@ pub enum SchemaStoreError {
     AlreadyExists,
     SerializationError,
     InvalidState,
+    StoreFailed,
 }
 
 impl std::fmt::Display for SchemaStoreError {
@@ -88,6 +89,7 @@ impl std::fmt::Display for SchemaStoreError {
             Self::AlreadyExists => write!(f, "schema already exists"),
             Self::SerializationError => write!(f, "serialization error"),
             Self::InvalidState => write!(f, "invalid schema state"),
+            Self::StoreFailed => write!(f, "the schema could not be stored"),
         }
     }
 }
@@ -119,19 +121,20 @@ impl SchemaStore {
     ///
     /// # Errors
     /// Returns `AlreadyExists` if the schema already exists.
-    pub fn register(
+    pub fn prepare_register(
         &self,
         entity: &str,
         schema_data: &[u8],
     ) -> Result<ClusterSchema, SchemaStoreError> {
-        let mut schemas = self.schemas.write().unwrap();
-        if schemas.contains_key(entity) {
+        if self.schemas.read().unwrap().contains_key(entity) {
             return Err(SchemaStoreError::AlreadyExists);
         }
-
-        let schema = ClusterSchema::create(entity, 1, SchemaState::Active, schema_data);
-        schemas.insert(entity.to_string(), schema.clone());
-        Ok(schema)
+        Ok(ClusterSchema::create(
+            entity,
+            1,
+            SchemaState::Active,
+            schema_data,
+        ))
     }
 
     /// # Panics
@@ -146,18 +149,19 @@ impl SchemaStore {
     ///
     /// # Errors
     /// Returns `NotFound` if the schema does not exist.
-    pub fn update(
+    pub fn prepare_update(
         &self,
         entity: &str,
         schema_data: &[u8],
     ) -> Result<ClusterSchema, SchemaStoreError> {
-        let mut schemas = self.schemas.write().unwrap();
+        let schemas = self.schemas.read().unwrap();
         let existing = schemas.get(entity).ok_or(SchemaStoreError::NotFound)?;
-
-        let new_version = existing.schema_version + 1;
-        let schema = ClusterSchema::create(entity, new_version, SchemaState::Active, schema_data);
-        schemas.insert(entity.to_string(), schema.clone());
-        Ok(schema)
+        Ok(ClusterSchema::create(
+            entity,
+            existing.schema_version + 1,
+            SchemaState::Active,
+            schema_data,
+        ))
     }
 
     /// # Panics
@@ -367,9 +371,26 @@ pub fn schema_key(entity: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cluster::test_support::register_schema;
 
     fn node(id: u16) -> NodeId {
         NodeId::validated(id).unwrap()
+    }
+
+    #[test]
+    fn prepared_schemas_leave_the_catalog_unchanged() {
+        let store = SchemaStore::new(node(1));
+
+        store.prepare_register("users", b"{v1}").unwrap();
+        assert!(store.get("users").is_none());
+
+        register_schema(&store, "users", b"{v1}");
+        store.prepare_update("users", b"{v2}").unwrap();
+        let kept = store.get("users").unwrap();
+        assert_eq!(
+            (kept.schema_version, kept.data.as_slice()),
+            (1, &b"{v1}"[..])
+        );
     }
 
     #[test]
@@ -387,7 +408,7 @@ mod tests {
     fn register_and_get() {
         let store = SchemaStore::new(node(1));
 
-        store.register("users", b"{\"fields\":[]}").unwrap();
+        register_schema(&store, "users", b"{\"fields\":[]}");
         let schema = store.get("users").unwrap();
 
         assert_eq!(schema.entity_str(), "users");
@@ -399,8 +420,8 @@ mod tests {
     fn register_duplicate_fails() {
         let store = SchemaStore::new(node(1));
 
-        store.register("users", b"{}").unwrap();
-        let result = store.register("users", b"{}");
+        register_schema(&store, "users", b"{}");
+        let result = store.prepare_register("users", b"{}");
 
         assert_eq!(result, Err(SchemaStoreError::AlreadyExists));
     }
@@ -409,8 +430,8 @@ mod tests {
     fn update_increments_version() {
         let store = SchemaStore::new(node(1));
 
-        store.register("users", b"{v1}").unwrap();
-        let updated = store.update("users", b"{v2}").unwrap();
+        register_schema(&store, "users", b"{v1}");
+        let updated = store.prepare_update("users", b"{v2}").unwrap();
 
         assert_eq!(updated.schema_version, 2);
         assert_eq!(updated.data, b"{v2}");
@@ -420,7 +441,7 @@ mod tests {
     fn drop_marks_as_dropped() {
         let store = SchemaStore::new(node(1));
 
-        store.register("users", b"{}").unwrap();
+        register_schema(&store, "users", b"{}");
         let dropped = store.drop_schema("users").unwrap();
 
         assert_eq!(dropped.state(), SchemaState::Dropped);
@@ -435,7 +456,7 @@ mod tests {
 
         assert!(!store.is_valid_for_write("users"));
 
-        store.register("users", b"{}").unwrap();
+        register_schema(&store, "users", b"{}");
         assert!(store.is_valid_for_write("users"));
 
         store.drop_schema("users").unwrap();
@@ -460,9 +481,9 @@ mod tests {
         let src = SchemaStore::new(node(1));
         let dst = SchemaStore::new(node(2));
 
-        src.register("alpha", b"{}").unwrap();
-        src.register("beta", b"{}").unwrap();
-        src.register("gamma", b"{}").unwrap();
+        register_schema(&src, "alpha", b"{}");
+        register_schema(&src, "beta", b"{}");
+        register_schema(&src, "gamma", b"{}");
 
         let target_partition = src.get("alpha").unwrap().partition();
 
@@ -503,7 +524,7 @@ mod tests {
 
         let entities = ["alpha", "beta", "gamma", "delta", "epsilon"];
         for entity in &entities {
-            src.register(entity, b"{}").unwrap();
+            register_schema(&src, entity, b"{}");
         }
 
         let partitions: std::collections::HashSet<_> =

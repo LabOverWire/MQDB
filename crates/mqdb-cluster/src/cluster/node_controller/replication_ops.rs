@@ -5,7 +5,7 @@ use super::super::entity;
 use super::super::protocol::{self, ChangeEventRecord, ReplicationAck, ReplicationWrite};
 use super::super::quorum::{QuorumResult, QuorumTracker};
 use super::super::replication::{ReplicaRole, ReplicaState};
-use super::super::store_manager::{HeldPrimaries, StoreManager};
+use super::super::store_manager::{HeldPrimaries, StoreApplyError, StoreManager};
 use super::super::transport::{ClusterMessage, ClusterTransport};
 use super::super::{Epoch, NodeId, PartitionAssignment, PartitionId, PartitionMap};
 use super::{
@@ -521,14 +521,28 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    async fn broadcast_write(&self, write: &ReplicationWrite) {
-        if let Err(error) = self.stores.apply_write(write) {
-            tracing::error!(
-                entity = write.entity,
-                id = write.id,
-                %error,
-                "broadcast write not applied on this node"
-            );
+    pub(crate) async fn broadcast_write(
+        &self,
+        write: &ReplicationWrite,
+    ) -> Result<(), ReplicationError> {
+        match self.stores.apply_write(write) {
+            Ok(()) => {}
+            Err(StoreApplyError::PersistenceError) => {
+                tracing::error!(
+                    entity = write.entity,
+                    id = write.id,
+                    "broadcast write not stored on this node, not sent"
+                );
+                return Err(ReplicationError::StoreFailed);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    entity = write.entity,
+                    id = write.id,
+                    %error,
+                    "broadcast write stored but not applied in memory"
+                );
+            }
         }
         let alive = self.heartbeat.alive_nodes();
         let targets: Vec<_> = alive.iter().filter(|&n| *n != self.node_id).collect();
@@ -550,6 +564,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 tracing::warn!(to = node.get(), %error, entity = write.entity, "broadcast write not sent");
             }
         }
+        Ok(())
     }
 
     fn believed_primary(&self, partition: PartitionId) -> Option<(NodeId, Epoch)> {
@@ -591,8 +606,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
 
         if is_broadcast_entity(&write.entity) {
-            self.broadcast_write(&write).await;
-            return Ok(());
+            return self.broadcast_write(&write).await;
         }
 
         if self.waiting_to_take(partition) && extra_outbox.is_empty() {
