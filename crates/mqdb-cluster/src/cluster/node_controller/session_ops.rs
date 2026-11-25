@@ -38,9 +38,17 @@ impl<T: ClusterTransport> NodeController<T> {
         let replicas: Vec<NodeId> = self.partition_map.replicas(partition).to_vec();
         let required_acks = replicas.len();
 
-        if !replicas.is_empty() {
-            self.replicate_write(write, &replicas, required_acks)
-                .await?;
+        if !replicas.is_empty()
+            && let Err(error) = self.replicate_write(write, &replicas, required_acks).await
+        {
+            let removed = self.stores.sessions.remove(client_id);
+            tracing::warn!(
+                client_id,
+                removed = removed.is_some(),
+                %error,
+                "session not created"
+            );
+            return Err(error);
         }
 
         Ok(session)
@@ -116,7 +124,7 @@ impl<T: ClusterTransport> NodeController<T> {
         Ok((session, rx))
     }
 
-    fn apply_primary_write(
+    pub(super) fn apply_primary_write(
         &self,
         write_msg: &ReplicationWrite,
         change_event: Option<&super::change_events::WriteChangeEvent>,
