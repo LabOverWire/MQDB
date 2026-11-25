@@ -5,11 +5,15 @@ use super::store_failure::{controller_where, publish_completing_unique, response
 use super::*;
 use crate::cluster::db::{ClusterConstraint, OnDeleteAction, data_partition};
 use crate::cluster::db_handler::{DbPublishResult, DbRequestHandler, FkCheckCompletion};
+use crate::cluster::node_controller::db_ops::CLIENT_WRITE_LIMIT;
 use crate::cluster::protocol::{JsonDbOp, JsonDbRequest};
 use serde_json::{Value, json};
 
-const LIMIT: &str = "bytes, max 10485760)";
 const MIB: usize = 1024 * 1024;
+
+fn limit_text() -> String {
+    format!("bytes, max {CLIENT_WRITE_LIMIT})")
+}
 
 fn node(id: u16) -> NodeId {
     NodeId::validated(id).unwrap()
@@ -57,7 +61,7 @@ fn data_writes_sent(ctrl: &NodeController<MockTransport>) -> usize {
 fn refused_as_too_large(reply: &Value) -> bool {
     reply["code"] == json!(400)
         && reply["message"].as_str().is_some_and(|message| {
-            message.contains("too large to replicate") && message.contains(LIMIT)
+            message.contains("too large to replicate") && message.contains(&limit_text())
         })
 }
 
@@ -118,7 +122,9 @@ async fn the_controller_refuses_a_record_over_the_frame_limit() {
         .map(|error| error.map_or_else(|| "accepted".to_string(), |e| e.to_string()))
         .collect();
     assert!(
-        messages.iter().all(|message| message.contains(LIMIT)),
+        messages
+            .iter()
+            .all(|message| message.contains(&limit_text())),
         "{messages:?}"
     );
     assert!(ctrl.db_get("items", "r1").is_none());
@@ -398,11 +404,8 @@ fn frame_len_of(ctrl: &NodeController<MockTransport>, id: &str, blob_len: usize)
 async fn a_record_whose_frame_is_exactly_the_limit_is_stored_and_one_byte_more_is_refused() {
     let mut ctrl = primary_with_replica();
     let probe = frame_len_of(&ctrl, "r1", MIB);
-    let at_limit = MIB + (crate::cluster::transport::MAX_MESSAGE_SIZE - probe);
-    assert_eq!(
-        frame_len_of(&ctrl, "r1", at_limit),
-        crate::cluster::transport::MAX_MESSAGE_SIZE
-    );
+    let at_limit = MIB + (CLIENT_WRITE_LIMIT - probe);
+    assert_eq!(frame_len_of(&ctrl, "r1", at_limit), CLIENT_WRITE_LIMIT);
 
     let over = serde_json::to_vec(&json!({"blob": blob(at_limit + 1)})).unwrap();
     let refused = ctrl.db_create("items", "r2", &over, 1000).await;
@@ -412,8 +415,8 @@ async fn a_record_whose_frame_is_exactly_the_limit_is_stored_and_one_byte_more_i
     assert_eq!(
         refused.err(),
         Some(crate::cluster::db::DbDataStoreError::TooLarge {
-            size: crate::cluster::transport::MAX_MESSAGE_SIZE + 1,
-            limit: crate::cluster::transport::MAX_MESSAGE_SIZE,
+            size: CLIENT_WRITE_LIMIT + 1,
+            limit: CLIENT_WRITE_LIMIT,
         })
     );
     assert!(stored.is_ok());
@@ -448,4 +451,165 @@ fn the_frame_length_is_a_catchup_response_carrying_the_write_alone() {
     assert_eq!(frame_len, encoded_len(&catchup));
     assert!(frame_len >= encoded_len(&ClusterMessage::Write(write.clone())));
     assert!(frame_len >= encoded_len(&ClusterMessage::WriteRequest(write)));
+}
+
+fn reported_size(reply: &Value) -> usize {
+    let message = reply["message"].as_str().unwrap();
+    let start = message.find('(').unwrap() + 1;
+    let end = message.find(" bytes").unwrap();
+    message[start..end].parse().unwrap()
+}
+
+async fn child_at_the_limit(
+    ctrl: &mut NodeController<MockTransport>,
+    entity: &str,
+    fk_value: &str,
+) {
+    let mut guess = 6 * MIB;
+    for _ in 0..8 {
+        let attempt = request(
+            ctrl,
+            &format!("$DB/{entity}/create"),
+            &json!({"id": "c1", "author_id": fk_value, "blob": blob(guess)}),
+        )
+        .await;
+        if attempt["status"] == "ok" {
+            return;
+        }
+        assert!(refused_as_too_large(&attempt), "{}", outcome(&attempt));
+        let over = reported_size(&attempt) - CLIENT_WRITE_LIMIT;
+        guess -= over.div_ceil(2);
+    }
+    panic!("no child could be created at the limit");
+}
+
+#[tokio::test]
+async fn r388_set_null_cascade_on_a_child_near_the_limit_leaves_a_dangling_reference() {
+    let mut ctrl = primary_with_replica();
+    ctrl.constraint_add(
+        &ClusterConstraint::foreign_key(
+            "posts",
+            "posts_author_fk",
+            "author_id",
+            "users",
+            "id",
+            OnDeleteAction::SetNull,
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let parent = request(&mut ctrl, "$DB/users/create", &json!({"id": "u"})).await;
+    assert_eq!(parent["status"], "ok");
+    child_at_the_limit(&mut ctrl, "posts", "u").await;
+
+    let deleted = request(&mut ctrl, "$DB/users/u/delete", &json!({})).await;
+    let child = stored(&ctrl, "posts", "c1").unwrap();
+    eprintln!(
+        "R388 parent delete: {} | parent stored={} | child author_id={}",
+        outcome(&deleted),
+        ctrl.db_get("users", "u").is_some(),
+        child["author_id"]
+    );
+    assert!(
+        child["author_id"].is_null() || ctrl.db_get("users", "u").is_some(),
+        "parent deleted but child still references it"
+    );
+}
+
+#[tokio::test]
+async fn r388_a_record_stored_at_the_limit_cannot_be_deleted_through_json() {
+    let mut ctrl = primary_with_replica();
+    let probe = frame_len_of(&ctrl, "r1", MIB);
+    let at_limit = MIB + (crate::cluster::transport::MAX_MESSAGE_SIZE - probe);
+    let fits = serde_json::to_vec(&json!({"blob": blob(at_limit)})).unwrap();
+    crate::cluster::test_support::put_record(&ctrl.stores().db_data, "items", "r1", &fits, 1000);
+
+    let deleted = request(&mut ctrl, "$DB/items/r1/delete", &json!({})).await;
+    eprintln!(
+        "R388 delete of a stored record: {} | still stored={}",
+        outcome(&deleted),
+        ctrl.db_get("items", "r1").is_some()
+    );
+    assert_eq!(deleted["status"], "ok", "{}", outcome(&deleted));
+}
+
+fn cascade_request(op: JsonDbOp, entity: &str, id: &str, payload: &Value) -> JsonDbRequest {
+    JsonDbRequest {
+        response_topic: "_mqdb/cascade_ack/2/7".to_string(),
+        ..forwarded(op, entity, Some(id), payload)
+    }
+}
+
+#[tokio::test]
+async fn a_remote_set_null_on_a_child_near_the_limit_is_acknowledged() {
+    let mut ctrl = primary_with_replica();
+    child_at_the_limit(&mut ctrl, "posts", "u").await;
+
+    ctrl.handle_json_db_request(
+        node(2),
+        data_partition("posts", "c1"),
+        &cascade_request(
+            JsonDbOp::Update,
+            "posts",
+            "c1",
+            &json!({"author_id": null, "__mqdb_fk_expected": "author_id=u"}),
+        ),
+    )
+    .await;
+
+    let replies = forwarded_replies(&ctrl);
+    assert_eq!(replies[0]["status"], "ok", "{}", outcome(&replies[0]));
+    assert!(stored(&ctrl, "posts", "c1").unwrap()["author_id"].is_null());
+}
+
+#[tokio::test]
+async fn a_remote_cascade_delete_of_a_record_at_the_frame_limit_is_acknowledged() {
+    let mut ctrl = primary_with_replica();
+    let probe = frame_len_of(&ctrl, "c1", MIB);
+    let at_limit = MIB + (crate::cluster::transport::MAX_MESSAGE_SIZE - probe);
+    let fits = serde_json::to_vec(&json!({"blob": blob(at_limit)})).unwrap();
+    crate::cluster::test_support::put_record(&ctrl.stores().db_data, "posts", "c1", &fits, 1000);
+
+    ctrl.handle_json_db_request(
+        node(2),
+        data_partition("posts", "c1"),
+        &cascade_request(JsonDbOp::Delete, "posts", "c1", &json!({})),
+    )
+    .await;
+
+    let replies = forwarded_replies(&ctrl);
+    assert_eq!(replies[0]["status"], "ok", "{}", outcome(&replies[0]));
+    assert!(ctrl.db_get("posts", "c1").is_none());
+}
+
+#[tokio::test]
+async fn a_delete_too_large_with_its_record_replicates_an_event_without_it() {
+    let mut ctrl = primary_with_replica();
+    let probe = frame_len_of(&ctrl, "r1", MIB);
+    let at_limit = MIB + (crate::cluster::transport::MAX_MESSAGE_SIZE - probe);
+    let fits = serde_json::to_vec(&json!({"blob": blob(at_limit)})).unwrap();
+    crate::cluster::test_support::put_record(&ctrl.stores().db_data, "items", "r1", &fits, 1000);
+
+    let deleted = request(&mut ctrl, "$DB/items/r1/delete", &json!({})).await;
+
+    let sent = ctrl.transport.sent_messages();
+    let write = sent
+        .iter()
+        .rev()
+        .find_map(|(_, message)| match message {
+            ClusterMessage::Write(w) if w.entity == crate::cluster::entity::DB_DATA => Some(w),
+            _ => None,
+        })
+        .unwrap();
+    let event: Value = serde_json::from_slice(&write.event.as_ref().unwrap().payload).unwrap();
+    assert_eq!(deleted["status"], "ok", "{}", outcome(&deleted));
+    assert!(
+        super::super::catchup::replication_frame_len(write).unwrap()
+            <= crate::cluster::transport::MAX_MESSAGE_SIZE
+    );
+    assert_eq!(
+        (&event["id"], &event["operation"], &event["data"]),
+        (&json!("r1"), &json!("Delete"), &Value::Null)
+    );
 }

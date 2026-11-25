@@ -115,6 +115,31 @@ impl<'a> EventOrigin<'a> {
     }
 }
 
+const CASCADE_HEADROOM: usize = 64 * 1024;
+pub(crate) const CLIENT_WRITE_LIMIT: usize = MAX_MESSAGE_SIZE - CASCADE_HEADROOM;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OversizeWrite {
+    Refuse,
+    RefuseUnlessClearing,
+    SlimEvent,
+}
+
+fn without_record(event: &ChangeEvent) -> ChangeEvent {
+    ChangeEvent {
+        sequence: event.sequence,
+        entity: event.entity.clone(),
+        id: event.id.clone(),
+        operation: event.operation.clone(),
+        data: None,
+        operation_id: event.operation_id.clone(),
+        sender: event.sender.clone(),
+        client_id: event.client_id.clone(),
+        scope: event.scope.clone(),
+        recipients: event.recipients.clone(),
+    }
+}
+
 pub(crate) fn change_event_record(event: &ChangeEvent) -> ChangeEventRecord {
     ChangeEventRecord {
         topic: event.event_topic(0),
@@ -232,7 +257,8 @@ impl<T: ClusterTransport> NodeController<T> {
         timestamp_ms: u64,
     ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
         let (db_entity, write) = self.db_create_prepare(entity_type, id, data, timestamp_ms)?;
-        self.commit_write(write, None, &[]).await?;
+        self.commit_write(write, None, &[], OversizeWrite::Refuse)
+            .await?;
         Ok(db_entity)
     }
 
@@ -256,7 +282,8 @@ impl<T: ClusterTransport> NodeController<T> {
         timestamp_ms: u64,
     ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
         let (db_entity, write) = self.db_update_prepare(entity_type, id, data, timestamp_ms)?;
-        self.commit_write(write, None, &[]).await?;
+        self.commit_write(write, None, &[], OversizeWrite::Refuse)
+            .await?;
         Ok(db_entity)
     }
 
@@ -275,31 +302,49 @@ impl<T: ClusterTransport> NodeController<T> {
         id: &str,
     ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
         let (db_entity, write) = self.db_delete_prepare(entity_type, id)?;
-        self.commit_write(write, None, &[]).await?;
+        self.commit_write(write, None, &[], OversizeWrite::SlimEvent)
+            .await?;
         Ok(db_entity)
     }
 
     async fn commit_write(
         &mut self,
         write: ReplicationWrite,
-        event: Option<ChangeEventRecord>,
+        event: Option<&ChangeEvent>,
         extra_outbox: &[(Vec<u8>, Vec<u8>)],
+        oversize: OversizeWrite,
     ) -> Result<(), super::db::DbDataStoreError> {
-        let mut write = write.with_event(event);
-        if let Some(size) =
-            super::catchup::replication_frame_len(&write).filter(|size| *size > MAX_MESSAGE_SIZE)
-        {
+        let mut write = write.with_event(event.map(change_event_record));
+        let size = super::catchup::replication_frame_len(&write).unwrap_or(0);
+        let refused = match oversize {
+            OversizeWrite::Refuse => size > CLIENT_WRITE_LIMIT,
+            OversizeWrite::RefuseUnlessClearing => {
+                size > CLIENT_WRITE_LIMIT && !event.is_some_and(|e| self.update_only_clears(e))
+            }
+            OversizeWrite::SlimEvent => false,
+        };
+        if refused {
+            tracing::warn!(
+                entity = write.entity,
+                id = write.id,
+                size,
+                limit = CLIENT_WRITE_LIMIT,
+                "write refused: too large to replicate"
+            );
+            return Err(super::db::DbDataStoreError::TooLarge {
+                size,
+                limit: CLIENT_WRITE_LIMIT,
+            });
+        }
+        if size > MAX_MESSAGE_SIZE {
+            write.event = event.map(|e| change_event_record(&without_record(e)));
             tracing::warn!(
                 entity = write.entity,
                 id = write.id,
                 size,
                 limit = MAX_MESSAGE_SIZE,
-                "write refused: too large to replicate"
+                "change event replicated without the record: too large to replicate with it"
             );
-            return Err(super::db::DbDataStoreError::TooLarge {
-                size,
-                limit: MAX_MESSAGE_SIZE,
-            });
         }
         let event = write.event.take();
         self.write_or_forward_with_event(write, event, extra_outbox)
@@ -313,12 +358,24 @@ impl<T: ClusterTransport> NodeController<T> {
             })
     }
 
+    fn update_only_clears(&self, event: &ChangeEvent) -> bool {
+        let (Some(Value::Object(updated)), Some(Value::Object(current))) = (
+            event.data.as_ref(),
+            self.current_record(&event.entity, &event.id),
+        ) else {
+            return false;
+        };
+        updated.iter().all(|(field, value)| {
+            field == "_version" || value.is_null() || current.get(field) == Some(value)
+        })
+    }
+
     pub async fn db_commit(
         &mut self,
         write: ReplicationWrite,
         event: &ChangeEvent,
     ) -> Result<(), super::db::DbDataStoreError> {
-        self.commit_write(write, Some(change_event_record(event)), &[])
+        self.commit_write(write, Some(event), &[], OversizeWrite::SlimEvent)
             .await
     }
 
@@ -346,8 +403,9 @@ impl<T: ClusterTransport> NodeController<T> {
     ) -> Result<(), super::db::DbDataStoreError> {
         self.commit_write(
             write,
-            Some(change_event_record(event)),
+            Some(event),
             &[(cascade.key.clone(), cascade.value.clone())],
+            OversizeWrite::SlimEvent,
         )
         .await
     }
@@ -370,7 +428,8 @@ impl<T: ClusterTransport> NodeController<T> {
             ),
             origin,
         );
-        self.db_commit(write, &event).await?;
+        self.commit_write(write, Some(&event), &[], OversizeWrite::Refuse)
+            .await?;
         Ok(db_entity)
     }
 
@@ -392,7 +451,13 @@ impl<T: ClusterTransport> NodeController<T> {
             ),
             origin,
         );
-        self.db_commit(write, &event).await?;
+        self.commit_write(
+            write,
+            Some(&event),
+            &[],
+            OversizeWrite::RefuseUnlessClearing,
+        )
+        .await?;
         Ok(db_entity)
     }
 
