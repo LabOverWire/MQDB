@@ -366,6 +366,45 @@ async fn a_forwarded_delete_restricted_by_an_fk_lookup_replies_with_its_request_
     assert!(ctrl.db_get("users", "u2").is_some());
 }
 
+#[tokio::test]
+async fn a_forwarded_delete_refused_after_the_lookup_when_the_role_is_lost_replies_with_its_request_id()
+ {
+    let mut ctrl = primary().await;
+    let request = forwarded(50, JsonDbOp::Delete, "users", "u2", &json!({}));
+    let PendingConstraintWork::FkDelete(work) = deferred(&mut ctrl, &request).await else {
+        panic!("the delete should wait on the remote FK reverse lookup");
+    };
+    ctrl.step_down(data_partition("users", "u2"));
+
+    ctrl.complete_pending_fk_delete_work(None, work.local_results, work.continuation)
+        .await;
+
+    assert_reply(&reply_to_forwarder(&ctrl), 50, "error");
+    assert!(ctrl.db_get("users", "u2").is_some());
+}
+
+#[tokio::test]
+async fn a_forwarded_update_refused_by_an_fk_check_replies_with_its_request_id() {
+    let mut ctrl = primary().await;
+    let request = forwarded(
+        51,
+        JsonDbOp::Update,
+        "posts",
+        "p1",
+        &json!({"author_id": REMOTE_AUTHOR}),
+    );
+    let PendingConstraintWork::Fk(work) = deferred(&mut ctrl, &request).await else {
+        panic!("the update should wait on the remote FK check");
+    };
+
+    let outcome = ctrl
+        .complete_pending_fk_work(false, Some("author missing".to_string()), work.continuation)
+        .await;
+
+    assert!(matches!(outcome, FkThenUniqueOutcome::Done));
+    assert_reply(&reply_to_forwarder(&ctrl), 51, "error");
+}
+
 fn vault_key() -> Vec<u8> {
     vec![7u8; 32]
 }
