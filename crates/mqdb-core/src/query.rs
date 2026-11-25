@@ -7,17 +7,30 @@ use crate::types::{Filter, FilterOp, SortDirection, SortOrder};
 use serde_json::Value;
 use std::cmp::Ordering;
 
+fn type_rank(value: &Value) -> u8 {
+    match value {
+        Value::Null => 0,
+        Value::Bool(_) => 1,
+        Value::Number(_) => 2,
+        Value::String(_) => 3,
+        Value::Array(_) => 4,
+        Value::Object(_) => 5,
+    }
+}
+
 #[must_use]
 pub fn compare_json_values(a: &Value, b: &Value) -> Ordering {
     match (a, b) {
         (Value::Number(a_num), Value::Number(b_num)) => {
             let a_f64 = a_num.as_f64().unwrap_or(0.0);
             let b_f64 = b_num.as_f64().unwrap_or(0.0);
-            a_f64.partial_cmp(&b_f64).unwrap_or(Ordering::Equal)
+            a_f64
+                .partial_cmp(&b_f64)
+                .unwrap_or_else(|| a_f64.total_cmp(&b_f64))
         }
         (Value::String(a_str), Value::String(b_str)) => a_str.cmp(b_str),
         (Value::Bool(a_bool), Value::Bool(b_bool)) => a_bool.cmp(b_bool),
-        _ => Ordering::Equal,
+        _ => type_rank(a).cmp(&type_rank(b)),
     }
 }
 
@@ -253,6 +266,69 @@ mod tests {
             compare_json_values(&json!(false), &json!(true)),
             Ordering::Less
         );
+    }
+
+    #[test]
+    fn compare_ranks_types_null_bool_number_string_array_object() {
+        let ranked = [
+            json!(null),
+            json!(true),
+            json!(-1),
+            json!("a"),
+            json!([1]),
+            json!({"k": 1}),
+        ];
+        for (low, high) in ranked.iter().zip(ranked.iter().skip(1)) {
+            assert_eq!(
+                compare_json_values(low, high),
+                Ordering::Less,
+                "{low} < {high}"
+            );
+            assert_eq!(
+                compare_json_values(high, low),
+                Ordering::Greater,
+                "{high} > {low}"
+            );
+        }
+    }
+
+    #[test]
+    fn compare_is_transitive_across_types() {
+        let values = [
+            json!(null),
+            json!(false),
+            json!(true),
+            json!(-2.5),
+            json!(0),
+            json!(3),
+            json!(u64::MAX),
+            json!(""),
+            json!("x"),
+            json!([]),
+            json!([2, 1]),
+            json!({}),
+            json!({"k": "v"}),
+        ];
+        for a in &values {
+            for b in &values {
+                assert_eq!(
+                    compare_json_values(a, b),
+                    compare_json_values(b, a).reverse(),
+                    "antisymmetry {a} {b}"
+                );
+                for c in &values {
+                    let ab = compare_json_values(a, b);
+                    let bc = compare_json_values(b, c);
+                    if ab != Ordering::Greater && bc != Ordering::Greater {
+                        assert_ne!(
+                            compare_json_values(a, c),
+                            Ordering::Greater,
+                            "transitivity {a} <= {b} <= {c}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

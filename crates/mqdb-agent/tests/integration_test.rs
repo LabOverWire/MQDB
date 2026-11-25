@@ -1409,6 +1409,73 @@ async fn test_sorted_list_keeps_scan_order_for_equal_keys() {
     }
 }
 
+async fn open_with_sort_values(values: &[Value]) -> (TempDir, Database) {
+    let tmp = TempDir::new().unwrap();
+    let config = DatabaseConfig::new(tmp.path()).without_background_tasks();
+    let db = Database::open_with_config(config).await.unwrap();
+    for (pos, value) in values.iter().enumerate() {
+        db.create(
+            "items".into(),
+            json!({"id": format!("r{pos}"), "v": value}),
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
+    }
+    (tmp, db)
+}
+
+async fn ids_sorted_by_v(
+    db: &Database,
+    direction: SortDirection,
+    pagination: Option<Pagination>,
+) -> Vec<String> {
+    db.list(
+        "items".into(),
+        vec![],
+        vec![SortOrder::new("v".into(), direction)],
+        pagination,
+        vec![],
+        None,
+    )
+    .await
+    .unwrap()
+    .iter()
+    .map(|row| row["id"].as_str().unwrap().to_string())
+    .collect()
+}
+
+#[tokio::test]
+async fn test_paging_one_by_one_visits_each_row_once_with_null_sort_key() {
+    let values = [json!(5), Value::Null, json!(3)];
+    let (_tmp, db) = open_with_sort_values(&values).await;
+    let whole = ids_sorted_by_v(&db, SortDirection::Asc, None).await;
+    let mut paged = Vec::new();
+    for offset in 0..values.len() {
+        paged.extend(
+            ids_sorted_by_v(&db, SortDirection::Asc, Some(Pagination::new(1, offset))).await,
+        );
+    }
+    assert_eq!(paged, whole, "pages of one row vs one unpaginated list");
+}
+
+#[tokio::test]
+async fn test_paging_one_by_one_visits_each_row_once_with_mixed_type_sort_key() {
+    let values = [json!(5), json!("x"), json!(3)];
+    let (_tmp, db) = open_with_sort_values(&values).await;
+    let whole = ids_sorted_by_v(&db, SortDirection::Asc, None).await;
+    let mut paged = Vec::new();
+    for offset in 0..values.len() {
+        paged.extend(
+            ids_sorted_by_v(&db, SortDirection::Asc, Some(Pagination::new(1, offset))).await,
+        );
+    }
+    assert_eq!(paged, whole, "pages of one row vs one unpaginated list");
+}
+
 #[tokio::test]
 async fn test_list_with_gt_filter_uses_index() {
     let tmp = TempDir::new().unwrap();
