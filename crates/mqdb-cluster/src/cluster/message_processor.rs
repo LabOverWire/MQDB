@@ -123,6 +123,8 @@ impl MessageProcessor {
                         }
                     }
                 }
+
+                else => break,
             }
         }
 
@@ -355,24 +357,47 @@ mod tests {
         assert!(!verdict_arrives(&rx_events, peer));
     }
 
-    #[test]
-    fn processor_forward_dedup() {
-        let node_id = NodeId::validated(1).unwrap();
-        let (tx_raft, _rx_raft) = flume::unbounded();
-        let (tx_events, _rx_events) = flume::unbounded();
-        let (tx_main, _rx_main) = flume::unbounded();
-        let (_tx_inbox, rx_inbox) = flume::unbounded();
-        let (_tx_tick, rx_tick) = flume::unbounded();
-
-        let mut processor = MessageProcessor::new(
-            node_id,
+    fn idle_processor() -> MessageProcessor {
+        MessageProcessor::new(
+            NodeId::validated(1).unwrap(),
             test_config(),
-            tx_raft,
-            tx_events,
-            tx_main,
+            flume::unbounded().0,
+            flume::unbounded().0,
+            flume::unbounded().0,
+            flume::unbounded().1,
+            flume::unbounded().1,
+        )
+    }
+
+    #[tokio::test]
+    async fn processor_stops_without_panicking_when_its_inputs_close() {
+        let (tx_inbox, rx_inbox) = flume::unbounded();
+        let (tx_tick, rx_tick) = flume::unbounded();
+        let (tx_batch, rx_batch) = flume::unbounded();
+        let processor = MessageProcessor::new(
+            NodeId::validated(1).unwrap(),
+            test_config(),
+            flume::unbounded().0,
+            flume::unbounded().0,
+            flume::unbounded().0,
             rx_inbox,
             rx_tick,
         );
+        let task = tokio::spawn(processor.run(tx_batch));
+
+        drop(tx_inbox);
+        drop(tx_tick);
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .expect("processor did not stop after its inputs closed");
+        assert!(outcome.is_ok(), "processor panicked: {outcome:?}");
+        assert!(rx_batch.is_disconnected());
+    }
+
+    #[test]
+    fn processor_forward_dedup() {
+        let mut processor = idle_processor();
 
         let fwd = ForwardedPublish::new(
             NodeId::validated(2).unwrap(),
@@ -399,22 +424,7 @@ mod tests {
 
     #[test]
     fn processor_dedup_capacity() {
-        let node_id = NodeId::validated(1).unwrap();
-        let (tx_raft, _rx_raft) = flume::unbounded();
-        let (tx_events, _rx_events) = flume::unbounded();
-        let (tx_main, _rx_main) = flume::unbounded();
-        let (_tx_inbox, rx_inbox) = flume::unbounded();
-        let (_tx_tick, rx_tick) = flume::unbounded();
-
-        let mut processor = MessageProcessor::new(
-            node_id,
-            test_config(),
-            tx_raft,
-            tx_events,
-            tx_main,
-            rx_inbox,
-            rx_tick,
-        );
+        let mut processor = idle_processor();
 
         for i in 0..FORWARD_DEDUP_CAPACITY {
             let fwd = ForwardedPublish::new(
