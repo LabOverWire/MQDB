@@ -317,6 +317,30 @@ fn an_imported_offset_for_a_consumer_id_containing_a_colon_survives_a_restart() 
 }
 
 #[test]
+fn a_stale_offset_cleaned_up_is_not_recovered_after_a_restart() {
+    let consumer = "dev:1";
+    let offset_partition = PartitionId::new(10).unwrap();
+    let store_disk: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
+    let store = with_storage(1, &store_disk);
+    persist(
+        &store,
+        store
+            .commit_offset_replicated(consumer, offset_partition, 42, 1)
+            .1,
+    );
+
+    assert_eq!(store.cleanup_stale_offsets(u64::MAX), Ok(1));
+
+    assert!(store.offsets.get(consumer, offset_partition).is_none());
+    assert!(
+        recovered(&store_disk)
+            .offsets
+            .get(consumer, offset_partition)
+            .is_none()
+    );
+}
+
+#[test]
 fn an_import_writes_the_keys_and_values_normal_writes_write() {
     let source_disk: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
     let source = written_by_normal_paths(&source_disk);

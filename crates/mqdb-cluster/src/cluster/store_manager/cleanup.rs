@@ -1,10 +1,10 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use super::StoreManager;
+use super::{StoreApplyError, StoreManager};
 use crate::cluster::idempotency_store::{IdempotencyCheck, IdempotencyError, IdempotencyStore};
 use crate::cluster::protocol::{Operation, ReplicationWrite};
-use crate::cluster::session::SessionData;
+use crate::cluster::session::{SessionData, session_partition};
 use crate::cluster::{Epoch, PartitionId, entity};
 
 impl StoreManager {
@@ -70,7 +70,26 @@ impl StoreManager {
         self.sessions.expired_sessions(now)
     }
 
-    pub fn cleanup_stale_offsets(&self, now: u64) -> usize {
-        self.offsets.cleanup_stale(now)
+    /// # Errors
+    /// Returns `PersistenceError` if the removals cannot be written to storage.
+    pub fn cleanup_stale_offsets(&self, now: u64) -> Result<usize, StoreApplyError> {
+        let removals: Vec<ReplicationWrite> = self
+            .offsets
+            .cleanup_stale(now)
+            .into_iter()
+            .map(|(consumer_id, partition_num)| {
+                ReplicationWrite::new(
+                    session_partition(&consumer_id),
+                    Operation::Delete,
+                    Epoch::ZERO,
+                    0,
+                    entity::OFFSETS.to_string(),
+                    format!("{consumer_id}:{partition_num}"),
+                    Vec::new(),
+                )
+            })
+            .collect();
+        self.persist_writes_batch(&removals)?;
+        Ok(removals.len())
     }
 }

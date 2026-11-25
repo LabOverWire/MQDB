@@ -176,17 +176,19 @@ impl OffsetStore {
 
     /// # Panics
     /// Panics if the internal lock is poisoned.
-    pub fn cleanup_stale(&self, now: u64) -> usize {
+    pub fn cleanup_stale(&self, now: u64) -> Vec<OffsetKey> {
         self.cleanup_stale_with_ttl(now, OFFSET_STALE_TTL_MS)
     }
 
     /// # Panics
     /// Panics if the internal lock is poisoned.
-    pub fn cleanup_stale_with_ttl(&self, now: u64, ttl_ms: u64) -> usize {
-        let mut offsets = self.offsets.write().unwrap();
-        let before = offsets.len();
-        offsets.retain(|_, offset| !offset.is_stale(now, ttl_ms));
-        before - offsets.len()
+    pub fn cleanup_stale_with_ttl(&self, now: u64, ttl_ms: u64) -> Vec<OffsetKey> {
+        self.offsets
+            .write()
+            .unwrap()
+            .extract_if(|_, offset| offset.is_stale(now, ttl_ms))
+            .map(|(key, _)| key)
+            .collect()
     }
 
     /// # Panics
@@ -383,17 +385,15 @@ impl OffsetStore {
             .collect();
 
         results.sort_by(|(a, _), (b, _)| a.cmp(b));
-        results.truncate(limit as usize + 1);
-        let has_more = results.len() > limit as usize;
-        if has_more {
-            results.pop();
-        }
+        let truncated = results.len() > limit as usize;
+        results.truncate(limit as usize);
 
-        let next_cursor = if has_more {
+        let next_cursor = if truncated {
             results.last().map(|(key, _)| key.clone().into_bytes())
         } else {
             None
         };
+        let has_more = next_cursor.is_some();
 
         let data = results.into_iter().map(|(_, v)| v.clone()).collect();
         (data, has_more, next_cursor)
@@ -510,7 +510,7 @@ mod tests {
         let now = 10000;
         let removed = store.cleanup_stale_with_ttl(now, ttl_ms);
 
-        assert_eq!(removed, 1);
+        assert_eq!(removed, vec![("old-consumer".to_string(), 0)]);
         assert_eq!(store.count(), 2);
         assert!(store.get("old-consumer", partition(0)).is_none());
         assert!(store.get("recent-consumer", partition(0)).is_some());
@@ -573,5 +573,19 @@ mod tests {
         }
 
         assert_eq!(seen, consumers);
+    }
+
+    #[test]
+    fn query_with_zero_limit_reports_more_without_a_cursor() {
+        let store = OffsetStore::new(node(1));
+        store.commit("c", partition(1), 1, 1);
+
+        let (page, has_more, next) = store.query(0, None);
+
+        assert!(page.is_empty());
+        assert!(
+            !(has_more && next.is_none()),
+            "has_more={has_more} next={next:?}"
+        );
     }
 }
