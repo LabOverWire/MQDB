@@ -13,20 +13,7 @@ fn node(id: u16) -> NodeId {
 }
 
 fn controller_with_peers(backend: &Arc<FaultyBackend>) -> NodeController<MockTransport> {
-    let storage: Arc<dyn StorageBackend> = backend.clone();
-    let mut ctrl = NodeController::new_with_storage(
-        node(1),
-        MockTransport::new(node(1)),
-        TransportConfig::default(),
-        Some(storage),
-        flume::unbounded().0,
-        flume::unbounded().0,
-    );
-    for peer in [node(2), node(3)] {
-        ctrl.heartbeat
-            .receive_heartbeat(peer, &Heartbeat::create(peer, 0), 0);
-    }
-    ctrl
+    ctrl_with(1, backend, &[2, 3])
 }
 
 fn broadcasts_of(ctrl: &NodeController<MockTransport>, entity_name: &str) -> usize {
@@ -184,7 +171,95 @@ async fn a_client_location_the_node_cannot_store_is_still_broadcast_with_a_warni
     assert_eq!(broadcasts_of(&ctrl, entity::CLIENT_LOCATIONS), 2);
     let logged = log.text();
     assert!(
-        logged.contains("WARN") && logged.contains("broadcast write not stored on this node"),
+        logged.contains("WARN") && logged.contains("not stored on this node"),
         "{logged}"
     );
+}
+
+fn ctrl_with(
+    id: u16,
+    backend: &Arc<FaultyBackend>,
+    peers: &[u16],
+) -> NodeController<MockTransport> {
+    let storage: Arc<dyn StorageBackend> = backend.clone();
+    let mut ctrl = NodeController::new_with_storage(
+        node(id),
+        MockTransport::new(node(id)),
+        TransportConfig::default(),
+        Some(storage),
+        flume::unbounded().0,
+        flume::unbounded().0,
+    );
+    for &peer in peers {
+        ctrl.heartbeat
+            .receive_heartbeat(node(peer), &Heartbeat::create(node(peer), 0), 0);
+    }
+    ctrl
+}
+
+fn sent_write_requests(ctrl: &NodeController<MockTransport>, to: NodeId) -> Vec<ReplicationWrite> {
+    ctrl.transport
+        .sent_messages()
+        .into_iter()
+        .filter_map(|(dest, message)| match message {
+            ClusterMessage::WriteRequest(w) if dest == to => Some(w),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_peer_that_cannot_store_a_client_location_still_keeps_it_in_memory() {
+    let healthy = FaultyBackend::shared();
+    let mut origin = ctrl_with(1, &healthy, &[2]);
+    let failing = FaultyBackend::shared();
+    let mut peer = ctrl_with(2, &failing, &[1]);
+    failing.fail_writes(true);
+    let location = ReplicationWrite::new(
+        crate::cluster::session_partition("c1"),
+        Operation::Insert,
+        Epoch::ZERO,
+        0,
+        entity::CLIENT_LOCATIONS.to_string(),
+        client_location_key("c1"),
+        ClientLocationEntry::create("c1", node(1)).to_be_bytes(),
+    );
+    origin.write_or_forward(location).await;
+    for write in sent_write_requests(&origin, node(2)) {
+        peer.handle_write_request(node(1), write).await;
+    }
+    let on_origin = origin.stores().client_locations.get("c1");
+    let on_peer = peer.stores().client_locations.get("c1");
+    assert_eq!(on_origin, Some(node(1)));
+    assert_eq!(
+        on_peer,
+        Some(node(1)),
+        "peer that cannot store has no location for c1"
+    );
+}
+
+#[tokio::test]
+async fn a_primary_peer_that_cannot_store_a_client_location_still_keeps_it_in_memory() {
+    let healthy = FaultyBackend::shared();
+    let mut origin = ctrl_with(1, &healthy, &[2]);
+    let failing = FaultyBackend::shared();
+    let mut peer = ctrl_with(2, &failing, &[1]);
+    let partition = crate::cluster::session_partition("c1");
+    peer.become_primary(partition, Epoch::new(1));
+    failing.fail_writes(true);
+    let location = ReplicationWrite::new(
+        partition,
+        Operation::Insert,
+        Epoch::ZERO,
+        0,
+        entity::CLIENT_LOCATIONS.to_string(),
+        client_location_key("c1"),
+        ClientLocationEntry::create("c1", node(1)).to_be_bytes(),
+    );
+    origin.write_or_forward(location).await;
+    for write in sent_write_requests(&origin, node(2)) {
+        peer.handle_write_request(node(1), write).await;
+    }
+
+    assert_eq!(peer.stores().client_locations.get("c1"), Some(node(1)));
 }

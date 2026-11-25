@@ -936,3 +936,18 @@ async fn handle_acl_assignment_list(
     let roles = auth.acl_manager().get_user_roles(user).await;
     Response::ok(json!(roles))
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_constraint_the_node_cannot_store_answers_500() {
+        let response = super::ClusteredAgent::constraint_add_response(
+            Err(crate::cluster::db::ConstraintStoreError::StoreFailed),
+            "x",
+        );
+        assert!(matches!(
+            response,
+            mqdb_core::transport::Response::Error { code: 500, .. }
+        ));
+    }
+}

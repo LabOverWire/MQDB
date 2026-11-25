@@ -5,9 +5,7 @@ use super::super::entity;
 use super::super::protocol::{self, ChangeEventRecord, ReplicationAck, ReplicationWrite};
 use super::super::quorum::{QuorumResult, QuorumTracker};
 use super::super::replication::{ReplicaRole, ReplicaState};
-use super::super::store_manager::{
-    HeldPrimaries, StoreApplyError, StoreManager, is_recovered_from_storage,
-};
+use super::super::store_manager::{HeldPrimaries, StoreApplyError, StoreManager};
 use super::super::transport::{ClusterMessage, ClusterTransport};
 use super::super::{Epoch, NodeId, PartitionAssignment, PartitionId, PartitionMap};
 use super::{
@@ -107,7 +105,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 self.apply_write_request(write).await;
                 return;
             }
-            if let Err(e) = self.stores.apply_write(&write) {
+            if let Err(e) = self.stores.apply_write_keeping_unrecovered(&write) {
                 tracing::error!(?partition, ?e, "failed to apply broadcast write to stores");
             }
             if let Some(record) = write.event {
@@ -527,23 +525,8 @@ impl<T: ClusterTransport> NodeController<T> {
         &self,
         write: &ReplicationWrite,
     ) -> Result<(), ReplicationError> {
-        match self.stores.apply_write(write) {
+        match self.stores.apply_write_keeping_unrecovered(write) {
             Ok(()) => {}
-            Err(StoreApplyError::PersistenceError) if !is_recovered_from_storage(&write.entity) => {
-                tracing::warn!(
-                    entity = write.entity,
-                    id = write.id,
-                    "broadcast write not stored on this node, applied in memory and sent"
-                );
-                if let Err(error) = self.stores.apply_write_unpersisted(write) {
-                    tracing::warn!(
-                        entity = write.entity,
-                        id = write.id,
-                        %error,
-                        "unstored broadcast write not applied in memory"
-                    );
-                }
-            }
             Err(StoreApplyError::PersistenceError) => {
                 tracing::error!(
                     entity = write.entity,
@@ -557,7 +540,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     entity = write.entity,
                     id = write.id,
                     %error,
-                    "broadcast write stored but not applied in memory"
+                    "broadcast write not applied in memory"
                 );
             }
         }

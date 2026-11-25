@@ -644,11 +644,14 @@ async fn handle_constraint_add(db: &Database, entity: String, payload: &Value) -
             }
 
             if fields.is_empty() {
-                Err("unique constraint requires 'fields' or 'field'".to_string())
+                Err((
+                    mqdb_core::ErrorCode::BadRequest,
+                    "unique constraint requires 'fields' or 'field'".to_string(),
+                ))
             } else {
                 db.add_unique_constraint(entity, fields)
                     .await
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| admin_write_error(&e))
             }
         }
         Some("not_null") => {
@@ -658,17 +661,26 @@ async fn handle_constraint_add(db: &Database, entity: String, payload: &Value) -
                 .map(String::from);
 
             match field {
-                Some(f) => db.add_not_null(entity, f).await.map_err(|e| e.to_string()),
-                None => Err("not_null constraint requires field".to_string()),
+                Some(f) => db
+                    .add_not_null(entity, f)
+                    .await
+                    .map_err(|e| admin_write_error(&e)),
+                None => Err((
+                    mqdb_core::ErrorCode::BadRequest,
+                    "not_null constraint requires field".to_string(),
+                )),
             }
         }
         Some("foreign_key") => handle_foreign_key_constraint(db, entity, payload).await,
-        _ => Err(format!("unknown constraint type: {constraint_type:?}")),
+        _ => Err((
+            mqdb_core::ErrorCode::BadRequest,
+            format!("unknown constraint type: {constraint_type:?}"),
+        )),
     };
 
     match result {
         Ok(()) => Response::ok(json!({"message": "constraint added"})),
-        Err(e) => Response::error(mqdb_core::ErrorCode::BadRequest, e),
+        Err((code, message)) => Response::error(code, message),
     }
 }
 
@@ -676,7 +688,7 @@ async fn handle_foreign_key_constraint(
     db: &Database,
     entity: String,
     payload: &Value,
-) -> Result<(), String> {
+) -> Result<(), (mqdb_core::ErrorCode, String)> {
     use mqdb_core::constraint::OnDeleteAction;
 
     let source_field = payload.get("field").and_then(|v| v.as_str());
@@ -703,9 +715,29 @@ async fn handle_foreign_key_constraint(
                 action,
             )
             .await
-            .map_err(|e| e.to_string()),
-        _ => Err("foreign_key requires field, target_entity, target_field".to_string()),
+            .map_err(|e| admin_write_error(&e)),
+        _ => Err((
+            mqdb_core::ErrorCode::BadRequest,
+            "foreign_key requires field, target_entity, target_field".to_string(),
+        )),
     }
+}
+
+fn admin_write_error(error: &mqdb_core::Error) -> (mqdb_core::ErrorCode, String) {
+    use mqdb_core::Error;
+    let code = match error {
+        Error::Validation(_)
+        | Error::InvalidKey(_)
+        | Error::KeyTooLarge(_)
+        | Error::SchemaViolation { .. }
+        | Error::ConstraintViolation(_)
+        | Error::UniqueViolation { .. }
+        | Error::ForeignKeyViolation { .. }
+        | Error::NotNullViolation { .. }
+        | Error::InvalidForeignKey => mqdb_core::ErrorCode::BadRequest,
+        _ => mqdb_core::ErrorCode::Internal,
+    };
+    (code, error.to_string())
 }
 
 async fn handle_constraint_list(db: &Database, entity: &str) -> Response {
@@ -1977,6 +2009,154 @@ mod tests {
         assert!(
             data[1]["grantee_email"].is_null(),
             "a null grantee_email (password mode) is left untouched"
+        );
+    }
+}
+
+#[cfg(test)]
+mod admin_store_failure {
+    use crate::database::Database;
+    use mqdb_core::config::DatabaseConfig;
+    use mqdb_core::error::{Error, Result};
+    use mqdb_core::storage::{BatchOperations, MemoryBackend, StorageBackend};
+    use mqdb_core::transport::Response;
+    use serde_json::json;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct Failing {
+        inner: MemoryBackend,
+        fail: Arc<AtomicBool>,
+    }
+    impl StorageBackend for Failing {
+        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+            self.inner.get(key)
+        }
+        fn insert(&self, key: &[u8], value: &[u8]) -> Result<()> {
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(Error::Internal("injected".into()));
+            }
+            self.inner.insert(key, value)
+        }
+        fn remove(&self, key: &[u8]) -> Result<()> {
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(Error::Internal("injected".into()));
+            }
+            self.inner.remove(key)
+        }
+        fn prefix_scan(&self, p: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+            self.inner.prefix_scan(p)
+        }
+        fn prefix_count(&self, p: &[u8]) -> Result<usize> {
+            self.inner.prefix_count(p)
+        }
+        fn prefix_scan_keys(&self, p: &[u8]) -> Result<Vec<Vec<u8>>> {
+            self.inner.prefix_scan_keys(p)
+        }
+        fn prefix_scan_batch(
+            &self,
+            p: &[u8],
+            n: usize,
+            a: Option<&[u8]>,
+        ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+            self.inner.prefix_scan_batch(p, n, a)
+        }
+        fn range_scan(&self, s: &[u8], e: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+            self.inner.range_scan(s, e)
+        }
+        fn batch(&self) -> Box<dyn BatchOperations> {
+            Box::new(FailingBatch {
+                inner: self.inner.batch(),
+                fail: Arc::clone(&self.fail),
+            })
+        }
+        fn flush(&self) -> Result<()> {
+            self.inner.flush()
+        }
+    }
+    struct FailingBatch {
+        inner: Box<dyn BatchOperations>,
+        fail: Arc<AtomicBool>,
+    }
+    impl BatchOperations for FailingBatch {
+        fn insert(&mut self, k: Vec<u8>, v: Vec<u8>) {
+            self.inner.insert(k, v);
+        }
+        fn remove(&mut self, k: Vec<u8>) {
+            self.inner.remove(k);
+        }
+        fn expect_value(&mut self, k: Vec<u8>, v: Vec<u8>) {
+            self.inner.expect_value(k, v);
+        }
+        fn expect_absent(&mut self, k: Vec<u8>) {
+            self.inner.expect_absent(k);
+        }
+        fn commit(self: Box<Self>) -> Result<()> {
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(Error::Internal("injected commit failure".into()));
+            }
+            self.inner.commit()
+        }
+    }
+
+    fn code(r: &Response) -> u16 {
+        match r {
+            Response::Ok { .. } => 200,
+            Response::Error { code, .. } => *code,
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_writes_the_agent_cannot_store_answer_500() {
+        let fail = Arc::new(AtomicBool::new(false));
+        let backend = Arc::new(Failing {
+            inner: MemoryBackend::new(),
+            fail: Arc::clone(&fail),
+        });
+        let config = DatabaseConfig::new(PathBuf::from("mem")).without_background_tasks();
+        let db = Database::open_with_backend(backend, config).await.unwrap();
+        fail.store(true, Ordering::SeqCst);
+        let schema =
+            super::handle_schema_set(&db, "items".into(), json!({"code": {"type": "string"}}))
+                .await;
+        let constraint = super::handle_constraint_add(
+            &db,
+            "items".into(),
+            &json!({"type": "unique", "fields": ["code"]}),
+        )
+        .await;
+        assert_eq!(
+            (code(&schema), code(&constraint)),
+            (500, 500),
+            "agent codes differ from cluster's 500/500"
+        );
+    }
+
+    #[tokio::test]
+    async fn constraint_adds_the_agent_refuses_as_invalid_answer_400() {
+        let fail = Arc::new(AtomicBool::new(false));
+        let backend = Arc::new(Failing {
+            inner: MemoryBackend::new(),
+            fail: Arc::clone(&fail),
+        });
+        let config = DatabaseConfig::new(PathBuf::from("mem")).without_background_tasks();
+        let db = Database::open_with_backend(backend, config).await.unwrap();
+        let missing_fields =
+            super::handle_constraint_add(&db, "items".into(), &json!({"type": "unique"})).await;
+        let schema =
+            super::handle_schema_set(&db, "items".into(), json!({"code": {"type": "string"}}))
+                .await;
+        assert_eq!(code(&schema), 200);
+        let unknown_after_schema = super::handle_constraint_add(
+            &db,
+            "items".into(),
+            &json!({"type": "not_null", "field": "absent"}),
+        )
+        .await;
+        assert_eq!(
+            (code(&missing_fields), code(&unknown_after_schema)),
+            (400, 400)
         );
     }
 }
