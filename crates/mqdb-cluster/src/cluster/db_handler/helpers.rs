@@ -63,6 +63,7 @@ pub(crate) fn update_payload_error(payload: &[u8]) -> Option<String> {
 pub(crate) fn json_write_failure(error: DbDataStoreError) -> Vec<u8> {
     match error {
         DbDataStoreError::NotPrimary => DbRequestHandler::json_error(503, &error.to_string()),
+        DbDataStoreError::TooLarge { .. } => DbRequestHandler::json_error(400, &error.to_string()),
         _ => DbRequestHandler::json_error(500, "internal error"),
     }
 }

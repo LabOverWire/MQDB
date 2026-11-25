@@ -4,7 +4,8 @@
 use super::address_book::AddressBook;
 use super::redial_backoff::RedialBackoff;
 use super::transport::{
-    ClusterMessage, ClusterTransport, InboundMessage, RoutedPublish, TransportError,
+    ClusterMessage, ClusterTransport, InboundMessage, MAX_MESSAGE_SIZE, RoutedPublish,
+    TransportError,
 };
 use super::{NodeId, PartitionId};
 use quinn::{Connection, Endpoint, RecvStream, SendStream, ServerConfig, VarInt};
@@ -54,8 +55,6 @@ fn queue_frame<T>(lane: &flume::Sender<T>, item: T) -> Result<(), QueueRefused> 
         flume::TrySendError::Disconnected(_) => QueueRefused::Disconnected,
     })
 }
-
-const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalPublishKind {
@@ -1490,5 +1489,29 @@ mod tests {
     #[test]
     fn max_message_size_constant_is_10mb() {
         assert_eq!(MAX_MESSAGE_SIZE, 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn a_serialized_message_is_its_payload_after_the_message_header() {
+        use super::super::protocol::{Operation, ReplicationWrite};
+        use super::super::transport::MESSAGE_HEADER_LEN;
+        use super::super::{Epoch, PartitionId};
+        let transport = QuicDirectTransport::new(NodeId::validated(1).unwrap());
+        let message = ClusterMessage::Write(ReplicationWrite::new(
+            PartitionId::ZERO,
+            Operation::Insert,
+            Epoch::new(1),
+            1,
+            "items".to_string(),
+            "r1".to_string(),
+            b"{}".to_vec(),
+        ));
+        let mut payload = Vec::new();
+        message.encode_payload(&mut payload);
+
+        assert_eq!(
+            transport.serialize_message(&message).len(),
+            MESSAGE_HEADER_LEN + payload.len()
+        );
     }
 }

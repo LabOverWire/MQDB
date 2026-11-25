@@ -19,6 +19,9 @@ use super::{NodeId, PartitionId};
 use bebytes::BeBytes;
 use std::fmt::Debug;
 
+pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
+pub const MESSAGE_HEADER_LEN: usize = size_of::<u16>() + size_of::<u8>();
+
 #[derive(Debug, Clone)]
 pub enum ClusterMessage {
     Heartbeat(Heartbeat),

@@ -4,11 +4,18 @@
 use super::NodeController;
 use crate::cluster::protocol::{CatchupResponse, ReplicationWrite};
 use crate::cluster::replication::{ReplicaRole, ReplicaState};
-use crate::cluster::transport::{ClusterMessage, ClusterTransport};
+use crate::cluster::transport::{ClusterMessage, ClusterTransport, MESSAGE_HEADER_LEN};
 use crate::cluster::{NodeId, PartitionId};
 
 const CATCHUP_RESPONSE_MAX_BYTES: usize = 8 * 1024 * 1024;
 const WRITE_FRAMING_BYTES: usize = 16;
+const CATCHUP_ENVELOPE_BYTES: usize = 1 + 2 + 2 + 4 + 4 + 8 + 8;
+
+pub(crate) fn replication_frame_len(write: &ReplicationWrite) -> Option<usize> {
+    write
+        .to_bytes()
+        .map(|bytes| MESSAGE_HEADER_LEN + CATCHUP_ENVELOPE_BYTES + bytes.len())
+}
 
 impl<T: ClusterTransport> NodeController<T> {
     pub(super) async fn handle_catchup_request(

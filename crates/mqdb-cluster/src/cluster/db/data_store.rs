@@ -112,6 +112,7 @@ pub enum DbDataStoreError {
     SerializationError,
     NotPrimary,
     StoreFailed,
+    TooLarge { size: usize, limit: usize },
 }
 
 impl std::fmt::Display for DbDataStoreError {
@@ -122,6 +123,12 @@ impl std::fmt::Display for DbDataStoreError {
             Self::SerializationError => write!(f, "serialization error"),
             Self::NotPrimary => write!(f, "this node is not the partition primary"),
             Self::StoreFailed => write!(f, "the write could not be stored"),
+            Self::TooLarge { size, limit } => {
+                write!(
+                    f,
+                    "record too large to replicate ({size} bytes, max {limit})"
+                )
+            }
         }
     }
 }

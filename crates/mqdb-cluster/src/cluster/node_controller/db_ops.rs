@@ -13,6 +13,7 @@ use crate::cluster::replication::{ReplicaRole, ReplicaState};
 use crate::cluster::store_manager::outbox::{
     CascadeOutboxPayload, CascadePendingEntry, CascadeRemoteOp,
 };
+use crate::cluster::transport::MAX_MESSAGE_SIZE;
 use crate::cluster::{PublishRouter, RoutedPublish};
 use mqdb_core::events::ChangeEvent;
 use mqdb_core::types::{AccessLevel, MAX_LIST_RESULTS, OwnershipDecision, owner_change_refusal};
@@ -284,6 +285,23 @@ impl<T: ClusterTransport> NodeController<T> {
         event: Option<ChangeEventRecord>,
         extra_outbox: &[(Vec<u8>, Vec<u8>)],
     ) -> Result<(), super::db::DbDataStoreError> {
+        let mut write = write.with_event(event);
+        if let Some(size) =
+            super::catchup::replication_frame_len(&write).filter(|size| *size > MAX_MESSAGE_SIZE)
+        {
+            tracing::warn!(
+                entity = write.entity,
+                id = write.id,
+                size,
+                limit = MAX_MESSAGE_SIZE,
+                "write refused: too large to replicate"
+            );
+            return Err(super::db::DbDataStoreError::TooLarge {
+                size,
+                limit: MAX_MESSAGE_SIZE,
+            });
+        }
+        let event = write.event.take();
         self.write_or_forward_with_event(write, event, extra_outbox)
             .await
             .map_err(|error| match error {
