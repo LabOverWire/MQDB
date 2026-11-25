@@ -483,10 +483,9 @@ impl Database {
             requested_end
         };
 
-        if offset >= results.len() {
-            return vec![];
-        }
-        results[offset..final_end].to_vec()
+        results
+            .get(offset..final_end)
+            .map_or_else(Vec::new, <[Value]>::to_vec)
     }
 
     fn sort_results(results: &mut [Value], sort: &[SortOrder]) {
