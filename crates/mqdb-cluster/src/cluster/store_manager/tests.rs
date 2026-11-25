@@ -35,6 +35,21 @@ fn apply_session_insert() {
 }
 
 #[test]
+fn a_replicated_offset_commit_keeps_a_consumer_id_containing_a_colon() {
+    let primary = StoreManager::new(node(1));
+    let replica = StoreManager::new(node(2));
+    let offset_partition = PartitionId::new(10).unwrap();
+
+    let (_, write) = primary.commit_offset_replicated("dev:1", offset_partition, 42, 1);
+    replica.apply_write(&write).unwrap();
+
+    assert_eq!(
+        replica.offsets.get_sequence("dev:1", offset_partition),
+        Some(42)
+    );
+}
+
+#[test]
 fn apply_session_delete() {
     let manager = StoreManager::new(node(1));
     manager.sessions.create_session("client1").unwrap();

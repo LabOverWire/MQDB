@@ -281,6 +281,42 @@ fn an_imported_snapshot_is_recovered_after_a_restart() {
 }
 
 #[test]
+fn an_imported_offset_for_a_consumer_id_containing_a_colon_survives_a_restart() {
+    let consumer = "dev:1";
+    let offset_partition = PartitionId::new(10).unwrap();
+    let source_disk: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
+    let source = with_storage(1, &source_disk);
+    persist(
+        &source,
+        source
+            .commit_offset_replicated(consumer, offset_partition, 42, 1)
+            .1,
+    );
+
+    let joiner_disk: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
+    let joiner = with_storage(2, &joiner_disk);
+    let consumer_partition = session_partition(consumer);
+    joiner
+        .import_partition(
+            consumer_partition,
+            &source.export_partition(consumer_partition).unwrap(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        joiner.offsets.get_sequence(consumer, offset_partition),
+        Some(42)
+    );
+    assert_eq!(disk(&joiner_disk), disk(&source_disk));
+    assert_eq!(
+        recovered(&joiner_disk)
+            .offsets
+            .get_sequence(consumer, offset_partition),
+        Some(42)
+    );
+}
+
+#[test]
 fn an_import_writes_the_keys_and_values_normal_writes_write() {
     let source_disk: Arc<dyn StorageBackend> = Arc::new(MemoryBackend::new());
     let source = written_by_normal_paths(&source_disk);
