@@ -459,11 +459,17 @@ async fn the_sort_buffer_counts_only_rows_the_caller_may_see() {
     let (_tmp, db) = open_capped(10_000, 2).await;
     two_owners(&db).await;
 
-    let sorted = Query {
+    let descending = Query {
         sort: vec![SortOrder::desc("lat".into())],
         ..Query::default()
     };
-    assert_eq!(list_ids(&db, "alice", sorted).await, ["z2", "z1"]);
+    assert_eq!(list_ids(&db, "alice", descending).await, ["z3", "z2"]);
+
+    let ascending = Query {
+        sort: vec![SortOrder::asc("lat".into())],
+        ..Query::default()
+    };
+    assert_eq!(list_ids(&db, "alice", ascending).await, ["z1", "z2"]);
 }
 
 #[tokio::test]
