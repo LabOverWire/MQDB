@@ -119,6 +119,9 @@ impl MessageProcessor {
                         self.process_message(msg);
                         count += 1;
                         if count.is_multiple_of(BATCH_SIZE) {
+                            if !self.rx_tick.is_empty() {
+                                break;
+                            }
                             tokio::task::yield_now().await;
                         }
                     }
@@ -275,6 +278,8 @@ impl MessageProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn test_config() -> TransportConfig {
         TransportConfig {
@@ -393,6 +398,54 @@ mod tests {
             .expect("processor did not stop after its inputs closed");
         assert!(outcome.is_ok(), "processor panicked: {outcome:?}");
         assert!(rx_batch.is_disconnected());
+    }
+
+    #[tokio::test]
+    async fn a_pending_tick_is_served_while_inbox_traffic_continues() {
+        let peer = NodeId::validated(2).unwrap();
+        let (tx_inbox, rx_inbox) = flume::unbounded();
+        let (tx_tick, rx_tick) = flume::unbounded();
+        let (tx_batch, rx_batch) = flume::unbounded();
+        let mut processor = MessageProcessor::new(
+            NodeId::validated(1).unwrap(),
+            test_config(),
+            flume::unbounded().0,
+            flume::unbounded().0,
+            flume::unbounded().0,
+            rx_inbox,
+            rx_tick,
+        );
+        processor.register_peer(peer);
+        let stop = Arc::new(AtomicBool::new(false));
+        let producer_stop = Arc::clone(&stop);
+        let producer = tokio::spawn(async move {
+            let mut at = 0u64;
+            while !producer_stop.load(Ordering::Relaxed) {
+                for _ in 0..128 {
+                    at += 1;
+                    let msg = InboundMessage {
+                        from: peer,
+                        message: ClusterMessage::Heartbeat(Heartbeat::create(peer, at)),
+                        received_at: at,
+                    };
+                    if tx_inbox.send(msg).is_err() {
+                        return;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        });
+        let task = tokio::spawn(processor.run(tx_batch));
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        tx_tick.send(1_000).unwrap();
+        let batch =
+            tokio::time::timeout(std::time::Duration::from_secs(2), rx_batch.recv_async()).await;
+        stop.store(true, Ordering::Relaxed);
+        producer.abort();
+        task.abort();
+        let batch = batch.expect("tick was never processed while inbox traffic continued");
+        assert!(batch.is_ok());
     }
 
     #[test]
