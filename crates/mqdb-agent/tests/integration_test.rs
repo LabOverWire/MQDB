@@ -5,9 +5,9 @@ use mqdb_agent::Database;
 use mqdb_agent::database::{CallerContext, GranteeIdentity, ShareActor};
 use mqdb_core::config::DatabaseConfig;
 use mqdb_core::schema::{FieldDefinition, FieldType, Schema};
-use mqdb_core::types::{OwnershipConfig, ScopeConfig};
+use mqdb_core::types::{OwnershipConfig, Pagination, ScopeConfig};
 use mqdb_core::{Filter, FilterOp, SortDirection, SortOrder};
-use serde_json::json;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 #[tokio::test]
@@ -1160,6 +1160,320 @@ async fn test_list_truncates_at_max_list_results() {
         "filtered list should respect max_list_results, got {}",
         filtered.len()
     );
+}
+
+const PAGINATION_ROWS: usize = 120;
+
+#[derive(Clone, Copy, Debug)]
+struct ListShape {
+    sorted: bool,
+    filtered: bool,
+}
+
+fn expected_page(
+    shape: ListShape,
+    max_list_results: usize,
+    max_sort_buffer: usize,
+    pagination: &Pagination,
+) -> Vec<usize> {
+    let ordered: Vec<usize> = if shape.sorted {
+        (0..PAGINATION_ROWS).rev().collect()
+    } else {
+        (0..PAGINATION_ROWS).collect()
+    };
+    if !shape.sorted && !shape.filtered {
+        return ordered
+            .into_iter()
+            .skip(pagination.offset)
+            .take(pagination.limit.min(max_list_results))
+            .collect();
+    }
+    let window = if shape.sorted && !shape.filtered {
+        max_list_results.min(max_sort_buffer)
+    } else {
+        max_list_results
+    };
+    ordered
+        .into_iter()
+        .take(window)
+        .skip(pagination.offset)
+        .take(pagination.limit)
+        .collect()
+}
+
+#[tokio::test]
+async fn test_list_pagination_past_max_list_results_returns_empty_page() {
+    let shapes = [
+        ListShape {
+            sorted: true,
+            filtered: false,
+        },
+        ListShape {
+            sorted: true,
+            filtered: true,
+        },
+        ListShape {
+            sorted: false,
+            filtered: true,
+        },
+        ListShape {
+            sorted: false,
+            filtered: false,
+        },
+    ];
+    let limits = [1, 5, 1000, usize::MAX];
+
+    for max_list_results in [10, 50] {
+        for max_sort_buffer in [30, 60, 200] {
+            let tmp = TempDir::new().unwrap();
+            let mut config = DatabaseConfig::new(tmp.path())
+                .without_background_tasks()
+                .with_max_list_results(Some(max_list_results));
+            config.max_sort_buffer = max_sort_buffer;
+            let db = Database::open_with_config(config).await.unwrap();
+
+            for idx in 0..PAGINATION_ROWS {
+                db.create(
+                    "items".into(),
+                    json!({"id": format!("item-{idx:03}"), "idx": idx}),
+                    None,
+                    None,
+                    None,
+                    &ScopeConfig::default(),
+                )
+                .await
+                .unwrap();
+            }
+
+            let offsets = [
+                0,
+                max_list_results - 1,
+                max_list_results,
+                max_list_results + 1,
+                max_sort_buffer.min(PAGINATION_ROWS) - 1,
+                PAGINATION_ROWS - 1,
+                PAGINATION_ROWS,
+                PAGINATION_ROWS + 10,
+                usize::MAX,
+            ];
+
+            for shape in shapes {
+                for offset in offsets {
+                    for limit in limits {
+                        let pagination = Pagination::new(limit, offset);
+                        let sort = if shape.sorted {
+                            vec![SortOrder::new("idx".into(), SortDirection::Desc)]
+                        } else {
+                            vec![]
+                        };
+                        let filters = if shape.filtered {
+                            vec![Filter::new("idx".into(), FilterOp::Gte, json!(0))]
+                        } else {
+                            vec![]
+                        };
+                        let page = db
+                            .list(
+                                "items".into(),
+                                filters,
+                                sort,
+                                Some(pagination.clone()),
+                                vec![],
+                                None,
+                            )
+                            .await
+                            .unwrap();
+                        let got: Vec<usize> = page
+                            .iter()
+                            .map(|row| usize::try_from(row["idx"].as_u64().unwrap()).unwrap())
+                            .collect();
+                        assert_eq!(
+                            got,
+                            expected_page(shape, max_list_results, max_sort_buffer, &pagination),
+                            "{shape:?} max_list_results={max_list_results} max_sort_buffer={max_sort_buffer} offset={offset} limit={limit}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn open_seeded_items(
+    rows: usize,
+    max_list_results: Option<usize>,
+    max_sort_buffer: usize,
+    indexed: bool,
+) -> (TempDir, Database) {
+    let tmp = TempDir::new().unwrap();
+    let mut config = DatabaseConfig::new(tmp.path())
+        .without_background_tasks()
+        .with_max_list_results(max_list_results);
+    config.max_sort_buffer = max_sort_buffer;
+    let db = Database::open_with_config(config).await.unwrap();
+    if indexed {
+        db.add_index("items".into(), vec!["idx".into()])
+            .await
+            .unwrap();
+    }
+    for idx in 0..rows {
+        db.create(
+            "items".into(),
+            json!({"id": format!("item-{idx:03}"), "idx": idx, "group": idx % 4}),
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
+    }
+    (tmp, db)
+}
+
+async fn top_idx_desc(db: &Database, filters: Vec<Filter>) -> Value {
+    let page = db
+        .list(
+            "items".into(),
+            filters,
+            vec![SortOrder::new("idx".into(), SortDirection::Desc)],
+            Some(Pagination::new(1, 0)),
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
+    page[0]["idx"].clone()
+}
+
+#[tokio::test]
+async fn test_sorted_list_sorts_past_max_sort_buffer() {
+    let (_tmp, db) = open_seeded_items(40, None, 30, false).await;
+    assert_eq!(top_idx_desc(&db, vec![]).await, json!(39));
+}
+
+#[tokio::test]
+async fn test_sorted_filtered_list_sorts_past_max_list_results() {
+    let (_tmp, db) = open_seeded_items(40, Some(10), 10_000, false).await;
+    let filters = vec![Filter::new("idx".into(), FilterOp::Gte, json!(0))];
+    assert_eq!(top_idx_desc(&db, filters).await, json!(39));
+}
+
+#[tokio::test]
+async fn test_sorted_index_filtered_list_sorts_past_max_list_results() {
+    let (_tmp, db) = open_seeded_items(40, Some(10), 10_000, true).await;
+    let filters = vec![Filter::new("idx".into(), FilterOp::Gte, json!(0))];
+    assert_eq!(top_idx_desc(&db, filters).await, json!(39));
+}
+
+#[tokio::test]
+async fn test_sorted_list_keeps_scan_order_for_equal_keys() {
+    let rows = 40;
+    for (max_list_results, max_sort_buffer) in [(None, 10_000), (Some(12), 30), (Some(50), 7)] {
+        let (_tmp, db) = open_seeded_items(rows, max_list_results, max_sort_buffer, false).await;
+        for direction in [SortDirection::Asc, SortDirection::Desc] {
+            let mut reference: Vec<usize> = (0..rows).collect();
+            match direction {
+                SortDirection::Asc => reference.sort_by_key(|idx| idx % 4),
+                SortDirection::Desc => reference.sort_by_key(|idx| std::cmp::Reverse(idx % 4)),
+            }
+            let window = max_list_results.unwrap_or(usize::MAX).min(max_sort_buffer);
+            for (offset, limit) in [(0, 5), (0, 12), (3, 9), (8, 100)] {
+                let expected: Vec<usize> = reference
+                    .iter()
+                    .copied()
+                    .take(window)
+                    .skip(offset)
+                    .take(limit)
+                    .collect();
+                let page = db
+                    .list(
+                        "items".into(),
+                        vec![],
+                        vec![SortOrder::new("group".into(), direction.clone())],
+                        Some(Pagination::new(limit, offset)),
+                        vec![],
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                let got: Vec<usize> = page
+                    .iter()
+                    .map(|row| usize::try_from(row["idx"].as_u64().unwrap()).unwrap())
+                    .collect();
+                assert_eq!(
+                    got, expected,
+                    "{direction:?} max_list_results={max_list_results:?} max_sort_buffer={max_sort_buffer} offset={offset} limit={limit}"
+                );
+            }
+        }
+    }
+}
+
+async fn open_with_sort_values(values: &[Value]) -> (TempDir, Database) {
+    let tmp = TempDir::new().unwrap();
+    let config = DatabaseConfig::new(tmp.path()).without_background_tasks();
+    let db = Database::open_with_config(config).await.unwrap();
+    for (pos, value) in values.iter().enumerate() {
+        db.create(
+            "items".into(),
+            json!({"id": format!("r{pos}"), "v": value}),
+            None,
+            None,
+            None,
+            &ScopeConfig::default(),
+        )
+        .await
+        .unwrap();
+    }
+    (tmp, db)
+}
+
+async fn ids_sorted_by_v(
+    db: &Database,
+    direction: SortDirection,
+    pagination: Option<Pagination>,
+) -> Vec<String> {
+    db.list(
+        "items".into(),
+        vec![],
+        vec![SortOrder::new("v".into(), direction)],
+        pagination,
+        vec![],
+        None,
+    )
+    .await
+    .unwrap()
+    .iter()
+    .map(|row| row["id"].as_str().unwrap().to_string())
+    .collect()
+}
+
+#[tokio::test]
+async fn test_paging_one_by_one_visits_each_row_once_with_null_sort_key() {
+    let values = [json!(5), Value::Null, json!(3)];
+    let (_tmp, db) = open_with_sort_values(&values).await;
+    let whole = ids_sorted_by_v(&db, SortDirection::Asc, None).await;
+    let mut paged = Vec::new();
+    for offset in 0..values.len() {
+        paged.extend(
+            ids_sorted_by_v(&db, SortDirection::Asc, Some(Pagination::new(1, offset))).await,
+        );
+    }
+    assert_eq!(paged, whole, "pages of one row vs one unpaginated list");
+}
+
+#[tokio::test]
+async fn test_paging_one_by_one_visits_each_row_once_with_mixed_type_sort_key() {
+    let values = [json!(5), json!("x"), json!(3)];
+    let (_tmp, db) = open_with_sort_values(&values).await;
+    let whole = ids_sorted_by_v(&db, SortDirection::Asc, None).await;
+    let mut paged = Vec::new();
+    for offset in 0..values.len() {
+        paged.extend(
+            ids_sorted_by_v(&db, SortDirection::Asc, Some(Pagination::new(1, offset))).await,
+        );
+    }
+    assert_eq!(paged, whole, "pages of one row vs one unpaginated list");
 }
 
 #[tokio::test]
