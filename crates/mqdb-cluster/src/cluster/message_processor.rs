@@ -113,13 +113,17 @@ impl MessageProcessor {
 
                 Ok(msg) = self.rx_inbox.recv_async() => {
                     const BATCH_SIZE: u32 = 64;
+                    if tx_batch.is_disconnected() {
+                        tracing::warn!("batch channel closed, processor exiting");
+                        break;
+                    }
                     self.process_message(msg);
                     let mut count = 1u32;
                     while let Ok(msg) = self.rx_inbox.try_recv() {
                         self.process_message(msg);
                         count += 1;
                         if count.is_multiple_of(BATCH_SIZE) {
-                            if !self.rx_tick.is_empty() {
+                            if !self.rx_tick.is_empty() || tx_batch.is_disconnected() {
                                 break;
                             }
                             tokio::task::yield_now().await;
@@ -504,5 +508,168 @@ mod tests {
         assert!(processor.check_forward_dedup(&fwd_new));
 
         assert_eq!(processor.forward_dedup.len(), FORWARD_DEDUP_CAPACITY);
+    }
+
+    fn forwarded(i: usize) -> InboundMessage {
+        let peer = NodeId::validated(2).unwrap();
+        InboundMessage {
+            from: peer,
+            message: ClusterMessage::ForwardedPublish(ForwardedPublish::new(
+                peer,
+                format!("t/{i}"),
+                1,
+                false,
+                vec![1],
+                vec![],
+            )),
+            received_at: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_break_keeps_every_message_in_order() {
+        let (tx_inbox, rx_inbox) = flume::unbounded();
+        let (tx_tick, rx_tick) = flume::unbounded();
+        let (tx_batch, rx_batch) = flume::unbounded();
+        let (tx_main, rx_main) = flume::unbounded();
+        let processor = MessageProcessor::new(
+            NodeId::validated(1).unwrap(),
+            test_config(),
+            flume::unbounded().0,
+            flume::unbounded().0,
+            tx_main,
+            rx_inbox,
+            rx_tick,
+        );
+        for i in 0..1000 {
+            tx_inbox.send(forwarded(i)).unwrap();
+        }
+        let task = tokio::spawn(processor.run(tx_batch));
+        for at in 0..20u64 {
+            tx_tick.send(at).unwrap();
+            tokio::task::yield_now().await;
+        }
+        drop(tx_inbox);
+        drop(tx_tick);
+        tokio::time::timeout(std::time::Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        let topics: Vec<String> = rx_main
+            .drain()
+            .map(|m| match m.message {
+                ClusterMessage::ForwardedPublish(f) => f.topic,
+                _ => String::new(),
+            })
+            .collect();
+        let expected: Vec<String> = (0..1000).map(|i| format!("t/{i}")).collect();
+        assert_eq!(topics, expected);
+        assert_eq!(rx_batch.drain().count(), 20);
+    }
+
+    #[tokio::test]
+    async fn tick_closed_inbox_open_keeps_processing() {
+        let (tx_inbox, rx_inbox) = flume::unbounded();
+        let (tx_tick, rx_tick) = flume::unbounded::<u64>();
+        let (tx_batch, rx_batch) = flume::unbounded();
+        let (tx_main, rx_main) = flume::unbounded();
+        let processor = MessageProcessor::new(
+            NodeId::validated(1).unwrap(),
+            test_config(),
+            flume::unbounded().0,
+            flume::unbounded().0,
+            tx_main,
+            rx_inbox,
+            rx_tick,
+        );
+        drop(tx_tick);
+        let task = tokio::spawn(processor.run(tx_batch));
+        for i in 0..10 {
+            tx_inbox.send(forwarded(i)).unwrap();
+        }
+        let got = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let mut n = 0;
+            while n < 10 {
+                rx_main.recv_async().await.unwrap();
+                n += 1;
+            }
+            n
+        })
+        .await
+        .unwrap();
+        assert_eq!(got, 10);
+        assert!(!task.is_finished());
+        drop(tx_inbox);
+        tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(rx_batch.is_disconnected());
+    }
+
+    #[tokio::test]
+    async fn inbox_closed_tick_open_keeps_ticking() {
+        let (tx_inbox, rx_inbox) = flume::unbounded::<InboundMessage>();
+        let (tx_tick, rx_tick) = flume::unbounded();
+        let (tx_batch, rx_batch) = flume::unbounded();
+        let processor = MessageProcessor::new(
+            NodeId::validated(1).unwrap(),
+            test_config(),
+            flume::unbounded().0,
+            flume::unbounded().0,
+            flume::unbounded().0,
+            rx_inbox,
+            rx_tick,
+        );
+        drop(tx_inbox);
+        let task = tokio::spawn(processor.run(tx_batch));
+        for at in 0..3u64 {
+            tx_tick.send(at).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(2), rx_batch.recv_async())
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        drop(tx_tick);
+        tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn processor_stops_when_its_batch_consumer_is_gone() {
+        let peer = NodeId::validated(2).unwrap();
+        let (tx_inbox, rx_inbox) = flume::unbounded();
+        let (tx_tick, rx_tick) = flume::unbounded::<u64>();
+        let (tx_batch, rx_batch) = flume::unbounded();
+        let processor = MessageProcessor::new(
+            NodeId::validated(1).unwrap(),
+            test_config(),
+            flume::unbounded().0,
+            flume::unbounded().0,
+            flume::unbounded().0,
+            rx_inbox,
+            rx_tick,
+        );
+        drop(rx_batch);
+        drop(tx_tick);
+        let task = tokio::spawn(processor.run(tx_batch));
+        for at in 0..1000u64 {
+            tx_inbox
+                .send(InboundMessage {
+                    from: peer,
+                    message: ClusterMessage::Heartbeat(Heartbeat::create(peer, at)),
+                    received_at: at,
+                })
+                .unwrap();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let finished = task.is_finished();
+        task.abort();
+        assert!(
+            finished,
+            "processor kept running with its batch consumer gone"
+        );
     }
 }
