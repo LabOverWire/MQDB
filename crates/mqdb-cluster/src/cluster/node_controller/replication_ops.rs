@@ -249,8 +249,8 @@ impl<T: ClusterTransport> NodeController<T> {
             self.handle_sequence_gap_ack(&ack).await;
         }
 
-        for (seq, result) in self.pending.drain_completed() {
-            self.on_write_complete(ack.partition(), seq, result);
+        for (partition, seq, result) in self.pending.drain_completed() {
+            self.on_write_complete(partition, seq, result);
         }
     }
 
@@ -363,7 +363,14 @@ impl<T: ClusterTransport> NodeController<T> {
             .append(partition, sequence, write_msg.clone());
 
         self.pending
-            .add(QuorumTracker::new(sequence, epoch, replicas, required_acks));
+            .add(QuorumTracker::new(
+                partition,
+                sequence,
+                epoch,
+                replicas,
+                required_acks,
+            ))
+            .map_err(|_| ReplicationError::TooManyPending)?;
 
         for &replica in replicas {
             let _ = self

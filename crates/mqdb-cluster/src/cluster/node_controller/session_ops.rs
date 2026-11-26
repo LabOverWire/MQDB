@@ -32,12 +32,15 @@ impl<T: ClusterTransport> NodeController<T> {
 
         if !stored.replicas.is_empty() {
             let required_acks = stored.replicas.len();
-            self.pending.add(QuorumTracker::new(
-                stored.write.sequence,
-                stored.write.epoch,
-                &stored.replicas,
-                required_acks,
-            ));
+            self.pending
+                .add(QuorumTracker::new(
+                    stored.write.partition,
+                    stored.write.sequence,
+                    stored.write.epoch,
+                    &stored.replicas,
+                    required_acks,
+                ))
+                .map_err(|_| ReplicationError::TooManyPending)?;
             self.send_to_replicas(&stored.write, &stored.replicas).await;
         }
 
@@ -69,12 +72,15 @@ impl<T: ClusterTransport> NodeController<T> {
 
         let required_acks = stored.replicas.len();
         let (tracker, rx) = QuorumTracker::with_completion(
+            stored.write.partition,
             stored.write.sequence,
             stored.write.epoch,
             &stored.replicas,
             required_acks,
         );
-        self.pending.add(tracker);
+        self.pending
+            .add(tracker)
+            .map_err(|_| ReplicationError::TooManyPending)?;
         self.send_to_replicas(&stored.write, &stored.replicas).await;
 
         Ok((stored.session, rx))

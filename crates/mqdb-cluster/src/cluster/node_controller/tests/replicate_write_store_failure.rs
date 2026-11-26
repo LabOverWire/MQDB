@@ -217,3 +217,32 @@ async fn a_quorum_session_refused_for_pending_capacity_leaves_no_trace() {
     assert!(ctrl.stores().sessions.get("zzqq").is_none());
     assert_eq!(backend.keys_containing("zzqq").unwrap(), 0);
 }
+
+#[tokio::test]
+async fn an_ack_for_one_partition_does_not_complete_another_partitions_quorum() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_with_replica(&backend);
+    let first = session_partition("a1");
+    let other = (0..1000)
+        .map(|i| format!("b{i}"))
+        .find(|client| session_partition(client) != first)
+        .unwrap();
+    let second = session_partition(&other);
+    let (_, mut first_done) = ctrl.create_session_quorum("a1").await.unwrap();
+    let (_, mut second_done) = ctrl.create_session_quorum(&other).await.unwrap();
+    let sequence = ctrl.sequence(second).unwrap();
+    assert_eq!(ctrl.sequence(first), Some(sequence));
+
+    ctrl.handle_ack(crate::cluster::protocol::ReplicationAck::ok(
+        second,
+        ctrl.epoch(second).unwrap(),
+        sequence,
+        node(2),
+    ))
+    .await;
+
+    assert_eq!(
+        (first_done.try_recv().ok(), second_done.try_recv().ok()),
+        (None, Some(QuorumResult::Success))
+    );
+}
