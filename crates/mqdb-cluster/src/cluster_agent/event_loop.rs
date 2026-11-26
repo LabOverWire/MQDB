@@ -503,9 +503,10 @@ impl ClusteredAgent {
                     "cleaned up expired idempotency records"
                 );
             }
-            let stale_offsets = ctrl.stores().cleanup_stale_offsets(now);
-            if stale_offsets > 0 {
-                info!(stale_offsets, "cleaned up stale consumer offsets");
+            match ctrl.stores().cleanup_stale_offsets(now) {
+                Ok(0) => {}
+                Ok(stale_offsets) => info!(stale_offsets, "cleaned up stale consumer offsets"),
+                Err(e) => warn!(error = ?e, "failed to persist stale consumer offset removals"),
             }
             ctrl.stores().cleanup_expired_sessions(now)
         };

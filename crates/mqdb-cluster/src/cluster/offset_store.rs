@@ -176,17 +176,39 @@ impl OffsetStore {
 
     /// # Panics
     /// Panics if the internal lock is poisoned.
-    pub fn cleanup_stale(&self, now: u64) -> usize {
-        self.cleanup_stale_with_ttl(now, OFFSET_STALE_TTL_MS)
+    ///
+    /// # Errors
+    /// Returns the error from `persist`, in which case nothing is removed.
+    pub fn cleanup_stale<E>(
+        &self,
+        now: u64,
+        persist: impl FnOnce(&[OffsetKey]) -> Result<(), E>,
+    ) -> Result<usize, E> {
+        self.cleanup_stale_with_ttl(now, OFFSET_STALE_TTL_MS, persist)
     }
 
     /// # Panics
     /// Panics if the internal lock is poisoned.
-    pub fn cleanup_stale_with_ttl(&self, now: u64, ttl_ms: u64) -> usize {
+    ///
+    /// # Errors
+    /// Returns the error from `persist`, in which case nothing is removed.
+    pub fn cleanup_stale_with_ttl<E>(
+        &self,
+        now: u64,
+        ttl_ms: u64,
+        persist: impl FnOnce(&[OffsetKey]) -> Result<(), E>,
+    ) -> Result<usize, E> {
         let mut offsets = self.offsets.write().unwrap();
-        let before = offsets.len();
-        offsets.retain(|_, offset| !offset.is_stale(now, ttl_ms));
-        before - offsets.len()
+        let stale: Vec<OffsetKey> = offsets
+            .iter()
+            .filter(|(_, offset)| offset.is_stale(now, ttl_ms))
+            .map(|(key, _)| key.clone())
+            .collect();
+        persist(&stale)?;
+        for key in &stale {
+            offsets.remove(key);
+        }
+        Ok(stale.len())
     }
 
     /// # Panics
@@ -242,12 +264,10 @@ impl OffsetStore {
         id: &str,
         data: &[u8],
     ) -> Result<(), OffsetStoreError> {
-        let parts: Vec<&str> = id.splitn(2, ':').collect();
-        if parts.len() != 2 {
-            return Err(OffsetStoreError::InvalidPartition);
-        }
-        let consumer_id = parts[0];
-        let partition_num: u16 = parts[1]
+        let (consumer_id, partition_num) = id
+            .rsplit_once(':')
+            .ok_or(OffsetStoreError::InvalidPartition)?;
+        let partition_num: u16 = partition_num
             .parse()
             .map_err(|_| OffsetStoreError::InvalidPartition)?;
 
@@ -341,14 +361,11 @@ impl OffsetStore {
             let offset_data = &data[offset..offset + data_len];
             offset += data_len;
 
-            let parts: Vec<&str> = id.splitn(2, ':').collect();
-            if parts.len() != 2 {
+            let Some((consumer_id, partition_num)) = id.rsplit_once(':') else {
                 continue;
-            }
-            let consumer_id = parts[0];
-            let partition_num: u16 = match parts[1].parse() {
-                Ok(p) => p,
-                Err(_) => continue,
+            };
+            let Ok(partition_num) = partition_num.parse::<u16>() else {
+                continue;
             };
 
             if let Some(consumer_offset) = Self::deserialize(offset_data) {
@@ -373,10 +390,8 @@ impl OffsetStore {
     /// # Panics
     /// Panics if the internal lock is poisoned.
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn query(
         &self,
-        _filter: Option<&str>,
         limit: u32,
         cursor: Option<&[u8]>,
     ) -> (Vec<ConsumerOffset>, bool, Option<Vec<u8>>) {
@@ -385,26 +400,20 @@ impl OffsetStore {
 
         let mut results: Vec<_> = offsets
             .iter()
-            .filter(|((cid, topic), _)| {
-                let key = format!("{cid}:{topic}");
-                start_key.is_none_or(|sk| key.as_str() > sk)
-            })
-            .take(limit as usize + 1)
+            .map(|((cid, part_num), offset)| (format!("{cid}:{part_num}"), offset))
+            .filter(|(key, _)| start_key.is_none_or(|sk| key.as_str() > sk))
             .collect();
 
-        results.sort_by_key(|((cid, topic), _)| format!("{cid}:{topic}"));
-        let has_more = results.len() > limit as usize;
-        if has_more {
-            results.pop();
-        }
+        results.sort_by(|(a, _), (b, _)| a.cmp(b));
+        let truncated = results.len() > limit as usize;
+        results.truncate(limit as usize);
 
-        let next_cursor = if has_more {
-            results
-                .last()
-                .map(|((cid, topic), _)| format!("{cid}:{topic}").into_bytes())
+        let next_cursor = if truncated {
+            results.last().map(|(key, _)| key.clone().into_bytes())
         } else {
             None
         };
+        let has_more = next_cursor.is_some();
 
         let data = results.into_iter().map(|(_, v)| v.clone()).collect();
         (data, has_more, next_cursor)
@@ -519,9 +528,14 @@ mod tests {
 
         let ttl_ms = 5000;
         let now = 10000;
-        let removed = store.cleanup_stale_with_ttl(now, ttl_ms);
+        let mut persisted = Vec::new();
+        let removed = store.cleanup_stale_with_ttl(now, ttl_ms, |keys| {
+            persisted.extend_from_slice(keys);
+            Ok::<(), OffsetStoreError>(())
+        });
 
-        assert_eq!(removed, 1);
+        assert_eq!(removed, Ok(1));
+        assert_eq!(persisted, vec![("old-consumer".to_string(), 0)]);
         assert_eq!(store.count(), 2);
         assert!(store.get("old-consumer", partition(0)).is_none());
         assert!(store.get("recent-consumer", partition(0)).is_some());
@@ -535,5 +549,68 @@ mod tests {
         assert!(!offset.is_stale(5000, 5000));
         assert!(offset.is_stale(7000, 5000));
         assert!(!offset.is_stale(6000, 5000));
+    }
+
+    #[test]
+    fn snapshot_keeps_a_consumer_id_containing_a_colon() {
+        let src = OffsetStore::new(node(1));
+        src.commit("dev:1", partition(10), 100, 1000);
+
+        let snapshot = src.export_for_partition(session_partition("dev:1"));
+        let dst = OffsetStore::new(node(2));
+
+        assert_eq!(dst.import_offsets(&snapshot), Ok(1));
+        assert_eq!(dst.get_sequence("dev:1", partition(10)), Some(100));
+    }
+
+    #[test]
+    fn replicated_writes_keep_a_consumer_id_containing_a_colon() {
+        let src = OffsetStore::new(node(1));
+        let (_, data) = src.commit_with_data("dev:1", partition(10), 100, 1000);
+        let dst = OffsetStore::new(node(2));
+
+        dst.apply_replicated(Operation::Update, "dev:1:10", &data)
+            .unwrap();
+        assert_eq!(dst.get_sequence("dev:1", partition(10)), Some(100));
+
+        dst.apply_replicated(Operation::Delete, "dev:1:10", &[])
+            .unwrap();
+        assert!(dst.get("dev:1", partition(10)).is_none());
+    }
+
+    #[test]
+    fn query_pages_through_every_offset_in_key_order() {
+        let store = OffsetStore::new(node(1));
+        let consumers: Vec<String> = (0..40).map(|i| format!("c{i:02}")).collect();
+        for consumer in &consumers {
+            store.commit(consumer, partition(1), 1, 1);
+        }
+
+        let mut seen = Vec::new();
+        let mut cursor: Option<Vec<u8>> = None;
+        loop {
+            let (page, has_more, next) = store.query(5, cursor.as_deref());
+            seen.extend(page.iter().map(|o| o.consumer_id_str().to_string()));
+            if !has_more {
+                break;
+            }
+            cursor = next;
+        }
+
+        assert_eq!(seen, consumers);
+    }
+
+    #[test]
+    fn query_with_zero_limit_returns_an_empty_final_page() {
+        let store = OffsetStore::new(node(1));
+        store.commit("c", partition(1), 1, 1);
+
+        let (page, has_more, next) = store.query(0, None);
+
+        assert!(page.is_empty());
+        assert!(
+            !(has_more && next.is_none()),
+            "has_more={has_more} next={next:?}"
+        );
     }
 }
