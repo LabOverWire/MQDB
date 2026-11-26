@@ -6,6 +6,29 @@ use crate::cluster::protocol::{Operation, ReplicationWrite};
 use crate::cluster::session::session_partition;
 use crate::cluster::{Epoch, SubscriptionType, entity, is_response_topic};
 
+const RECOVERED_ENTITIES: [(&str, RecoveryField); 13] = [
+    (entity::SESSIONS, RecoveryField::Sessions),
+    (entity::QOS2, RecoveryField::Qos2),
+    (entity::SUBSCRIPTIONS, RecoveryField::Subscriptions),
+    (entity::RETAINED, RecoveryField::Retained),
+    (entity::INFLIGHT, RecoveryField::Inflight),
+    (entity::OFFSETS, RecoveryField::Offsets),
+    (entity::IDEMPOTENCY, RecoveryField::Idempotency),
+    (entity::DB_DATA, RecoveryField::DbData),
+    (entity::DB_SCHEMA, RecoveryField::DbSchema),
+    (entity::DB_INDEX, RecoveryField::DbIndex),
+    (entity::DB_UNIQUE, RecoveryField::DbUnique),
+    (entity::DB_FK, RecoveryField::DbFk),
+    (entity::DB_CONSTRAINT, RecoveryField::DbConstraint),
+];
+
+#[must_use]
+pub(crate) fn is_recovered_from_storage(entity_name: &str) -> bool {
+    RECOVERED_ENTITIES
+        .iter()
+        .any(|(recovered, _)| *recovered == entity_name)
+}
+
 impl StoreManager {
     pub(crate) fn recover(&self) -> Result<RecoveryStats, StoreApplyError> {
         let storage = self
@@ -15,23 +38,7 @@ impl StoreManager {
 
         let mut stats = RecoveryStats::default();
 
-        let entities_to_recover = [
-            (entity::SESSIONS, RecoveryField::Sessions),
-            (entity::QOS2, RecoveryField::Qos2),
-            (entity::SUBSCRIPTIONS, RecoveryField::Subscriptions),
-            (entity::RETAINED, RecoveryField::Retained),
-            (entity::INFLIGHT, RecoveryField::Inflight),
-            (entity::OFFSETS, RecoveryField::Offsets),
-            (entity::IDEMPOTENCY, RecoveryField::Idempotency),
-            (entity::DB_DATA, RecoveryField::DbData),
-            (entity::DB_SCHEMA, RecoveryField::DbSchema),
-            (entity::DB_INDEX, RecoveryField::DbIndex),
-            (entity::DB_UNIQUE, RecoveryField::DbUnique),
-            (entity::DB_FK, RecoveryField::DbFk),
-            (entity::DB_CONSTRAINT, RecoveryField::DbConstraint),
-        ];
-
-        for (entity_name, field) in entities_to_recover {
+        for (entity_name, field) in RECOVERED_ENTITIES {
             match storage.scan_entity(entity_name) {
                 Ok(entries) => {
                     for (partition, id, data) in entries {

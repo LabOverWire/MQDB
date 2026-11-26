@@ -129,7 +129,7 @@ impl<T: ClusterTransport> NodeController<T> {
         entries.extend_from_slice(extra_outbox);
 
         let applied = if entries.is_empty() {
-            self.stores.apply_write(write_msg)
+            self.stores.apply_write_keeping_unrecovered(write_msg)
         } else {
             self.stores
                 .apply_write_with_outbox_entries(write_msg, &entries)

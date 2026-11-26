@@ -457,11 +457,11 @@ async fn an_update_taken_before_the_window_fills_is_kept() {
         .db_schema
         .apply_replicated(Operation::Insert, ENTITY, &SchemaStore::serialize(&first))
         .unwrap();
-    let updated = elsewhere
-        .stores
-        .db_schema
-        .update(ENTITY, b"{\"fields\":[\"new\"]}")
-        .unwrap();
+    let updated = crate::cluster::test_support::update_schema(
+        &elsewhere.stores.db_schema,
+        ENTITY,
+        b"{\"fields\":[\"new\"]}",
+    );
     let (mut replica, _) = awaiting_replica(node(1)).await;
     let chunks = start_transfer(&mut primary, &mut replica).await;
     replica.transport.inject_message(
@@ -523,11 +523,11 @@ async fn a_global_write_while_the_request_cannot_be_sent_survives_import() {
         .db_schema
         .apply_replicated(Operation::Insert, ENTITY, &SchemaStore::serialize(&first))
         .unwrap();
-    let updated = elsewhere
-        .stores
-        .db_schema
-        .update(ENTITY, b"{\"fields\":[\"new\"]}")
-        .unwrap();
+    let updated = crate::cluster::test_support::update_schema(
+        &elsewhere.stores.db_schema,
+        ENTITY,
+        b"{\"fields\":[\"new\"]}",
+    );
 
     let mut replica = controller(2);
     assign(&mut replica, node(1));
