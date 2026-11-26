@@ -836,6 +836,7 @@ async fn fk_then_unique_defers_reserve_to_async_completion() {
 
     let continuation = FkCheckContinuation::CreateFromNodeController {
         from: node1,
+        response_request_id: 1,
         entity: "users".to_string(),
         id: "u1".to_string(),
         data: serde_json::json!({ "id": "u1", "email": "a@x.com" }),
@@ -3147,6 +3148,7 @@ async fn forwarded_writes_completed_after_a_unique_check_publish_their_events() 
         Ok(Vec::new()),
         UniqueCheckContinuation::CreateFromNodeController {
             from: node2,
+            response_request_id: 1,
             entity: "users".to_string(),
             id: "u1".to_string(),
             data_bytes: serde_json::to_vec(&data).unwrap(),
@@ -3166,6 +3168,7 @@ async fn forwarded_writes_completed_after_a_unique_check_publish_their_events() 
         Ok(Vec::new()),
         UniqueCheckContinuation::UpdateFromNodeController {
             from: node2,
+            response_request_id: 2,
             entity: "users".to_string(),
             id: "u1".to_string(),
             update,
@@ -3247,6 +3250,7 @@ async fn forwarded_delete_cascade_events_carry_the_deleters_origin() {
 
 mod cascade_share;
 mod change_events;
+mod deferred_reply;
 mod forwarded_write;
 mod lost_snapshot_request;
 mod missing_record;
