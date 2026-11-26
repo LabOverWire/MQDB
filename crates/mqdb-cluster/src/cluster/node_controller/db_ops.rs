@@ -1078,26 +1078,8 @@ impl<T: ClusterTransport> NodeController<T> {
             Ok(v) => v,
             Err(msg) => return (Self::json_error(400, &msg), None),
         };
-        let Some(existing) = self.db_get(entity, id) else {
-            return (
-                Self::json_error(404, &format!("entity not found: {entity} id={id}")),
-                None,
-            );
-        };
-        if let Some(expected) = expected_version {
-            let current = serde_json::from_slice::<Value>(&existing.data)
-                .ok()
-                .and_then(|d| d.get("_version").and_then(Value::as_u64))
-                .unwrap_or(0);
-            if current != expected {
-                return (
-                    Self::json_error(
-                        412,
-                        &format!("{entity}/{id}: expected _version {expected}, found {current}"),
-                    ),
-                    None,
-                );
-            }
+        if let Err(refusal) = self.delete_precondition(entity, id, expected_version) {
+            return (refusal, None);
         }
 
         let (local_results, pending_remote) = match self
@@ -1120,6 +1102,7 @@ impl<T: ClusterTransport> NodeController<T> {
                             response_request_id: request.request_id,
                             entity: entity.to_string(),
                             id: id.to_string(),
+                            expected_version,
                             sender: request.sender.clone(),
                             client_id: request.client_id.clone(),
                             response_topic: request.response_topic.clone(),
@@ -2257,14 +2240,47 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
+    pub(crate) fn delete_precondition(
+        &self,
+        entity: &str,
+        id: &str,
+        expected_version: Option<u64>,
+    ) -> Result<(), Vec<u8>> {
+        let Some(existing) = self.db_get(entity, id) else {
+            return Err(Self::json_error(
+                404,
+                &format!("entity not found: {entity} id={id}"),
+            ));
+        };
+        let Some(expected) = expected_version else {
+            return Ok(());
+        };
+        let current = serde_json::from_slice::<Value>(&existing.data)
+            .ok()
+            .and_then(|d| d.get("_version").and_then(Value::as_u64))
+            .unwrap_or(0);
+        if current == expected {
+            Ok(())
+        } else {
+            Err(Self::json_error(
+                412,
+                &format!("{entity}/{id}: expected _version {expected}, found {current}"),
+            ))
+        }
+    }
+
     pub(crate) async fn complete_pending_fk_delete_work(
         &mut self,
         restrict_error: Option<String>,
         side_effects: Vec<super::fk::FkReverseLookupResult>,
         continuation: FkDeleteContinuation,
     ) {
-        if let Some(msg) = restrict_error {
-            let payload = Self::json_error(409, &msg);
+        let (entity, id) = continuation.entity_id();
+        let refusal = self
+            .delete_precondition(entity, id, continuation.expected_version())
+            .err()
+            .or_else(|| restrict_error.map(|msg| Self::json_error(409, &msg)));
+        if let Some(payload) = refusal {
             let FkDeleteContinuation::DeleteFromNodeController {
                 from,
                 response_request_id,
@@ -2297,6 +2313,7 @@ impl<T: ClusterTransport> NodeController<T> {
             client_id,
             response_topic,
             correlation_data,
+            ..
         } = continuation
         else {
             return;

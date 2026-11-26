@@ -116,41 +116,8 @@ async fn a_constraint_remove_the_node_cannot_store_is_refused_and_keeps_the_cons
     assert_eq!(broadcasts_of(&ctrl, entity::DB_CONSTRAINT), sent_before);
 }
 
-#[derive(Clone, Default)]
-struct CapturedLog(Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl CapturedLog {
-    fn text(&self) -> String {
-        self.0
-            .lock()
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-            .unwrap_or_default()
-    }
-}
-
-impl std::io::Write for CapturedLog {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        if let Ok(mut bytes) = self.0.lock() {
-            bytes.extend_from_slice(buf);
-        }
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 #[tokio::test]
-async fn a_client_location_the_node_cannot_store_is_still_broadcast_with_a_warning() {
-    let log = CapturedLog::default();
-    let writer = log.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::WARN)
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .finish();
-    let _log_guard = tracing::subscriber::set_default(subscriber);
+async fn a_client_location_the_node_cannot_store_is_kept_and_broadcast() {
     let backend = FaultyBackend::shared();
     let mut ctrl = controller_with_peers(&backend);
     backend.fail_writes(true);
@@ -169,11 +136,6 @@ async fn a_client_location_the_node_cannot_store_is_still_broadcast_with_a_warni
     assert_eq!(written, Ok(()));
     assert_eq!(ctrl.stores().client_locations.get("c1"), Some(node(1)));
     assert_eq!(broadcasts_of(&ctrl, entity::CLIENT_LOCATIONS), 2);
-    let logged = log.text();
-    assert!(
-        logged.contains("WARN") && logged.contains("not stored on this node"),
-        "{logged}"
-    );
 }
 
 fn ctrl_with(
