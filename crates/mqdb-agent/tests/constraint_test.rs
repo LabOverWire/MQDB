@@ -2039,3 +2039,47 @@ async fn concurrent_adds_of_one_constraint_store_it_once() {
         "rounds that accepted or stored the constraint twice"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_not_null_and_set_null_foreign_key_on_one_field_are_not_both_stored() {
+    const ROUNDS: usize = 100;
+    let tmp = TempDir::new().unwrap();
+    let db = Arc::new(Database::open(tmp.path()).await.unwrap());
+    let mut both = 0;
+    for round in 0..ROUNDS {
+        let entity = format!("tasks{round}");
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let not_null = {
+            let (db, barrier, entity) = (Arc::clone(&db), Arc::clone(&barrier), entity.clone());
+            tokio::spawn(async move {
+                barrier.wait().await;
+                db.add_not_null(entity, "owner".into()).await
+            })
+        };
+        let foreign_key = {
+            let (db, barrier, entity) = (Arc::clone(&db), Arc::clone(&barrier), entity.clone());
+            tokio::spawn(async move {
+                barrier.wait().await;
+                db.add_foreign_key(
+                    entity,
+                    "owner".into(),
+                    "users".into(),
+                    "id".into(),
+                    OnDeleteAction::SetNull,
+                )
+                .await
+            })
+        };
+        let accepted = (
+            not_null.await.unwrap().is_ok(),
+            foreign_key.await.unwrap().is_ok(),
+        );
+        if accepted == (true, true) {
+            both += 1;
+        }
+    }
+    assert_eq!(
+        both, 0,
+        "rounds that stored a not-null and a set-null foreign key on one field"
+    );
+}
