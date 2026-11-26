@@ -1,6 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
+use super::protocol::ListingDigest;
 use super::{PartitionId, session_partition};
 use mqtt5::{parse_shared_subscription, topic_matches_filter};
 use std::collections::{BTreeSet, HashMap};
@@ -9,6 +10,33 @@ use std::collections::{BTreeSet, HashMap};
 pub enum SubscriptionType {
     Mqtt,
     Db,
+}
+
+impl SubscriptionType {
+    #[must_use]
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Mqtt => 0,
+            Self::Db => 1,
+        }
+    }
+
+    #[must_use]
+    pub fn from_code(code: u8) -> Self {
+        match code {
+            1 => Self::Db,
+            _ => Self::Mqtt,
+        }
+    }
+}
+
+fn digest_term(pattern: &str, subscriber: &WildcardSubscriber) -> u64 {
+    ListingDigest::pattern_term(
+        &subscriber.client_id,
+        pattern,
+        subscriber.qos,
+        subscriber.subscription_type.code(),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +90,8 @@ pub struct TopicTrie {
     root: TrieNode,
     pattern_count: usize,
     shared_patterns: BTreeSet<String>,
+    patterns_by_client: HashMap<String, BTreeSet<String>>,
+    digest_by_client: HashMap<String, u64>,
 }
 
 impl TopicTrie {
@@ -91,6 +121,15 @@ impl TopicTrie {
             .iter()
             .any(|s| s.client_id == subscriber.client_id)
         {
+            self.patterns_by_client
+                .entry(subscriber.client_id.clone())
+                .or_default()
+                .insert(pattern.to_string());
+            let digest = self
+                .digest_by_client
+                .entry(subscriber.client_id.clone())
+                .or_default();
+            *digest = digest.wrapping_add(digest_term(pattern, &subscriber));
             node.subscribers.push(subscriber);
             self.pattern_count += 1;
         }
@@ -100,10 +139,26 @@ impl TopicTrie {
     }
 
     pub fn remove(&mut self, pattern: &str, client_id: &str) -> bool {
+        let term = self.find(pattern).and_then(|node| {
+            node.subscribers
+                .iter()
+                .find(|sub| sub.client_id == client_id)
+                .map(|sub| digest_term(pattern, sub))
+        });
         let levels: Vec<&str> = pattern.split('/').collect();
         let removed = Self::remove_recursive(&mut self.root, &levels, 0, client_id);
         if removed {
             self.pattern_count = self.pattern_count.saturating_sub(1);
+            if let Some(digest) = self.digest_by_client.get_mut(client_id) {
+                *digest = digest.wrapping_sub(term.unwrap_or_default());
+            }
+            if let Some(patterns) = self.patterns_by_client.get_mut(client_id) {
+                patterns.remove(pattern);
+                if patterns.is_empty() {
+                    self.patterns_by_client.remove(client_id);
+                    self.digest_by_client.remove(client_id);
+                }
+            }
             if self.shared_patterns.contains(pattern)
                 && self
                     .find(pattern)
@@ -113,6 +168,40 @@ impl TopicTrie {
             }
         }
         removed
+    }
+
+    #[must_use]
+    pub fn client_digest(&self, client_id: &str) -> u64 {
+        self.digest_by_client
+            .get(client_id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub fn client_patterns<'a>(
+        &'a self,
+        client_id: &'a str,
+    ) -> impl Iterator<Item = (&'a String, &'a WildcardSubscriber)> {
+        self.patterns_by_client
+            .get(client_id)
+            .into_iter()
+            .flatten()
+            .filter_map(move |pattern| {
+                self.find(pattern)?
+                    .subscribers
+                    .iter()
+                    .find(|sub| sub.client_id == client_id)
+                    .map(|sub| (pattern, sub))
+            })
+    }
+
+    pub fn client_subscriptions<'a>(
+        &'a self,
+        client_id: &'a str,
+    ) -> Vec<(String, &'a WildcardSubscriber)> {
+        self.client_patterns(client_id)
+            .map(|(pattern, sub)| (pattern.clone(), sub))
+            .collect()
     }
 
     fn find(&self, pattern: &str) -> Option<&TrieNode> {

@@ -20,8 +20,9 @@ use tracing::{debug, trace, warn};
 impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
     pub(super) async fn client_is_live_elsewhere(&self, client_id: &str) -> bool {
         let ctrl = self.controller.read().await;
-        ctrl.connected_node(client_id)
-            .is_some_and(|node| node != self.node_id)
+        ctrl.connected_nodes(client_id)
+            .into_iter()
+            .any(|node| node != self.node_id)
     }
 
     pub(super) async fn emit_presence(&self, presence: &mqdb_agent::presence::PresenceEvent) {

@@ -3214,7 +3214,14 @@ fn setup_lwt_test_sessions(cluster: &mut TestCluster, n1: NodeId, n2: NodeId) {
         .controller
         .stores()
         .client_locations
-        .set("subscriber-client", n2);
+        .apply_replicated(
+            Operation::Insert,
+            &bebytes::BeBytes::to_be_bytes(&mqdb_cluster::cluster::ClientLocationEntry::create(
+                "subscriber-client",
+                n2,
+            )),
+        )
+        .unwrap();
 }
 
 #[tokio::test]

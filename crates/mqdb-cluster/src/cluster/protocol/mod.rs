@@ -9,6 +9,7 @@ mod heartbeat;
 mod publish;
 mod query;
 mod replication;
+mod subscription_resync;
 mod types;
 mod unique;
 mod wire;
@@ -24,6 +25,10 @@ pub use heartbeat::Heartbeat;
 pub use publish::{ForwardTarget, ForwardedPublish};
 pub use query::{BatchReadRequest, BatchReadResponse, QueryRequest, QueryResponse};
 pub use replication::{CatchupRequest, CatchupResponse, ReplicationAck, ReplicationWrite};
+pub use subscription_resync::{
+    ListingDigest, ResyncRequest, ResyncedClient, ResyncedPattern, ResyncedTopic,
+    SubscriptionResync,
+};
 pub use types::{AckStatus, JsonDbOp, MessageType, Operation, QueryStatus};
 pub use unique::{
     UniqueCommitRequest, UniqueCommitResponse, UniqueReassertRequest, UniqueReleaseRequest,

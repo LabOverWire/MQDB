@@ -1,29 +1,18 @@
 // Copyright 2027 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use mqdb_cluster::cluster::raft::{
-    AppendEntriesRequest, AppendEntriesResponse, PartitionUpdate, RequestVoteRequest,
-    RequestVoteResponse,
-};
 use mqdb_cluster::cluster::{
-    BatchReadRequest, BatchReadResponse, CatchupRequest, CatchupResponse, ClusterMessage,
-    ClusterTransport, Epoch, ForwardedPublish, Heartbeat, InboundMessage, JsonDbRequest,
-    JsonDbResponse, NUM_PARTITIONS, NodeId, PartitionId, QueryRequest, QueryResponse,
-    ReplicationAck, ReplicationWrite, SnapshotChunk, SnapshotComplete, SnapshotRequest,
-    TopicSubscriptionBroadcast, TransportError, UniqueCommitRequest, UniqueCommitResponse,
-    UniqueReassertRequest, UniqueReleaseRequest, UniqueReleaseResponse, UniqueReplicateAck,
-    UniqueReserveRequest, UniqueReserveResponse, UniqueSealRequest, UniqueSealResponse,
-    WildcardBroadcast,
+    BatchReadRequest, BatchReadResponse, ClusterMessage, ClusterTransport, Epoch, Heartbeat,
+    InboundMessage, NodeId, PartitionId, QueryRequest, QueryResponse, ReplicationWrite,
+    TransportError,
 };
 
 use super::framework::{VirtualClock, VirtualNetwork};
-use bebytes::BeBytes;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug)]
 struct TransportState {
     registered_nodes: Vec<u16>,
-    partition_primaries: Vec<Option<u16>>,
 }
 
 #[derive(Debug, Clone)]
@@ -43,7 +32,6 @@ impl SimulatedTransport {
             clock,
             state: Arc::new(Mutex::new(TransportState {
                 registered_nodes: vec![node_id.get()],
-                partition_primaries: vec![None; NUM_PARTITIONS as usize],
             })),
         }
     }
@@ -56,12 +44,6 @@ impl SimulatedTransport {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn set_partition_primary(&self, partition: PartitionId, primary: Option<NodeId>) {
-        let mut state = self.state.lock().unwrap();
-        state.partition_primaries[partition.get() as usize] = primary.map(NodeId::get);
-    }
-
     fn serialize_message(msg: &ClusterMessage) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.push(msg.message_type());
@@ -69,184 +51,9 @@ impl SimulatedTransport {
         buf
     }
 
-    #[allow(clippy::too_many_lines)]
     fn deserialize_message(data: &[u8]) -> Option<ClusterMessage> {
-        if data.is_empty() {
-            return None;
-        }
-
-        let msg_type = data[0];
-        let payload = &data[1..];
-
-        match msg_type {
-            0 => {
-                let (hb, _) = Heartbeat::try_from_be_bytes(payload).ok()?;
-                Some(ClusterMessage::Heartbeat(hb))
-            }
-            10 => {
-                let w = ReplicationWrite::from_bytes(payload)?;
-                Some(ClusterMessage::Write(w))
-            }
-            11 => {
-                let (ack, _) = ReplicationAck::try_from_be_bytes(payload).ok()?;
-                Some(ClusterMessage::Ack(ack))
-            }
-            15 => {
-                let w = ReplicationWrite::from_bytes(payload)?;
-                Some(ClusterMessage::WriteRequest(w))
-            }
-            2 => {
-                if payload.len() < 2 {
-                    return None;
-                }
-                let node_id = u16::from_be_bytes([payload[0], payload[1]]);
-                let node = NodeId::validated(node_id)?;
-                Some(ClusterMessage::DeathNotice { node_id: node })
-            }
-            3 => {
-                if payload.len() < 2 {
-                    return None;
-                }
-                let node_id = u16::from_be_bytes([payload[0], payload[1]]);
-                let node = NodeId::validated(node_id)?;
-                Some(ClusterMessage::DrainNotification { node_id: node })
-            }
-            20 => {
-                let (req, _) = RequestVoteRequest::try_from_be_bytes(payload).ok()?;
-                Some(ClusterMessage::RequestVote(req))
-            }
-            21 => {
-                let (resp, _) = RequestVoteResponse::try_from_be_bytes(payload).ok()?;
-                Some(ClusterMessage::RequestVoteResponse(resp))
-            }
-            22 => {
-                let req = AppendEntriesRequest::from_bytes(payload)?;
-                Some(ClusterMessage::AppendEntries(req))
-            }
-            23 => {
-                let (resp, _) = AppendEntriesResponse::try_from_be_bytes(payload).ok()?;
-                Some(ClusterMessage::AppendEntriesResponse(resp))
-            }
-            12 => {
-                let (req, _) = CatchupRequest::try_from_be_bytes(payload).ok()?;
-                Some(ClusterMessage::CatchupRequest(req))
-            }
-            13 => {
-                let resp = CatchupResponse::from_bytes(payload)?;
-                Some(ClusterMessage::CatchupResponse(resp))
-            }
-            30 => {
-                let fwd = ForwardedPublish::from_bytes(payload)?;
-                Some(ClusterMessage::ForwardedPublish(fwd))
-            }
-            40 => {
-                let (req, _) = SnapshotRequest::try_from_be_bytes(payload).ok()?;
-                Some(ClusterMessage::SnapshotRequest(req))
-            }
-            41 => {
-                let chunk = SnapshotChunk::from_bytes(payload)?;
-                Some(ClusterMessage::SnapshotChunk(chunk))
-            }
-            42 => {
-                let (complete, _) = SnapshotComplete::try_from_be_bytes(payload).ok()?;
-                Some(ClusterMessage::SnapshotComplete(complete))
-            }
-            50 => {
-                if payload.len() < 2 {
-                    return None;
-                }
-                let partition_id = u16::from_be_bytes([payload[0], payload[1]]);
-                let partition = PartitionId::new(partition_id)?;
-                let request = QueryRequest::from_bytes(&payload[2..])?;
-                Some(ClusterMessage::QueryRequest { partition, request })
-            }
-            51 => {
-                let response = QueryResponse::from_bytes(payload)?;
-                Some(ClusterMessage::QueryResponse(response))
-            }
-            52 => {
-                let request = BatchReadRequest::from_bytes(payload)?;
-                Some(ClusterMessage::BatchReadRequest(request))
-            }
-            53 => {
-                let response = BatchReadResponse::from_bytes(payload)?;
-                Some(ClusterMessage::BatchReadResponse(response))
-            }
-            60 => {
-                let (broadcast, _) = WildcardBroadcast::try_from_be_bytes(payload).ok()?;
-                Some(ClusterMessage::WildcardBroadcast(broadcast))
-            }
-            61 => {
-                let (broadcast, _) = TopicSubscriptionBroadcast::try_from_be_bytes(payload).ok()?;
-                Some(ClusterMessage::TopicSubscriptionBroadcast(broadcast))
-            }
-            70 => {
-                let (update, _) = PartitionUpdate::try_from_be_bytes(payload).ok()?;
-                Some(ClusterMessage::PartitionUpdate(update))
-            }
-            54 => {
-                if payload.len() < 2 {
-                    return None;
-                }
-                let partition_id = u16::from_be_bytes([payload[0], payload[1]]);
-                let partition = PartitionId::new(partition_id)?;
-                let request = JsonDbRequest::from_bytes(&payload[2..])?;
-                Some(ClusterMessage::JsonDbRequest { partition, request })
-            }
-            55 => {
-                let response = JsonDbResponse::from_bytes(payload)?;
-                Some(ClusterMessage::JsonDbResponse(response))
-            }
-            80 => {
-                let (req, _) = UniqueReserveRequest::try_from_be_bytes(payload).ok()?;
-                Some(ClusterMessage::UniqueReserveRequest(req))
-            }
-            81 => {
-                let (resp, _) = UniqueReserveResponse::try_from_be_bytes(payload).ok()?;
-                Some(ClusterMessage::UniqueReserveResponse(resp))
-            }
-            82 => {
-                let (req, _) = UniqueCommitRequest::try_from_be_bytes(payload).ok()?;
-                Some(ClusterMessage::UniqueCommitRequest(req))
-            }
-            83 => {
-                let (resp, _) = UniqueCommitResponse::try_from_be_bytes(payload).ok()?;
-                Some(ClusterMessage::UniqueCommitResponse(resp))
-            }
-            84 => {
-                let (req, _) = UniqueReleaseRequest::try_from_be_bytes(payload).ok()?;
-                Some(ClusterMessage::UniqueReleaseRequest(req))
-            }
-            85 => {
-                let (resp, _) = UniqueReleaseResponse::try_from_be_bytes(payload).ok()?;
-                Some(ClusterMessage::UniqueReleaseResponse(resp))
-            }
-            86 => {
-                let (req, _) = UniqueReassertRequest::try_from_be_bytes(payload).ok()?;
-                Some(ClusterMessage::UniqueReassertRequest(req))
-            }
-            87 => {
-                if payload.len() < 8 {
-                    return None;
-                }
-                let request_id = u64::from_be_bytes(payload[..8].try_into().ok()?);
-                let write = ReplicationWrite::from_bytes(&payload[8..])?;
-                Some(ClusterMessage::UniqueReplicate { request_id, write })
-            }
-            88 => {
-                let (ack, _) = UniqueReplicateAck::try_from_be_bytes(payload).ok()?;
-                Some(ClusterMessage::UniqueReplicateAck(ack))
-            }
-            89 => {
-                let (req, _) = UniqueSealRequest::try_from_be_bytes(payload).ok()?;
-                Some(ClusterMessage::UniqueSealRequest(req))
-            }
-            94 => {
-                let (resp, _) = UniqueSealResponse::try_from_be_bytes(payload).ok()?;
-                Some(ClusterMessage::UniqueSealResponse(resp))
-            }
-            _ => None,
-        }
+        let (msg_type, payload) = data.split_first()?;
+        ClusterMessage::decode_from_wire(*msg_type, payload)
     }
 }
 
@@ -280,28 +87,9 @@ impl ClusterTransport for SimulatedTransport {
     async fn send_to_partition_primary(
         &self,
         partition: PartitionId,
-        message: ClusterMessage,
+        _message: ClusterMessage,
     ) -> Result<(), TransportError> {
-        let primary = {
-            let state = self.state.lock().unwrap();
-            state.partition_primaries[partition.get() as usize]
-        };
-
-        match primary {
-            Some(id) => {
-                if let Some(node) = NodeId::validated(id) {
-                    let data = Self::serialize_message(&message);
-                    if self.network.send(self.node_id.get(), node.get(), data) {
-                        Ok(())
-                    } else {
-                        Err(TransportError::NetworkPartitioned)
-                    }
-                } else {
-                    Err(TransportError::PartitionNotFound(partition))
-                }
-            }
-            None => Err(TransportError::PartitionNotFound(partition)),
-        }
+        Err(TransportError::PartitionNotFound(partition))
     }
 
     async fn direct_peers(&self) -> Option<Vec<NodeId>> {

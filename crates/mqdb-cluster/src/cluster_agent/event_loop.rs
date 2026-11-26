@@ -248,6 +248,7 @@ impl ClusteredAgent {
         ctrl.drain_pending_seals().await;
         ctrl.drive_change_events(now).await;
         ctrl.drive_snapshots(now).await;
+        ctrl.drive_subscription_resyncs(now).await;
     }
 
     async fn handle_processing_batch(&self, batch: ProcessingBatch) {
@@ -259,6 +260,7 @@ impl ClusteredAgent {
         if !batch.heartbeat_updates.is_empty() {
             let mut ctrl = self.controller.write().await;
             ctrl.apply_heartbeat_updates(&batch.heartbeat_updates);
+            ctrl.request_subscription_resyncs().await;
         }
 
         if !batch.dead_nodes.is_empty() {

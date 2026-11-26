@@ -58,7 +58,8 @@ pub use mqdb_core::partition::{
 };
 
 pub use client_location::{
-    ClientLocationEntry, ClientLocationError, ClientLocationStore, client_location_key,
+    ClientLocationEntry, ClientLocationError, ClientLocationStore, LocationOrder, LocationStamp,
+    client_location_key,
 };
 pub use cursor::{PartitionCursor, ScatterCursor};
 pub use db::{DbDataStore, DbDataStoreError, DbEntity, data_partition, db_data_key};

@@ -3245,6 +3245,7 @@ mod cascade_share;
 mod change_events;
 mod deferred_reply;
 mod forwarded_write;
+mod location_claims;
 mod lost_snapshot_request;
 mod missing_record;
 mod owner_field;
