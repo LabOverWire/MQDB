@@ -666,22 +666,73 @@ async fn a_null_for_a_field_the_record_lacks_is_not_a_clearing_update() {
     assert_eq!(data_writes_sent(&ctrl), writes_before);
 }
 
-#[tokio::test]
-async fn a_clearing_update_of_a_record_over_the_frame_limit_is_refused() {
-    let mut ctrl = primary_with_replica();
+async fn posts_with_set_null_author(ctrl: &mut NodeController<MockTransport>) {
+    ctrl.constraint_add(
+        &ClusterConstraint::foreign_key(
+            "posts",
+            "posts_author_fk",
+            "author_id",
+            "users",
+            "id",
+            OnDeleteAction::SetNull,
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+}
+
+fn store_child_over_the_frame_limit(ctrl: &NodeController<MockTransport>) {
     let oversized =
-        serde_json::to_vec(&json!({"id": "r1", "n": 1, "blob": blob(11 * MIB)})).unwrap();
+        serde_json::to_vec(&json!({"id": "c1", "author_id": "u", "blob": blob(11 * MIB)})).unwrap();
     crate::cluster::test_support::put_record(
         &ctrl.stores().db_data,
-        "items",
-        "r1",
+        "posts",
+        "c1",
         &oversized,
         1000,
     );
-    let writes_before = data_writes_sent(&ctrl);
+}
 
-    let updated = request(&mut ctrl, "$DB/items/r1/update", &json!({"n": null})).await;
+#[tokio::test]
+async fn a_local_set_null_on_a_child_over_the_frame_limit_is_applied() {
+    let mut ctrl = primary_with_replica();
+    posts_with_set_null_author(&mut ctrl).await;
+    let parent = request(&mut ctrl, "$DB/users/create", &json!({"id": "u"})).await;
+    assert_eq!(parent["status"], "ok");
+    let child = request(
+        &mut ctrl,
+        "$DB/posts/create",
+        &json!({"id": "c1", "author_id": "u"}),
+    )
+    .await;
+    assert_eq!(child["status"], "ok");
+    store_child_over_the_frame_limit(&ctrl);
 
-    assert!(refused_as_too_large(&updated), "{}", outcome(&updated));
-    assert_eq!(data_writes_sent(&ctrl), writes_before);
+    let deleted = request(&mut ctrl, "$DB/users/u/delete", &json!({})).await;
+
+    assert_eq!(deleted["status"], "ok", "{}", outcome(&deleted));
+    assert!(stored(&ctrl, "posts", "c1").unwrap()["author_id"].is_null());
+}
+
+#[tokio::test]
+async fn a_remote_set_null_on_a_child_over_the_frame_limit_is_acknowledged() {
+    let mut ctrl = primary_with_replica();
+    store_child_over_the_frame_limit(&ctrl);
+
+    ctrl.handle_json_db_request(
+        node(2),
+        data_partition("posts", "c1"),
+        &cascade_request(
+            JsonDbOp::Update,
+            "posts",
+            "c1",
+            &json!({"author_id": null, "__mqdb_fk_expected": "author_id=u"}),
+        ),
+    )
+    .await;
+
+    let replies = forwarded_replies(&ctrl);
+    assert_eq!(replies[0]["status"], "ok", "{}", outcome(&replies[0]));
+    assert!(stored(&ctrl, "posts", "c1").unwrap()["author_id"].is_null());
 }

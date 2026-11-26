@@ -342,11 +342,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
         if size > MAX_MESSAGE_SIZE {
             write.event = event.map(|e| change_event_record(&without_record(e)));
-            let slimmed = super::catchup::replication_frame_len(&write).unwrap_or(0);
-            if matches!(oversize, OversizeWrite::RefuseUnlessClearing) && slimmed > MAX_MESSAGE_SIZE
-            {
-                return Err(refuse_too_large(&write, slimmed));
-            }
             tracing::warn!(
                 entity = write.entity,
                 id = write.id,
