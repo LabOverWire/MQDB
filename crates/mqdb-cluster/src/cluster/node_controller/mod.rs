@@ -255,6 +255,7 @@ pub enum FkDeleteContinuation {
     DeleteFromDbHandler {
         entity: String,
         id: String,
+        expected_version: Option<u64>,
         sender: Option<String>,
         client_id: Option<String>,
         response_topic: String,
@@ -265,6 +266,7 @@ pub enum FkDeleteContinuation {
         response_request_id: u64,
         entity: String,
         id: String,
+        expected_version: Option<u64>,
         sender: Option<String>,
         client_id: Option<String>,
         response_topic: String,

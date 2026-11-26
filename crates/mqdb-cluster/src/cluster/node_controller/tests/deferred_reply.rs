@@ -746,3 +746,55 @@ async fn an_early_refusal_without_a_response_topic_sends_no_reply() {
         "replies sent with an empty topic: {empty_topic_replies:?}"
     );
 }
+
+#[tokio::test]
+async fn a_deferred_forwarded_delete_rechecks_its_expected_version() {
+    let mut ctrl = primary().await;
+    let request = forwarded(
+        64,
+        JsonDbOp::Delete,
+        "users",
+        "u2",
+        &json!({"_expected_version": 1}),
+    );
+    let PendingConstraintWork::FkDelete(work) = deferred(&mut ctrl, &request).await else {
+        panic!("the delete should wait on the remote FK reverse lookup");
+    };
+    let updated =
+        publish_completing_unique(&mut ctrl, "$DB/users/u2/update", &json!({"name": "b"})).await;
+    assert_eq!(updated["data"]["_version"], 2, "{updated}");
+
+    ctrl.complete_pending_fk_delete_work(None, work.local_results, work.continuation)
+        .await;
+
+    assert_reply(&reply_to_forwarder(&ctrl), 64, "error");
+    let reply: Value = serde_json::from_slice(&reply_to_forwarder(&ctrl).payload).unwrap();
+    assert_eq!(reply["code"], 412, "{reply}");
+    assert!(ctrl.db_get("users", "u2").is_some());
+}
+
+#[tokio::test]
+async fn a_deferred_mqtt_delete_rechecks_its_expected_version() {
+    let mut ctrl = primary().await;
+    let handler = crate::cluster::db_handler::DbRequestHandler::new(node(1));
+    let ctx = super::store_failure::response_ctx(None);
+    let payload = serde_json::to_vec(&json!({"_expected_version": 1})).unwrap();
+    let crate::cluster::db_handler::DbPublishResult::PendingFkDelete(work) = handler
+        .handle_publish(&mut ctrl, "$DB/users/u2/delete", &payload, &ctx)
+        .await
+    else {
+        panic!("the delete should wait on the remote FK reverse lookup");
+    };
+    let updated =
+        publish_completing_unique(&mut ctrl, "$DB/users/u2/update", &json!({"name": "b"})).await;
+    assert_eq!(updated["data"]["_version"], 2, "{updated}");
+
+    let response = handler
+        .complete_pending_fk_delete(&mut ctrl, None, work.local_results, work.continuation)
+        .await
+        .unwrap();
+
+    let reply: Value = serde_json::from_slice(&response.payload).unwrap();
+    assert_eq!(reply["code"], 412, "{reply}");
+    assert!(ctrl.db_get("users", "u2").is_some());
+}
