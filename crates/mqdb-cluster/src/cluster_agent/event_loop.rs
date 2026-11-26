@@ -400,27 +400,14 @@ impl ClusteredAgent {
         controller: Arc<tokio::sync::RwLock<NodeController<super::ClusterTransportKind>>>,
         pending: crate::cluster::node_controller::PendingUniqueWork,
     ) {
-        use crate::cluster::node_controller::unique::{await_unique_quorum, await_unique_reserves};
+        use crate::cluster::node_controller::unique::await_unique_phase1;
 
         let local_reserved = pending.phase1.local_reserved;
         let pending_remote = pending.phase1.pending_remote;
         let pending_quorum = pending.phase1.pending_quorum;
         let continuation = pending.continuation;
         tokio::spawn(async move {
-            use crate::cluster::node_controller::ReserveFailure;
-            // Await the remote-reserve and local-quorum rounds concurrently so a create waits the
-            // max of the two ~5s deadlines, not their sum.
-            let remote_results = match tokio::join!(
-                await_unique_reserves(pending_remote),
-                await_unique_quorum(pending_quorum),
-            ) {
-                (Ok(confirmed), Ok(durable)) => {
-                    tracing::debug!(?durable, "unique reserve is majority-durable");
-                    Ok(confirmed)
-                }
-                (Ok(confirmed), Err(field)) => Err((ReserveFailure::NotDurable(field), confirmed)),
-                (Err(e), _) => Err(e),
-            };
+            let remote_results = await_unique_phase1(pending_remote, pending_quorum).await;
             let mut ctrl = controller.write().await;
             ctrl.complete_pending_unique_work(local_reserved, remote_results, continuation)
                 .await;
@@ -446,7 +433,6 @@ impl ClusteredAgent {
                 };
                 ctrl.complete_pending_fk_work(fk_ok, fk_error, continuation)
                     .await
-                // controller write lock is released here, before the majority-await below.
             };
             if let FkThenUniqueOutcome::NeedUnique(pending) = outcome {
                 Self::spawn_unique_completion(controller, *pending);

@@ -355,7 +355,6 @@ pub enum UniqueCheckContinuation {
         id: String,
         data: serde_json::Value,
         constraint_data: serde_json::Value,
-        partition: PartitionId,
         request_id: String,
         now_ms: u64,
         sender: Option<String>,
@@ -384,7 +383,6 @@ pub enum UniqueCheckContinuation {
         id: String,
         data: serde_json::Value,
         data_bytes: Vec<u8>,
-        partition: PartitionId,
         request_id: String,
         now_ms: u64,
         sender: Option<String>,
@@ -1547,7 +1545,6 @@ impl<T: ClusterTransport> NodeController<T> {
                 id,
                 data,
                 data_bytes,
-                partition,
                 request_id,
                 now_ms,
                 sender,
@@ -1580,15 +1577,8 @@ impl<T: ClusterTransport> NodeController<T> {
                             .await
                         {
                             Ok(db_entity) => {
-                                self.commit_unique_constraints(
-                                    &entity,
-                                    &id,
-                                    &data,
-                                    partition,
-                                    &request_id,
-                                    now_ms,
-                                )
-                                .await;
+                                self.commit_unique_constraints(&entity, &data, &request_id)
+                                    .await;
                                 crate::cluster::db_handler::helpers::json_ok_with_id(
                                     db_entity.id_str(),
                                     &data,
@@ -1676,15 +1666,8 @@ impl<T: ClusterTransport> NodeController<T> {
                             .await
                         {
                             Ok(db_entity) => {
-                                self.commit_unique_constraints(
-                                    &entity,
-                                    &id,
-                                    &new_diff,
-                                    partition,
-                                    &request_id,
-                                    now_ms,
-                                )
-                                .await;
+                                self.commit_unique_constraints(&entity, &new_diff, &request_id)
+                                    .await;
                                 self.release_unique_constraints(
                                     &entity, &id, &old_diff, partition, &id, now_ms,
                                 )
