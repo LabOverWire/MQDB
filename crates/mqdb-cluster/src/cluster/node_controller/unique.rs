@@ -3,9 +3,9 @@
 
 use super::{
     ClusterMessage, ClusterTransport, NodeController, NodeId, PartitionId, PendingUniqueReserve,
-    ReserveFailure, UniqueCheckPhase1Result, UniqueCommitRequest, UniqueReassertRequest,
-    UniqueReleaseRequest, UniqueReserveRequest, UniqueReserveResponse, UniqueReserveStatus,
-    UniqueSealRequest, UniqueSealResponse,
+    RemoteReserveResult, ReserveFailure, UniqueCheckPhase1Result, UniqueCommitRequest,
+    UniqueReassertRequest, UniqueReleaseRequest, UniqueReserveRequest, UniqueReserveResponse,
+    UniqueReserveStatus, UniqueSealRequest, UniqueSealResponse,
 };
 use crate::cluster::Epoch;
 use crate::cluster::protocol::Heartbeat;
@@ -42,30 +42,35 @@ pub async fn await_unique_reserves(
     pending: Vec<PendingUniqueReserve>,
 ) -> Result<Vec<(String, Vec<u8>, NodeId)>, (ReserveFailure, Vec<(String, Vec<u8>, NodeId)>)> {
     let mut confirmed: Vec<(String, Vec<u8>, NodeId)> = Vec::new();
+    let mut pending = pending.into_iter();
 
-    for pending_reserve in pending {
+    while let Some(pending_reserve) = pending.next() {
         let deadline = tokio::time::Instant::now()
             + std::time::Duration::from_secs(UNIQUE_RESERVE_TIMEOUT_SECS);
 
         let result = tokio::time::timeout_at(deadline, pending_reserve.receiver).await;
+        let field = pending_reserve.field;
+        let reserved = (
+            field.clone(),
+            pending_reserve.value,
+            pending_reserve.target_node,
+        );
 
-        match result {
+        let failure = match result {
             Ok(Ok(UniqueReserveStatus::Reserved | UniqueReserveStatus::AlreadyReserved)) => {
-                confirmed.push((
-                    pending_reserve.field,
-                    pending_reserve.value,
-                    pending_reserve.target_node,
-                ));
+                confirmed.push(reserved);
+                continue;
             }
-            // A remote conflict is a permanent 409; a remote error, timeout, or dropped channel is a
-            // transient not-durable failure the client should retry (503).
-            Ok(Ok(UniqueReserveStatus::Conflict)) => {
-                return Err((ReserveFailure::Conflict(pending_reserve.field), confirmed));
-            }
+            Ok(Ok(UniqueReserveStatus::Conflict)) => ReserveFailure::Conflict(field),
             _ => {
-                return Err((ReserveFailure::NotDurable(pending_reserve.field), confirmed));
+                confirmed.push(reserved);
+                ReserveFailure::NotDurable(field)
             }
-        }
+        };
+        confirmed.extend(
+            pending.map(|unanswered| (unanswered.field, unanswered.value, unanswered.target_node)),
+        );
+        return Err((failure, confirmed));
     }
 
     Ok(confirmed)
@@ -85,6 +90,23 @@ pub async fn await_unique_quorum(
         }
     }
     Ok(durable)
+}
+
+pub(crate) async fn await_unique_phase1(
+    pending_remote: Vec<PendingUniqueReserve>,
+    pending_quorum: Vec<(String, oneshot::Receiver<bool>)>,
+) -> RemoteReserveResult {
+    match tokio::join!(
+        await_unique_reserves(pending_remote),
+        await_unique_quorum(pending_quorum),
+    ) {
+        (Ok(confirmed), Ok(durable)) => {
+            tracing::debug!(?durable, "unique reserve is majority-durable");
+            Ok(confirmed)
+        }
+        (Ok(confirmed), Err(field)) => Err((ReserveFailure::NotDurable(field), confirmed)),
+        (Err(failure), _) => Err(failure),
+    }
 }
 
 impl<T: ClusterTransport> NodeController<T> {
@@ -209,7 +231,15 @@ impl<T: ClusterTransport> NodeController<T> {
                     }
                 }
                 for pending in pending_remote {
-                    drop(pending.receiver);
+                    self.send_unique_release_fire_and_forget(
+                        pending.target_node,
+                        entity,
+                        &pending.field,
+                        &pending.value,
+                        request_id,
+                        None,
+                    )
+                    .await;
                 }
                 return Err(failure);
             }
@@ -243,6 +273,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments, clippy::missing_errors_doc)]
     pub async fn check_unique_constraints(
         &mut self,
@@ -286,11 +317,8 @@ impl<T: ClusterTransport> NodeController<T> {
     pub async fn commit_unique_constraints(
         &mut self,
         entity: &str,
-        _id: &str,
         data: &serde_json::Value,
-        _data_partition: PartitionId,
         request_id: &str,
-        _now_ms: u64,
     ) {
         let unique_fields = self.stores.constraint_get_unique_fields(entity);
 
