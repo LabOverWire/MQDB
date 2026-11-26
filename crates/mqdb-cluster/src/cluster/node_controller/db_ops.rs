@@ -421,8 +421,10 @@ impl<T: ClusterTransport> NodeController<T> {
         entity: &str,
         schema_data: &[u8],
     ) -> Result<super::db::ClusterSchema, super::db::SchemaStoreError> {
-        let schema = self.stores.db_schema.register(entity, schema_data)?;
-        let serialized = super::db::SchemaStore::serialize(&schema);
+        let schema = self
+            .stores
+            .db_schema
+            .prepare_register(entity, schema_data)?;
         let write = ReplicationWrite::new(
             PartitionId::ZERO,
             super::protocol::Operation::Insert,
@@ -430,9 +432,11 @@ impl<T: ClusterTransport> NodeController<T> {
             0,
             entity::DB_SCHEMA.to_string(),
             entity.to_string(),
-            serialized,
+            super::db::SchemaStore::serialize(&schema),
         );
-        self.write_or_forward(write).await;
+        self.broadcast_write(&write)
+            .await
+            .map_err(|_| super::db::SchemaStoreError::StoreFailed)?;
         Ok(schema)
     }
 
@@ -441,8 +445,7 @@ impl<T: ClusterTransport> NodeController<T> {
         entity: &str,
         schema_data: &[u8],
     ) -> Result<super::db::ClusterSchema, super::db::SchemaStoreError> {
-        let schema = self.stores.db_schema.update(entity, schema_data)?;
-        let serialized = super::db::SchemaStore::serialize(&schema);
+        let schema = self.stores.db_schema.prepare_update(entity, schema_data)?;
         let write = ReplicationWrite::new(
             PartitionId::ZERO,
             super::protocol::Operation::Update,
@@ -450,9 +453,11 @@ impl<T: ClusterTransport> NodeController<T> {
             0,
             entity::DB_SCHEMA.to_string(),
             entity.to_string(),
-            serialized,
+            super::db::SchemaStore::serialize(&schema),
         );
-        self.write_or_forward(write).await;
+        self.broadcast_write(&write)
+            .await
+            .map_err(|_| super::db::SchemaStoreError::StoreFailed)?;
         Ok(schema)
     }
 
@@ -476,8 +481,9 @@ impl<T: ClusterTransport> NodeController<T> {
         constraint: &super::db::ClusterConstraint,
     ) -> Result<(), super::db::ConstraintStoreError> {
         let write = self.stores.constraint_add_replicated(constraint)?;
-        self.write_or_forward(write).await;
-        Ok(())
+        self.broadcast_write(&write)
+            .await
+            .map_err(|_| super::db::ConstraintStoreError::StoreFailed)
     }
 
     pub async fn constraint_remove(
@@ -486,8 +492,9 @@ impl<T: ClusterTransport> NodeController<T> {
         name: &str,
     ) -> Result<(), super::db::ConstraintStoreError> {
         let write = self.stores.constraint_remove_replicated(entity, name)?;
-        self.write_or_forward(write).await;
-        Ok(())
+        self.broadcast_write(&write)
+            .await
+            .map_err(|_| super::db::ConstraintStoreError::StoreFailed)
     }
 
     #[must_use]

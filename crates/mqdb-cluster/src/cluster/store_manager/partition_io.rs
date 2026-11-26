@@ -354,10 +354,7 @@ mod tests {
         use mqdb_core::partition::data_partition;
 
         put_record(&store.db_data, entity, "rec-1", b"{}", 1000);
-        store
-            .db_schema
-            .register(entity, b"{\"fields\":[]}")
-            .unwrap();
+        crate::cluster::test_support::register_schema(&store.db_schema, entity, b"{\"fields\":[]}");
         store
             .db_constraints
             .add(ClusterConstraint::unique(entity, &format!("uniq_{entity}"), "email").unwrap())
@@ -528,7 +525,11 @@ mod tests {
 
         let entities = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"];
         for entity in &entities {
-            src.db_schema.register(entity, b"{\"fields\":[]}").unwrap();
+            crate::cluster::test_support::register_schema(
+                &src.db_schema,
+                entity,
+                b"{\"fields\":[]}",
+            );
             src.db_constraints
                 .add(ClusterConstraint::unique(entity, &format!("uniq_{entity}"), "email").unwrap())
                 .unwrap();

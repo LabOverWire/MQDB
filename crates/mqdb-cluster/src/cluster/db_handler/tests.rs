@@ -1358,10 +1358,11 @@ async fn json_create_rejects_wrong_type_with_schema() {
         }
     });
     let schema_bytes = serde_json::to_vec(&schema_json).unwrap();
-    ctrl.stores_mut()
-        .db_schema
-        .register("users", &schema_bytes)
-        .unwrap();
+    crate::cluster::test_support::register_schema(
+        &ctrl.stores_mut().db_schema,
+        "users",
+        &schema_bytes,
+    );
 
     let payload = serde_json::to_vec(&serde_json::json!({"name": 123})).unwrap();
     let topic = "$DB/users/create";
@@ -1405,10 +1406,11 @@ async fn json_list_rejects_nonexistent_filter_field() {
         }
     });
     let schema_bytes = serde_json::to_vec(&schema_json).unwrap();
-    ctrl.stores_mut()
-        .db_schema
-        .register("users", &schema_bytes)
-        .unwrap();
+    crate::cluster::test_support::register_schema(
+        &ctrl.stores_mut().db_schema,
+        "users",
+        &schema_bytes,
+    );
 
     let data = serde_json::json!({"name": "Alice"});
     ctrl.db_create("users", "u-1", &serde_json::to_vec(&data).unwrap(), 1000)
