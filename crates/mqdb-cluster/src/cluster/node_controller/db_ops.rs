@@ -522,10 +522,7 @@ impl<T: ClusterTransport> NodeController<T> {
             request.response_topic.clone(),
             request.correlation_data.clone(),
         );
-        let _ = self
-            .transport
-            .send(from, ClusterMessage::JsonDbResponse(response))
-            .await;
+        self.send_json_db_reply(from, response).await;
     }
 
     pub(crate) async fn handle_json_db_request(
@@ -959,6 +956,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     pending_checks: fk_result.pending_remote,
                     continuation: FkCheckContinuation::UpdateFromNodeController {
                         from,
+                        response_request_id: request.request_id,
                         entity: entity.to_string(),
                         id: id.to_string(),
                         update,
@@ -1004,6 +1002,7 @@ impl<T: ClusterTransport> NodeController<T> {
                                 phase1,
                                 continuation: UniqueCheckContinuation::UpdateFromNodeController {
                                     from,
+                                    response_request_id: request.request_id,
                                     entity: entity.to_string(),
                                     id: id.to_string(),
                                     update,
@@ -1125,6 +1124,7 @@ impl<T: ClusterTransport> NodeController<T> {
                         pending_lookups: pending_remote,
                         continuation: FkDeleteContinuation::DeleteFromNodeController {
                             from,
+                            response_request_id: request.request_id,
                             entity: entity.to_string(),
                             id: id.to_string(),
                             sender: request.sender.clone(),
@@ -1574,7 +1574,7 @@ impl<T: ClusterTransport> NodeController<T> {
             );
             return None;
         }
-        let request_id = self.pending_constraints.allocate_cascade_id();
+        let request_id = self.pending_constraints.allocate_request_id();
         let (tx, rx) = oneshot::channel();
         self.pending_constraints.insert_cascade_ack(request_id, tx);
 
@@ -1628,7 +1628,7 @@ impl<T: ClusterTransport> NodeController<T> {
             );
             return None;
         }
-        let request_id = self.pending_constraints.allocate_cascade_id();
+        let request_id = self.pending_constraints.allocate_request_id();
         let (tx, rx) = oneshot::channel();
         self.pending_constraints.insert_cascade_ack(request_id, tx);
 
@@ -1825,6 +1825,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     pending_checks: fk_result.pending_remote,
                     continuation: FkCheckContinuation::CreateFromNodeController {
                         from,
+                        response_request_id: request.request_id,
                         entity: entity.to_string(),
                         id,
                         data,
@@ -1928,6 +1929,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     },
                     continuation: UniqueCheckContinuation::CreateFromNodeController {
                         from,
+                        response_request_id: request.request_id,
                         entity: entity.to_string(),
                         id,
                         data,
@@ -2072,6 +2074,16 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
+    pub(super) async fn send_json_db_reply(&self, from: NodeId, response: JsonDbResponse) {
+        if response.response_topic.is_empty() {
+            return;
+        }
+        let _ = self
+            .transport
+            .send(from, ClusterMessage::JsonDbResponse(response))
+            .await;
+    }
+
     pub(crate) async fn complete_pending_fk_work(
         &mut self,
         fk_ok: bool,
@@ -2083,12 +2095,14 @@ impl<T: ClusterTransport> NodeController<T> {
             let payload = Self::json_error(409, &msg);
             let (FkCheckContinuation::CreateFromNodeController {
                 from,
+                response_request_id,
                 response_topic,
                 correlation_data,
                 ..
             }
             | FkCheckContinuation::UpdateFromNodeController {
                 from,
+                response_request_id,
                 response_topic,
                 correlation_data,
                 ..
@@ -2096,17 +2110,23 @@ impl<T: ClusterTransport> NodeController<T> {
             else {
                 return super::FkThenUniqueOutcome::Done;
             };
-            let response = JsonDbResponse::new(0, payload, response_topic, correlation_data);
-            let _ = self
-                .transport
-                .send(from, ClusterMessage::JsonDbResponse(response))
-                .await;
+            self.send_json_db_reply(
+                from,
+                JsonDbResponse::new(
+                    response_request_id,
+                    payload,
+                    response_topic,
+                    correlation_data,
+                ),
+            )
+            .await;
             return super::FkThenUniqueOutcome::Done;
         }
 
         match continuation {
             FkCheckContinuation::CreateFromNodeController {
                 from,
+                response_request_id,
                 entity,
                 id,
                 data,
@@ -2133,12 +2153,16 @@ impl<T: ClusterTransport> NodeController<T> {
                     Ok(p) => p,
                     Err(failure) => {
                         let payload = Self::json_error(failure.http_code(), &failure.message());
-                        let response =
-                            JsonDbResponse::new(0, payload, response_topic, correlation_data);
-                        let _ = self
-                            .transport
-                            .send(from, ClusterMessage::JsonDbResponse(response))
-                            .await;
+                        self.send_json_db_reply(
+                            from,
+                            JsonDbResponse::new(
+                                response_request_id,
+                                payload,
+                                response_topic,
+                                correlation_data,
+                            ),
+                        )
+                        .await;
                         return super::FkThenUniqueOutcome::Done;
                     }
                 };
@@ -2146,6 +2170,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     phase1,
                     continuation: super::UniqueCheckContinuation::CreateFromNodeController {
                         from,
+                        response_request_id,
                         entity,
                         id,
                         data,
@@ -2162,6 +2187,7 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             FkCheckContinuation::UpdateFromNodeController {
                 from,
+                response_request_id,
                 entity,
                 id,
                 update,
@@ -2189,12 +2215,16 @@ impl<T: ClusterTransport> NodeController<T> {
                     Ok(p) => p,
                     Err(failure) => {
                         let payload = Self::json_error(failure.http_code(), &failure.message());
-                        let response =
-                            JsonDbResponse::new(0, payload, response_topic, correlation_data);
-                        let _ = self
-                            .transport
-                            .send(from, ClusterMessage::JsonDbResponse(response))
-                            .await;
+                        self.send_json_db_reply(
+                            from,
+                            JsonDbResponse::new(
+                                response_request_id,
+                                payload,
+                                response_topic,
+                                correlation_data,
+                            ),
+                        )
+                        .await;
                         return super::FkThenUniqueOutcome::Done;
                     }
                 };
@@ -2202,6 +2232,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     phase1,
                     continuation: super::UniqueCheckContinuation::UpdateFromNodeController {
                         from,
+                        response_request_id,
                         entity,
                         id,
                         update,
@@ -2237,6 +2268,7 @@ impl<T: ClusterTransport> NodeController<T> {
             let payload = Self::json_error(409, &msg);
             let FkDeleteContinuation::DeleteFromNodeController {
                 from,
+                response_request_id,
                 response_topic,
                 correlation_data,
                 ..
@@ -2244,18 +2276,22 @@ impl<T: ClusterTransport> NodeController<T> {
             else {
                 return;
             };
-            if !response_topic.is_empty() {
-                let response = JsonDbResponse::new(0, payload, response_topic, correlation_data);
-                let _ = self
-                    .transport
-                    .send(from, ClusterMessage::JsonDbResponse(response))
-                    .await;
-            }
+            self.send_json_db_reply(
+                from,
+                JsonDbResponse::new(
+                    response_request_id,
+                    payload,
+                    response_topic,
+                    correlation_data,
+                ),
+            )
+            .await;
             return;
         }
 
         let FkDeleteContinuation::DeleteFromNodeController {
             from,
+            response_request_id,
             entity,
             id,
             sender,
@@ -2271,26 +2307,30 @@ impl<T: ClusterTransport> NodeController<T> {
         let plan = match self.plan_fk_delete(&entity, &id, &side_effects, origin) {
             Ok(plan) => plan,
             Err(payload) => {
-                if !response_topic.is_empty() {
-                    let response =
-                        JsonDbResponse::new(0, payload, response_topic, correlation_data);
-                    let _ = self
-                        .transport
-                        .send(from, ClusterMessage::JsonDbResponse(response))
-                        .await;
-                }
+                self.send_json_db_reply(
+                    from,
+                    JsonDbResponse::new(
+                        response_request_id,
+                        payload,
+                        response_topic,
+                        correlation_data,
+                    ),
+                )
+                .await;
                 return;
             }
         };
         let response_payload = self.execute_json_delete(&entity, &id, &plan, origin).await;
-        if !response_topic.is_empty() {
-            let response =
-                JsonDbResponse::new(0, response_payload, response_topic, correlation_data);
-            let _ = self
-                .transport
-                .send(from, ClusterMessage::JsonDbResponse(response))
-                .await;
-        }
+        self.send_json_db_reply(
+            from,
+            JsonDbResponse::new(
+                response_request_id,
+                response_payload,
+                response_topic,
+                correlation_data,
+            ),
+        )
+        .await;
     }
 
     pub(crate) fn handle_json_list_local(&self, entity: &str, payload: &[u8]) -> Vec<u8> {
@@ -2419,9 +2459,7 @@ impl<T: ClusterTransport> NodeController<T> {
             return false;
         }
 
-        let request_id = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+        let request_id = self.pending_constraints.allocate_request_id();
 
         let request = JsonDbRequest {
             request_id,
@@ -2468,7 +2506,7 @@ impl<T: ClusterTransport> NodeController<T> {
                         entity: entity.to_string(),
                         sender: sender_id.to_string(),
                         op: op_str.to_string(),
-                        created_at_ms: request_id / 1_000_000,
+                        created_at_ms: Self::current_time_ms(),
                     },
                 );
             }

@@ -4005,6 +4005,7 @@ async fn a_create_whose_primary_moves_during_its_unique_check_is_refused() {
         Ok(Vec::new()),
         super::super::node_controller::UniqueCheckContinuation::CreateFromNodeController {
             from: node2,
+            response_request_id: 1,
             entity: "nr".to_string(),
             id: "r1".to_string(),
             data_bytes: serde_json::to_vec(&data).unwrap(),
