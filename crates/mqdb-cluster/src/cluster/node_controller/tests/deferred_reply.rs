@@ -748,6 +748,31 @@ async fn an_early_refusal_without_a_response_topic_sends_no_reply() {
 }
 
 #[tokio::test]
+async fn a_forwarded_update_deferred_by_a_unique_check_too_large_to_echo_is_acknowledged() {
+    let mut ctrl = primary().await;
+    let big =
+        serde_json::to_vec(&json!({"id": "u1", "email": "old", "a": "x".repeat(8 * 1024 * 1024)}))
+            .unwrap();
+    crate::cluster::test_support::put_record(&ctrl.stores.db_data, "users", "u1", &big, 1000);
+    let request = forwarded(
+        52,
+        JsonDbOp::Update,
+        "users",
+        "u1",
+        &json!({"email": NEW_EMAIL, "d": "y".repeat(3 * 1024 * 1024)}),
+    );
+    let PendingConstraintWork::Unique(work) = deferred(&mut ctrl, &request).await else {
+        panic!("the update should wait on the unique check");
+    };
+
+    finish_unique(&mut ctrl, work).await;
+
+    let stored: Value = serde_json::from_slice(&ctrl.db_get("users", "u1").unwrap().data).unwrap();
+    assert_eq!(stored["email"], NEW_EMAIL);
+    assert_reply(&reply_to_forwarder(&ctrl), 52, "ok");
+}
+
+#[tokio::test]
 async fn a_deferred_forwarded_delete_rechecks_its_expected_version() {
     let mut ctrl = primary().await;
     let request = forwarded(

@@ -661,6 +661,7 @@ pub enum TransportError {
     SendFailed(String),
     SendQueueFull(NodeId),
     NotConnected,
+    MessageTooLarge { size: usize, max: usize },
 }
 
 impl std::fmt::Display for TransportError {
@@ -672,6 +673,9 @@ impl std::fmt::Display for TransportError {
             Self::SendFailed(msg) => write!(f, "send failed: {msg}"),
             Self::SendQueueFull(id) => write!(f, "send queue full for node {}", id.get()),
             Self::NotConnected => write!(f, "not connected"),
+            Self::MessageTooLarge { size, max } => {
+                write!(f, "message of {size} bytes is over the {max} byte limit")
+            }
         }
     }
 }

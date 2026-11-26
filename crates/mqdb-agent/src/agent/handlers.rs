@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use crate::database::Database;
+use crate::response_limit::{ReplyKind, publish_reply};
 use crate::vault_backend::{VaultBackend, VaultError};
 use mqdb_core::constraint::Constraint;
 use mqdb_core::protocol::{AdminOperation, build_request, parse_admin_topic, parse_db_topic};
@@ -52,22 +53,17 @@ async fn publish_response(
     response_topic: &str,
     correlation_data: Option<&[u8]>,
     payload: Vec<u8>,
+    kind: ReplyKind,
 ) {
-    let props = mqtt5::types::PublishProperties {
-        correlation_data: correlation_data.map(Vec::from),
-        ..Default::default()
-    };
     let options = mqtt5::PublishOptions {
         qos: QoS::AtLeastOnce,
-        properties: props,
+        properties: mqtt5::types::PublishProperties {
+            correlation_data: correlation_data.map(Vec::from),
+            ..Default::default()
+        },
         ..Default::default()
     };
-    if let Err(e) = client
-        .publish_with_options(response_topic, payload, options)
-        .await
-    {
-        error!("Failed to publish response to {response_topic}: {e}");
-    }
+    publish_reply(client, response_topic, payload, options, kind).await;
 }
 
 pub(super) struct MessageContext<'a> {
@@ -285,6 +281,7 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
                         response_topic,
                         message.properties.correlation_data.as_deref(),
                         payload,
+                        ReplyKind::Read,
                     )
                     .await;
                 }
@@ -315,6 +312,7 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
                         response_topic,
                         message.properties.correlation_data.as_deref(),
                         payload,
+                        ReplyKind::Read,
                     )
                     .await;
                 }
@@ -395,6 +393,7 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
                     response_topic,
                     message.properties.correlation_data.as_deref(),
                     payload,
+                    ReplyKind::from(op.operation),
                 )
                 .await;
             }
@@ -455,6 +454,7 @@ struct AdminContext<'a> {
 
 #[allow(clippy::too_many_lines)]
 async fn handle_admin_operation(ctx: &AdminContext<'_>, op: AdminOperation) {
+    let reply_kind = ReplyKind::from(&op);
     let payload: Value = if ctx.message.payload.is_empty() {
         Value::Null
     } else {
@@ -469,6 +469,7 @@ async fn handle_admin_operation(ctx: &AdminContext<'_>, op: AdminOperation) {
                             response_topic,
                             ctx.message.properties.correlation_data.as_deref(),
                             payload,
+                            ReplyKind::Read,
                         )
                         .await;
                     }
@@ -555,6 +556,7 @@ async fn handle_admin_operation(ctx: &AdminContext<'_>, op: AdminOperation) {
                     response_topic,
                     ctx.message.properties.correlation_data.as_deref(),
                     payload,
+                    reply_kind,
                 )
                 .await;
             }
