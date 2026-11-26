@@ -2099,10 +2099,30 @@ impl<T: ClusterTransport> NodeController<T> {
         if response.response_topic.is_empty() {
             return;
         }
-        let _ = self
-            .transport
-            .send(from, ClusterMessage::JsonDbResponse(response))
-            .await;
+        let JsonDbResponse {
+            request_id,
+            payload,
+            response_topic,
+            correlation_data,
+        } = response;
+        let payload = fit_write_reply(payload, &response_topic, correlation_data.as_deref());
+        let reply = |payload| {
+            ClusterMessage::JsonDbResponse(JsonDbResponse::new(
+                request_id,
+                payload,
+                response_topic.clone(),
+                correlation_data.clone(),
+            ))
+        };
+        if let Err(TransportError::MessageTooLarge { size, max }) =
+            self.transport.send(from, reply(payload)).await
+        {
+            tracing::warn!(to = from.get(), size, max, "reply too large for one frame");
+            let _ = self
+                .transport
+                .send(from, reply(too_large_response(size, max)))
+                .await;
+        }
     }
 
     pub(crate) async fn complete_pending_fk_work(
