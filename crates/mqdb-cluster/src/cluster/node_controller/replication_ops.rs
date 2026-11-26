@@ -340,7 +340,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let sequence = state.sequence() + 1;
         let epoch = state.epoch();
 
-        if self.pending.is_full() {
+        if !replicas.is_empty() && self.pending.is_full() {
             return Err(ReplicationError::TooManyPending);
         }
 

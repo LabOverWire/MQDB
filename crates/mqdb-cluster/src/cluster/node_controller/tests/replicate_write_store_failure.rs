@@ -305,3 +305,23 @@ async fn a_replicated_write_without_replicas_holds_no_pending_slot() {
 
     assert_eq!((refused, ctrl.pending_write_count()), (None, 0));
 }
+
+#[tokio::test]
+async fn a_replicated_write_without_replicas_is_accepted_when_the_queue_is_full() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_with_replica(&backend);
+    let partition = session_partition("filler");
+    for i in 0..1000 {
+        let write = ReplicationWrite {
+            partition,
+            ..session_write(&ctrl, &format!("f-{i}"))
+        };
+        ctrl.replicate_write(write, &[node(2)], 1).await.unwrap();
+    }
+    let write = ReplicationWrite {
+        partition,
+        ..session_write(&ctrl, "f-last")
+    };
+
+    assert!(ctrl.replicate_write(write, &[], 0).await.is_ok());
+}

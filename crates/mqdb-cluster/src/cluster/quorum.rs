@@ -99,7 +99,7 @@ impl QuorumTracker {
 
     pub fn record_ack(&mut self, ack: &ReplicationAck) -> QuorumResult {
         let node_id = ack.node_id();
-        if !self.expected_nodes.contains(&node_id) {
+        if !self.expected_nodes.contains(&node_id) || self.acked_nodes.contains(&node_id) {
             return self.current_result();
         }
 
@@ -109,6 +109,7 @@ impl QuorumTracker {
                     return self.current_result();
                 }
                 if ack.epoch() == self.epoch {
+                    self.failed_nodes.remove(&node_id);
                     self.acked_nodes.insert(node_id);
                 } else if ack.epoch() > self.epoch {
                     self.stale_epoch_seen = true;
@@ -125,10 +126,10 @@ impl QuorumTracker {
                 }
                 self.failed_nodes.insert(node_id);
             }
-            Some(AckStatus::NotReplica | AckStatus::SequenceGap) => {
+            Some(AckStatus::NotReplica) => {
                 self.failed_nodes.insert(node_id);
             }
-            None => {}
+            Some(AckStatus::SequenceGap) | None => {}
         }
 
         self.current_result()
@@ -480,5 +481,83 @@ mod tests {
             vec![(other, 1, QuorumResult::Success)]
         );
         assert_eq!(pending.pending_count(), 1);
+    }
+
+    #[test]
+    fn a_sequence_gap_fails_no_write() {
+        let replicas = nodes(&[2]);
+        let mut pending = PendingWrites::new(10);
+        for sequence in [1, 2] {
+            pending
+                .add(QuorumTracker::new(
+                    PartitionId::ZERO,
+                    sequence,
+                    Epoch::new(1),
+                    &replicas,
+                    1,
+                ))
+                .unwrap();
+        }
+
+        pending.record_ack(&ReplicationAck::sequence_gap(
+            PartitionId::ZERO,
+            Epoch::new(1),
+            1,
+            NodeId::validated(2).unwrap(),
+        ));
+        let after_gap = pending.drain_completed();
+        pending.record_ack(&ok_ack(0, 1, 1, 2));
+
+        assert_eq!(
+            (after_gap, pending.drain_completed()),
+            (vec![], vec![(PartitionId::ZERO, 1, QuorumResult::Success)])
+        );
+    }
+
+    #[test]
+    fn a_refusal_does_not_fail_a_write_the_node_already_acked() {
+        let mut pending = PendingWrites::new(10);
+        pending
+            .add(QuorumTracker::new(
+                PartitionId::ZERO,
+                1,
+                Epoch::new(1),
+                &nodes(&[2, 3]),
+                2,
+            ))
+            .unwrap();
+        pending.record_ack(&ok_ack(0, 1, 1, 2));
+
+        pending.record_ack(&ReplicationAck::not_replica(
+            PartitionId::ZERO,
+            NodeId::validated(2).unwrap(),
+        ));
+        let after_refusal = pending.drain_completed();
+        pending.record_ack(&ok_ack(0, 1, 1, 3));
+
+        assert_eq!(
+            (after_refusal, pending.drain_completed()),
+            (vec![], vec![(PartitionId::ZERO, 1, QuorumResult::Success)])
+        );
+    }
+
+    #[test]
+    fn an_ok_after_a_refusal_counts_the_node_once() {
+        let mut tracker =
+            QuorumTracker::new(PartitionId::ZERO, 1, Epoch::new(1), &nodes(&[2, 3]), 2);
+        tracker.record_ack(&ReplicationAck::not_replica(
+            PartitionId::ZERO,
+            NodeId::validated(2).unwrap(),
+        ));
+        tracker.record_ack(&ok_ack(0, 1, 1, 2));
+
+        assert_eq!(
+            (
+                tracker.ack_count(),
+                tracker.failed_count(),
+                tracker.pending_count()
+            ),
+            (1, 0, 1)
+        );
     }
 }
