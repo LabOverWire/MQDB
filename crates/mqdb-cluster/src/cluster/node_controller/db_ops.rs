@@ -125,6 +125,20 @@ enum OversizeWrite {
     SlimEvent,
 }
 
+fn refuse_too_large(write: &ReplicationWrite, size: usize) -> super::db::DbDataStoreError {
+    tracing::warn!(
+        entity = write.entity,
+        id = write.id,
+        size,
+        limit = CLIENT_WRITE_LIMIT,
+        "write refused: too large to replicate"
+    );
+    super::db::DbDataStoreError::TooLarge {
+        size,
+        limit: CLIENT_WRITE_LIMIT,
+    }
+}
+
 fn without_record(event: &ChangeEvent) -> ChangeEvent {
     ChangeEvent {
         sequence: event.sequence,
@@ -324,20 +338,15 @@ impl<T: ClusterTransport> NodeController<T> {
             OversizeWrite::SlimEvent => false,
         };
         if refused {
-            tracing::warn!(
-                entity = write.entity,
-                id = write.id,
-                size,
-                limit = CLIENT_WRITE_LIMIT,
-                "write refused: too large to replicate"
-            );
-            return Err(super::db::DbDataStoreError::TooLarge {
-                size,
-                limit: CLIENT_WRITE_LIMIT,
-            });
+            return Err(refuse_too_large(&write, size));
         }
         if size > MAX_MESSAGE_SIZE {
             write.event = event.map(|e| change_event_record(&without_record(e)));
+            let slimmed = super::catchup::replication_frame_len(&write).unwrap_or(0);
+            if matches!(oversize, OversizeWrite::RefuseUnlessClearing) && slimmed > MAX_MESSAGE_SIZE
+            {
+                return Err(refuse_too_large(&write, slimmed));
+            }
             tracing::warn!(
                 entity = write.entity,
                 id = write.id,
@@ -366,7 +375,9 @@ impl<T: ClusterTransport> NodeController<T> {
             return false;
         };
         updated.iter().all(|(field, value)| {
-            field == "_version" || value.is_null() || current.get(field) == Some(value)
+            field == "_version"
+                || current.get(field) == Some(value)
+                || (value.is_null() && current.contains_key(field))
         })
     }
 

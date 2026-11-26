@@ -613,3 +613,75 @@ async fn a_delete_too_large_with_its_record_replicates_an_event_without_it() {
         (&json!("r1"), &json!("Delete"), &Value::Null)
     );
 }
+
+fn largest_data_write_frame(ctrl: &NodeController<MockTransport>) -> usize {
+    ctrl.transport
+        .sent_messages()
+        .iter()
+        .filter_map(|(_, message)| match message {
+            ClusterMessage::Write(w) if w.entity == crate::cluster::entity::DB_DATA => {
+                crate::cluster::node_controller::catchup::replication_frame_len(w)
+            }
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+#[tokio::test]
+async fn an_update_that_adds_null_fields_past_the_frame_limit_is_refused() {
+    let mut ctrl = primary_with_replica();
+    let created = request(&mut ctrl, "$DB/items/create", &json!({"id": "r1", "n": 1})).await;
+    assert_eq!(created["status"], "ok");
+    let mut refused = 0;
+    for round in 0..3 {
+        let mut fields = serde_json::Map::new();
+        fields.insert(format!("k{round}_{}", blob(4 * MIB)), Value::Null);
+        let reply = request(&mut ctrl, "$DB/items/r1/update", &Value::Object(fields)).await;
+        if refused_as_too_large(&reply) {
+            refused += 1;
+        }
+    }
+
+    let largest = largest_data_write_frame(&ctrl);
+    assert!(
+        refused > 0 && largest <= crate::cluster::transport::MAX_MESSAGE_SIZE,
+        "{refused} updates refused, largest replicated write {largest} bytes"
+    );
+}
+
+#[tokio::test]
+async fn a_null_for_a_field_the_record_lacks_is_not_a_clearing_update() {
+    let mut ctrl = primary_with_replica();
+    let record = json!({"id": "r1", "blob": blob(4 * MIB + 900 * 1024)});
+    let created = request(&mut ctrl, "$DB/items/create", &record).await;
+    assert_eq!(created["status"], "ok", "{}", outcome(&created));
+    let writes_before = data_writes_sent(&ctrl);
+    let mut fields = serde_json::Map::new();
+    fields.insert(format!("pad_{}", blob(200 * 1024)), Value::Null);
+
+    let updated = request(&mut ctrl, "$DB/items/r1/update", &Value::Object(fields)).await;
+
+    assert!(refused_as_too_large(&updated), "{}", outcome(&updated));
+    assert_eq!(data_writes_sent(&ctrl), writes_before);
+}
+
+#[tokio::test]
+async fn a_clearing_update_of_a_record_over_the_frame_limit_is_refused() {
+    let mut ctrl = primary_with_replica();
+    let oversized =
+        serde_json::to_vec(&json!({"id": "r1", "n": 1, "blob": blob(11 * MIB)})).unwrap();
+    crate::cluster::test_support::put_record(
+        &ctrl.stores().db_data,
+        "items",
+        "r1",
+        &oversized,
+        1000,
+    );
+    let writes_before = data_writes_sent(&ctrl);
+
+    let updated = request(&mut ctrl, "$DB/items/r1/update", &json!({"n": null})).await;
+
+    assert!(refused_as_too_large(&updated), "{}", outcome(&updated));
+    assert_eq!(data_writes_sent(&ctrl), writes_before);
+}
