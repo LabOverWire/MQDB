@@ -81,13 +81,13 @@ fn change_event_user_properties(event: &ChangeEvent) -> Vec<(String, String)> {
 }
 
 fn without_fk_expected(op: JsonDbOp, payload: &[u8]) -> Vec<u8> {
-    let carries_fields = matches!(op, JsonDbOp::Create | JsonDbOp::Update);
     match serde_json::from_slice::<Value>(payload) {
-        Ok(Value::Object(mut fields))
-            if carries_fields && fields.contains_key(mqdb_core::protocol::FK_EXPECTED_FIELD) =>
+        Ok(fields @ Value::Object(_))
+            if matches!(op, JsonDbOp::Create | JsonDbOp::Update)
+                && fields.get(mqdb_core::protocol::FK_EXPECTED_FIELD).is_some() =>
         {
-            fields.remove(mqdb_core::protocol::FK_EXPECTED_FIELD);
-            serde_json::to_vec(&Value::Object(fields)).unwrap_or_else(|_| payload.to_vec())
+            serde_json::to_vec(&mqdb_core::protocol::without_internal_fields(fields))
+                .unwrap_or_else(|_| payload.to_vec())
         }
         _ => payload.to_vec(),
     }
