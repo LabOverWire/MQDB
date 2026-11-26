@@ -1031,15 +1031,8 @@ impl<T: ClusterTransport> NodeController<T> {
         {
             Ok(db_entity) => {
                 if has_unique_changes {
-                    self.commit_unique_constraints(
-                        entity,
-                        id,
-                        &new_diff,
-                        partition,
-                        &request_id,
-                        now_ms,
-                    )
-                    .await;
+                    self.commit_unique_constraints(entity, &new_diff, &request_id)
+                        .await;
                     self.release_unique_constraints(entity, id, &old_diff, partition, id, now_ms)
                         .await;
                 }
@@ -1935,7 +1928,6 @@ impl<T: ClusterTransport> NodeController<T> {
                         id,
                         data,
                         data_bytes,
-                        partition,
                         request_id,
                         now_ms,
                         sender: request.sender.clone(),
@@ -2176,7 +2168,6 @@ impl<T: ClusterTransport> NodeController<T> {
                         id,
                         data,
                         data_bytes,
-                        partition,
                         request_id,
                         now_ms,
                         sender,

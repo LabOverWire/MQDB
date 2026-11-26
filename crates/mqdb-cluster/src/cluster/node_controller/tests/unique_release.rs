@@ -25,8 +25,9 @@ fn forwarded(op: JsonDbOp, entity: &str, id: &str, payload: &Value) -> JsonDbReq
     }
 }
 
-#[tokio::test]
-async fn a_conflict_on_one_remote_reserve_releases_the_others() {
+async fn releases_after_the_first_remote_reserve_answers(
+    first: UniqueReserveStatus,
+) -> (Vec<String>, Vec<String>) {
     use crate::cluster::db::unique_partition;
     use crate::cluster::node_controller::unique::await_unique_phase1;
     let email = serde_json::to_vec(&json!("a@x")).unwrap();
@@ -82,10 +83,7 @@ async fn a_conflict_on_one_remote_reserve_releases_the_others() {
         .collect();
     assert_eq!(reserves.len(), 2);
     ctrl.pending_constraints()
-        .resolve_unique(&UniqueReserveResponse::create(
-            reserves[0].0,
-            UniqueReserveStatus::Conflict,
-        ));
+        .resolve_unique(&UniqueReserveResponse::create(reserves[0].0, first));
     ctrl.pending_constraints()
         .resolve_unique(&UniqueReserveResponse::create(
             reserves[1].0,
@@ -105,21 +103,22 @@ async fn a_conflict_on_one_remote_reserve_releases_the_others() {
             _ => None,
         })
         .collect();
-    let replies: Vec<Value> = ctrl
-        .transport()
-        .sent_messages()
-        .into_iter()
-        .filter_map(|(_, m)| match m {
-            ClusterMessage::JsonDbResponse(r) => serde_json::from_slice(&r.payload).ok(),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        released,
-        vec![reserves[1].1.clone()],
-        "node 2 reserved {} for u1 and was never told to release it; replies {replies:?}",
-        reserves[1].1
-    );
+    let fields = reserves.into_iter().map(|(_, field)| field).collect();
+    (fields, released)
+}
+
+#[tokio::test]
+async fn a_conflict_on_one_remote_reserve_releases_the_others() {
+    let (reserved, released) =
+        releases_after_the_first_remote_reserve_answers(UniqueReserveStatus::Conflict).await;
+    assert_eq!(released, vec![reserved[1].clone()]);
+}
+
+#[tokio::test]
+async fn a_failed_remote_reserve_is_released_with_the_others() {
+    let (reserved, released) =
+        releases_after_the_first_remote_reserve_answers(UniqueReserveStatus::Error).await;
+    assert_eq!(released, reserved);
 }
 
 async fn reserves_and_releases_after_a_local_conflict(

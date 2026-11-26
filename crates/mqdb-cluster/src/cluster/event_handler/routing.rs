@@ -559,7 +559,6 @@ mod tests {
                 id: "u1".to_string(),
                 data: data.clone(),
                 constraint_data: data,
-                partition: data_partition("user", "u1"),
                 request_id: "req-1".to_string(),
                 now_ms: 1000,
                 sender: None,

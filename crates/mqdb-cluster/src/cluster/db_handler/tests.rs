@@ -4008,7 +4008,6 @@ async fn a_create_whose_primary_moves_during_its_unique_check_is_refused() {
             id: "r1".to_string(),
             data_bytes: serde_json::to_vec(&data).unwrap(),
             data,
-            partition,
             request_id: "req-1".to_string(),
             now_ms: 1000,
             sender: None,

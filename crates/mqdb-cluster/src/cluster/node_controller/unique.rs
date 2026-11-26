@@ -273,6 +273,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments, clippy::missing_errors_doc)]
     pub async fn check_unique_constraints(
         &mut self,
@@ -316,11 +317,8 @@ impl<T: ClusterTransport> NodeController<T> {
     pub async fn commit_unique_constraints(
         &mut self,
         entity: &str,
-        _id: &str,
         data: &serde_json::Value,
-        _data_partition: PartitionId,
         request_id: &str,
-        _now_ms: u64,
     ) {
         let unique_fields = self.stores.constraint_get_unique_fields(entity);
 
