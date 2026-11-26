@@ -768,7 +768,6 @@ impl DbRequestHandler {
                     id: id.to_string(),
                     data,
                     constraint_data,
-                    partition,
                     request_id,
                     now_ms,
                     sender: sender.map(str::to_string),
@@ -820,14 +819,7 @@ impl DbRequestHandler {
             {
                 Ok(db_entity) => {
                     controller
-                        .commit_unique_constraints(
-                            entity,
-                            id,
-                            constraint_data,
-                            partition,
-                            request_id,
-                            now_ms,
-                        )
+                        .commit_unique_constraints(entity, constraint_data, request_id)
                         .await;
                     helpers::json_ok_with_id(db_entity.id_str(), data)
                 }
@@ -1181,9 +1173,7 @@ impl DbRequestHandler {
                 Ok(db_entity) => {
                     if has_unique_changes {
                         controller
-                            .commit_unique_constraints(
-                                entity, id, new_diff, partition, request_id, now_ms,
-                            )
+                            .commit_unique_constraints(entity, new_diff, request_id)
                             .await;
                         controller
                             .release_unique_constraints(entity, id, old_diff, partition, id, now_ms)
@@ -1506,7 +1496,6 @@ impl DbRequestHandler {
                 id,
                 data,
                 constraint_data,
-                partition,
                 request_id,
                 now_ms,
                 sender,
@@ -1544,11 +1533,8 @@ impl DbRequestHandler {
                                 controller
                                     .commit_unique_constraints(
                                         &entity,
-                                        &id,
                                         &constraint_data,
-                                        partition,
                                         &request_id,
-                                        now_ms,
                                     )
                                     .await;
                                 helpers::json_ok_with_id(db_entity.id_str(), &data)
@@ -1636,14 +1622,7 @@ impl DbRequestHandler {
                         {
                             Ok(db_entity) => {
                                 controller
-                                    .commit_unique_constraints(
-                                        &entity,
-                                        &id,
-                                        &new_diff,
-                                        partition,
-                                        &request_id,
-                                        now_ms,
-                                    )
+                                    .commit_unique_constraints(&entity, &new_diff, &request_id)
                                     .await;
                                 controller
                                     .release_unique_constraints(
