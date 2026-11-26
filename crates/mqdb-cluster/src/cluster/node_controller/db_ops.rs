@@ -342,6 +342,10 @@ impl<T: ClusterTransport> NodeController<T> {
         }
         if size > MAX_MESSAGE_SIZE {
             write.event = event.map(|e| change_event_record(&without_record(e)));
+            let slimmed = super::catchup::replication_frame_len(&write).unwrap_or(0);
+            if oversize == OversizeWrite::RefuseUnlessClearing && slimmed > MAX_MESSAGE_SIZE {
+                return Err(refuse_too_large(&write, slimmed));
+            }
             tracing::warn!(
                 entity = write.entity,
                 id = write.id,
@@ -464,6 +468,29 @@ impl<T: ClusterTransport> NodeController<T> {
             OversizeWrite::RefuseUnlessClearing,
         )
         .await?;
+        Ok(db_entity)
+    }
+
+    async fn db_set_null_with_event(
+        &mut self,
+        entity_type: &str,
+        id: &str,
+        data_bytes: &[u8],
+        data: Value,
+        now_ms: u64,
+        origin: EventOrigin<'_>,
+    ) -> Result<super::db::DbEntity, super::db::DbDataStoreError> {
+        let (db_entity, write) = self.db_update_prepare(entity_type, id, data_bytes, now_ms)?;
+        let event = self.change_event(
+            ChangeEvent::update(
+                entity_type.to_string(),
+                db_entity.id_str().to_string(),
+                data,
+            ),
+            origin,
+        );
+        self.commit_write(write, Some(&event), &[], OversizeWrite::SlimEvent)
+            .await?;
         Ok(db_entity)
     }
 
@@ -1114,8 +1141,8 @@ impl<T: ClusterTransport> NodeController<T> {
 
         let data_bytes = serde_json::to_vec(&merged_data).unwrap_or_default();
 
-        let result = match self
-            .db_update_with_event(
+        let written = if fk_expected.is_some() {
+            self.db_set_null_with_event(
                 entity,
                 id,
                 &data_bytes,
@@ -1124,7 +1151,18 @@ impl<T: ClusterTransport> NodeController<T> {
                 EventOrigin::of(request),
             )
             .await
-        {
+        } else {
+            self.db_update_with_event(
+                entity,
+                id,
+                &data_bytes,
+                merged_data.clone(),
+                now_ms,
+                EventOrigin::of(request),
+            )
+            .await
+        };
+        let result = match written {
             Ok(db_entity) => {
                 if has_unique_changes {
                     self.commit_unique_constraints(entity, &new_diff, &request_id)
@@ -1514,7 +1552,7 @@ impl<T: ClusterTransport> NodeController<T> {
     ) {
         let data_json: Value = serde_json::from_slice(updated_data).unwrap_or(Value::Null);
         match self
-            .db_update_with_event(entity, id, updated_data, data_json, now_ms, origin)
+            .db_set_null_with_event(entity, id, updated_data, data_json, now_ms, origin)
             .await
         {
             Ok(_) | Err(super::db::DbDataStoreError::NotFound) => {}
@@ -1814,7 +1852,7 @@ impl<T: ClusterTransport> NodeController<T> {
         obj.insert(field.to_string(), Value::Null);
         let updated_bytes = serde_json::to_vec(&record).unwrap_or_default();
         match self
-            .db_update_with_event(entity, id, &updated_bytes, record, now_ms, origin)
+            .db_set_null_with_event(entity, id, &updated_bytes, record, now_ms, origin)
             .await
         {
             Ok(_) => true,

@@ -736,3 +736,30 @@ async fn a_remote_set_null_on_a_child_over_the_frame_limit_is_acknowledged() {
     assert_eq!(replies[0]["status"], "ok", "{}", outcome(&replies[0]));
     assert!(stored(&ctrl, "posts", "c1").unwrap()["author_id"].is_null());
 }
+
+#[tokio::test]
+async fn clearing_numeric_fields_cannot_grow_a_record_past_the_frame_limit() {
+    let mut ctrl = primary_with_replica();
+    let mut record = serde_json::Map::new();
+    record.insert("id".to_string(), json!("r1"));
+    for n in 0..30_000 {
+        record.insert(format!("k{n:06}"), json!(0));
+    }
+    record.insert("blob".to_string(), json!(""));
+    let probe = serde_json::to_vec(&Value::Object(record.clone())).unwrap();
+    let (_, write) = ctrl.db_create_prepare("items", "r1", &probe, 1000).unwrap();
+    let overhead = super::super::catchup::replication_frame_len(&write).unwrap() - probe.len();
+    let blob_len = CLIENT_WRITE_LIMIT - overhead - probe.len() - 1000;
+    record.insert("blob".to_string(), json!(blob(blob_len)));
+    let data = serde_json::to_vec(&Value::Object(record)).unwrap();
+    ctrl.db_create("items", "r1", &data, 1000).await.unwrap();
+    let mut clear = serde_json::Map::new();
+    for n in 0..30_000 {
+        clear.insert(format!("k{n:06}"), Value::Null);
+    }
+
+    let reply = request(&mut ctrl, "$DB/items/r1/update", &Value::Object(clear)).await;
+
+    assert!(refused_as_too_large(&reply), "{}", outcome(&reply));
+    assert!(largest_data_write_frame(&ctrl) <= crate::cluster::transport::MAX_MESSAGE_SIZE);
+}
