@@ -50,7 +50,7 @@ impl StoreManager {
                 Ok((data, has_more, next_cursor))
             }
             entity::OFFSETS => {
-                let (offsets, has_more, next_cursor) = self.offsets.query(filter, limit, cursor);
+                let (offsets, has_more, next_cursor) = self.offsets.query(limit, cursor);
                 let data = offsets.into_iter().flat_map(|o| o.to_be_bytes()).collect();
                 Ok((data, has_more, next_cursor))
             }
