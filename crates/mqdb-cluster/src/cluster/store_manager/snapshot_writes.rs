@@ -135,9 +135,9 @@ fn keyed_writes(
     Ok(writes)
 }
 
-fn client_and_packet(key: &str) -> Option<&str> {
-    let (client_id, packet_id) = key.rsplit_once(':')?;
-    packet_id.parse::<u16>().ok().map(|_| client_id)
+fn owner_and_number(key: &str) -> Option<&str> {
+    let (owner, number) = key.rsplit_once(':')?;
+    number.parse::<u16>().ok().map(|_| owner)
 }
 
 fn idempotency_writes(
@@ -184,7 +184,7 @@ pub(super) fn snapshot_writes(
             }))
         }),
         entity::QOS2 => keyed_writes(section, StoreApplyError::Qos2Error, |key, value| {
-            Ok(client_and_packet(key).and_then(|client_id| {
+            Ok(owner_and_number(key).and_then(|client_id| {
                 Qos2Store::deserialize(value).map(|state| {
                     insert(
                         session_partition(client_id),
@@ -218,7 +218,7 @@ pub(super) fn snapshot_writes(
             }))
         }),
         entity::INFLIGHT => keyed_writes(section, StoreApplyError::InflightError, |key, value| {
-            Ok(client_and_packet(key).and_then(|client_id| {
+            Ok(owner_and_number(key).and_then(|client_id| {
                 InflightStore::deserialize(value).map(|message| {
                     insert(
                         session_partition(client_id),
@@ -230,19 +230,15 @@ pub(super) fn snapshot_writes(
             }))
         }),
         entity::OFFSETS => keyed_writes(section, StoreApplyError::OffsetError, |key, value| {
-            let Some((consumer_id, partition_num)) = key.split_once(':') else {
-                return Ok(None);
-            };
-            if partition_num.parse::<u16>().is_err() {
-                return Ok(None);
-            }
-            Ok(OffsetStore::deserialize(value).map(|offset| {
-                insert(
-                    session_partition(consumer_id),
-                    entity_name,
-                    key,
-                    OffsetStore::serialize(&offset),
-                )
+            Ok(owner_and_number(key).and_then(|consumer_id| {
+                OffsetStore::deserialize(value).map(|offset| {
+                    insert(
+                        session_partition(consumer_id),
+                        entity_name,
+                        key,
+                        OffsetStore::serialize(&offset),
+                    )
+                })
             }))
         }),
         entity::IDEMPOTENCY => idempotency_writes(section, false),
