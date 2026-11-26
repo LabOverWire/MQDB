@@ -312,6 +312,16 @@ pub fn take_expected_version(data: &mut Value) -> Result<Option<u64>, ProtocolEr
     }
 }
 
+pub const FK_EXPECTED_FIELD: &str = "__mqdb_fk_expected";
+
+#[must_use]
+pub fn without_internal_fields(mut data: Value) -> Value {
+    if let Value::Object(obj) = &mut data {
+        obj.remove(FK_EXPECTED_FIELD);
+    }
+    data
+}
+
 /// Builds a database request from an operation descriptor and payload.
 ///
 /// # Errors
@@ -330,7 +340,7 @@ pub fn build_request(op: DbOperation, payload: &[u8]) -> Result<Request, Protoco
     match op.operation {
         DbOp::Create => Ok(Request::Create {
             entity: op.entity,
-            data,
+            data: without_internal_fields(data),
         }),
         DbOp::Read => {
             let id = op.id.ok_or(ProtocolError::MissingId(DbOp::Read))?;
@@ -344,7 +354,7 @@ pub fn build_request(op: DbOperation, payload: &[u8]) -> Result<Request, Protoco
         }
         DbOp::Update => {
             let id = op.id.ok_or(ProtocolError::MissingId(DbOp::Update))?;
-            let mut fields = data;
+            let mut fields = without_internal_fields(data);
             let expected_version = take_expected_version(&mut fields)?;
             Ok(Request::Update {
                 entity: op.entity,
@@ -504,6 +514,32 @@ fn extract_list_options(data: &Value) -> ListOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_request_drops_the_internal_fk_expected_field() {
+        let op = |operation, id: Option<&str>| DbOperation {
+            entity: "docs".to_string(),
+            id: id.map(String::from),
+            operation,
+        };
+        let payload = br#"{"title":"t","__mqdb_fk_expected":"title=nope"}"#;
+        let Request::Create { data, .. } = build_request(op(DbOp::Create, None), payload).unwrap()
+        else {
+            panic!("create");
+        };
+        let Request::Update { fields, .. } =
+            build_request(op(DbOp::Update, Some("d1")), payload).unwrap()
+        else {
+            panic!("update");
+        };
+        assert_eq!(
+            (data, fields),
+            (
+                serde_json::json!({"title": "t"}),
+                serde_json::json!({"title": "t"})
+            )
+        );
+    }
 
     #[test]
     fn take_expected_version_extracts_and_strips() {
