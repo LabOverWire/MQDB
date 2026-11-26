@@ -255,6 +255,7 @@ pub enum FkDeleteContinuation {
     DeleteFromDbHandler {
         entity: String,
         id: String,
+        expected_version: Option<u64>,
         sender: Option<String>,
         client_id: Option<String>,
         response_topic: String,
@@ -265,6 +266,7 @@ pub enum FkDeleteContinuation {
         response_request_id: u64,
         entity: String,
         id: String,
+        expected_version: Option<u64>,
         sender: Option<String>,
         client_id: Option<String>,
         response_topic: String,
@@ -277,6 +279,17 @@ impl FkDeleteContinuation {
         match self {
             Self::DeleteFromDbHandler { entity, id, .. }
             | Self::DeleteFromNodeController { entity, id, .. } => (entity, id),
+        }
+    }
+
+    pub fn expected_version(&self) -> Option<u64> {
+        match self {
+            Self::DeleteFromDbHandler {
+                expected_version, ..
+            }
+            | Self::DeleteFromNodeController {
+                expected_version, ..
+            } => *expected_version,
         }
     }
 

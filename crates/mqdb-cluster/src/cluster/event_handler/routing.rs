@@ -634,6 +634,7 @@ mod tests {
             continuation: FkDeleteContinuation::DeleteFromDbHandler {
                 entity: "user".to_string(),
                 id: "u1".to_string(),
+                expected_version: None,
                 sender: None,
                 client_id: None,
                 response_topic: RESPONSE_TOPIC.to_string(),
