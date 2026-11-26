@@ -1723,7 +1723,7 @@ async fn setup_unique_entity_with_constraint(
     ctrl.check_unique_constraints("users", id, &entity_data, partition, &request_id, timestamp)
         .await
         .unwrap();
-    ctrl.commit_unique_constraints("users", id, &entity_data, partition, &request_id, timestamp)
+    ctrl.commit_unique_constraints("users", &entity_data, &request_id)
         .await;
 }
 
@@ -3145,7 +3145,6 @@ async fn forwarded_writes_completed_after_a_unique_check_publish_their_events() 
             id: "u1".to_string(),
             data_bytes: serde_json::to_vec(&data).unwrap(),
             data,
-            partition,
             request_id: "req-1".to_string(),
             now_ms: 1000,
             sender: Some("alice".to_string()),
@@ -3244,6 +3243,7 @@ mod admin_store_failure;
 mod cascade_share;
 mod change_events;
 mod deferred_reply;
+mod forwarded_unique_quorum;
 mod forwarded_write;
 mod frame_limit;
 mod lost_snapshot_request;
@@ -3260,6 +3260,7 @@ mod snapshot;
 mod snapshot_replace;
 mod stale_log;
 mod store_failure;
+mod unique_release;
 
 #[tokio::test]
 async fn forwarded_create_refuses_an_id_longer_than_the_record_id_limit() {
