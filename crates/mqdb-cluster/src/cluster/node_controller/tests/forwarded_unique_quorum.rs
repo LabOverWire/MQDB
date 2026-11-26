@@ -4,7 +4,7 @@
 use super::store_failure::{controller_where, publish_completing_unique};
 use super::*;
 use crate::cluster::db::{ClusterConstraint, OnDeleteAction, data_partition, unique_partition};
-use crate::cluster::node_controller::unique::{await_unique_quorum, await_unique_reserves};
+use crate::cluster::node_controller::unique::await_unique_phase1;
 use serde_json::{Value, json};
 
 const REMOTE_AUTHOR: &str = "u9";
@@ -163,14 +163,8 @@ async fn after_the_remote_fk_check(
 
 async fn fail_the_majority(ctrl: &mut NodeController<MockTransport>, work: PendingUniqueWork) {
     ctrl.sweep_unique_quorum(u64::MAX).await;
-    let remote_results = match tokio::join!(
-        await_unique_reserves(work.phase1.pending_remote),
-        await_unique_quorum(work.phase1.pending_quorum),
-    ) {
-        (Ok(confirmed), Ok(_)) => Ok(confirmed),
-        (Ok(confirmed), Err(field)) => Err((ReserveFailure::NotDurable(field), confirmed)),
-        (Err(failure), _) => Err(failure),
-    };
+    let remote_results =
+        await_unique_phase1(work.phase1.pending_remote, work.phase1.pending_quorum).await;
     ctrl.complete_pending_unique_work(
         work.phase1.local_reserved,
         remote_results,

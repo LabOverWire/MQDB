@@ -3,9 +3,9 @@
 
 use super::{
     ClusterMessage, ClusterTransport, NodeController, NodeId, PartitionId, PendingUniqueReserve,
-    ReserveFailure, UniqueCheckPhase1Result, UniqueCommitRequest, UniqueReassertRequest,
-    UniqueReleaseRequest, UniqueReserveRequest, UniqueReserveResponse, UniqueReserveStatus,
-    UniqueSealRequest, UniqueSealResponse,
+    RemoteReserveResult, ReserveFailure, UniqueCheckPhase1Result, UniqueCommitRequest,
+    UniqueReassertRequest, UniqueReleaseRequest, UniqueReserveRequest, UniqueReserveResponse,
+    UniqueReserveStatus, UniqueSealRequest, UniqueSealResponse,
 };
 use crate::cluster::Epoch;
 use crate::cluster::protocol::Heartbeat;
@@ -85,6 +85,23 @@ pub async fn await_unique_quorum(
         }
     }
     Ok(durable)
+}
+
+pub(crate) async fn await_unique_phase1(
+    pending_remote: Vec<PendingUniqueReserve>,
+    pending_quorum: Vec<(String, oneshot::Receiver<bool>)>,
+) -> RemoteReserveResult {
+    match tokio::join!(
+        await_unique_reserves(pending_remote),
+        await_unique_quorum(pending_quorum),
+    ) {
+        (Ok(confirmed), Ok(durable)) => {
+            tracing::debug!(?durable, "unique reserve is majority-durable");
+            Ok(confirmed)
+        }
+        (Ok(confirmed), Err(field)) => Err((ReserveFailure::NotDurable(field), confirmed)),
+        (Err(failure), _) => Err(failure),
+    }
 }
 
 impl<T: ClusterTransport> NodeController<T> {

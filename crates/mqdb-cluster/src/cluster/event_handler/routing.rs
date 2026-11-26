@@ -220,7 +220,11 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             continuation,
         } = pending;
         drop(ctrl);
-        let remote_results = combine_quorum(phase1.pending_remote, phase1.pending_quorum).await;
+        let remote_results = super::super::node_controller::unique::await_unique_phase1(
+            phase1.pending_remote,
+            phase1.pending_quorum,
+        )
+        .await;
         let mut ctrl = self.controller.write().await;
         if let Some(response) = self
             .db_handler
@@ -424,28 +428,6 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
             share_nodes,
             is_clean_session,
         })
-    }
-}
-
-async fn combine_quorum(
-    pending_remote: Vec<super::super::node_controller::PendingUniqueReserve>,
-    pending_quorum: Vec<(String, tokio::sync::oneshot::Receiver<bool>)>,
-) -> super::super::node_controller::RemoteReserveResult {
-    use super::super::node_controller::ReserveFailure;
-    use super::super::node_controller::unique::{await_unique_quorum, await_unique_reserves};
-    let (remote_results, quorum) = tokio::join!(
-        await_unique_reserves(pending_remote),
-        await_unique_quorum(pending_quorum),
-    );
-    match remote_results {
-        Ok(confirmed) => match quorum {
-            Ok(durable) => {
-                tracing::debug!(?durable, "unique reserve is majority-durable");
-                Ok(confirmed)
-            }
-            Err(field) => Err((ReserveFailure::NotDurable(field), confirmed)),
-        },
-        Err(e) => Err(e),
     }
 }
 
