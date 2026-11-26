@@ -231,7 +231,15 @@ impl<T: ClusterTransport> NodeController<T> {
                     }
                 }
                 for pending in pending_remote {
-                    drop(pending.receiver);
+                    self.send_unique_release_fire_and_forget(
+                        pending.target_node,
+                        entity,
+                        &pending.field,
+                        &pending.value,
+                        request_id,
+                        None,
+                    )
+                    .await;
                 }
                 return Err(failure);
             }

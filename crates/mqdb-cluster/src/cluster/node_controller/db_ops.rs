@@ -1901,7 +1901,15 @@ impl<T: ClusterTransport> NodeController<T> {
                 self.release_all_reservations(entity, &request_id, &local_reserved)
                     .await;
                 for pending in pending_remote_reserves {
-                    drop(pending.receiver);
+                    self.send_unique_release_fire_and_forget(
+                        pending.target_node,
+                        entity,
+                        &pending.field,
+                        &pending.value,
+                        &request_id,
+                        None,
+                    )
+                    .await;
                 }
                 return (
                     Self::json_error(failure.http_code(), &failure.message()),
