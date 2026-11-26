@@ -135,6 +135,27 @@ impl Database {
         manager.get_constraints(entity).to_vec()
     }
 
+    async fn refuse_existing_constraint(
+        &self,
+        constraint: &mqdb_core::constraint::Constraint,
+    ) -> Result<()> {
+        let manager = self.constraint_manager.read().await;
+        refuse_conflicting(&manager, constraint)
+    }
+
+    async fn commit_new_constraint(
+        &self,
+        mut batch: mqdb_core::BatchWriter,
+        constraint: mqdb_core::constraint::Constraint,
+    ) -> Result<()> {
+        let mut manager = self.constraint_manager.write().await;
+        refuse_conflicting(&manager, &constraint)?;
+        manager.persist_constraint(&mut batch, &constraint)?;
+        batch.commit()?;
+        manager.add_constraint(constraint);
+        Ok(())
+    }
+
     /// # Errors
     /// Returns an error if field validation or persisting the constraint fails.
     #[tracing::instrument(skip(self), fields(entity = %entity))]
@@ -143,9 +164,10 @@ impl Database {
         use mqdb_core::error::Error;
         use std::collections::HashSet;
 
-        self.add_index(entity.clone(), fields.clone()).await?;
-
         let constraint = Constraint::Unique(UniqueConstraint::new(entity.clone(), fields.clone()));
+        self.refuse_existing_constraint(&constraint).await?;
+
+        self.add_index(entity.clone(), fields.clone()).await?;
 
         let mut batch = self.storage.batch();
 
@@ -170,54 +192,23 @@ impl Database {
             }
         }
 
-        let constraint_manager = self.constraint_manager.read().await;
-        constraint_manager.persist_constraint(&mut batch, &constraint)?;
-        drop(constraint_manager);
-
-        batch.commit()?;
-
-        let mut constraint_manager = self.constraint_manager.write().await;
-        constraint_manager.add_constraint(constraint);
-
-        Ok(())
+        self.commit_new_constraint(batch, constraint).await
     }
 
     /// # Errors
     /// Returns an error if field validation or persisting the constraint fails.
     #[tracing::instrument(skip(self), fields(entity = %entity, field = %field))]
     pub async fn add_not_null(&self, entity: String, field: String) -> Result<()> {
-        use mqdb_core::constraint::{Constraint, NotNullConstraint, OnDeleteAction};
-        use mqdb_core::error::Error;
+        use mqdb_core::constraint::{Constraint, NotNullConstraint};
 
         let schema_registry = self.schema_registry.read().await;
         schema_registry.validate_fields_exist(&entity, &[field.as_str()], "not-null constraint")?;
         drop(schema_registry);
 
-        let constraint_manager = self.constraint_manager.read().await;
-        let conflicting_set_null_fk = constraint_manager.get_constraints(&entity).iter().any(
-            |c| matches!(c, Constraint::ForeignKey(fk) if fk.source_field == field && fk.on_delete == OnDeleteAction::SetNull),
-        );
-        drop(constraint_manager);
-        if conflicting_set_null_fk {
-            return Err(Error::ConstraintViolation(format!(
-                "cannot add not-null constraint on {entity}.{field}: a set-null foreign key exists on the field"
-            )));
-        }
-
         let constraint = Constraint::NotNull(NotNullConstraint::new(entity, field));
 
-        let mut batch = self.storage.batch();
-
-        let constraint_manager = self.constraint_manager.read().await;
-        constraint_manager.persist_constraint(&mut batch, &constraint)?;
-        drop(constraint_manager);
-
-        batch.commit()?;
-
-        let mut constraint_manager = self.constraint_manager.write().await;
-        constraint_manager.add_constraint(constraint);
-
-        Ok(())
+        self.commit_new_constraint(self.storage.batch(), constraint)
+            .await
     }
 
     /// # Errors
@@ -264,20 +255,6 @@ impl Database {
         }
         drop(schema_registry);
 
-        if on_delete == OnDeleteAction::SetNull {
-            let constraint_manager = self.constraint_manager.read().await;
-            let conflicting_not_null = constraint_manager
-                .get_constraints(&source_entity)
-                .iter()
-                .any(|c| matches!(c, Constraint::NotNull(nn) if nn.field == source_field));
-            drop(constraint_manager);
-            if conflicting_not_null {
-                return Err(Error::ConstraintViolation(format!(
-                    "cannot set on_delete=set_null on {source_entity}.{source_field}: a not-null constraint exists on the field"
-                )));
-            }
-        }
-
         let constraint = Constraint::ForeignKey(ForeignKeyConstraint::new(
             source_entity,
             source_field,
@@ -286,18 +263,49 @@ impl Database {
             on_delete,
         ));
 
-        let mut batch = self.storage.batch();
+        self.commit_new_constraint(self.storage.batch(), constraint)
+            .await
+    }
+}
 
-        let constraint_manager = self.constraint_manager.read().await;
-        constraint_manager.persist_constraint(&mut batch, &constraint)?;
-        drop(constraint_manager);
+fn refuse_conflicting(
+    manager: &mqdb_core::constraint::ConstraintManager,
+    constraint: &mqdb_core::constraint::Constraint,
+) -> Result<()> {
+    use mqdb_core::constraint::{Constraint, OnDeleteAction};
+    use mqdb_core::error::Error;
 
-        batch.commit()?;
-
-        let mut constraint_manager = self.constraint_manager.write().await;
-        constraint_manager.add_constraint(constraint);
-
-        Ok(())
+    let existing = manager.get_constraints(constraint.entity());
+    if existing.iter().any(|c| c.name() == constraint.name()) {
+        return Err(Error::AlreadyExists {
+            entity: constraint.entity().to_string(),
+            id: constraint.name().to_string(),
+        });
+    }
+    match constraint {
+        Constraint::NotNull(not_null)
+            if existing.iter().any(|c| {
+                matches!(c, Constraint::ForeignKey(fk)
+                    if fk.source_field == not_null.field && fk.on_delete == OnDeleteAction::SetNull)
+            }) =>
+        {
+            Err(Error::ConstraintViolation(format!(
+                "cannot add not-null constraint on {}.{}: a set-null foreign key exists on the field",
+                not_null.entity, not_null.field
+            )))
+        }
+        Constraint::ForeignKey(fk)
+            if fk.on_delete == OnDeleteAction::SetNull
+                && existing.iter().any(
+                    |c| matches!(c, Constraint::NotNull(nn) if nn.field == fk.source_field),
+                ) =>
+        {
+            Err(Error::ConstraintViolation(format!(
+                "cannot set on_delete=set_null on {}.{}: a not-null constraint exists on the field",
+                fk.source_entity, fk.source_field
+            )))
+        }
+        _ => Ok(()),
     }
 }
 

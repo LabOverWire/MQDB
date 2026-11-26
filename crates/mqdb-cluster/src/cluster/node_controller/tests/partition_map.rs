@@ -549,11 +549,11 @@ async fn a_primary_built_from_an_empty_snapshot_trusts_its_disk_after_a_restart(
     let partition = session_partition("c1");
     let mut replica = controller(3);
     replica.become_replica(partition, Epoch::new(1), 0);
-    replica
-        .stores()
-        .db_schema
-        .register("bigdocs", b"{\"fields\":[]}")
-        .unwrap();
+    crate::cluster::test_support::register_schema(
+        &replica.stores().db_schema,
+        "bigdocs",
+        b"{\"fields\":[]}",
+    );
     let backend = crate::cluster::test_support::FaultyBackend::shared();
     let map = map_with(partition, node(2), &[node(3)], 1);
 

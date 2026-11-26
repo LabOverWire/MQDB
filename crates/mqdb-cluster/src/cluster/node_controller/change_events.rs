@@ -83,7 +83,7 @@ impl<T: ClusterTransport> NodeController<T> {
             storage_entry,
         }) = Self::change_event_entry(write)
         else {
-            return self.stores.apply_write(write);
+            return self.stores.apply_write_keeping_unrecovered(write);
         };
         self.stores
             .apply_write_with_outbox_entries(write, std::slice::from_ref(&storage_entry))?;
