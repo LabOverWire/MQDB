@@ -263,3 +263,54 @@ async fn a_primary_peer_that_cannot_store_a_client_location_still_keeps_it_in_me
 
     assert_eq!(peer.stores().client_locations.get("c1"), Some(node(1)));
 }
+
+#[tokio::test]
+async fn a_replica_that_cannot_store_a_client_location_from_its_primary_keeps_it() {
+    let healthy = FaultyBackend::shared();
+    let partition = crate::cluster::session_partition("c1");
+    let mut primary = ctrl_with(2, &healthy, &[1, 3]);
+    primary.become_primary(partition, Epoch::new(1));
+    primary.partition_map.set(
+        partition,
+        crate::cluster::PartitionAssignment::new(node(2), vec![node(3)], Epoch::new(1)),
+    );
+    let failing = FaultyBackend::shared();
+    let mut replica = ctrl_with(3, &failing, &[1, 2]);
+    replica.become_replica(partition, Epoch::new(1), 0);
+    failing.fail_writes(true);
+    let location = ReplicationWrite::new(
+        partition,
+        Operation::Insert,
+        Epoch::ZERO,
+        0,
+        entity::CLIENT_LOCATIONS.to_string(),
+        client_location_key("c1"),
+        ClientLocationEntry::create("c1", node(1)).to_be_bytes(),
+    );
+    primary.handle_write_request(node(1), location).await;
+    let replicated: Vec<ReplicationWrite> = primary
+        .transport
+        .sent_messages()
+        .into_iter()
+        .filter_map(|(dest, message)| match message {
+            ClusterMessage::Write(w) if dest == node(3) => Some(w),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        replicated.len(),
+        1,
+        "primary did not replicate to its replica"
+    );
+    for write in &replicated {
+        replica.handle_write(node(2), write).await;
+    }
+    assert_eq!(
+        (
+            primary.stores().client_locations.get("c1"),
+            replica.stores().client_locations.get("c1")
+        ),
+        (Some(node(1)), Some(node(1))),
+        "replica that cannot store drops the client location from memory"
+    );
+}
