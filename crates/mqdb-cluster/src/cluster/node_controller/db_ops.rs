@@ -2417,7 +2417,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let mut items: Vec<serde_json::Value> = entities
             .iter()
             .filter_map(|e| {
-                let data: serde_json::Value = serde_json::from_slice(&e.data).ok()?;
+                let data = Self::with_record_id(serde_json::from_slice(&e.data).ok()?, e.id_str());
                 if !Self::matches_filters(&data, &filters) {
                     return None;
                 }
@@ -2427,8 +2427,10 @@ impl<T: ClusterTransport> NodeController<T> {
                             .get("resource_id")
                             .and_then(serde_json::Value::as_str)?;
                         let resource = self.db_get(resource_entity, resource_id)?;
-                        let resource_data: serde_json::Value =
-                            serde_json::from_slice(&resource.data).ok()?;
+                        let resource_data = Self::with_record_id(
+                            serde_json::from_slice(&resource.data).ok()?,
+                            resource_id,
+                        );
                         Some(serde_json::json!({
                             "id": resource_id,
                             "data": resource_data

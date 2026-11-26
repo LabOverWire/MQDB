@@ -4731,3 +4731,21 @@ async fn local_list_sorts_on_a_field_left_out_of_the_projection() {
     .await;
     assert_eq!(listed_ids(&body), ["a", "c", "b"], "{body}");
 }
+
+#[tokio::test]
+async fn local_list_sorts_by_id() {
+    let body = local_list(&serde_json::json!({
+        "sort": [{"field": "id", "direction": "desc"}]
+    }))
+    .await;
+    assert_eq!(listed_ids(&body), ["c", "b", "a"], "{body}");
+}
+
+#[tokio::test]
+async fn local_list_filters_by_id() {
+    let body = local_list(&serde_json::json!({
+        "filters": [{"field": "id", "op": "eq", "value": "b"}]
+    }))
+    .await;
+    assert_eq!(listed_ids(&body), ["b"], "{body}");
+}

@@ -314,6 +314,15 @@ impl<T: ClusterTransport> NodeController<T> {
             .collect()
     }
 
+    pub(crate) fn with_record_id(mut data: serde_json::Value, id: &str) -> serde_json::Value {
+        if let serde_json::Value::Object(fields) = &mut data {
+            fields
+                .entry("id")
+                .or_insert_with(|| serde_json::Value::String(id.to_string()));
+        }
+        data
+    }
+
     pub(crate) fn sort_list_items(
         results: &mut [serde_json::Value],
         sorts: &[mqdb_core::SortOrder],

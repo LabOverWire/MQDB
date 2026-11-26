@@ -187,3 +187,64 @@ async fn a_forwarded_update_too_large_to_echo_is_acknowledged_without_the_record
     );
     assert!(replies[0]["data"].get("a").is_none());
 }
+
+#[tokio::test]
+async fn a_scatter_list_sorts_by_id() {
+    let mut ctrl = create_test_controller(node(1), MockTransport::new(node(1)));
+    for id in ["a", "b", "c"] {
+        put_record(&ctrl.stores.db_data, "rows", id, br#"{"n":1}"#, 1000);
+    }
+    ctrl.heartbeat.receive_heartbeat(
+        node(2),
+        &crate::cluster::protocol::Heartbeat::create(node(2), 0),
+        0,
+    );
+    assert!(
+        ctrl.start_scatter_list_query(
+            "rows",
+            b"{}",
+            RESPONSE_TOPIC.to_string(),
+            None,
+            Vec::new(),
+            vec![mqdb_core::SortOrder::new(
+                "id".to_string(),
+                mqdb_core::SortDirection::Desc
+            )],
+            None,
+            None,
+            None,
+        )
+        .await
+    );
+    let request_id = *ctrl.pending_scatter_requests.keys().next().unwrap();
+
+    ctrl.handle_json_db_response(&JsonDbResponse::new(
+        request_id,
+        br#"{"status":"ok","data":[]}"#.to_vec(),
+        format!("_mqdb/scatter/1/{request_id}"),
+        None,
+    ))
+    .await;
+
+    let ids: Vec<String> = ctrl
+        .transport()
+        .queued_publishes()
+        .into_iter()
+        .filter_map(|publish| match publish {
+            QueuedPublish::Plain(topic, payload, _) if topic == RESPONSE_TOPIC => {
+                Some(parse(&payload))
+            }
+            _ => None,
+        })
+        .flat_map(|reply| {
+            reply["data"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|item| item["id"].as_str().unwrap_or_default().to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(ids, ["c", "b", "a"]);
+}

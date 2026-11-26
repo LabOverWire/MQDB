@@ -1442,6 +1442,7 @@ impl DbRequestHandler {
                         skip,
                     );
                 }
+                let data = NodeController::<T>::with_record_id(data, e.id_str());
                 if !filters.is_empty() && !NodeController::<T>::matches_filters(&data, &filters) {
                     return None;
                 }
@@ -1449,7 +1450,10 @@ impl DbRequestHandler {
                     Some(resource_entity) => {
                         let resource_id = data.get("resource_id").and_then(Value::as_str)?;
                         let resource = controller.db_get(resource_entity, resource_id)?;
-                        let resource_data: Value = serde_json::from_slice(&resource.data).ok()?;
+                        let resource_data = NodeController::<T>::with_record_id(
+                            serde_json::from_slice(&resource.data).ok()?,
+                            resource_id,
+                        );
                         (resource_id.to_string(), resource_data)
                     }
                     None => (e.id_str().to_string(), data),
