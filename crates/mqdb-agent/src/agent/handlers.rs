@@ -699,10 +699,16 @@ async fn handle_foreign_key_constraint(
         .and_then(|v| v.as_str())
         .unwrap_or("restrict");
 
-    let action = match on_delete {
+    let action = match on_delete.to_ascii_lowercase().as_str() {
         "cascade" => OnDeleteAction::Cascade,
-        "set_null" => OnDeleteAction::SetNull,
-        _ => OnDeleteAction::Restrict,
+        "set_null" | "setnull" => OnDeleteAction::SetNull,
+        "restrict" => OnDeleteAction::Restrict,
+        _ => {
+            return Err((
+                mqdb_core::ErrorCode::BadRequest,
+                format!("invalid on_delete value: {on_delete}"),
+            ));
+        }
     };
 
     match (source_field, target_entity, target_field) {
@@ -725,6 +731,12 @@ async fn handle_foreign_key_constraint(
 
 fn admin_write_error(error: &mqdb_core::Error) -> (mqdb_core::ErrorCode, String) {
     use mqdb_core::Error;
+    if matches!(error, Error::AlreadyExists { .. }) {
+        return (
+            mqdb_core::ErrorCode::Conflict,
+            "constraint already exists".to_string(),
+        );
+    }
     let code = match error {
         Error::Validation(_)
         | Error::InvalidKey(_)
@@ -2157,6 +2169,46 @@ mod admin_store_failure {
         assert_eq!(
             (code(&missing_fields), code(&unknown_after_schema)),
             (400, 400)
+        );
+    }
+
+    async fn memory_db() -> Database {
+        let config = DatabaseConfig::new(PathBuf::from("mem")).without_background_tasks();
+        Database::open_with_backend(Arc::new(MemoryBackend::new()), config)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_constraint_added_twice_answers_409_and_is_stored_once() {
+        let db = memory_db().await;
+        let unique = json!({"type": "unique", "fields": ["code"]});
+        let first = super::handle_constraint_add(&db, "items".into(), &unique).await;
+        let again = super::handle_constraint_add(&db, "items".into(), &unique).await;
+        assert_eq!(
+            (
+                code(&first),
+                code(&again),
+                db.list_constraints("items").await.len()
+            ),
+            (200, 409, 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_foreign_key_with_an_unknown_on_delete_answers_400() {
+        let db = memory_db().await;
+        let foreign_key = json!({
+            "type": "foreign_key",
+            "field": "owner_id",
+            "target_entity": "owners",
+            "target_field": "id",
+            "on_delete": "bogus"
+        });
+        let refused = super::handle_constraint_add(&db, "items".into(), &foreign_key).await;
+        assert_eq!(
+            (code(&refused), db.list_constraints("items").await.len()),
+            (400, 0)
         );
     }
 }

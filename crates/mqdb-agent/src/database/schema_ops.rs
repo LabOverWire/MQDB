@@ -135,6 +135,25 @@ impl Database {
         manager.get_constraints(entity).to_vec()
     }
 
+    async fn persist_new_constraint(
+        &self,
+        batch: &mut mqdb_core::BatchWriter,
+        constraint: &mqdb_core::constraint::Constraint,
+    ) -> Result<()> {
+        let manager = self.constraint_manager.read().await;
+        if manager
+            .get_constraints(constraint.entity())
+            .iter()
+            .any(|existing| existing.name() == constraint.name())
+        {
+            return Err(mqdb_core::error::Error::AlreadyExists {
+                entity: constraint.entity().to_string(),
+                id: constraint.name().to_string(),
+            });
+        }
+        manager.persist_constraint(batch, constraint)
+    }
+
     /// # Errors
     /// Returns an error if field validation or persisting the constraint fails.
     #[tracing::instrument(skip(self), fields(entity = %entity))]
@@ -170,9 +189,7 @@ impl Database {
             }
         }
 
-        let constraint_manager = self.constraint_manager.read().await;
-        constraint_manager.persist_constraint(&mut batch, &constraint)?;
-        drop(constraint_manager);
+        self.persist_new_constraint(&mut batch, &constraint).await?;
 
         batch.commit()?;
 
@@ -208,9 +225,7 @@ impl Database {
 
         let mut batch = self.storage.batch();
 
-        let constraint_manager = self.constraint_manager.read().await;
-        constraint_manager.persist_constraint(&mut batch, &constraint)?;
-        drop(constraint_manager);
+        self.persist_new_constraint(&mut batch, &constraint).await?;
 
         batch.commit()?;
 
@@ -288,9 +303,7 @@ impl Database {
 
         let mut batch = self.storage.batch();
 
-        let constraint_manager = self.constraint_manager.read().await;
-        constraint_manager.persist_constraint(&mut batch, &constraint)?;
-        drop(constraint_manager);
+        self.persist_new_constraint(&mut batch, &constraint).await?;
 
         batch.commit()?;
 
