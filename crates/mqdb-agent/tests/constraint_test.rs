@@ -1997,3 +1997,45 @@ async fn cross_owned_cascade_setnull_blocked_on_typed_field() {
         "cross-owned task's FK field must be untouched after the blocked delete"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_adds_of_one_constraint_store_it_once() {
+    const ROUNDS: usize = 50;
+    let tmp = TempDir::new().unwrap();
+    let db = Arc::new(Database::open(tmp.path()).await.unwrap());
+    let mut duplicated = 0;
+    for round in 0..ROUNDS {
+        let field = format!("f{round}");
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let adds: Vec<_> = (0..2)
+            .map(|_| {
+                let db = Arc::clone(&db);
+                let barrier = Arc::clone(&barrier);
+                let field = field.clone();
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    db.add_not_null("users".into(), field).await.is_ok()
+                })
+            })
+            .collect();
+        let mut accepted = 0;
+        for add in adds {
+            if add.await.unwrap() {
+                accepted += 1;
+            }
+        }
+        let stored = db
+            .list_constraints("users")
+            .await
+            .iter()
+            .filter(|constraint| constraint.name().contains(&field))
+            .count();
+        if (accepted, stored) != (1, 1) {
+            duplicated += 1;
+        }
+    }
+    assert_eq!(
+        duplicated, 0,
+        "rounds that accepted or stored the constraint twice"
+    );
+}

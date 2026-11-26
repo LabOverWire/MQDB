@@ -135,23 +135,25 @@ impl Database {
         manager.get_constraints(entity).to_vec()
     }
 
-    async fn persist_new_constraint(
+    async fn refuse_existing_constraint(
         &self,
-        batch: &mut mqdb_core::BatchWriter,
         constraint: &mqdb_core::constraint::Constraint,
     ) -> Result<()> {
         let manager = self.constraint_manager.read().await;
-        if manager
-            .get_constraints(constraint.entity())
-            .iter()
-            .any(|existing| existing.name() == constraint.name())
-        {
-            return Err(mqdb_core::error::Error::AlreadyExists {
-                entity: constraint.entity().to_string(),
-                id: constraint.name().to_string(),
-            });
-        }
-        manager.persist_constraint(batch, constraint)
+        refuse_if_named(&manager, constraint)
+    }
+
+    async fn commit_new_constraint(
+        &self,
+        mut batch: mqdb_core::BatchWriter,
+        constraint: mqdb_core::constraint::Constraint,
+    ) -> Result<()> {
+        let mut manager = self.constraint_manager.write().await;
+        refuse_if_named(&manager, &constraint)?;
+        manager.persist_constraint(&mut batch, &constraint)?;
+        batch.commit()?;
+        manager.add_constraint(constraint);
+        Ok(())
     }
 
     /// # Errors
@@ -162,9 +164,10 @@ impl Database {
         use mqdb_core::error::Error;
         use std::collections::HashSet;
 
-        self.add_index(entity.clone(), fields.clone()).await?;
-
         let constraint = Constraint::Unique(UniqueConstraint::new(entity.clone(), fields.clone()));
+        self.refuse_existing_constraint(&constraint).await?;
+
+        self.add_index(entity.clone(), fields.clone()).await?;
 
         let mut batch = self.storage.batch();
 
@@ -189,14 +192,7 @@ impl Database {
             }
         }
 
-        self.persist_new_constraint(&mut batch, &constraint).await?;
-
-        batch.commit()?;
-
-        let mut constraint_manager = self.constraint_manager.write().await;
-        constraint_manager.add_constraint(constraint);
-
-        Ok(())
+        self.commit_new_constraint(batch, constraint).await
     }
 
     /// # Errors
@@ -223,16 +219,8 @@ impl Database {
 
         let constraint = Constraint::NotNull(NotNullConstraint::new(entity, field));
 
-        let mut batch = self.storage.batch();
-
-        self.persist_new_constraint(&mut batch, &constraint).await?;
-
-        batch.commit()?;
-
-        let mut constraint_manager = self.constraint_manager.write().await;
-        constraint_manager.add_constraint(constraint);
-
-        Ok(())
+        self.commit_new_constraint(self.storage.batch(), constraint)
+            .await
     }
 
     /// # Errors
@@ -301,17 +289,26 @@ impl Database {
             on_delete,
         ));
 
-        let mut batch = self.storage.batch();
-
-        self.persist_new_constraint(&mut batch, &constraint).await?;
-
-        batch.commit()?;
-
-        let mut constraint_manager = self.constraint_manager.write().await;
-        constraint_manager.add_constraint(constraint);
-
-        Ok(())
+        self.commit_new_constraint(self.storage.batch(), constraint)
+            .await
     }
+}
+
+fn refuse_if_named(
+    manager: &mqdb_core::constraint::ConstraintManager,
+    constraint: &mqdb_core::constraint::Constraint,
+) -> Result<()> {
+    if manager
+        .get_constraints(constraint.entity())
+        .iter()
+        .any(|existing| existing.name() == constraint.name())
+    {
+        return Err(mqdb_core::error::Error::AlreadyExists {
+            entity: constraint.entity().to_string(),
+            id: constraint.name().to_string(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]
