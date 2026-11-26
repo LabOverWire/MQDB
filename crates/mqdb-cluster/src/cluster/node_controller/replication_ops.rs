@@ -249,8 +249,8 @@ impl<T: ClusterTransport> NodeController<T> {
             self.handle_sequence_gap_ack(&ack).await;
         }
 
-        for (seq, result) in self.pending.drain_completed() {
-            self.on_write_complete(ack.partition(), seq, result);
+        for (partition, seq, result) in self.pending.drain_completed() {
+            self.on_write_complete(partition, seq, result);
         }
     }
 
@@ -323,6 +323,7 @@ impl<T: ClusterTransport> NodeController<T> {
     /// # Errors
     /// Returns `NotPrimary` if this node is not the primary for the partition.
     /// Returns `TooManyPending` if the pending writes limit is reached.
+    /// Returns `StoreFailed` if this node cannot store the write.
     pub async fn replicate_write(
         &mut self,
         write: ReplicationWrite,
@@ -331,18 +332,17 @@ impl<T: ClusterTransport> NodeController<T> {
     ) -> Result<u64, ReplicationError> {
         let partition = write.partition;
 
-        let (sequence, epoch) = {
-            let state = self
-                .replicas
-                .get_mut(&partition.get())
-                .ok_or(ReplicationError::NotPrimary)?;
+        let state = self
+            .replicas
+            .get(&partition.get())
+            .filter(|state| state.role() == ReplicaRole::Primary)
+            .ok_or(ReplicationError::NotPrimary)?;
+        let sequence = state.sequence() + 1;
+        let epoch = state.epoch();
 
-            if state.role() != ReplicaRole::Primary {
-                return Err(ReplicationError::NotPrimary);
-            }
-
-            (state.advance_sequence(), state.epoch())
-        };
+        if !replicas.is_empty() && self.pending.is_full() {
+            return Err(ReplicationError::TooManyPending);
+        }
 
         let write_msg = ReplicationWrite::new(
             partition,
@@ -354,14 +354,24 @@ impl<T: ClusterTransport> NodeController<T> {
             write.data,
         );
 
+        self.apply_primary_write(&write_msg, None, &[])?;
+
+        if let Some(state) = self.replicas.get_mut(&partition.get()) {
+            state.advance_sequence();
+        }
         self.write_log
             .append(partition, sequence, write_msg.clone());
-        let _ = self.stores.apply_write(&write_msg);
 
-        let tracker = QuorumTracker::new(sequence, epoch, replicas, required_acks);
-
-        if !self.pending.add(tracker) {
-            return Err(ReplicationError::TooManyPending);
+        if !replicas.is_empty() {
+            self.pending
+                .add(QuorumTracker::new(
+                    partition,
+                    sequence,
+                    epoch,
+                    replicas,
+                    required_acks,
+                ))
+                .map_err(|_| ReplicationError::TooManyPending)?;
         }
 
         for &replica in replicas {

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::protocol::{AckStatus, ReplicationAck};
-use super::{Epoch, NodeId};
+use super::{Epoch, NodeId, PartitionId};
 use std::collections::HashSet;
 use tokio::sync::oneshot;
 
@@ -14,6 +14,7 @@ pub enum QuorumResult {
 }
 
 pub struct QuorumTracker {
+    partition: PartitionId,
     sequence: u64,
     epoch: Epoch,
     required: usize,
@@ -28,6 +29,7 @@ pub struct QuorumTracker {
 impl std::fmt::Debug for QuorumTracker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("QuorumTracker")
+            .field("partition", &self.partition)
             .field("sequence", &self.sequence)
             .field("epoch", &self.epoch)
             .field("required", &self.required)
@@ -43,6 +45,7 @@ impl std::fmt::Debug for QuorumTracker {
 impl QuorumTracker {
     #[must_use]
     pub fn new(
+        partition: PartitionId,
         sequence: u64,
         epoch: Epoch,
         replica_nodes: &[NodeId],
@@ -50,6 +53,7 @@ impl QuorumTracker {
     ) -> Self {
         let expected_nodes: HashSet<u16> = replica_nodes.iter().map(|n| n.get()).collect();
         Self {
+            partition,
             sequence,
             epoch,
             required: required_acks,
@@ -64,6 +68,7 @@ impl QuorumTracker {
 
     #[must_use]
     pub fn with_completion(
+        partition: PartitionId,
         sequence: u64,
         epoch: Epoch,
         replica_nodes: &[NodeId],
@@ -72,6 +77,7 @@ impl QuorumTracker {
         let (tx, rx) = oneshot::channel();
         let expected_nodes: HashSet<u16> = replica_nodes.iter().map(|n| n.get()).collect();
         let tracker = Self {
+            partition,
             sequence,
             epoch,
             required: required_acks,
@@ -93,16 +99,17 @@ impl QuorumTracker {
 
     pub fn record_ack(&mut self, ack: &ReplicationAck) -> QuorumResult {
         let node_id = ack.node_id();
-        if !self.expected_nodes.contains(&node_id) {
+        if !self.expected_nodes.contains(&node_id) || self.acked_nodes.contains(&node_id) {
             return self.current_result();
         }
 
         match ack.status() {
             Some(AckStatus::Ok) => {
-                if ack.sequence() != self.sequence {
+                if ack.partition() != self.partition || ack.sequence() != self.sequence {
                     return self.current_result();
                 }
                 if ack.epoch() == self.epoch {
+                    self.failed_nodes.remove(&node_id);
                     self.acked_nodes.insert(node_id);
                 } else if ack.epoch() > self.epoch {
                     self.stale_epoch_seen = true;
@@ -119,17 +126,17 @@ impl QuorumTracker {
                 }
                 self.failed_nodes.insert(node_id);
             }
-            Some(AckStatus::NotReplica | AckStatus::SequenceGap) => {
+            Some(AckStatus::NotReplica) => {
                 self.failed_nodes.insert(node_id);
             }
-            None => {}
+            Some(AckStatus::SequenceGap) | None => {}
         }
 
         self.current_result()
     }
 
     pub fn record_timeout(&mut self, node: NodeId) {
-        if self.expected_nodes.contains(&node.get()) {
+        if self.expected_nodes.contains(&node.get()) && !self.acked_nodes.contains(&node.get()) {
             self.failed_nodes.insert(node.get());
         }
     }
@@ -192,7 +199,23 @@ impl QuorumTracker {
     pub fn sequence(&self) -> u64 {
         self.sequence
     }
+
+    #[must_use]
+    pub fn partition(&self) -> PartitionId {
+        self.partition
+    }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingWritesFull;
+
+impl std::fmt::Display for PendingWritesFull {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("too many pending writes")
+    }
+}
+
+impl std::error::Error for PendingWritesFull {}
 
 #[derive(Debug)]
 pub struct PendingWrites {
@@ -209,24 +232,25 @@ impl PendingWrites {
         }
     }
 
-    pub fn add(&mut self, tracker: QuorumTracker) -> bool {
-        if self.trackers.len() >= self.max_pending {
-            return false;
+    /// # Errors
+    /// Returns `PendingWritesFull` when `max_pending` trackers are already pending.
+    pub fn add(&mut self, tracker: QuorumTracker) -> Result<(), PendingWritesFull> {
+        if self.is_full() {
+            return Err(PendingWritesFull);
         }
         self.trackers.push(tracker);
-        true
+        Ok(())
     }
 
     pub fn record_ack(&mut self, ack: &ReplicationAck) {
-        for tracker in &mut self.trackers {
-            if tracker.sequence() == ack.sequence() {
-                tracker.record_ack(ack);
-                break;
-            }
+        if let Some(tracker) = self.trackers.iter_mut().find(|tracker| {
+            tracker.partition() == ack.partition() && tracker.sequence() == ack.sequence()
+        }) {
+            tracker.record_ack(ack);
         }
     }
 
-    pub fn drain_completed(&mut self) -> Vec<(u64, QuorumResult)> {
+    pub fn drain_completed(&mut self) -> Vec<(PartitionId, u64, QuorumResult)> {
         let mut completed = Vec::new();
         let mut i = 0;
         while i < self.trackers.len() {
@@ -234,7 +258,7 @@ impl PendingWrites {
                 let mut tracker = self.trackers.swap_remove(i);
                 let result = tracker.current_result();
                 tracker.signal_completion();
-                completed.push((tracker.sequence(), result));
+                completed.push((tracker.partition(), tracker.sequence(), result));
             } else {
                 i += 1;
             }
@@ -294,7 +318,7 @@ mod tests {
     #[test]
     fn quorum_reached_with_majority() {
         let replicas = nodes(&[2, 3, 4]);
-        let mut tracker = QuorumTracker::new(1, Epoch::new(1), &replicas, 2);
+        let mut tracker = QuorumTracker::new(PartitionId::ZERO, 1, Epoch::new(1), &replicas, 2);
 
         assert_eq!(tracker.current_result(), QuorumResult::Pending);
 
@@ -310,7 +334,7 @@ mod tests {
     #[test]
     fn quorum_fails_when_impossible() {
         let replicas = nodes(&[2, 3, 4]);
-        let mut tracker = QuorumTracker::new(1, Epoch::new(1), &replicas, 2);
+        let mut tracker = QuorumTracker::new(PartitionId::ZERO, 1, Epoch::new(1), &replicas, 2);
 
         tracker.record_timeout(NodeId::validated(2).unwrap());
         assert_eq!(tracker.current_result(), QuorumResult::Pending);
@@ -322,7 +346,7 @@ mod tests {
     #[test]
     fn stale_epoch_fails_immediately() {
         let replicas = nodes(&[2, 3]);
-        let mut tracker = QuorumTracker::new(1, Epoch::new(1), &replicas, 1);
+        let mut tracker = QuorumTracker::new(PartitionId::ZERO, 1, Epoch::new(1), &replicas, 1);
 
         tracker.record_ack(&stale_ack(0, 5, 2));
         assert_eq!(tracker.current_result(), QuorumResult::Failed);
@@ -333,7 +357,7 @@ mod tests {
     #[test]
     fn ignores_unexpected_nodes() {
         let replicas = nodes(&[2, 3]);
-        let mut tracker = QuorumTracker::new(1, Epoch::new(1), &replicas, 2);
+        let mut tracker = QuorumTracker::new(PartitionId::ZERO, 1, Epoch::new(1), &replicas, 2);
 
         tracker.record_ack(&ok_ack(0, 1, 1, 99));
         assert_eq!(tracker.ack_count(), 0);
@@ -342,7 +366,7 @@ mod tests {
     #[test]
     fn ignores_wrong_sequence() {
         let replicas = nodes(&[2]);
-        let mut tracker = QuorumTracker::new(5, Epoch::new(1), &replicas, 1);
+        let mut tracker = QuorumTracker::new(PartitionId::ZERO, 5, Epoch::new(1), &replicas, 1);
 
         tracker.record_ack(&ok_ack(0, 1, 3, 2));
         assert_eq!(tracker.ack_count(), 0);
@@ -356,9 +380,33 @@ mod tests {
         let replicas = nodes(&[2, 3]);
         let mut pending = PendingWrites::new(10);
 
-        pending.add(QuorumTracker::new(1, Epoch::new(1), &replicas, 1));
-        pending.add(QuorumTracker::new(2, Epoch::new(1), &replicas, 1));
-        pending.add(QuorumTracker::new(3, Epoch::new(1), &replicas, 1));
+        pending
+            .add(QuorumTracker::new(
+                PartitionId::ZERO,
+                1,
+                Epoch::new(1),
+                &replicas,
+                1,
+            ))
+            .unwrap();
+        pending
+            .add(QuorumTracker::new(
+                PartitionId::ZERO,
+                2,
+                Epoch::new(1),
+                &replicas,
+                1,
+            ))
+            .unwrap();
+        pending
+            .add(QuorumTracker::new(
+                PartitionId::ZERO,
+                3,
+                Epoch::new(1),
+                &replicas,
+                1,
+            ))
+            .unwrap();
 
         assert_eq!(pending.pending_count(), 3);
 
@@ -368,5 +416,154 @@ mod tests {
         let completed = pending.drain_completed();
         assert_eq!(completed.len(), 2);
         assert_eq!(pending.pending_count(), 1);
+    }
+
+    #[test]
+    fn pending_writes_refuse_a_tracker_past_max_pending() {
+        let replicas = nodes(&[2]);
+        let mut pending = PendingWrites::new(1);
+
+        let first = pending.add(QuorumTracker::new(
+            PartitionId::ZERO,
+            1,
+            Epoch::new(1),
+            &replicas,
+            1,
+        ));
+        let second = pending.add(QuorumTracker::new(
+            PartitionId::ZERO,
+            2,
+            Epoch::new(1),
+            &replicas,
+            1,
+        ));
+
+        assert_eq!(
+            (first, second, pending.len()),
+            (Ok(()), Err(PendingWritesFull), 1)
+        );
+    }
+
+    #[test]
+    fn an_ack_completes_only_the_tracker_of_its_partition() {
+        let replicas = nodes(&[2]);
+        let mut pending = PendingWrites::new(10);
+        let other = PartitionId::new(7).unwrap();
+        pending
+            .add(QuorumTracker::new(
+                PartitionId::ZERO,
+                1,
+                Epoch::new(1),
+                &replicas,
+                1,
+            ))
+            .unwrap();
+        pending
+            .add(QuorumTracker::new(other, 1, Epoch::new(1), &replicas, 1))
+            .unwrap();
+
+        pending.record_ack(&ok_ack(7, 1, 1, 2));
+
+        assert_eq!(
+            pending.drain_completed(),
+            vec![(other, 1, QuorumResult::Success)]
+        );
+        assert_eq!(pending.pending_count(), 1);
+    }
+
+    #[test]
+    fn a_sequence_gap_fails_no_write() {
+        let replicas = nodes(&[2]);
+        let mut pending = PendingWrites::new(10);
+        for sequence in [1, 2] {
+            pending
+                .add(QuorumTracker::new(
+                    PartitionId::ZERO,
+                    sequence,
+                    Epoch::new(1),
+                    &replicas,
+                    1,
+                ))
+                .unwrap();
+        }
+
+        pending.record_ack(&ReplicationAck::sequence_gap(
+            PartitionId::ZERO,
+            Epoch::new(1),
+            1,
+            NodeId::validated(2).unwrap(),
+        ));
+        let after_gap = pending.drain_completed();
+        pending.record_ack(&ok_ack(0, 1, 1, 2));
+
+        assert_eq!(
+            (after_gap, pending.drain_completed()),
+            (vec![], vec![(PartitionId::ZERO, 1, QuorumResult::Success)])
+        );
+    }
+
+    #[test]
+    fn a_refusal_does_not_fail_a_write_the_node_already_acked() {
+        let mut pending = PendingWrites::new(10);
+        pending
+            .add(QuorumTracker::new(
+                PartitionId::ZERO,
+                1,
+                Epoch::new(1),
+                &nodes(&[2, 3]),
+                2,
+            ))
+            .unwrap();
+        pending.record_ack(&ok_ack(0, 1, 1, 2));
+
+        pending.record_ack(&ReplicationAck::not_replica(
+            PartitionId::ZERO,
+            NodeId::validated(2).unwrap(),
+        ));
+        let after_refusal = pending.drain_completed();
+        pending.record_ack(&ok_ack(0, 1, 1, 3));
+
+        assert_eq!(
+            (after_refusal, pending.drain_completed()),
+            (vec![], vec![(PartitionId::ZERO, 1, QuorumResult::Success)])
+        );
+    }
+
+    #[test]
+    fn a_timeout_after_an_ack_counts_the_node_once() {
+        let mut tracker =
+            QuorumTracker::new(PartitionId::ZERO, 1, Epoch::new(1), &nodes(&[2, 3]), 2);
+        tracker.record_ack(&ok_ack(0, 1, 1, 2));
+        tracker.record_timeout(NodeId::validated(2).unwrap());
+        tracker.record_timeout(NodeId::validated(3).unwrap());
+
+        assert_eq!(
+            (
+                tracker.current_result(),
+                tracker.ack_count(),
+                tracker.failed_count()
+            ),
+            (QuorumResult::Failed, 1, 1)
+        );
+    }
+
+    #[test]
+    fn an_ok_after_a_refusal_counts_the_node_once() {
+        let mut tracker =
+            QuorumTracker::new(PartitionId::ZERO, 1, Epoch::new(1), &nodes(&[2, 3]), 2);
+        tracker.record_ack(&ReplicationAck::not_replica(
+            PartitionId::ZERO,
+            NodeId::validated(2).unwrap(),
+        ));
+        tracker.record_ack(&ok_ack(0, 1, 1, 2));
+
+        assert_eq!(
+            (
+                tracker.ack_count(),
+                tracker.failed_count(),
+                tracker.pending_count()
+            ),
+            (1, 0, 1)
+        );
     }
 }
