@@ -246,3 +246,62 @@ async fn an_ack_for_one_partition_does_not_complete_another_partitions_quorum() 
         (None, Some(QuorumResult::Success))
     );
 }
+
+#[tokio::test]
+async fn a_not_replica_ack_fails_the_quorum_session() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_with_replica(&backend);
+    let partition = session_partition("a1");
+    let (_, mut done) = ctrl.create_session_quorum("a1").await.unwrap();
+
+    ctrl.handle_ack(crate::cluster::protocol::ReplicationAck::not_replica(
+        partition,
+        node(2),
+    ))
+    .await;
+
+    assert_eq!(
+        (done.try_recv().ok(), ctrl.pending_write_count()),
+        (Some(QuorumResult::Failed), 0)
+    );
+}
+
+#[tokio::test]
+async fn a_stale_epoch_ack_fails_the_quorum_session() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_with_replica(&backend);
+    let partition = session_partition("a1");
+    let (_, mut done) = ctrl.create_session_quorum("a1").await.unwrap();
+
+    ctrl.handle_ack(crate::cluster::protocol::ReplicationAck::stale_epoch(
+        partition,
+        Epoch::new(99),
+        node(2),
+    ))
+    .await;
+
+    assert_eq!(
+        (done.try_recv().ok(), ctrl.pending_write_count()),
+        (Some(QuorumResult::Failed), 0)
+    );
+}
+
+#[tokio::test]
+async fn a_replicated_write_without_replicas_holds_no_pending_slot() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = controller_where(Some(&backend), |_| node(1), &[]);
+    let partition = session_partition("filler");
+    let mut refused = None;
+    for i in 0..1001 {
+        let write = ReplicationWrite {
+            partition,
+            ..session_write(&ctrl, &format!("f-{i}"))
+        };
+        if let Err(error) = ctrl.replicate_write(write, &[], 0).await {
+            refused = Some((i, error));
+            break;
+        }
+    }
+
+    assert_eq!((refused, ctrl.pending_write_count()), (None, 0));
+}

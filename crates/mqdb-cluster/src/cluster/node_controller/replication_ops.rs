@@ -362,15 +362,17 @@ impl<T: ClusterTransport> NodeController<T> {
         self.write_log
             .append(partition, sequence, write_msg.clone());
 
-        self.pending
-            .add(QuorumTracker::new(
-                partition,
-                sequence,
-                epoch,
-                replicas,
-                required_acks,
-            ))
-            .map_err(|_| ReplicationError::TooManyPending)?;
+        if !replicas.is_empty() {
+            self.pending
+                .add(QuorumTracker::new(
+                    partition,
+                    sequence,
+                    epoch,
+                    replicas,
+                    required_acks,
+                ))
+                .map_err(|_| ReplicationError::TooManyPending)?;
+        }
 
         for &replica in replicas {
             let _ = self

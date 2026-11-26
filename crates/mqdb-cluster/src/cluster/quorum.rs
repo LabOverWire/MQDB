@@ -242,6 +242,18 @@ impl PendingWrites {
     }
 
     pub fn record_ack(&mut self, ack: &ReplicationAck) {
+        if matches!(
+            ack.status(),
+            Some(AckStatus::StaleEpoch | AckStatus::NotReplica)
+        ) {
+            self.trackers
+                .iter_mut()
+                .filter(|tracker| tracker.partition() == ack.partition())
+                .for_each(|tracker| {
+                    tracker.record_ack(ack);
+                });
+            return;
+        }
         if let Some(tracker) = self.trackers.iter_mut().find(|tracker| {
             tracker.partition() == ack.partition() && tracker.sequence() == ack.sequence()
         }) {
