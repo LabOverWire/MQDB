@@ -234,7 +234,7 @@ impl<T: ClusterTransport> NodeController<T> {
                 })
                 .collect();
 
-            Self::sort_scatter_results(&mut filtered, &completed.sorts);
+            Self::sort_list_items(&mut filtered, &completed.sorts);
             if let Some(ref pagination) = completed.pagination {
                 filtered = filtered
                     .into_iter()
@@ -264,7 +264,34 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    pub(super) fn apply_list_projection(
+    pub(super) async fn fail_scatter_list_request(&mut self, request_id: u64, refusal: Vec<u8>) {
+        let Some(pending) = self.pending_scatter_requests.remove(&request_id) else {
+            tracing::debug!(request_id, "scatter refusal for unknown request");
+            return;
+        };
+        tracing::warn!(
+            request_id,
+            entity = %pending.entity,
+            "a node refused its part of a scatter LIST, answering with its refusal"
+        );
+        #[cfg(feature = "http-api")]
+        if let Some(cont) = pending.continuation {
+            self.transport
+                .queue_local_response(cont.response_topic, refusal, 0, cont.correlation_data)
+                .await;
+            return;
+        }
+        self.transport
+            .queue_local_response(
+                pending.client_response_topic,
+                refusal,
+                0,
+                pending.correlation_data,
+            )
+            .await;
+    }
+
+    pub(crate) fn apply_list_projection(
         items: Vec<serde_json::Value>,
         projection: Option<&[String]>,
     ) -> Vec<serde_json::Value> {
@@ -287,7 +314,17 @@ impl<T: ClusterTransport> NodeController<T> {
             .collect()
     }
 
-    fn sort_scatter_results(results: &mut [serde_json::Value], sorts: &[mqdb_core::SortOrder]) {
+    pub(crate) fn with_record_id(mut data: serde_json::Value, id: &str) -> serde_json::Value {
+        if let serde_json::Value::Object(fields) = &mut data {
+            fields.insert("id".to_string(), serde_json::Value::String(id.to_string()));
+        }
+        data
+    }
+
+    pub(crate) fn sort_list_items(
+        results: &mut [serde_json::Value],
+        sorts: &[mqdb_core::SortOrder],
+    ) {
         if sorts.is_empty() {
             return;
         }

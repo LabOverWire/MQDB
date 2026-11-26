@@ -3,6 +3,8 @@
 
 use super::{AdminRequest, ClusteredAgent};
 use crate::cluster::{NUM_PARTITIONS, NodeId, PartitionId};
+use mqdb_agent::response_limit::{ReplyKind, publish_reply};
+use mqdb_core::protocol::parse_admin_topic;
 use mqdb_core::transport::{ErrorCode, Response};
 use mqtt5::broker::auth::ComprehensiveAuthProvider;
 use mqtt5::broker::{AclRule, Permission};
@@ -87,12 +89,8 @@ impl ClusteredAgent {
             properties: props,
             ..Default::default()
         };
-        if let Err(e) = client
-            .publish_with_options(&response_topic, payload, options)
-            .await
-        {
-            warn!(error = %e, "failed to send admin response");
-        }
+        let kind = parse_admin_topic(&req.topic).map_or(ReplyKind::Read, |op| ReplyKind::from(&op));
+        publish_reply(client, &response_topic, payload, options, kind).await;
     }
 
     async fn handle_constraint_request(&self, rest: &str, payload: &[u8]) -> Response {

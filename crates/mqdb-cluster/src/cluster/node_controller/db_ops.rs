@@ -13,7 +13,9 @@ use crate::cluster::replication::{ReplicaRole, ReplicaState};
 use crate::cluster::store_manager::outbox::{
     CascadeOutboxPayload, CascadePendingEntry, CascadeRemoteOp,
 };
+use crate::cluster::transport::TransportError;
 use crate::cluster::{PublishRouter, RoutedPublish};
+use mqdb_agent::response_limit::{fit_write_reply, too_large_response};
 use mqdb_core::events::ChangeEvent;
 use mqdb_core::types::{AccessLevel, MAX_LIST_RESULTS, OwnershipDecision, owner_change_refusal};
 use serde_json::Value;
@@ -653,16 +655,37 @@ impl<T: ClusterTransport> NodeController<T> {
         }
 
         if !request.response_topic.is_empty() {
-            let response = JsonDbResponse::new(
-                request.request_id,
-                response_payload,
-                request.response_topic.clone(),
-                request.correlation_data.clone(),
-            );
-            let _ = self
-                .transport
-                .send(from, ClusterMessage::JsonDbResponse(response))
-                .await;
+            let reply = |payload| {
+                ClusterMessage::JsonDbResponse(JsonDbResponse::new(
+                    request.request_id,
+                    payload,
+                    request.response_topic.clone(),
+                    request.correlation_data.clone(),
+                ))
+            };
+            let response_payload = match request.op {
+                JsonDbOp::Create
+                | JsonDbOp::Update
+                | JsonDbOp::Delete
+                | JsonDbOp::Share
+                | JsonDbOp::Unshare => fit_write_reply(
+                    response_payload,
+                    &request.response_topic,
+                    request.correlation_data.as_deref(),
+                ),
+                JsonDbOp::Read | JsonDbOp::List | JsonDbOp::Shares | JsonDbOp::Shared => {
+                    response_payload
+                }
+            };
+            if let Err(TransportError::MessageTooLarge { size, max }) =
+                self.transport.send(from, reply(response_payload)).await
+            {
+                tracing::warn!(to = from.get(), size, max, "reply too large for one frame");
+                let _ = self
+                    .transport
+                    .send(from, reply(too_large_response(size, max)))
+                    .await;
+            }
         }
 
         None
@@ -683,12 +706,17 @@ impl<T: ClusterTransport> NodeController<T> {
             && let Ok(request_id) = request_id_str.parse::<u64>()
         {
             tracing::debug!(request_id, "matched scatter response");
-            let items: Vec<serde_json::Value> =
+            let items: Option<Vec<serde_json::Value>> =
                 serde_json::from_slice::<serde_json::Value>(&response.payload)
                     .ok()
-                    .and_then(|parsed| parsed.get("data").and_then(|d| d.as_array()).cloned())
-                    .unwrap_or_default();
-            self.handle_scatter_list_response(request_id, items).await;
+                    .and_then(|parsed| parsed.get("data").and_then(|d| d.as_array()).cloned());
+            match items {
+                Some(items) => self.handle_scatter_list_response(request_id, items).await,
+                None => {
+                    self.fail_scatter_list_request(request_id, response.payload.clone())
+                        .await;
+                }
+            }
             return;
         }
 
@@ -2061,10 +2089,30 @@ impl<T: ClusterTransport> NodeController<T> {
         if response.response_topic.is_empty() {
             return;
         }
-        let _ = self
-            .transport
-            .send(from, ClusterMessage::JsonDbResponse(response))
-            .await;
+        let JsonDbResponse {
+            request_id,
+            payload,
+            response_topic,
+            correlation_data,
+        } = response;
+        let payload = fit_write_reply(payload, &response_topic, correlation_data.as_deref());
+        let reply = |payload| {
+            ClusterMessage::JsonDbResponse(JsonDbResponse::new(
+                request_id,
+                payload,
+                response_topic.clone(),
+                correlation_data.clone(),
+            ))
+        };
+        if let Err(TransportError::MessageTooLarge { size, max }) =
+            self.transport.send(from, reply(payload)).await
+        {
+            tracing::warn!(to = from.get(), size, max, "reply too large for one frame");
+            let _ = self
+                .transport
+                .send(from, reply(too_large_response(size, max)))
+                .await;
+        }
     }
 
     pub(crate) async fn complete_pending_fk_work(
@@ -2369,7 +2417,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let mut items: Vec<serde_json::Value> = entities
             .iter()
             .filter_map(|e| {
-                let data: serde_json::Value = serde_json::from_slice(&e.data).ok()?;
+                let data = Self::with_record_id(serde_json::from_slice(&e.data).ok()?, e.id_str());
                 if !Self::matches_filters(&data, &filters) {
                     return None;
                 }
@@ -2379,8 +2427,10 @@ impl<T: ClusterTransport> NodeController<T> {
                             .get("resource_id")
                             .and_then(serde_json::Value::as_str)?;
                         let resource = self.db_get(resource_entity, resource_id)?;
-                        let resource_data: serde_json::Value =
-                            serde_json::from_slice(&resource.data).ok()?;
+                        let resource_data = Self::with_record_id(
+                            serde_json::from_slice(&resource.data).ok()?,
+                            resource_id,
+                        );
                         Some(serde_json::json!({
                             "id": resource_id,
                             "data": resource_data

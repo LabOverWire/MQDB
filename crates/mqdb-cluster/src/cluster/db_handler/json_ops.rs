@@ -1411,7 +1411,7 @@ impl DbRequestHandler {
                     } else {
                         filters.clone()
                     },
-                    sorts,
+                    sorts.clone(),
                     projection.clone(),
                     pagination.clone(),
                     sender,
@@ -1442,6 +1442,7 @@ impl DbRequestHandler {
                         skip,
                     );
                 }
+                let data = NodeController::<T>::with_record_id(data, e.id_str());
                 if !filters.is_empty() && !NodeController::<T>::matches_filters(&data, &filters) {
                     return None;
                 }
@@ -1449,15 +1450,13 @@ impl DbRequestHandler {
                     Some(resource_entity) => {
                         let resource_id = data.get("resource_id").and_then(Value::as_str)?;
                         let resource = controller.db_get(resource_entity, resource_id)?;
-                        let resource_data: Value = serde_json::from_slice(&resource.data).ok()?;
+                        let resource_data = NodeController::<T>::with_record_id(
+                            serde_json::from_slice(&resource.data).ok()?,
+                            resource_id,
+                        );
                         (resource_id.to_string(), resource_data)
                     }
                     None => (e.id_str().to_string(), data),
-                };
-                let item_data = if let Some(ref fields) = projection {
-                    mqdb_core::types::project_fields(item_data, fields)
-                } else {
-                    item_data
                 };
                 Some(json!({
                     "id": item_id,
@@ -1465,6 +1464,7 @@ impl DbRequestHandler {
                 }))
             })
             .collect();
+        NodeController::<T>::sort_list_items(&mut items, &sorts);
         if let Some(ref pagination) = pagination {
             items = items
                 .into_iter()
@@ -1473,7 +1473,8 @@ impl DbRequestHandler {
                 .collect();
         }
         items.truncate(MAX_LIST_RESULTS);
-        let flattened = helpers::flatten_list_items(items);
+        let projected = NodeController::<T>::apply_list_projection(items, projection.as_deref());
+        let flattened = helpers::flatten_list_items(projected);
 
         let result = json!({
             "status": "ok",

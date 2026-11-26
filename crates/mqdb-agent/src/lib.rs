@@ -13,6 +13,7 @@ pub mod dispatcher;
 pub mod outbox_processor;
 pub mod presence;
 pub mod rate_limiter;
+pub mod response_limit;
 pub mod runtime;
 pub mod session;
 pub mod sparkplug;
