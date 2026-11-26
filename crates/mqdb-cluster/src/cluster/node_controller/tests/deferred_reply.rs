@@ -675,6 +675,46 @@ async fn a_vault_create_deferred_by_a_unique_check_reaches_the_client_decrypted(
 }
 
 #[tokio::test]
+async fn back_to_back_vault_forwards_each_keep_their_decrypt_entry() {
+    const FORWARDS: usize = 2000;
+    let partition = data_partition("posts", "p5");
+    let mut forwarder = vault_forwarder(partition);
+    for _ in 0..FORWARDS {
+        assert!(
+            forwarder
+                .forward_json_db_request(
+                    partition,
+                    ForwardedJsonRequest {
+                        op: JsonDbOp::Read,
+                        entity: "posts",
+                        id: Some("p5"),
+                        payload: &[],
+                        response_topic: RESPONSE_TOPIC,
+                        correlation_data: None,
+                        origin: EventOrigin::new(Some(VAULT_USER), None),
+                        requested_owner: None,
+                    },
+                )
+                .await
+        );
+    }
+    let ids: std::collections::HashSet<u64> = forwarder
+        .transport()
+        .take_sent()
+        .into_iter()
+        .filter_map(|(_, message)| match message {
+            ClusterMessage::JsonDbRequest { request, .. } => Some(request.request_id),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        (ids.len(), forwarder.pending_vault_decrypts.len()),
+        (FORWARDS, FORWARDS)
+    );
+}
+
+#[tokio::test]
 async fn an_early_refusal_without_a_response_topic_sends_no_reply() {
     let mut ctrl = primary().await;
     let request = without_response_topic(forwarded(

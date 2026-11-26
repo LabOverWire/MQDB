@@ -1567,7 +1567,7 @@ impl<T: ClusterTransport> NodeController<T> {
             );
             return None;
         }
-        let request_id = self.pending_constraints.allocate_cascade_id();
+        let request_id = self.pending_constraints.allocate_request_id();
         let (tx, rx) = oneshot::channel();
         self.pending_constraints.insert_cascade_ack(request_id, tx);
 
@@ -1621,7 +1621,7 @@ impl<T: ClusterTransport> NodeController<T> {
             );
             return None;
         }
-        let request_id = self.pending_constraints.allocate_cascade_id();
+        let request_id = self.pending_constraints.allocate_request_id();
         let (tx, rx) = oneshot::channel();
         self.pending_constraints.insert_cascade_ack(request_id, tx);
 
@@ -2452,9 +2452,7 @@ impl<T: ClusterTransport> NodeController<T> {
             return false;
         }
 
-        let request_id = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+        let request_id = self.pending_constraints.allocate_request_id();
 
         let request = JsonDbRequest {
             request_id,
@@ -2501,7 +2499,7 @@ impl<T: ClusterTransport> NodeController<T> {
                         entity: entity.to_string(),
                         sender: sender_id.to_string(),
                         op: op_str.to_string(),
-                        created_at_ms: request_id / 1_000_000,
+                        created_at_ms: Self::current_time_ms(),
                     },
                 );
             }
