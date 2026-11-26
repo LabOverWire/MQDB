@@ -282,6 +282,17 @@ impl FkDeleteContinuation {
         }
     }
 
+    pub fn expected_version(&self) -> Option<u64> {
+        match self {
+            Self::DeleteFromDbHandler {
+                expected_version, ..
+            }
+            | Self::DeleteFromNodeController {
+                expected_version, ..
+            } => *expected_version,
+        }
+    }
+
     pub fn sender_ref(&self) -> Option<&str> {
         match self {
             Self::DeleteFromDbHandler { sender, .. }

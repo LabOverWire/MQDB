@@ -1694,8 +1694,12 @@ impl DbRequestHandler {
         side_effects: Vec<crate::cluster::node_controller::fk::FkReverseLookupResult>,
         continuation: FkDeleteContinuation,
     ) -> Option<super::super::db_handler::DbPublishResponse> {
-        if let Some(msg) = restrict_error {
-            let payload = Self::json_error(409, &msg);
+        let (entity, id) = continuation.entity_id();
+        let refusal = controller
+            .delete_precondition(entity, id, continuation.expected_version())
+            .err()
+            .or_else(|| restrict_error.map(|msg| Self::json_error(409, &msg)));
+        if let Some(payload) = refusal {
             return match continuation {
                 FkDeleteContinuation::DeleteFromDbHandler {
                     response_topic,
@@ -1714,22 +1718,18 @@ impl DbRequestHandler {
             FkDeleteContinuation::DeleteFromDbHandler {
                 entity,
                 id,
-                expected_version,
                 sender,
                 client_id,
                 response_topic,
                 correlation_data,
+                ..
             } => {
-                let plan = match controller
-                    .delete_precondition(&entity, &id, expected_version)
-                    .and_then(|()| {
-                        controller.plan_fk_delete(
-                            &entity,
-                            &id,
-                            &side_effects,
-                            EventOrigin::new(sender.as_deref(), client_id.as_deref()),
-                        )
-                    }) {
+                let plan = match controller.plan_fk_delete(
+                    &entity,
+                    &id,
+                    &side_effects,
+                    EventOrigin::new(sender.as_deref(), client_id.as_deref()),
+                ) {
                     Ok(plan) => plan,
                     Err(payload) => {
                         return Some(super::DbPublishResponse {

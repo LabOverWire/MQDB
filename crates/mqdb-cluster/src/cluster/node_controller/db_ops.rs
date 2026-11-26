@@ -2276,8 +2276,12 @@ impl<T: ClusterTransport> NodeController<T> {
         side_effects: Vec<super::fk::FkReverseLookupResult>,
         continuation: FkDeleteContinuation,
     ) {
-        if let Some(msg) = restrict_error {
-            let payload = Self::json_error(409, &msg);
+        let (entity, id) = continuation.entity_id();
+        let refusal = self
+            .delete_precondition(entity, id, continuation.expected_version())
+            .err()
+            .or_else(|| restrict_error.map(|msg| Self::json_error(409, &msg)));
+        if let Some(payload) = refusal {
             let FkDeleteContinuation::DeleteFromNodeController {
                 from,
                 response_request_id,
@@ -2306,21 +2310,18 @@ impl<T: ClusterTransport> NodeController<T> {
             response_request_id,
             entity,
             id,
-            expected_version,
             sender,
             client_id,
             response_topic,
             correlation_data,
+            ..
         } = continuation
         else {
             return;
         };
         let origin = EventOrigin::new(sender.as_deref(), client_id.as_deref());
 
-        let plan = match self
-            .delete_precondition(&entity, &id, expected_version)
-            .and_then(|()| self.plan_fk_delete(&entity, &id, &side_effects, origin))
-        {
+        let plan = match self.plan_fk_delete(&entity, &id, &side_effects, origin) {
             Ok(plan) => plan,
             Err(payload) => {
                 self.send_json_db_reply(
