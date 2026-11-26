@@ -3254,6 +3254,7 @@ mod pending_update;
 mod primary_role_wait;
 mod promoted_transfer;
 mod remote_fk_unique;
+mod replicate_write_store_failure;
 mod reply_correlation;
 mod snapshot;
 mod snapshot_replace;
