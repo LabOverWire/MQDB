@@ -4749,3 +4749,37 @@ async fn local_list_filters_by_id() {
     .await;
     assert_eq!(listed_ids(&body), ["b"], "{body}");
 }
+
+#[tokio::test]
+async fn list_filters_by_the_record_key_after_an_update_writes_an_id_field() {
+    let handler = DbRequestHandler::new(NodeId::validated(1).unwrap());
+    let mut ctrl = setup_controller_all_partitions();
+    let ctx = MqttRequestContext {
+        response_topic: Some("resp/t"),
+        correlation_data: None,
+        sender: None,
+        client_id: None,
+    };
+    let mut last = serde_json::Value::Null;
+    for (topic, payload) in [
+        ("$DB/rows/create", serde_json::json!({"id": "a", "n": 1})),
+        ("$DB/rows/a/update", serde_json::json!({"id": "zzz"})),
+        (
+            "$DB/rows/list",
+            serde_json::json!({"filters": [{"field": "id", "op": "eq", "value": "a"}]}),
+        ),
+    ] {
+        if let super::DbPublishResult::Response(response) = handler
+            .handle_publish(
+                &mut ctrl,
+                topic,
+                &serde_json::to_vec(&payload).unwrap(),
+                &ctx,
+            )
+            .await
+        {
+            last = parse_json_response(&response.payload);
+        }
+    }
+    assert_eq!(listed_ids(&last), ["a"], "{last}");
+}

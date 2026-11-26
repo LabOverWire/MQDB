@@ -316,9 +316,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
     pub(crate) fn with_record_id(mut data: serde_json::Value, id: &str) -> serde_json::Value {
         if let serde_json::Value::Object(fields) = &mut data {
-            fields
-                .entry("id")
-                .or_insert_with(|| serde_json::Value::String(id.to_string()));
+            fields.insert("id".to_string(), serde_json::Value::String(id.to_string()));
         }
         data
     }
