@@ -12,50 +12,43 @@ use super::super::transport::{ClusterMessage, ClusterTransport};
 use super::super::{Epoch, NodeId, PartitionId};
 use super::{NodeController, RefusedWrite, ReplicationError};
 
+struct StoredSession {
+    session: super::SessionData,
+    write: ReplicationWrite,
+    replicas: Vec<NodeId>,
+}
+
 impl<T: ClusterTransport> NodeController<T> {
     /// # Errors
-    /// Returns an error if this node is not the primary for the session partition or if replication fails.
+    /// Returns `NotPrimary` if this node is not the primary for the session partition.
+    /// Returns `TooManyPending` if the pending writes limit is reached.
+    /// Returns `StoreFailed` if this node cannot store the session.
+    /// Returns `QuorumFailed` if a session already exists for this client ID.
     pub async fn create_session_replicated(
         &mut self,
         client_id: &str,
     ) -> Result<super::SessionData, ReplicationError> {
-        let partition = session_partition(client_id);
+        let stored = self.store_new_session(client_id)?;
 
-        let state = self
-            .replicas
-            .get(&partition.get())
-            .ok_or(ReplicationError::NotPrimary)?;
-
-        if state.role() != ReplicaRole::Primary {
-            return Err(ReplicationError::NotPrimary);
+        if !stored.replicas.is_empty() {
+            let required_acks = stored.replicas.len();
+            self.pending.add(QuorumTracker::new(
+                stored.write.sequence,
+                stored.write.epoch,
+                &stored.replicas,
+                required_acks,
+            ));
+            self.send_to_replicas(&stored.write, &stored.replicas).await;
         }
 
-        let (session, write) = self
-            .stores
-            .create_session_replicated(client_id)
-            .map_err(|_| ReplicationError::QuorumFailed)?;
-
-        let replicas: Vec<NodeId> = self.partition_map.replicas(partition).to_vec();
-        let required_acks = replicas.len();
-
-        if !replicas.is_empty()
-            && let Err(error) = self.replicate_write(write, &replicas, required_acks).await
-        {
-            let removed = self.stores.sessions.remove(client_id);
-            tracing::warn!(
-                client_id,
-                removed = removed.is_some(),
-                %error,
-                "session not created"
-            );
-            return Err(error);
-        }
-
-        Ok(session)
+        Ok(stored.session)
     }
 
     /// # Errors
-    /// Returns an error if this node is not the primary for the session partition or if there are too many pending writes.
+    /// Returns `NotPrimary` if this node is not the primary for the session partition.
+    /// Returns `TooManyPending` if the pending writes limit is reached.
+    /// Returns `StoreFailed` if this node cannot store the session.
+    /// Returns `QuorumFailed` if a session already exists for this client ID.
     pub async fn create_session_quorum(
         &mut self,
         client_id: &str,
@@ -66,35 +59,49 @@ impl<T: ClusterTransport> NodeController<T> {
         ),
         ReplicationError,
     > {
+        let stored = self.store_new_session(client_id)?;
+
+        if stored.replicas.is_empty() {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let _ = tx.send(QuorumResult::Success);
+            return Ok((stored.session, rx));
+        }
+
+        let required_acks = stored.replicas.len();
+        let (tracker, rx) = QuorumTracker::with_completion(
+            stored.write.sequence,
+            stored.write.epoch,
+            &stored.replicas,
+            required_acks,
+        );
+        self.pending.add(tracker);
+        self.send_to_replicas(&stored.write, &stored.replicas).await;
+
+        Ok((stored.session, rx))
+    }
+
+    fn store_new_session(&mut self, client_id: &str) -> Result<StoredSession, ReplicationError> {
         let partition = session_partition(client_id);
 
         let state = self
             .replicas
-            .get_mut(&partition.get())
+            .get(&partition.get())
+            .filter(|state| state.role() == ReplicaRole::Primary)
             .ok_or(ReplicationError::NotPrimary)?;
-
-        if state.role() != ReplicaRole::Primary {
-            return Err(ReplicationError::NotPrimary);
-        }
-
-        let sequence = state.advance_sequence();
+        let sequence = state.sequence() + 1;
         let epoch = state.epoch();
+
+        let replicas: Vec<NodeId> = self.partition_map.replicas(partition).to_vec();
+        if !replicas.is_empty() && self.pending.is_full() {
+            return Err(ReplicationError::TooManyPending);
+        }
 
         let (session, write_data) = self
             .stores
             .create_session_replicated(client_id)
             .map_err(|_| ReplicationError::QuorumFailed)?;
 
-        let replicas: Vec<NodeId> = self.partition_map.replicas(partition).to_vec();
-        let required_acks = replicas.len();
-
-        if replicas.is_empty() {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            let _ = tx.send(QuorumResult::Success);
-            return Ok((session, rx));
-        }
-
-        let write_msg = ReplicationWrite::new(
+        let write = ReplicationWrite::new(
             partition,
             write_data.operation,
             epoch,
@@ -104,24 +111,36 @@ impl<T: ClusterTransport> NodeController<T> {
             write_data.data,
         );
 
-        let (tracker, rx) =
-            QuorumTracker::with_completion(sequence, epoch, &replicas, required_acks);
-
-        if !self.pending.add(tracker) {
-            return Err(ReplicationError::TooManyPending);
+        if let Err(error) = self.apply_primary_write(&write, None, &[]) {
+            let removed = self.stores.sessions.remove(client_id);
+            tracing::warn!(
+                client_id,
+                removed = removed.is_some(),
+                %error,
+                "session not created"
+            );
+            return Err(error);
         }
 
-        self.write_log
-            .append(partition, sequence, write_msg.clone());
+        if let Some(state) = self.replicas.get_mut(&partition.get()) {
+            state.advance_sequence();
+        }
+        self.write_log.append(partition, sequence, write.clone());
 
-        for &replica in &replicas {
+        Ok(StoredSession {
+            session,
+            write,
+            replicas,
+        })
+    }
+
+    async fn send_to_replicas(&self, write: &ReplicationWrite, replicas: &[NodeId]) {
+        for &replica in replicas {
             let _ = self
                 .transport
-                .send(replica, ClusterMessage::Write(write_msg.clone()))
+                .send(replica, ClusterMessage::Write(write.clone()))
                 .await;
         }
-
-        Ok((session, rx))
     }
 
     pub(super) fn apply_primary_write(

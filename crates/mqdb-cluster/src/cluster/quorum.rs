@@ -209,12 +209,8 @@ impl PendingWrites {
         }
     }
 
-    pub fn add(&mut self, tracker: QuorumTracker) -> bool {
-        if self.trackers.len() >= self.max_pending {
-            return false;
-        }
+    pub fn add(&mut self, tracker: QuorumTracker) {
         self.trackers.push(tracker);
-        true
     }
 
     pub fn record_ack(&mut self, ack: &ReplicationAck) {

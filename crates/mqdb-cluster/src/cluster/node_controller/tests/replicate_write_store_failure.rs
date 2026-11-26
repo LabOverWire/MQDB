@@ -121,3 +121,99 @@ async fn a_session_the_primary_cannot_store_is_refused_and_not_kept() {
     assert_eq!(session_writes_sent(&ctrl), vec!["c1".to_string()]);
     assert_eq!(ctrl.write_log().entry_count(partition), 1);
 }
+
+#[tokio::test]
+async fn a_session_without_replicas_the_primary_cannot_store_is_refused_and_not_kept() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = controller_where(Some(&backend), |_| node(1), &[]);
+    let partition = session_partition("c1");
+    let sequence_before = ctrl.sequence(partition);
+    backend.fail_writes(true);
+
+    let result = ctrl.create_session_replicated("c1").await;
+
+    assert_eq!(result.err(), Some(ReplicationError::StoreFailed));
+    assert!(ctrl.stores().sessions.get("c1").is_none());
+    assert_eq!(ctrl.write_log().entry_count(partition), 0);
+    assert_eq!(ctrl.sequence(partition), sequence_before);
+}
+
+#[tokio::test]
+async fn a_session_without_replicas_is_persisted_on_the_primary() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = controller_where(Some(&backend), |_| node(1), &[]);
+    assert_eq!(backend.keys_containing("zzqq").unwrap(), 0);
+
+    ctrl.create_session_replicated("zzqq").await.unwrap();
+
+    assert_eq!(backend.keys_containing("zzqq").unwrap(), 1);
+}
+
+#[tokio::test]
+async fn a_replicated_session_is_persisted_on_the_primary() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_with_replica(&backend);
+    assert_eq!(backend.keys_containing("zzqq").unwrap(), 0);
+
+    ctrl.create_session_replicated("zzqq").await.unwrap();
+
+    assert_eq!(backend.keys_containing("zzqq").unwrap(), 1);
+}
+
+#[tokio::test]
+async fn a_quorum_session_the_primary_cannot_store_is_refused_and_not_sent() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_with_replica(&backend);
+    let partition = session_partition("c1");
+    let sequence_before = ctrl.sequence(partition);
+    backend.fail_writes(true);
+
+    let result = ctrl.create_session_quorum("c1").await;
+
+    assert_eq!(result.err(), Some(ReplicationError::StoreFailed));
+    assert_eq!(session_writes_sent(&ctrl), Vec::<String>::new());
+    assert_eq!(ctrl.write_log().entry_count(partition), 0);
+    assert_eq!(ctrl.sequence(partition), sequence_before);
+    assert_eq!(ctrl.pending_write_count(), 0);
+    assert!(ctrl.stores().sessions.get("c1").is_none());
+}
+
+#[tokio::test]
+async fn a_quorum_session_is_persisted_on_the_primary_and_sent() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_with_replica(&backend);
+    assert_eq!(backend.keys_containing("zzqq").unwrap(), 0);
+
+    let created = ctrl.create_session_quorum("zzqq").await;
+
+    assert!(created.is_ok());
+    assert_eq!(session_writes_sent(&ctrl), vec!["zzqq".to_string()]);
+    assert_eq!(backend.keys_containing("zzqq").unwrap(), 1);
+}
+
+#[tokio::test]
+async fn a_quorum_session_refused_for_pending_capacity_leaves_no_trace() {
+    let backend = FaultyBackend::shared();
+    let mut ctrl = primary_with_replica(&backend);
+    let partition = session_partition("filler");
+    let mut filled = 0;
+    while ctrl.pending_write_count() < 1000 {
+        let write = session_write(&ctrl, &format!("filler-{filled}"));
+        let write = ReplicationWrite { partition, ..write };
+        ctrl.replicate_write(write, &[node(2)], 1).await.unwrap();
+        filled += 1;
+    }
+    let zzqq_partition = session_partition("zzqq");
+    let sequence_before = ctrl.sequence(zzqq_partition);
+    let logged_before = ctrl.write_log().entry_count(zzqq_partition);
+    let sent_before = session_writes_sent(&ctrl).len();
+
+    let result = ctrl.create_session_quorum("zzqq").await;
+
+    assert_eq!(result.err(), Some(ReplicationError::TooManyPending));
+    assert_eq!(ctrl.sequence(zzqq_partition), sequence_before);
+    assert_eq!(ctrl.write_log().entry_count(zzqq_partition), logged_before);
+    assert_eq!(session_writes_sent(&ctrl).len(), sent_before);
+    assert!(ctrl.stores().sessions.get("zzqq").is_none());
+    assert_eq!(backend.keys_containing("zzqq").unwrap(), 0);
+}

@@ -362,10 +362,8 @@ impl<T: ClusterTransport> NodeController<T> {
         self.write_log
             .append(partition, sequence, write_msg.clone());
 
-        let tracker = QuorumTracker::new(sequence, epoch, replicas, required_acks);
-        if !self.pending.add(tracker) {
-            return Err(ReplicationError::TooManyPending);
-        }
+        self.pending
+            .add(QuorumTracker::new(sequence, epoch, replicas, required_acks));
 
         for &replica in replicas {
             let _ = self
