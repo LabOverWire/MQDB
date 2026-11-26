@@ -3258,6 +3258,7 @@ mod snapshot;
 mod snapshot_replace;
 mod stale_log;
 mod store_failure;
+mod unique_release;
 
 #[tokio::test]
 async fn forwarded_create_refuses_an_id_longer_than_the_record_id_limit() {

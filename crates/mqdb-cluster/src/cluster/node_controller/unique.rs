@@ -42,30 +42,35 @@ pub async fn await_unique_reserves(
     pending: Vec<PendingUniqueReserve>,
 ) -> Result<Vec<(String, Vec<u8>, NodeId)>, (ReserveFailure, Vec<(String, Vec<u8>, NodeId)>)> {
     let mut confirmed: Vec<(String, Vec<u8>, NodeId)> = Vec::new();
+    let mut pending = pending.into_iter();
 
-    for pending_reserve in pending {
+    while let Some(pending_reserve) = pending.next() {
         let deadline = tokio::time::Instant::now()
             + std::time::Duration::from_secs(UNIQUE_RESERVE_TIMEOUT_SECS);
 
         let result = tokio::time::timeout_at(deadline, pending_reserve.receiver).await;
+        let field = pending_reserve.field;
+        let reserved = (
+            field.clone(),
+            pending_reserve.value,
+            pending_reserve.target_node,
+        );
 
-        match result {
+        let failure = match result {
             Ok(Ok(UniqueReserveStatus::Reserved | UniqueReserveStatus::AlreadyReserved)) => {
-                confirmed.push((
-                    pending_reserve.field,
-                    pending_reserve.value,
-                    pending_reserve.target_node,
-                ));
+                confirmed.push(reserved);
+                continue;
             }
-            // A remote conflict is a permanent 409; a remote error, timeout, or dropped channel is a
-            // transient not-durable failure the client should retry (503).
-            Ok(Ok(UniqueReserveStatus::Conflict)) => {
-                return Err((ReserveFailure::Conflict(pending_reserve.field), confirmed));
-            }
+            Ok(Ok(UniqueReserveStatus::Conflict)) => ReserveFailure::Conflict(field),
             _ => {
-                return Err((ReserveFailure::NotDurable(pending_reserve.field), confirmed));
+                confirmed.push(reserved);
+                ReserveFailure::NotDurable(field)
             }
-        }
+        };
+        confirmed.extend(
+            pending.map(|unanswered| (unanswered.field, unanswered.value, unanswered.target_node)),
+        );
+        return Err((failure, confirmed));
     }
 
     Ok(confirmed)
