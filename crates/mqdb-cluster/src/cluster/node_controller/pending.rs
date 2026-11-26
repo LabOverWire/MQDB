@@ -18,7 +18,7 @@ pub struct PendingConstraintState {
     cascade_acks: Mutex<HashMap<u64, oneshot::Sender<bool>>>,
     next_unique_id: AtomicU64,
     next_fk_id: AtomicU64,
-    next_cascade_id: AtomicU64,
+    next_request_id: AtomicU64,
 }
 
 impl PendingConstraintState {
@@ -30,7 +30,7 @@ impl PendingConstraintState {
             cascade_acks: Mutex::new(HashMap::new()),
             next_unique_id: AtomicU64::new(1),
             next_fk_id: AtomicU64::new(1),
-            next_cascade_id: AtomicU64::new(1),
+            next_request_id: AtomicU64::new(1),
         }
     }
 
@@ -80,8 +80,8 @@ impl PendingConstraintState {
         }
     }
 
-    pub fn allocate_cascade_id(&self) -> u64 {
-        self.next_cascade_id.fetch_add(1, Ordering::Relaxed)
+    pub fn allocate_request_id(&self) -> u64 {
+        self.next_request_id.fetch_add(1, Ordering::Relaxed)
     }
 
     pub fn insert_cascade_ack(&self, id: u64, tx: oneshot::Sender<bool>) {
