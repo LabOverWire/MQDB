@@ -1610,7 +1610,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     }
                 };
 
-                self.send_deferred_reply(
+                self.send_json_db_reply(
                     from,
                     JsonDbResponse::new(
                         response_request_id,
@@ -1710,7 +1710,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     }
                 };
 
-                self.send_deferred_reply(
+                self.send_json_db_reply(
                     from,
                     JsonDbResponse::new(
                         response_request_id,

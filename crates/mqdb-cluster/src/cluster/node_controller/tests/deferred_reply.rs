@@ -673,3 +673,27 @@ async fn a_vault_create_deferred_by_a_unique_check_reaches_the_client_decrypted(
     assert_eq!(reply["data"]["email"], "v@x", "client reply {reply}");
     assert!(forwarder.pending_vault_decrypts.is_empty());
 }
+
+#[tokio::test]
+async fn an_early_refusal_without_a_response_topic_sends_no_reply() {
+    let mut ctrl = primary().await;
+    let request = without_response_topic(forwarded(
+        61,
+        JsonDbOp::Create,
+        "users",
+        REMOTE_AUTHOR,
+        &json!({"id": REMOTE_AUTHOR}),
+    ));
+    ctrl.transport().take_sent();
+
+    let pending = ctrl
+        .handle_json_db_request(node(2), data_partition("users", REMOTE_AUTHOR), &request)
+        .await;
+
+    assert!(pending.is_none());
+    let empty_topic_replies = replies_with_an_empty_topic(&ctrl);
+    assert!(
+        empty_topic_replies.is_empty(),
+        "replies sent with an empty topic: {empty_topic_replies:?}"
+    );
+}

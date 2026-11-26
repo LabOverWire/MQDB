@@ -515,10 +515,7 @@ impl<T: ClusterTransport> NodeController<T> {
             request.response_topic.clone(),
             request.correlation_data.clone(),
         );
-        let _ = self
-            .transport
-            .send(from, ClusterMessage::JsonDbResponse(response))
-            .await;
+        self.send_json_db_reply(from, response).await;
     }
 
     pub(crate) async fn handle_json_db_request(
@@ -2070,7 +2067,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    pub(super) async fn send_deferred_reply(&self, from: NodeId, response: JsonDbResponse) {
+    pub(super) async fn send_json_db_reply(&self, from: NodeId, response: JsonDbResponse) {
         if response.response_topic.is_empty() {
             return;
         }
@@ -2106,7 +2103,7 @@ impl<T: ClusterTransport> NodeController<T> {
             else {
                 return super::FkThenUniqueOutcome::Done;
             };
-            self.send_deferred_reply(
+            self.send_json_db_reply(
                 from,
                 JsonDbResponse::new(
                     response_request_id,
@@ -2149,7 +2146,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     Ok(p) => p,
                     Err(failure) => {
                         let payload = Self::json_error(failure.http_code(), &failure.message());
-                        self.send_deferred_reply(
+                        self.send_json_db_reply(
                             from,
                             JsonDbResponse::new(
                                 response_request_id,
@@ -2211,7 +2208,7 @@ impl<T: ClusterTransport> NodeController<T> {
                     Ok(p) => p,
                     Err(failure) => {
                         let payload = Self::json_error(failure.http_code(), &failure.message());
-                        self.send_deferred_reply(
+                        self.send_json_db_reply(
                             from,
                             JsonDbResponse::new(
                                 response_request_id,
@@ -2272,7 +2269,7 @@ impl<T: ClusterTransport> NodeController<T> {
             else {
                 return;
             };
-            self.send_deferred_reply(
+            self.send_json_db_reply(
                 from,
                 JsonDbResponse::new(
                     response_request_id,
@@ -2303,7 +2300,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let plan = match self.plan_fk_delete(&entity, &id, &side_effects, origin) {
             Ok(plan) => plan,
             Err(payload) => {
-                self.send_deferred_reply(
+                self.send_json_db_reply(
                     from,
                     JsonDbResponse::new(
                         response_request_id,
@@ -2317,7 +2314,7 @@ impl<T: ClusterTransport> NodeController<T> {
             }
         };
         let response_payload = self.execute_json_delete(&entity, &id, &plan, origin).await;
-        self.send_deferred_reply(
+        self.send_json_db_reply(
             from,
             JsonDbResponse::new(
                 response_request_id,
