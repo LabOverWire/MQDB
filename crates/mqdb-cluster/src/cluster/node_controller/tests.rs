@@ -3239,6 +3239,7 @@ async fn forwarded_delete_cascade_events_carry_the_deleters_origin() {
     assert_written_by_editor(&events);
 }
 
+mod admin_store_failure;
 mod cascade_share;
 mod change_events;
 mod deferred_reply;

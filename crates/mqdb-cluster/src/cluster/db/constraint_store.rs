@@ -182,6 +182,7 @@ pub enum ConstraintStoreError {
     AlreadyExists,
     SerializationError,
     TooLarge,
+    StoreFailed,
 }
 
 impl std::fmt::Display for ConstraintStoreError {
@@ -191,6 +192,7 @@ impl std::fmt::Display for ConstraintStoreError {
             Self::AlreadyExists => write!(f, "constraint already exists"),
             Self::SerializationError => write!(f, "serialization error"),
             Self::TooLarge => write!(f, "constraint is too large to store"),
+            Self::StoreFailed => write!(f, "the constraint could not be stored"),
         }
     }
 }

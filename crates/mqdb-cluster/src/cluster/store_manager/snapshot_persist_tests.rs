@@ -103,10 +103,8 @@ fn written_by_normal_paths(backend: &Arc<dyn StorageBackend>) -> StoreManager {
         store.commit_idempotency(session_part, IDEMPOTENCY_KEY, b"{\"ok\":true}"),
     );
 
-    let schema = store
-        .db_schema
-        .register(ENTITY, b"{\"fields\":[]}")
-        .unwrap();
+    let schema =
+        crate::cluster::test_support::register_schema(&store.db_schema, ENTITY, b"{\"fields\":[]}");
     persist(
         &store,
         ReplicationWrite::new(

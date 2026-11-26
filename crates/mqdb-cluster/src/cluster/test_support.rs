@@ -1,7 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use crate::cluster::db::{DbDataStore, DbEntity};
+use crate::cluster::db::{ClusterSchema, DbDataStore, DbEntity, SchemaStore};
 use crate::cluster::protocol::Operation;
 use mqdb_core::error::{Error, Result};
 use mqdb_core::storage::{BatchOperations, MemoryBackend, StorageBackend};
@@ -203,4 +203,20 @@ pub(crate) fn remove_record(store: &DbDataStore, entity: &str, id: &str) {
     store
         .apply_replicated(Operation::Delete, &format!("{entity}/{id}"), &[])
         .unwrap();
+}
+
+pub(crate) fn register_schema(store: &SchemaStore, entity: &str, data: &[u8]) -> ClusterSchema {
+    let schema = store.prepare_register(entity, data).unwrap();
+    store
+        .apply_replicated(Operation::Insert, entity, &SchemaStore::serialize(&schema))
+        .unwrap();
+    schema
+}
+
+pub(crate) fn update_schema(store: &SchemaStore, entity: &str, data: &[u8]) -> ClusterSchema {
+    let schema = store.prepare_update(entity, data).unwrap();
+    store
+        .apply_replicated(Operation::Update, entity, &SchemaStore::serialize(&schema))
+        .unwrap();
+    schema
 }
