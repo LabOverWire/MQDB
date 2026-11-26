@@ -312,6 +312,7 @@ async fn a_parent_delete_the_primary_cannot_store_sends_no_remote_cascade() {
             FkDeleteContinuation::DeleteFromDbHandler {
                 entity: "users".to_string(),
                 id: "u1".to_string(),
+                expected_version: None,
                 sender: None,
                 client_id: None,
                 response_topic: "resp/t".to_string(),

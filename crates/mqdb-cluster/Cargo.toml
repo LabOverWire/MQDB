@@ -28,7 +28,6 @@ crc32fast.workspace = true
 fjall.workspace = true
 mqtt5.workspace = true
 tokio.workspace = true
-tracing-subscriber.workspace = true
 lru.workspace = true
 ring.workspace = true
 comfy-table.workspace = true
@@ -48,4 +47,3 @@ http-api = ["mqdb-agent/http-api"]
 [dev-dependencies]
 rcgen = "0.14.10"
 tempfile.workspace = true
-tracing-subscriber.workspace = true

@@ -1208,23 +1208,8 @@ impl DbRequestHandler {
         let response_topic = mqtt_ctx.response_topic.unwrap_or("");
         let correlation_data = mqtt_ctx.correlation_data;
 
-        let Some(existing) = controller.db_get(entity, id) else {
-            return JsonOpResult::Response(Self::json_error(
-                404,
-                &format!("entity not found: {entity} id={id}"),
-            ));
-        };
-        if let Some(expected) = expected_version {
-            let current = serde_json::from_slice::<Value>(&existing.data)
-                .ok()
-                .and_then(|d| d.get("_version").and_then(Value::as_u64))
-                .unwrap_or(0);
-            if current != expected {
-                return JsonOpResult::Response(Self::json_error(
-                    412,
-                    &format!("{entity}/{id}: expected _version {expected}, found {current}"),
-                ));
-            }
+        if let Err(refusal) = controller.delete_precondition(entity, id, expected_version) {
+            return JsonOpResult::Response(refusal);
         }
 
         let (local_results, pending_remote) =
@@ -1240,6 +1225,7 @@ impl DbRequestHandler {
                 continuation: FkDeleteContinuation::DeleteFromDbHandler {
                     entity: entity.to_string(),
                     id: id.to_string(),
+                    expected_version,
                     sender: sender.map(str::to_string),
                     client_id: client_id.map(str::to_string),
                     response_topic: response_topic.to_string(),
@@ -1687,8 +1673,12 @@ impl DbRequestHandler {
         side_effects: Vec<crate::cluster::node_controller::fk::FkReverseLookupResult>,
         continuation: FkDeleteContinuation,
     ) -> Option<super::super::db_handler::DbPublishResponse> {
-        if let Some(msg) = restrict_error {
-            let payload = Self::json_error(409, &msg);
+        let (entity, id) = continuation.entity_id();
+        let refusal = controller
+            .delete_precondition(entity, id, continuation.expected_version())
+            .err()
+            .or_else(|| restrict_error.map(|msg| Self::json_error(409, &msg)));
+        if let Some(payload) = refusal {
             return match continuation {
                 FkDeleteContinuation::DeleteFromDbHandler {
                     response_topic,
@@ -1711,6 +1701,7 @@ impl DbRequestHandler {
                 client_id,
                 response_topic,
                 correlation_data,
+                ..
             } => {
                 let plan = match controller.plan_fk_delete(
                     &entity,
