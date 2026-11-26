@@ -247,43 +247,44 @@ async fn an_ack_for_one_partition_does_not_complete_another_partitions_quorum() 
     );
 }
 
-#[tokio::test]
-async fn a_not_replica_ack_fails_the_quorum_session() {
+async fn session_after_a_refusal_then_an_ok(
+    refusal: impl Fn(PartitionId, Epoch) -> crate::cluster::protocol::ReplicationAck,
+) -> Option<QuorumResult> {
     let backend = FaultyBackend::shared();
     let mut ctrl = primary_with_replica(&backend);
     let partition = session_partition("a1");
     let (_, mut done) = ctrl.create_session_quorum("a1").await.unwrap();
+    let epoch = ctrl.epoch(partition).unwrap();
+    let sequence = ctrl.sequence(partition).unwrap();
 
-    ctrl.handle_ack(crate::cluster::protocol::ReplicationAck::not_replica(
+    ctrl.handle_ack(refusal(partition, epoch)).await;
+    ctrl.handle_ack(crate::cluster::protocol::ReplicationAck::ok(
         partition,
+        epoch,
+        sequence,
         node(2),
     ))
     .await;
 
-    assert_eq!(
-        (done.try_recv().ok(), ctrl.pending_write_count()),
-        (Some(QuorumResult::Failed), 0)
-    );
+    done.try_recv().ok()
 }
 
 #[tokio::test]
-async fn a_stale_epoch_ack_fails_the_quorum_session() {
-    let backend = FaultyBackend::shared();
-    let mut ctrl = primary_with_replica(&backend);
-    let partition = session_partition("a1");
-    let (_, mut done) = ctrl.create_session_quorum("a1").await.unwrap();
-
-    ctrl.handle_ack(crate::cluster::protocol::ReplicationAck::stale_epoch(
-        partition,
-        Epoch::new(99),
-        node(2),
-    ))
+async fn a_stale_epoch_ack_for_an_older_write_does_not_fail_a_session_the_replica_acks() {
+    let result = session_after_a_refusal_then_an_ok(|partition, epoch| {
+        crate::cluster::protocol::ReplicationAck::stale_epoch(partition, epoch, node(2))
+    })
     .await;
+    assert_eq!(result, Some(QuorumResult::Success));
+}
 
-    assert_eq!(
-        (done.try_recv().ok(), ctrl.pending_write_count()),
-        (Some(QuorumResult::Failed), 0)
-    );
+#[tokio::test]
+async fn a_not_replica_ack_does_not_fail_a_session_the_replica_later_acks() {
+    let result = session_after_a_refusal_then_an_ok(|partition, _| {
+        crate::cluster::protocol::ReplicationAck::not_replica(partition, node(2))
+    })
+    .await;
+    assert_eq!(result, Some(QuorumResult::Success));
 }
 
 #[tokio::test]

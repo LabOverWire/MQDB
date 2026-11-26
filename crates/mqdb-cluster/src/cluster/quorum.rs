@@ -136,7 +136,7 @@ impl QuorumTracker {
     }
 
     pub fn record_timeout(&mut self, node: NodeId) {
-        if self.expected_nodes.contains(&node.get()) {
+        if self.expected_nodes.contains(&node.get()) && !self.acked_nodes.contains(&node.get()) {
             self.failed_nodes.insert(node.get());
         }
     }
@@ -243,18 +243,6 @@ impl PendingWrites {
     }
 
     pub fn record_ack(&mut self, ack: &ReplicationAck) {
-        if matches!(
-            ack.status(),
-            Some(AckStatus::StaleEpoch | AckStatus::NotReplica)
-        ) {
-            self.trackers
-                .iter_mut()
-                .filter(|tracker| tracker.partition() == ack.partition())
-                .for_each(|tracker| {
-                    tracker.record_ack(ack);
-                });
-            return;
-        }
         if let Some(tracker) = self.trackers.iter_mut().find(|tracker| {
             tracker.partition() == ack.partition() && tracker.sequence() == ack.sequence()
         }) {
@@ -538,6 +526,24 @@ mod tests {
         assert_eq!(
             (after_refusal, pending.drain_completed()),
             (vec![], vec![(PartitionId::ZERO, 1, QuorumResult::Success)])
+        );
+    }
+
+    #[test]
+    fn a_timeout_after_an_ack_counts_the_node_once() {
+        let mut tracker =
+            QuorumTracker::new(PartitionId::ZERO, 1, Epoch::new(1), &nodes(&[2, 3]), 2);
+        tracker.record_ack(&ok_ack(0, 1, 1, 2));
+        tracker.record_timeout(NodeId::validated(2).unwrap());
+        tracker.record_timeout(NodeId::validated(3).unwrap());
+
+        assert_eq!(
+            (
+                tracker.current_result(),
+                tracker.ack_count(),
+                tracker.failed_count()
+            ),
+            (QuorumResult::Failed, 1, 1)
         );
     }
 
