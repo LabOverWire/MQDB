@@ -13,7 +13,6 @@ use super::super::{
 use super::{ClusterEventHandler, LwtForwardingData, qos_to_u8};
 use crate::cluster::{LocalShare, RemoteForward, remote_forwards};
 use mqdb_agent::response_limit::{ReplyKind, fit_write_reply};
-use mqdb_core::protocol::parse_db_topic;
 use mqtt5::broker::events::ClientPublishEvent;
 use std::collections::HashMap;
 use tokio::sync::RwLockWriteGuard;
@@ -181,8 +180,7 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
         match result {
             DbPublishResult::Response(response) => {
                 let t_handle = crate::cluster::node_controller::elapsed_micros(start);
-                let kind = parse_db_topic(event.topic.as_ref())
-                    .map_or(ReplyKind::Read, |op| ReplyKind::from(op.operation));
+                let kind = db_reply_kind(event.topic.as_ref());
                 let payload = match kind {
                     ReplyKind::Write => fit_write_reply(
                         response.payload,
@@ -438,6 +436,23 @@ impl<T: ClusterTransport + 'static> ClusterEventHandler<T> {
     }
 }
 
+fn db_reply_kind(topic: &str) -> ReplyKind {
+    use crate::cluster::db_topic::{DbTopicOperation, ParsedDbTopic};
+    match ParsedDbTopic::parse(topic).map(|parsed| parsed.operation) {
+        Some(
+            DbTopicOperation::JsonCreate { .. }
+            | DbTopicOperation::JsonUpdate { .. }
+            | DbTopicOperation::JsonDelete { .. }
+            | DbTopicOperation::JsonShare { .. }
+            | DbTopicOperation::JsonUnshare { .. }
+            | DbTopicOperation::Create { .. }
+            | DbTopicOperation::Update { .. }
+            | DbTopicOperation::Delete { .. },
+        ) => ReplyKind::Write,
+        _ => ReplyKind::Read,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::super::db::data_partition;
@@ -645,5 +660,31 @@ mod tests {
         ctrl.write().await.handle_json_db_response(&response).await;
 
         expect_one(&responses, b"fwd-1");
+    }
+
+    #[test]
+    fn write_replies_are_classified_by_the_cluster_topic_parser() {
+        let kinds: Vec<ReplyKind> = [
+            "$DB/big.docs/create",
+            "$DB/big.docs/k/update",
+            "$DB/big.docs/k/delete",
+            "$DB/big.docs/k",
+            "$DB/big.docs/list",
+            "$DB/bigdocs/k/update",
+        ]
+        .iter()
+        .map(|topic| super::db_reply_kind(topic))
+        .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ReplyKind::Write,
+                ReplyKind::Write,
+                ReplyKind::Write,
+                ReplyKind::Read,
+                ReplyKind::Read,
+                ReplyKind::Write,
+            ]
+        );
     }
 }
