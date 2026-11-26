@@ -262,6 +262,7 @@ pub enum FkDeleteContinuation {
     },
     DeleteFromNodeController {
         from: NodeId,
+        response_request_id: u64,
         entity: String,
         id: String,
         sender: Option<String>,
@@ -320,6 +321,7 @@ pub enum FkCheckContinuation {
     },
     CreateFromNodeController {
         from: NodeId,
+        response_request_id: u64,
         entity: String,
         id: String,
         data: serde_json::Value,
@@ -332,6 +334,7 @@ pub enum FkCheckContinuation {
     },
     UpdateFromNodeController {
         from: NodeId,
+        response_request_id: u64,
         entity: String,
         id: String,
         update: PendingUpdate,
@@ -376,6 +379,7 @@ pub enum UniqueCheckContinuation {
     },
     CreateFromNodeController {
         from: NodeId,
+        response_request_id: u64,
         entity: String,
         id: String,
         data: serde_json::Value,
@@ -390,6 +394,7 @@ pub enum UniqueCheckContinuation {
     },
     UpdateFromNodeController {
         from: NodeId,
+        response_request_id: u64,
         entity: String,
         id: String,
         update: PendingUpdate,
@@ -1537,6 +1542,7 @@ impl<T: ClusterTransport> NodeController<T> {
         match continuation {
             UniqueCheckContinuation::CreateFromNodeController {
                 from,
+                response_request_id,
                 entity,
                 id,
                 data,
@@ -1604,15 +1610,20 @@ impl<T: ClusterTransport> NodeController<T> {
                     }
                 };
 
-                let response =
-                    JsonDbResponse::new(0, response_payload, response_topic, correlation_data);
-                let _ = self
-                    .transport
-                    .send(from, ClusterMessage::JsonDbResponse(response))
-                    .await;
+                self.send_json_db_reply(
+                    from,
+                    JsonDbResponse::new(
+                        response_request_id,
+                        response_payload,
+                        response_topic,
+                        correlation_data,
+                    ),
+                )
+                .await;
             }
             UniqueCheckContinuation::UpdateFromNodeController {
                 from,
+                response_request_id,
                 entity,
                 id,
                 update,
@@ -1699,12 +1710,16 @@ impl<T: ClusterTransport> NodeController<T> {
                     }
                 };
 
-                let response =
-                    JsonDbResponse::new(0, response_payload, response_topic, correlation_data);
-                let _ = self
-                    .transport
-                    .send(from, ClusterMessage::JsonDbResponse(response))
-                    .await;
+                self.send_json_db_reply(
+                    from,
+                    JsonDbResponse::new(
+                        response_request_id,
+                        response_payload,
+                        response_topic,
+                        correlation_data,
+                    ),
+                )
+                .await;
             }
             UniqueCheckContinuation::CreateFromDbHandler { .. }
             | UniqueCheckContinuation::UpdateFromDbHandler { .. } => {}
