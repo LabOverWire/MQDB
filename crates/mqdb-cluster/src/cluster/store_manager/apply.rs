@@ -1,7 +1,7 @@
 // Copyright 2025-2026 LabOverWire. All rights reserved.
 // SPDX-License-Identifier: AGPL-3.0-only
 
-use super::{StoreApplyError, StoreManager};
+use super::{StoreApplyError, StoreManager, is_recovered_from_storage};
 use crate::cluster::entity;
 use crate::cluster::protocol::ReplicationWrite;
 
@@ -49,6 +49,27 @@ impl StoreManager {
 
         self.note_transfer_write(write);
         self.apply_to_memory(write)
+    }
+
+    /// # Errors
+    /// Returns `StoreApplyError` if persistence fails for a recovered entity, or the write
+    /// does not apply in memory.
+    pub fn apply_write_keeping_unrecovered(
+        &self,
+        write: &ReplicationWrite,
+    ) -> Result<(), StoreApplyError> {
+        match self.apply_write(write) {
+            Err(StoreApplyError::PersistenceError) if !is_recovered_from_storage(&write.entity) => {
+                tracing::warn!(
+                    entity = write.entity,
+                    id = write.id,
+                    "write not stored on this node, kept in memory only"
+                );
+                self.note_transfer_write(write);
+                self.apply_to_memory(write)
+            }
+            result => result,
+        }
     }
 
     /// # Errors
