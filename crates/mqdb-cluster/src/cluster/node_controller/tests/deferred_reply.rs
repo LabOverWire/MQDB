@@ -715,6 +715,15 @@ async fn back_to_back_vault_forwards_each_keep_their_decrypt_entry() {
 }
 
 #[tokio::test]
+async fn forwarded_request_ids_come_from_the_node_request_counter() {
+    let mut forwarder = vault_forwarder(data_partition("posts", "p5"));
+    let plain = json!({"id": "p5", "author_id": VAULT_USER, "title": "hello"});
+    let (_, request) = forward_create(&mut forwarder, "posts", "p5", &plain).await;
+    let next = forwarder.pending_constraints.allocate_request_id();
+    assert_eq!(next, request.request_id + 1);
+}
+
+#[tokio::test]
 async fn an_early_refusal_without_a_response_topic_sends_no_reply() {
     let mut ctrl = primary().await;
     let request = without_response_topic(forwarded(
