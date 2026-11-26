@@ -405,6 +405,119 @@ async fn a_forwarded_update_refused_by_an_fk_check_replies_with_its_request_id()
     assert_reply(&reply_to_forwarder(&ctrl), 51, "error");
 }
 
+fn replies_with_an_empty_topic(ctrl: &NodeController<MockTransport>) -> Vec<u64> {
+    ctrl.transport()
+        .sent_messages()
+        .into_iter()
+        .filter_map(|(_, message)| match message {
+            ClusterMessage::JsonDbResponse(response) if response.response_topic.is_empty() => {
+                Some(response.request_id)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn without_response_topic(mut request: JsonDbRequest) -> JsonDbRequest {
+    request.response_topic = String::new();
+    request
+}
+
+#[tokio::test]
+async fn a_deferred_create_without_a_response_topic_sends_no_reply() {
+    let mut ctrl = primary().await;
+    let request = without_response_topic(forwarded(
+        41,
+        JsonDbOp::Create,
+        "users",
+        "u5",
+        &json!({"id": "u5", "email": NEW_EMAIL}),
+    ));
+    let PendingConstraintWork::Unique(work) = deferred(&mut ctrl, &request).await else {
+        panic!("the create should wait on the remote unique reserve");
+    };
+    ctrl.transport().take_sent();
+
+    finish_unique(&mut ctrl, work).await;
+
+    let empty_topic_replies = replies_with_an_empty_topic(&ctrl);
+    assert!(
+        empty_topic_replies.is_empty(),
+        "replies sent with an empty topic: {empty_topic_replies:?}"
+    );
+    assert!(ctrl.db_get("users", "u5").is_some());
+}
+
+#[tokio::test]
+async fn a_deferred_update_without_a_response_topic_sends_no_reply() {
+    let mut ctrl = primary().await;
+    let request = without_response_topic(forwarded(
+        42,
+        JsonDbOp::Update,
+        "users",
+        "u1",
+        &json!({"email": NEW_EMAIL}),
+    ));
+    let PendingConstraintWork::Unique(work) = deferred(&mut ctrl, &request).await else {
+        panic!("the update should wait on the remote unique reserve");
+    };
+    ctrl.transport().take_sent();
+
+    finish_unique(&mut ctrl, work).await;
+
+    let empty_topic_replies = replies_with_an_empty_topic(&ctrl);
+    assert!(
+        empty_topic_replies.is_empty(),
+        "replies sent with an empty topic: {empty_topic_replies:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_deferred_fk_refusal_without_a_response_topic_sends_no_reply() {
+    let mut ctrl = primary().await;
+    let request = without_response_topic(forwarded(
+        44,
+        JsonDbOp::Create,
+        "posts",
+        "p5",
+        &json!({"id": "p5", "author_id": REMOTE_AUTHOR}),
+    ));
+    let PendingConstraintWork::Fk(work) = deferred(&mut ctrl, &request).await else {
+        panic!("the create should wait on the remote FK check");
+    };
+    ctrl.transport().take_sent();
+
+    ctrl.complete_pending_fk_work(false, Some("author missing".to_string()), work.continuation)
+        .await;
+
+    let empty_topic_replies = replies_with_an_empty_topic(&ctrl);
+    assert!(
+        empty_topic_replies.is_empty(),
+        "replies sent with an empty topic: {empty_topic_replies:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_unique_refusal_after_an_fk_check_without_a_response_topic_sends_no_reply() {
+    let mut ctrl = primary_with_slug_taken().await;
+    let request = without_response_topic(forwarded(
+        48,
+        JsonDbOp::Create,
+        "posts",
+        "p5",
+        &json!({"id": "p5", "author_id": REMOTE_AUTHOR, "slug": "s1"}),
+    ));
+    ctrl.transport().take_sent();
+
+    refused_after_fk(&mut ctrl, &request).await;
+
+    let empty_topic_replies = replies_with_an_empty_topic(&ctrl);
+    assert!(
+        empty_topic_replies.is_empty(),
+        "replies sent with an empty topic: {empty_topic_replies:?}"
+    );
+}
+
 fn vault_key() -> Vec<u8> {
     vec![7u8; 32]
 }

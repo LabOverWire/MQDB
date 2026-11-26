@@ -1610,16 +1610,16 @@ impl<T: ClusterTransport> NodeController<T> {
                     }
                 };
 
-                let response = JsonDbResponse::new(
-                    response_request_id,
-                    response_payload,
-                    response_topic,
-                    correlation_data,
-                );
-                let _ = self
-                    .transport
-                    .send(from, ClusterMessage::JsonDbResponse(response))
-                    .await;
+                self.send_deferred_reply(
+                    from,
+                    JsonDbResponse::new(
+                        response_request_id,
+                        response_payload,
+                        response_topic,
+                        correlation_data,
+                    ),
+                )
+                .await;
             }
             UniqueCheckContinuation::UpdateFromNodeController {
                 from,
@@ -1710,16 +1710,16 @@ impl<T: ClusterTransport> NodeController<T> {
                     }
                 };
 
-                let response = JsonDbResponse::new(
-                    response_request_id,
-                    response_payload,
-                    response_topic,
-                    correlation_data,
-                );
-                let _ = self
-                    .transport
-                    .send(from, ClusterMessage::JsonDbResponse(response))
-                    .await;
+                self.send_deferred_reply(
+                    from,
+                    JsonDbResponse::new(
+                        response_request_id,
+                        response_payload,
+                        response_topic,
+                        correlation_data,
+                    ),
+                )
+                .await;
             }
             UniqueCheckContinuation::CreateFromDbHandler { .. }
             | UniqueCheckContinuation::UpdateFromDbHandler { .. } => {}

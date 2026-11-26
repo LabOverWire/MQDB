@@ -2070,6 +2070,16 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
+    pub(super) async fn send_deferred_reply(&self, from: NodeId, response: JsonDbResponse) {
+        if response.response_topic.is_empty() {
+            return;
+        }
+        let _ = self
+            .transport
+            .send(from, ClusterMessage::JsonDbResponse(response))
+            .await;
+    }
+
     pub(crate) async fn complete_pending_fk_work(
         &mut self,
         fk_ok: bool,
@@ -2096,16 +2106,16 @@ impl<T: ClusterTransport> NodeController<T> {
             else {
                 return super::FkThenUniqueOutcome::Done;
             };
-            let response = JsonDbResponse::new(
-                response_request_id,
-                payload,
-                response_topic,
-                correlation_data,
-            );
-            let _ = self
-                .transport
-                .send(from, ClusterMessage::JsonDbResponse(response))
-                .await;
+            self.send_deferred_reply(
+                from,
+                JsonDbResponse::new(
+                    response_request_id,
+                    payload,
+                    response_topic,
+                    correlation_data,
+                ),
+            )
+            .await;
             return super::FkThenUniqueOutcome::Done;
         }
 
@@ -2139,16 +2149,16 @@ impl<T: ClusterTransport> NodeController<T> {
                     Ok(p) => p,
                     Err(failure) => {
                         let payload = Self::json_error(failure.http_code(), &failure.message());
-                        let response = JsonDbResponse::new(
-                            response_request_id,
-                            payload,
-                            response_topic,
-                            correlation_data,
-                        );
-                        let _ = self
-                            .transport
-                            .send(from, ClusterMessage::JsonDbResponse(response))
-                            .await;
+                        self.send_deferred_reply(
+                            from,
+                            JsonDbResponse::new(
+                                response_request_id,
+                                payload,
+                                response_topic,
+                                correlation_data,
+                            ),
+                        )
+                        .await;
                         return super::FkThenUniqueOutcome::Done;
                     }
                 };
@@ -2201,16 +2211,16 @@ impl<T: ClusterTransport> NodeController<T> {
                     Ok(p) => p,
                     Err(failure) => {
                         let payload = Self::json_error(failure.http_code(), &failure.message());
-                        let response = JsonDbResponse::new(
-                            response_request_id,
-                            payload,
-                            response_topic,
-                            correlation_data,
-                        );
-                        let _ = self
-                            .transport
-                            .send(from, ClusterMessage::JsonDbResponse(response))
-                            .await;
+                        self.send_deferred_reply(
+                            from,
+                            JsonDbResponse::new(
+                                response_request_id,
+                                payload,
+                                response_topic,
+                                correlation_data,
+                            ),
+                        )
+                        .await;
                         return super::FkThenUniqueOutcome::Done;
                     }
                 };
@@ -2262,18 +2272,16 @@ impl<T: ClusterTransport> NodeController<T> {
             else {
                 return;
             };
-            if !response_topic.is_empty() {
-                let response = JsonDbResponse::new(
+            self.send_deferred_reply(
+                from,
+                JsonDbResponse::new(
                     response_request_id,
                     payload,
                     response_topic,
                     correlation_data,
-                );
-                let _ = self
-                    .transport
-                    .send(from, ClusterMessage::JsonDbResponse(response))
-                    .await;
-            }
+                ),
+            )
+            .await;
             return;
         }
 
@@ -2295,34 +2303,30 @@ impl<T: ClusterTransport> NodeController<T> {
         let plan = match self.plan_fk_delete(&entity, &id, &side_effects, origin) {
             Ok(plan) => plan,
             Err(payload) => {
-                if !response_topic.is_empty() {
-                    let response = JsonDbResponse::new(
+                self.send_deferred_reply(
+                    from,
+                    JsonDbResponse::new(
                         response_request_id,
                         payload,
                         response_topic,
                         correlation_data,
-                    );
-                    let _ = self
-                        .transport
-                        .send(from, ClusterMessage::JsonDbResponse(response))
-                        .await;
-                }
+                    ),
+                )
+                .await;
                 return;
             }
         };
         let response_payload = self.execute_json_delete(&entity, &id, &plan, origin).await;
-        if !response_topic.is_empty() {
-            let response = JsonDbResponse::new(
+        self.send_deferred_reply(
+            from,
+            JsonDbResponse::new(
                 response_request_id,
                 response_payload,
                 response_topic,
                 correlation_data,
-            );
-            let _ = self
-                .transport
-                .send(from, ClusterMessage::JsonDbResponse(response))
-                .await;
-        }
+            ),
+        )
+        .await;
     }
 
     pub(crate) fn handle_json_list_local(&self, entity: &str, payload: &[u8]) -> Vec<u8> {
