@@ -942,3 +942,50 @@ async fn a_forwarded_client_update_drops_the_fk_expected_field() {
         .collect();
     assert_eq!(sent, vec![json!({"title": "x"})]);
 }
+
+async fn remote_set_null(expected_value: &str) -> Value {
+    let partition = data_partition("posts", "p1");
+    let forwarder = vault_forwarder(partition);
+    assert!(
+        forwarder
+            .send_cascade_set_null_request(
+                partition,
+                "posts",
+                "p1",
+                "author_id",
+                expected_value,
+                None
+            )
+            .await
+            .is_some()
+    );
+    let request = forwarder
+        .transport()
+        .take_sent()
+        .into_iter()
+        .find_map(|(_, message)| match message {
+            ClusterMessage::JsonDbRequest { request, .. } => Some(request),
+            _ => None,
+        })
+        .unwrap();
+    let mut primary = primary().await;
+
+    primary
+        .handle_json_db_request(node(2), partition, &request)
+        .await;
+
+    serde_json::from_slice(&primary.db_get("posts", "p1").unwrap().data).unwrap()
+}
+
+#[tokio::test]
+async fn a_remote_set_null_keeps_its_fk_guard() {
+    let applied = remote_set_null("u2").await;
+    let skipped = remote_set_null("u7").await;
+
+    assert_eq!(
+        (&applied["author_id"], &skipped["author_id"]),
+        (&Value::Null, &json!("u2"))
+    );
+    assert!(applied.get("__mqdb_fk_expected").is_none(), "{applied}");
+    assert!(skipped.get("__mqdb_fk_expected").is_none(), "{skipped}");
+}
