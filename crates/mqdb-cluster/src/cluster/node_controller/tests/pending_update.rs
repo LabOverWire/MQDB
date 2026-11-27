@@ -116,7 +116,10 @@ async fn forward(
 }
 
 fn forwarded_reply(ctrl: &NodeController<MockTransport>, request_id: u64) -> Value {
-    let topic = format!("resp/{request_id}");
+    reply_on(ctrl, &format!("resp/{request_id}"))
+}
+
+fn reply_on(ctrl: &NodeController<MockTransport>, topic: &str) -> Value {
     let payload = ctrl
         .transport()
         .sent_messages()
@@ -883,22 +886,23 @@ async fn published_pending_unique_update_refused_by_the_schema_answers_and_relea
 #[tokio::test]
 async fn forwarded_update_with_a_stale_expected_version_and_a_moved_set_null_field_answers_412() {
     let mut ctrl = cluster().await;
-
-    let pending = forward(
-        &mut ctrl,
-        &forwarded_update(
+    let topic = "_mqdb/cascade_ack/2/150";
+    let request = JsonDbRequest {
+        response_topic: topic.to_string(),
+        ..forwarded_update(
             150,
             "posts",
             "p1",
             &json!({"title": "x", "_expected_version": 5, "__mqdb_fk_expected": "author_id=u3"}),
-        ),
-    )
-    .await;
+        )
+    };
+
+    let pending = forward(&mut ctrl, &request).await;
 
     assert_eq!(
         (
             pending.is_none(),
-            forwarded_reply(&ctrl, 150)["code"].clone(),
+            reply_on(&ctrl, topic)["code"].clone(),
             stored(&ctrl, "posts", "p1").unwrap()["title"].clone(),
         ),
         (true, json!(412), json!("t0"))
