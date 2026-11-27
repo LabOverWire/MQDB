@@ -866,15 +866,26 @@ async fn unsealed_partition_fails_reserve_closed() {
     let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
     ctrl.register_peer(node2);
     ctrl.register_peer(node3);
-    set_unique_group(&mut ctrl, node1, &[node2, node3]);
 
     let entity = "users";
     ctrl.stores()
         .db_constraints
         .add(crate::cluster::db::ClusterConstraint::unique(entity, "uniq_email", "email").unwrap())
         .unwrap();
-    let value = b"a@x.com";
-    let unique_part = crate::cluster::db::unique_partition(entity, "email", value);
+    let value = serde_json::to_vec(&serde_json::json!("a@x.com")).unwrap();
+    let unique_part = crate::cluster::db::unique_partition(entity, "email", &value);
+    let mut map = crate::cluster::PartitionMap::default();
+    map.set(
+        unique_part,
+        crate::cluster::PartitionAssignment {
+            primary: Some(node1),
+            replicas: vec![node2, node3],
+            epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
+        },
+    );
+    ctrl.update_partition_map(map);
+    ctrl.seed_unique_voters([node1, node2, node3].into_iter().collect());
     ctrl.become_primary(unique_part, Epoch::new(1));
     assert!(
         !ctrl.unique_partition_sealed(unique_part),
@@ -883,7 +894,7 @@ async fn unsealed_partition_fails_reserve_closed() {
 
     let data = serde_json::json!({ "email": "a@x.com" });
     let result = ctrl
-        .check_unique_constraints(
+        .start_unique_constraint_check(
             entity,
             "u1",
             &data,
@@ -894,11 +905,11 @@ async fn unsealed_partition_fails_reserve_closed() {
         .await;
 
     assert!(
-        result.is_err(),
+        matches!(&result, Err(super::ReserveFailure::NotDurable(field)) if field == "email"),
         "reserve must fail closed while the value partition is unsealed"
     );
     assert!(
-        ctrl.stores().unique_get(entity, "email", value).is_none(),
+        ctrl.stores().unique_get(entity, "email", &value).is_none(),
         "no reservation should be recorded for a fail-closed reserve"
     );
 }
@@ -1728,9 +1739,12 @@ async fn setup_unique_entity_with_constraint(
 
     let request_id = uuid::Uuid::new_v4().to_string();
     let entity_data: serde_json::Value = serde_json::from_slice(data).unwrap();
-    ctrl.check_unique_constraints("users", id, &entity_data, partition, &request_id, timestamp)
+    let phase1 = ctrl
+        .start_unique_constraint_check("users", id, &entity_data, partition, &request_id, timestamp)
         .await
+        .map_err(|failure| failure.field().to_string())
         .unwrap();
+    assert!(phase1.pending_remote.is_empty());
     ctrl.commit_unique_constraints("users", &entity_data, &request_id)
         .await;
 }
@@ -1863,7 +1877,7 @@ async fn db_update_releases_old_unique_value() {
     let create_data_b: serde_json::Value =
         serde_json::from_slice(br#"{"email":"alice@example.com"}"#).unwrap();
     let check_result = ctrl
-        .check_unique_constraints(
+        .start_unique_constraint_check(
             "users",
             "user-b",
             &create_data_b,
@@ -1873,7 +1887,7 @@ async fn db_update_releases_old_unique_value() {
         )
         .await;
     assert!(
-        check_result.is_ok(),
+        check_result.is_ok_and(|phase1| phase1.pending_remote.is_empty()),
         "old unique value should be available after update changed it"
     );
 }
