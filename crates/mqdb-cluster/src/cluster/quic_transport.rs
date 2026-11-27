@@ -834,17 +834,17 @@ async fn handle_incoming_connection(
     let (send_stream, mut recv_stream) = connection
         .accept_bi()
         .await
-        .map_err(|e| TransportError::SendFailed(format!("failed to accept stream: {e}")))?;
+        .map_err(|e| TransportError::ReceiveFailed(format!("failed to accept stream: {e}")))?;
 
     let mut header = [0u8; 2];
     recv_stream
         .read_exact(&mut header)
         .await
-        .map_err(|e| TransportError::SendFailed(format!("failed to read header: {e}")))?;
+        .map_err(|e| TransportError::ReceiveFailed(format!("failed to read header: {e}")))?;
 
     let peer_node_id = u16::from_be_bytes(header);
     let peer_node = NodeId::validated(peer_node_id)
-        .ok_or_else(|| TransportError::SendFailed("invalid peer node ID".to_string()))?;
+        .ok_or_else(|| TransportError::ReceiveFailed("invalid peer node ID".to_string()))?;
 
     if peer_node == local_node {
         connection.close(
