@@ -866,15 +866,26 @@ async fn unsealed_partition_fails_reserve_closed() {
     let mut ctrl = create_test_controller(node1, MockTransport::new(node1));
     ctrl.register_peer(node2);
     ctrl.register_peer(node3);
-    set_unique_group(&mut ctrl, node1, &[node2, node3]);
 
     let entity = "users";
     ctrl.stores()
         .db_constraints
         .add(crate::cluster::db::ClusterConstraint::unique(entity, "uniq_email", "email").unwrap())
         .unwrap();
-    let value = b"a@x.com";
-    let unique_part = crate::cluster::db::unique_partition(entity, "email", value);
+    let value = serde_json::to_vec(&serde_json::json!("a@x.com")).unwrap();
+    let unique_part = crate::cluster::db::unique_partition(entity, "email", &value);
+    let mut map = crate::cluster::PartitionMap::default();
+    map.set(
+        unique_part,
+        crate::cluster::PartitionAssignment {
+            primary: Some(node1),
+            replicas: vec![node2, node3],
+            epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
+        },
+    );
+    ctrl.update_partition_map(map);
+    ctrl.seed_unique_voters([node1, node2, node3].into_iter().collect());
     ctrl.become_primary(unique_part, Epoch::new(1));
     assert!(
         !ctrl.unique_partition_sealed(unique_part),
@@ -894,11 +905,11 @@ async fn unsealed_partition_fails_reserve_closed() {
         .await;
 
     assert!(
-        result.is_err(),
+        matches!(&result, Err(super::ReserveFailure::NotDurable(field)) if field == "email"),
         "reserve must fail closed while the value partition is unsealed"
     );
     assert!(
-        ctrl.stores().unique_get(entity, "email", value).is_none(),
+        ctrl.stores().unique_get(entity, "email", &value).is_none(),
         "no reservation should be recorded for a fail-closed reserve"
     );
 }
