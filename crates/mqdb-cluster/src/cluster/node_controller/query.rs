@@ -125,7 +125,11 @@ impl<T: ClusterTransport> NodeController<T> {
         };
         self.pending_scatter_requests.insert(request_id, pending);
 
-        let scatter_response_topic = format!("_mqdb/scatter/{}/{request_id}", self.node_id.get());
+        let scatter_response_topic = format!(
+            "{}{}/{request_id}",
+            crate::cluster::protocol::SCATTER_REPLY_PREFIX,
+            self.node_id.get()
+        );
 
         for &target_node in &remote_nodes {
             let request = JsonDbRequest {

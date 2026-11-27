@@ -18,7 +18,10 @@ mod tests;
 
 pub use broadcast::{PresenceBroadcast, TopicSubscriptionBroadcast, WildcardBroadcast, WildcardOp};
 pub use change_event::{ChangeEventDelivery, ChangeEventMark, ChangeEventRecord, EventId};
-pub use db_messages::{JsonDbRequest, JsonDbResponse};
+pub use db_messages::{
+    CASCADE_ACK_REPLY_PREFIX, JsonDbRequest, JsonDbResponse, SCATTER_REPLY_PREFIX,
+    is_internal_reply_topic,
+};
 pub use fk::{FkCheckRequest, FkCheckResponse, FkReverseLookupRequest, FkReverseLookupResponse};
 pub use heartbeat::Heartbeat;
 pub use publish::{ForwardTarget, ForwardedPublish};

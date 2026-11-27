@@ -102,6 +102,18 @@ impl DbRequestHandler {
         payload: &[u8],
         ctx: &MqttRequestContext<'_>,
     ) -> DbPublishResult {
+        if ctx
+            .response_topic
+            .is_some_and(crate::cluster::protocol::is_internal_reply_topic)
+        {
+            tracing::warn!(
+                topic,
+                response_topic = ctx.response_topic,
+                client_id = ctx.client_id,
+                "refusing a request whose response topic is reserved for internal replies"
+            );
+            return DbPublishResult::NoResponse;
+        }
         let Some(parsed) = ParsedDbTopic::parse(topic) else {
             return DbPublishResult::NoResponse;
         };
