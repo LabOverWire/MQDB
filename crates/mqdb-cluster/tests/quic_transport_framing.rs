@@ -1503,3 +1503,28 @@ async fn a_silent_linked_peer_reaches_the_long_absence_delay_through_the_transpo
     );
     far.abort();
 }
+
+#[tokio::test]
+async fn a_bind_on_a_taken_port_is_reported_as_a_bind_error() {
+    let certs = generate_certs();
+    let dir = tempfile::tempdir().unwrap();
+    let cert_path = dir.path().join("server.pem");
+    let key_path = dir.path().join("server.key");
+    std::fs::write(&cert_path, &certs.leaf_pem).unwrap();
+    std::fs::write(&key_path, &certs.leaf_key_pem).unwrap();
+    let taken = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let addr = taken.local_addr().unwrap();
+    let transport = QuicDirectTransport::new(NodeId::validated(1).unwrap());
+
+    let error = transport
+        .bind(addr, &cert_path, &key_path)
+        .await
+        .err()
+        .map(|e| e.to_string());
+
+    let message = error.expect("binding a taken port succeeded");
+    assert!(
+        message.starts_with("failed to bind QUIC endpoint"),
+        "{message}"
+    );
+}
