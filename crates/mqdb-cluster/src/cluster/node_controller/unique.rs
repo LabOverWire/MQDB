@@ -273,47 +273,6 @@ impl<T: ClusterTransport> NodeController<T> {
         }
     }
 
-    #[cfg(test)]
-    #[allow(clippy::too_many_arguments, clippy::missing_errors_doc)]
-    pub async fn check_unique_constraints(
-        &mut self,
-        entity: &str,
-        id: &str,
-        data: &serde_json::Value,
-        data_partition: PartitionId,
-        request_id: &str,
-        now_ms: u64,
-    ) -> Result<(), String> {
-        let phase1 = self
-            .start_unique_constraint_check(entity, id, data, data_partition, request_id, now_ms)
-            .await
-            .map_err(|f| f.field().to_string())?;
-
-        if !phase1.pending_remote.is_empty() {
-            let remote_results = await_unique_reserves(phase1.pending_remote).await;
-            match remote_results {
-                Ok(confirmed_remotes) => {
-                    for (f, v, target) in &confirmed_remotes {
-                        self.send_unique_commit_fire_and_forget(*target, entity, f, v, request_id)
-                            .await;
-                    }
-                }
-                Err((failure, confirmed)) => {
-                    self.release_unique_check_reservations(
-                        entity,
-                        request_id,
-                        &phase1.local_reserved,
-                        &confirmed,
-                    )
-                    .await;
-                    return Err(failure.field().to_string());
-                }
-            }
-        }
-
-        Ok(())
-    }
-
     pub async fn commit_unique_constraints(
         &mut self,
         entity: &str,

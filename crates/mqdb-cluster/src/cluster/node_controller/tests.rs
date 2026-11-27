@@ -883,7 +883,7 @@ async fn unsealed_partition_fails_reserve_closed() {
 
     let data = serde_json::json!({ "email": "a@x.com" });
     let result = ctrl
-        .check_unique_constraints(
+        .start_unique_constraint_check(
             entity,
             "u1",
             &data,
@@ -1728,9 +1728,12 @@ async fn setup_unique_entity_with_constraint(
 
     let request_id = uuid::Uuid::new_v4().to_string();
     let entity_data: serde_json::Value = serde_json::from_slice(data).unwrap();
-    ctrl.check_unique_constraints("users", id, &entity_data, partition, &request_id, timestamp)
+    let phase1 = ctrl
+        .start_unique_constraint_check("users", id, &entity_data, partition, &request_id, timestamp)
         .await
+        .map_err(|failure| failure.field().to_string())
         .unwrap();
+    assert!(phase1.pending_remote.is_empty());
     ctrl.commit_unique_constraints("users", &entity_data, &request_id)
         .await;
 }
@@ -1863,7 +1866,7 @@ async fn db_update_releases_old_unique_value() {
     let create_data_b: serde_json::Value =
         serde_json::from_slice(br#"{"email":"alice@example.com"}"#).unwrap();
     let check_result = ctrl
-        .check_unique_constraints(
+        .start_unique_constraint_check(
             "users",
             "user-b",
             &create_data_b,
@@ -1873,7 +1876,7 @@ async fn db_update_releases_old_unique_value() {
         )
         .await;
     assert!(
-        check_result.is_ok(),
+        check_result.is_ok_and(|phase1| phase1.pending_remote.is_empty()),
         "old unique value should be available after update changed it"
     );
 }
