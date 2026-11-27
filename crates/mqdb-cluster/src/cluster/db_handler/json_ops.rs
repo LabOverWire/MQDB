@@ -697,7 +697,7 @@ impl DbRequestHandler {
         let correlation_data = ctx.correlation_data;
 
         if let Some(obj) = data.as_object_mut() {
-            obj.remove("__mqdb_fk_expected");
+            obj.remove(mqdb_core::protocol::FK_EXPECTED_FIELD);
         }
         let request_id = uuid::Uuid::new_v4().to_string();
 
@@ -980,7 +980,7 @@ impl DbRequestHandler {
         let correlation_data = ctx.correlation_data;
 
         if let Some(obj) = updates.as_object_mut() {
-            obj.remove("__mqdb_fk_expected");
+            obj.remove(mqdb_core::protocol::FK_EXPECTED_FIELD);
         }
         let expected_version = match mqdb_core::protocol::take_expected_version(&mut updates) {
             Ok(v) => v,

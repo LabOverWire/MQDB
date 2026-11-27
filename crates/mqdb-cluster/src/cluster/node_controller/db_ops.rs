@@ -82,6 +82,19 @@ fn change_event_user_properties(event: &ChangeEvent) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+fn without_fk_expected(op: JsonDbOp, payload: &[u8]) -> Vec<u8> {
+    match serde_json::from_slice::<Value>(payload) {
+        Ok(fields @ Value::Object(_))
+            if matches!(op, JsonDbOp::Create | JsonDbOp::Update)
+                && fields.get(mqdb_core::protocol::FK_EXPECTED_FIELD).is_some() =>
+        {
+            serde_json::to_vec(&mqdb_core::protocol::without_internal_fields(fields))
+                .unwrap_or_else(|_| payload.to_vec())
+        }
+        _ => payload.to_vec(),
+    }
+}
+
 pub(crate) struct ForwardedJsonRequest<'a> {
     pub(crate) op: JsonDbOp,
     pub(crate) entity: &'a str,
@@ -918,7 +931,8 @@ impl<T: ClusterTransport> NodeController<T> {
 
         let fk_expected = data
             .as_object_mut()
-            .and_then(|obj| obj.remove("__mqdb_fk_expected"))
+            .and_then(|obj| obj.remove(mqdb_core::protocol::FK_EXPECTED_FIELD))
+            .filter(|_| request.response_topic.starts_with("_mqdb/cascade_ack/"))
             .and_then(|v| v.as_str().map(String::from));
 
         let expected_version = match mqdb_core::protocol::take_expected_version(&mut data) {
@@ -1639,7 +1653,7 @@ impl<T: ClusterTransport> NodeController<T> {
         let response_topic = format!("_mqdb/cascade_ack/{}/{request_id}", self.node_id.get());
         let payload = serde_json::json!({
             field: serde_json::Value::Null,
-            "__mqdb_fk_expected": format!("{field}={expected_value}"),
+            mqdb_core::protocol::FK_EXPECTED_FIELD: format!("{field}={expected_value}"),
         });
         let bytes = serde_json::to_vec(&payload).unwrap_or_default();
         let request = JsonDbRequest {
@@ -1805,7 +1819,7 @@ impl<T: ClusterTransport> NodeController<T> {
 
         if let serde_json::Value::Object(ref mut obj) = data {
             obj.remove("_version");
-            obj.remove("__mqdb_fk_expected");
+            obj.remove(mqdb_core::protocol::FK_EXPECTED_FIELD);
             obj.insert("_version".to_string(), serde_json::Value::Number(1.into()));
         }
 
@@ -2532,7 +2546,7 @@ impl<T: ClusterTransport> NodeController<T> {
             op,
             entity: entity.to_string(),
             id: id.map(String::from),
-            payload: payload.to_vec(),
+            payload: without_fk_expected(op, payload),
             response_topic: response_topic.to_string(),
             correlation_data: correlation_data.map(<[u8]>::to_vec),
             sender: origin.sender.map(String::from),
@@ -2617,7 +2631,7 @@ impl<T: ClusterTransport> NodeController<T> {
             entity: entity.to_string(),
             id: Some(id.to_string()),
             payload: payload.to_vec(),
-            response_topic: String::new(),
+            response_topic: format!("_mqdb/cascade_ack/{}/0", self.node_id.get()),
             correlation_data: None,
             sender: None,
             client_id: None,
