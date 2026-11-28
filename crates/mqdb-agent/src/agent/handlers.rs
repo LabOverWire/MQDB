@@ -200,26 +200,23 @@ fn decrypt_shares_grantee_email(
     }
 }
 
-#[allow(clippy::too_many_lines)]
-pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
-    let db = ctx.db;
-    let client = ctx.client;
-    let ownership = ctx.ownership;
-    let scope_config = ctx.scope_config;
-    let vault_backend = ctx.vault_backend;
+async fn is_request_accepted(
+    ctx: &MessageContext<'_>,
+    message: &Message,
+    sender_uid: Option<&str>,
+    mqtt_client_id: Option<&str>,
+) -> bool {
     let topic = &message.topic;
-    let sender_uid = user_property(&message, "x-mqtt-sender");
-    let mqtt_client_id = user_property(&message, "x-mqtt-client-id");
 
     if is_own_response(ctx.service_username, sender_uid, mqtt_client_id) {
-        return;
+        return false;
     }
 
     if crate::topic_rules::is_change_event_topic(topic)
         || topic.starts_with(crate::presence::PRESENCE_TOPIC_PREFIX)
         || topic.starts_with(VERIFY_TOPIC_PREFIX)
     {
-        return;
+        return false;
     }
 
     if let Some(response_topic) = &message.properties.response_topic
@@ -238,29 +235,86 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
             client_id = mqtt_client_id,
             "request refused: the sender may not publish to its response topic"
         );
+        return false;
+    }
+
+    true
+}
+
+fn admin_context<'a>(ctx: &MessageContext<'a>, message: &'a Message) -> AdminContext<'a> {
+    AdminContext {
+        db: ctx.db,
+        client: ctx.client,
+        message,
+        backup_dir: ctx.backup_dir,
+        auth_providers: ctx.auth_providers,
+        ownership: ctx.ownership,
+        scope_config: ctx.scope_config,
+        vault_backend: ctx.vault_backend,
+        #[cfg(feature = "http-api")]
+        auth_rate_limiter: ctx.auth_rate_limiter,
+        #[cfg(feature = "http-api")]
+        identity_crypto: ctx.identity_crypto,
+        #[cfg(feature = "http-api")]
+        session_store: ctx.session_store,
+        #[cfg(feature = "http-api")]
+        jti_revocation: ctx.jti_revocation,
+    }
+}
+
+async fn reply_read_error(client: &MqttClient, message: &Message, response: &Response) {
+    if let Some(response_topic) = &message.properties.response_topic
+        && let Ok(payload) = serde_json::to_vec(response)
+    {
+        publish_response(
+            client,
+            response_topic,
+            message.properties.correlation_data.as_deref(),
+            payload,
+            ReplyKind::Read,
+        )
+        .await;
+    }
+}
+
+#[cfg(feature = "opentelemetry")]
+fn with_remote_parent(span: tracing::Span, message: &Message) -> tracing::Span {
+    use opentelemetry::Context;
+    use opentelemetry::trace::{SpanContext, TraceContextExt, TraceState};
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+    let user_props: Vec<(String, String)> = message.properties.user_properties.clone();
+
+    if let Some(parent_cx) = propagation::extract_trace_context(&user_props) {
+        let parent = SpanContext::new(
+            parent_cx.trace_id(),
+            parent_cx.span_id(),
+            parent_cx.trace_flags(),
+            false,
+            TraceState::default(),
+        );
+        if let Err(e) = span.set_parent(Context::current().with_remote_span_context(parent)) {
+            tracing::debug!(%e, "request trace parent not attached");
+        }
+    }
+    span
+}
+
+pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
+    let db = ctx.db;
+    let client = ctx.client;
+    let ownership = ctx.ownership;
+    let vault_backend = ctx.vault_backend;
+    let topic = &message.topic;
+    let sender_uid = user_property(&message, "x-mqtt-sender");
+    let mqtt_client_id = user_property(&message, "x-mqtt-client-id");
+
+    if !is_request_accepted(ctx, &message, sender_uid, mqtt_client_id).await {
         return;
     }
 
     if let Some(admin_op) = parse_admin_topic(topic) {
-        let admin_ctx = AdminContext {
-            db,
-            client,
-            message: &message,
-            backup_dir: ctx.backup_dir,
-            auth_providers: ctx.auth_providers,
-            ownership,
-            scope_config,
-            vault_backend,
-            #[cfg(feature = "http-api")]
-            auth_rate_limiter: ctx.auth_rate_limiter,
-            #[cfg(feature = "http-api")]
-            identity_crypto: ctx.identity_crypto,
-            #[cfg(feature = "http-api")]
-            session_store: ctx.session_store,
-            #[cfg(feature = "http-api")]
-            jti_revocation: ctx.jti_revocation,
-        };
-        handle_admin_operation(&admin_ctx, admin_op).await;
+        handle_admin_operation(&admin_context(ctx, &message), admin_op).await;
         return;
     }
 
@@ -273,19 +327,8 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
         Ok(r) => r,
         Err(e) => {
             warn!("Failed to build request from {}: {}", topic, e);
-            if let Some(response_topic) = &message.properties.response_topic {
-                let response = Response::error(mqdb_core::ErrorCode::BadRequest, e.to_string());
-                if let Ok(payload) = serde_json::to_vec(&response) {
-                    publish_response(
-                        client,
-                        response_topic,
-                        message.properties.correlation_data.as_deref(),
-                        payload,
-                        ReplyKind::Read,
-                    )
-                    .await;
-                }
-            }
+            let response = Response::error(mqdb_core::ErrorCode::BadRequest, e.to_string());
+            reply_read_error(client, &message, &response).await;
             return;
         }
     };
@@ -303,19 +346,7 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
         {
             Ok((r, vc)) => (r, vc),
             Err(vault_err) => {
-                let err_response = vault_error_to_response(&vault_err);
-                if let Some(response_topic) = &message.properties.response_topic
-                    && let Ok(payload) = serde_json::to_vec(&err_response)
-                {
-                    publish_response(
-                        client,
-                        response_topic,
-                        message.properties.correlation_data.as_deref(),
-                        payload,
-                        ReplyKind::Read,
-                    )
-                    .await;
-                }
+                reply_read_error(client, &message, &vault_error_to_response(&vault_err)).await;
                 return;
             }
         }
@@ -334,25 +365,7 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
     );
 
     #[cfg(feature = "opentelemetry")]
-    let span = {
-        use opentelemetry::Context;
-        use opentelemetry::trace::{SpanContext, TraceContextExt, TraceState};
-        use tracing_opentelemetry::OpenTelemetrySpanExt;
-
-        let user_props: Vec<(String, String)> = message.properties.user_properties.clone();
-
-        if let Some(parent_cx) = propagation::extract_trace_context(&user_props) {
-            let parent = SpanContext::new(
-                parent_cx.trace_id(),
-                parent_cx.span_id(),
-                parent_cx.trace_flags(),
-                false,
-                TraceState::default(),
-            );
-            let _ = span.set_parent(Context::current().with_remote_span_context(parent));
-        }
-        span
-    };
+    let span = with_remote_parent(span, &message);
 
     let mut response = db
         .execute_with_sender(
@@ -360,7 +373,7 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
             sender_uid,
             mqtt_client_id,
             ownership,
-            scope_config,
+            ctx.scope_config,
             vault_constraint,
         )
         .instrument(span)
@@ -452,30 +465,21 @@ struct AdminContext<'a> {
     jti_revocation: Option<&'a Arc<crate::http::JtiRevocationStore>>,
 }
 
-#[allow(clippy::too_many_lines)]
+fn parse_admin_payload(message: &Message) -> Result<Value, Response> {
+    if message.payload.is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_slice(&message.payload)
+        .map_err(|e| Response::error(mqdb_core::ErrorCode::BadRequest, e.to_string()))
+}
+
 async fn handle_admin_operation(ctx: &AdminContext<'_>, op: AdminOperation) {
     let reply_kind = ReplyKind::from(&op);
-    let payload: Value = if ctx.message.payload.is_empty() {
-        Value::Null
-    } else {
-        match serde_json::from_slice(&ctx.message.payload) {
-            Ok(v) => v,
-            Err(e) => {
-                if let Some(response_topic) = &ctx.message.properties.response_topic {
-                    let response = Response::error(mqdb_core::ErrorCode::BadRequest, e.to_string());
-                    if let Ok(payload) = serde_json::to_vec(&response) {
-                        publish_response(
-                            ctx.client,
-                            response_topic,
-                            ctx.message.properties.correlation_data.as_deref(),
-                            payload,
-                            ReplyKind::Read,
-                        )
-                        .await;
-                    }
-                }
-                return;
-            }
+    let payload = match parse_admin_payload(ctx.message) {
+        Ok(v) => v,
+        Err(response) => {
+            reply_read_error(ctx.client, ctx.message, &response).await;
+            return;
         }
     };
 
@@ -1465,7 +1469,64 @@ async fn handle_password_change_mqtt(ctx: &AdminContext<'_>, payload: &Value) ->
 }
 
 #[cfg(feature = "http-api")]
-#[allow(clippy::too_many_lines)]
+fn reset_email_matches(
+    crypto: Option<&Arc<crate::http::IdentityCrypto>>,
+    identity: &Value,
+    email: &str,
+) -> bool {
+    let email_lower = email.to_lowercase();
+    if let Some(crypto) = crypto {
+        let computed = crypto.blind_index("_identities", &email_lower);
+        identity
+            .get("email_hash")
+            .and_then(|v| v.as_str())
+            .is_some_and(|stored| stored == computed)
+    } else {
+        identity
+            .get("primary_email")
+            .and_then(|v| v.as_str())
+            .is_some_and(|stored| stored.to_lowercase() == email_lower)
+    }
+}
+
+#[cfg(feature = "http-api")]
+async fn expire_open_challenges(db: &Database, target_hash: &str) {
+    match crate::db_helpers::list_entities_db(
+        db,
+        "_verification_challenges",
+        &format!("target_hash={target_hash}"),
+    )
+    .await
+    {
+        Ok(challenges) => {
+            for challenge in challenges {
+                let status = challenge
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if status != "pending" && status != "delivered" {
+                    continue;
+                }
+                if let Some(id) = challenge.get("id").and_then(|v| v.as_str())
+                    && let Err(e) = crate::db_helpers::update_entity_db(
+                        db,
+                        "_verification_challenges",
+                        id,
+                        &serde_json::json!({"status": "expired"}),
+                    )
+                    .await
+                {
+                    warn!("password reset start: failed to expire stale challenge {id}: {e}");
+                }
+            }
+        }
+        Err(e) => {
+            warn!("password reset start: failed to list existing challenges: {e}");
+        }
+    }
+}
+
+#[cfg(feature = "http-api")]
 async fn handle_password_reset_start_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Response {
     use serde_json::json;
 
@@ -1496,20 +1557,7 @@ async fn handle_password_reset_start_mqtt(ctx: &AdminContext<'_>, payload: &Valu
             }
         };
 
-    let email_lower = email.to_lowercase();
-    let email_matches = if let Some(crypto) = ctx.identity_crypto {
-        let computed = crypto.blind_index("_identities", &email_lower);
-        identity
-            .get("email_hash")
-            .and_then(|v| v.as_str())
-            .is_some_and(|stored| stored == computed)
-    } else {
-        identity
-            .get("primary_email")
-            .and_then(|v| v.as_str())
-            .is_some_and(|stored| stored.to_lowercase() == email_lower)
-    };
-    if !email_matches {
+    if !reset_email_matches(ctx.identity_crypto, &identity, email) {
         return Response::error(
             mqdb_core::ErrorCode::BadRequest,
             "email does not match identity",
@@ -1521,39 +1569,7 @@ async fn handle_password_reset_start_mqtt(ctx: &AdminContext<'_>, payload: &Valu
         email,
     );
 
-    match crate::db_helpers::list_entities_db(
-        ctx.db,
-        "_verification_challenges",
-        &format!("target_hash={target_hash}"),
-    )
-    .await
-    {
-        Ok(challenges) => {
-            for challenge in challenges {
-                let status = challenge
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if status != "pending" && status != "delivered" {
-                    continue;
-                }
-                if let Some(id) = challenge.get("id").and_then(|v| v.as_str())
-                    && let Err(e) = crate::db_helpers::update_entity_db(
-                        ctx.db,
-                        "_verification_challenges",
-                        id,
-                        &json!({"status": "expired"}),
-                    )
-                    .await
-                {
-                    warn!("password reset start: failed to expire stale challenge {id}: {e}");
-                }
-            }
-        }
-        Err(e) => {
-            warn!("password reset start: failed to list existing challenges: {e}");
-        }
-    }
+    expire_open_challenges(ctx.db, &target_hash).await;
 
     let challenge_id = crate::http::challenge_utils::uuid_v4();
     let Some(code) = crate::http::challenge_utils::generate_verification_code() else {
@@ -1615,63 +1631,88 @@ async fn handle_password_reset_start_mqtt(ctx: &AdminContext<'_>, payload: &Valu
 }
 
 #[cfg(feature = "http-api")]
-#[allow(clippy::too_many_lines)]
-async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Response {
-    use serde_json::json;
+struct ResetSubmission<'a> {
+    challenge_id: &'a str,
+    code: &'a str,
+    new_password: &'a str,
+}
 
-    let Some(canonical_id) = extract_sender(ctx.message) else {
-        return Response::error(mqdb_core::ErrorCode::Forbidden, "missing sender identity");
-    };
-
+#[cfg(feature = "http-api")]
+fn parse_reset_submission(payload: &Value) -> Result<ResetSubmission<'_>, Response> {
     let Some(challenge_id) = payload.get("challenge_id").and_then(|v| v.as_str()) else {
-        return Response::error(
+        return Err(Response::error(
             mqdb_core::ErrorCode::BadRequest,
             "missing challenge_id field",
-        );
+        ));
     };
 
-    let Some(submitted_code) = payload.get("code").and_then(|v| v.as_str()) else {
-        return Response::error(mqdb_core::ErrorCode::BadRequest, "missing code field");
+    let Some(code) = payload.get("code").and_then(|v| v.as_str()) else {
+        return Err(Response::error(
+            mqdb_core::ErrorCode::BadRequest,
+            "missing code field",
+        ));
     };
 
     let Some(new_password) = payload.get("new_password").and_then(|v| v.as_str()) else {
-        return Response::error(
+        return Err(Response::error(
             mqdb_core::ErrorCode::BadRequest,
             "missing new_password field",
-        );
+        ));
     };
 
     if let Err(e) = crate::http::credentials::validate_password(new_password) {
-        return Response::error(mqdb_core::ErrorCode::BadRequest, e);
+        return Err(Response::error(mqdb_core::ErrorCode::BadRequest, e));
     }
 
-    if !ctx.auth_rate_limiter.check_and_record(canonical_id) {
-        return Response::error(
-            mqdb_core::ErrorCode::RateLimited,
-            "too many attempts, try again later",
-        );
+    Ok(ResetSubmission {
+        challenge_id,
+        code,
+        new_password,
+    })
+}
+
+#[cfg(feature = "http-api")]
+async fn read_reset_challenge(db: &Database, challenge_id: &str) -> Result<Value, Response> {
+    match crate::db_helpers::read_entity_db(db, "_verification_challenges", challenge_id).await {
+        Ok(Some(v)) => Ok(v),
+        Ok(None) => Err(Response::error(
+            mqdb_core::ErrorCode::NotFound,
+            "challenge not found",
+        )),
+        Err(e) => {
+            warn!("password reset submit: failed to read challenge {challenge_id}: {e}");
+            Err(Response::error(
+                mqdb_core::ErrorCode::Internal,
+                "failed to read challenge",
+            ))
+        }
     }
+}
 
-    let challenge =
-        match crate::db_helpers::read_entity_db(ctx.db, "_verification_challenges", challenge_id)
-            .await
-        {
-            Ok(Some(v)) => v,
-            Ok(None) => {
-                return Response::error(mqdb_core::ErrorCode::NotFound, "challenge not found");
-            }
-            Err(e) => {
-                warn!("password reset submit: failed to read challenge {challenge_id}: {e}");
-                return Response::error(mqdb_core::ErrorCode::Internal, "failed to read challenge");
-            }
-        };
+#[cfg(feature = "http-api")]
+struct OpenChallenge<'a> {
+    status: &'a str,
+    attempts: u64,
+    max_attempts: u64,
+    code_hash: &'a str,
+}
 
+#[cfg(feature = "http-api")]
+async fn check_open_challenge<'a>(
+    db: &Database,
+    challenge: &'a Value,
+    challenge_id: &str,
+    canonical_id: &str,
+) -> Result<OpenChallenge<'a>, Response> {
     let purpose = challenge
         .get("purpose")
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if purpose != "password_reset" {
-        return Response::error(mqdb_core::ErrorCode::BadRequest, "invalid challenge type");
+        return Err(Response::error(
+            mqdb_core::ErrorCode::BadRequest,
+            "invalid challenge type",
+        ));
     }
 
     let challenge_canonical = challenge
@@ -1679,10 +1720,10 @@ async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Val
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if challenge_canonical != canonical_id {
-        return Response::error(
+        return Err(Response::error(
             mqdb_core::ErrorCode::Forbidden,
             "challenge belongs to another user",
-        );
+        ));
     }
 
     let status = challenge
@@ -1690,10 +1731,10 @@ async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Val
         .and_then(|v| v.as_str())
         .unwrap_or("");
     if status != "pending" && status != "delivered" {
-        return Response::error(
+        return Err(Response::error(
             mqdb_core::ErrorCode::BadRequest,
             "invalid or expired challenge",
-        );
+        ));
     }
 
     let expires_at = challenge
@@ -1704,16 +1745,19 @@ async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Val
     let now = crate::http::challenge_utils::now_unix();
     if expires_at > 0 && now >= expires_at {
         if let Err(e) = crate::db_helpers::update_entity_db(
-            ctx.db,
+            db,
             "_verification_challenges",
             challenge_id,
-            &json!({"status": "expired"}),
+            &serde_json::json!({"status": "expired"}),
         )
         .await
         {
             warn!("password reset submit: failed to mark challenge {challenge_id} expired: {e}");
         }
-        return Response::error(mqdb_core::ErrorCode::BadRequest, "challenge has expired");
+        return Err(Response::error(
+            mqdb_core::ErrorCode::BadRequest,
+            "challenge has expired",
+        ));
     }
 
     let attempts = challenge
@@ -1726,56 +1770,165 @@ async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Val
         .unwrap_or(5);
     if attempts >= max_attempts {
         if let Err(e) = crate::db_helpers::update_entity_db(
-            ctx.db,
+            db,
             "_verification_challenges",
             challenge_id,
-            &json!({"status": "failed"}),
+            &serde_json::json!({"status": "failed"}),
         )
         .await
         {
             warn!("password reset submit: failed to mark challenge {challenge_id} failed: {e}");
         }
-        return Response::error(mqdb_core::ErrorCode::BadRequest, "too many attempts");
+        return Err(Response::error(
+            mqdb_core::ErrorCode::BadRequest,
+            "too many attempts",
+        ));
     }
 
-    let new_attempts = attempts + 1;
-    let submitted_hash = crate::http::challenge_utils::hash_code(submitted_code);
-    let stored_hash = challenge
+    let code_hash = challenge
         .get("code_hash")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    if submitted_hash != stored_hash {
-        let new_status = if new_attempts >= max_attempts {
+    Ok(OpenChallenge {
+        status,
+        attempts,
+        max_attempts,
+        code_hash,
+    })
+}
+
+#[cfg(feature = "http-api")]
+async fn verify_reset_code(
+    db: &Database,
+    challenge_id: &str,
+    submitted_code: &str,
+    open: &OpenChallenge<'_>,
+) -> Result<(), Response> {
+    let new_attempts = open.attempts + 1;
+    let submitted_hash = crate::http::challenge_utils::hash_code(submitted_code);
+
+    if submitted_hash != open.code_hash {
+        let new_status = if new_attempts >= open.max_attempts {
             "failed"
         } else {
-            status
+            open.status
         };
         if let Err(e) = crate::db_helpers::update_entity_db(
-            ctx.db,
+            db,
             "_verification_challenges",
             challenge_id,
-            &json!({"attempts": new_attempts, "status": new_status}),
+            &serde_json::json!({"attempts": new_attempts, "status": new_status}),
         )
         .await
         {
             warn!("password reset submit: failed to record failed attempt on {challenge_id}: {e}");
         }
-        return Response::error(mqdb_core::ErrorCode::Unauthorized, "invalid code");
+        return Err(Response::error(
+            mqdb_core::ErrorCode::Unauthorized,
+            "invalid code",
+        ));
     }
 
     if let Err(e) = crate::db_helpers::update_entity_db(
-        ctx.db,
+        db,
         "_verification_challenges",
         challenge_id,
-        &json!({"status": "verified", "attempts": new_attempts}),
+        &serde_json::json!({"status": "verified", "attempts": new_attempts}),
     )
     .await
     {
         warn!("password reset submit: failed to mark challenge {challenge_id} verified: {e}");
     }
 
-    let new_hash = match crate::http::credentials::hash_password(new_password) {
+    Ok(())
+}
+
+#[cfg(feature = "http-api")]
+async fn store_reset_password(
+    db: &Database,
+    canonical_id: &str,
+    new_hash: &str,
+    target_hash: &str,
+) -> Result<(), Response> {
+    let existing_creds =
+        match crate::db_helpers::read_entity_db(db, "_credentials", canonical_id).await {
+            Ok(opt) => opt,
+            Err(e) => {
+                warn!("password reset submit: failed to read credentials {canonical_id}: {e}");
+                return Err(Response::error(
+                    mqdb_core::ErrorCode::Internal,
+                    "failed to read credentials",
+                ));
+            }
+        };
+    let stored = if existing_creds.is_some() {
+        crate::db_helpers::update_entity_db(
+            db,
+            "_credentials",
+            canonical_id,
+            &serde_json::json!({"password_hash": new_hash}),
+        )
+        .await
+        .map_err(|e| {
+            error!("password reset submit: failed to update credentials for {canonical_id}: {e}");
+            Response::error(mqdb_core::ErrorCode::Internal, "failed to update password")
+        })
+    } else {
+        create_or_update_credentials(db, canonical_id, new_hash, target_hash)
+            .await
+            .map_err(|e| {
+                error!(
+                    "password reset submit: failed to create credentials for {canonical_id}: {e}"
+                );
+                Response::error(
+                    mqdb_core::ErrorCode::Internal,
+                    "failed to create credentials",
+                )
+            })
+    };
+    stored.map(drop)
+}
+
+#[cfg(feature = "http-api")]
+async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Value) -> Response {
+    use serde_json::json;
+
+    let Some(canonical_id) = extract_sender(ctx.message) else {
+        return Response::error(mqdb_core::ErrorCode::Forbidden, "missing sender identity");
+    };
+
+    let submission = match parse_reset_submission(payload) {
+        Ok(s) => s,
+        Err(response) => return response,
+    };
+
+    if !ctx.auth_rate_limiter.check_and_record(canonical_id) {
+        return Response::error(
+            mqdb_core::ErrorCode::RateLimited,
+            "too many attempts, try again later",
+        );
+    }
+
+    let challenge = match read_reset_challenge(ctx.db, submission.challenge_id).await {
+        Ok(c) => c,
+        Err(response) => return response,
+    };
+
+    let open = match check_open_challenge(ctx.db, &challenge, submission.challenge_id, canonical_id)
+        .await
+    {
+        Ok(o) => o,
+        Err(response) => return response,
+    };
+
+    if let Err(response) =
+        verify_reset_code(ctx.db, submission.challenge_id, submission.code, &open).await
+    {
+        return response;
+    }
+
+    let new_hash = match crate::http::credentials::hash_password(submission.new_password) {
         Ok(h) => h,
         Err(e) => {
             error!("password hashing failed: {e}");
@@ -1788,37 +1941,9 @@ async fn handle_password_reset_submit_mqtt(ctx: &AdminContext<'_>, payload: &Val
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let existing_creds =
-        match crate::db_helpers::read_entity_db(ctx.db, "_credentials", canonical_id).await {
-            Ok(opt) => opt,
-            Err(e) => {
-                warn!("password reset submit: failed to read credentials {canonical_id}: {e}");
-                return Response::error(
-                    mqdb_core::ErrorCode::Internal,
-                    "failed to read credentials",
-                );
-            }
-        };
-    if existing_creds.is_some() {
-        if let Err(e) = crate::db_helpers::update_entity_db(
-            ctx.db,
-            "_credentials",
-            canonical_id,
-            &json!({"password_hash": new_hash}),
-        )
-        .await
-        {
-            error!("password reset submit: failed to update credentials for {canonical_id}: {e}");
-            return Response::error(mqdb_core::ErrorCode::Internal, "failed to update password");
-        }
-    } else if let Err(e) =
-        create_or_update_credentials(ctx.db, canonical_id, &new_hash, target_hash).await
+    if let Err(response) = store_reset_password(ctx.db, canonical_id, &new_hash, target_hash).await
     {
-        error!("password reset submit: failed to create credentials for {canonical_id}: {e}");
-        return Response::error(
-            mqdb_core::ErrorCode::Internal,
-            "failed to create credentials",
-        );
+        return response;
     }
 
     if let Err(e) = crate::db_helpers::update_entity_db(
