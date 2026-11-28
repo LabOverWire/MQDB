@@ -7,7 +7,7 @@ use crate::common::{
     parse_filters, send_request,
 };
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -289,22 +289,14 @@ pub(crate) async fn cmd_backup_create(
     let topic = "$DB/_admin/backup";
     let payload = json!({"name": name});
     let response = Box::pin(execute_request(conn, topic, payload)).await?;
-
-    let is_ok = response
-        .get("status")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|s| s == "ok");
-
-    if is_ok {
-        if let Some(data) = response.get("data")
-            && let Some(msg) = data.get("message").and_then(serde_json::Value::as_str)
-        {
-            println!("{msg}");
-        }
-    } else if let Some(error) = response.get("message").and_then(serde_json::Value::as_str) {
-        eprintln!("Error: {error}");
+    check_response_status(&response)?;
+    if let Some(msg) = response
+        .get("data")
+        .and_then(|data| data.get("message"))
+        .and_then(Value::as_str)
+    {
+        println!("{msg}");
     }
-
     Ok(())
 }
 
@@ -314,51 +306,29 @@ pub(crate) async fn cmd_backup_list(
     let topic = "$DB/_admin/backup/list";
     let payload = json!({});
     let response = Box::pin(execute_request(conn, topic, payload)).await?;
-
-    let is_ok = response
-        .get("status")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|s| s == "ok");
-
-    if is_ok {
-        if let Some(backups) = response.get("data").and_then(|v| v.as_array()) {
-            if backups.is_empty() {
-                println!("No backups found");
-            } else {
-                println!("Available backups:");
-                for backup in backups {
-                    if let Some(name) = backup.as_str() {
-                        println!("  {name}");
-                    }
-                }
-            }
+    check_response_status(&response)?;
+    let backups = response
+        .get("data")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if backups.is_empty() {
+        println!("No backups found");
+    } else {
+        println!("Available backups:");
+        for name in backups.iter().filter_map(Value::as_str) {
+            println!("  {name}");
         }
-    } else if let Some(error) = response.get("message").and_then(serde_json::Value::as_str) {
-        eprintln!("Error: {error}");
     }
-
     Ok(())
 }
 
-pub(crate) async fn cmd_restore(
-    name: &str,
-    conn: &ConnectionArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let topic = "$DB/_admin/restore";
-    let payload = json!({"name": name});
-    let response = Box::pin(execute_request(conn, topic, payload)).await?;
-
-    let is_ok = response
-        .get("status")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|s| s == "ok");
-
-    if is_ok {
-        println!("Restore initiated");
-    } else if let Some(error) = response.get("message").and_then(serde_json::Value::as_str) {
-        eprintln!("Error: {error}");
-    }
-
+pub(crate) fn cmd_restore(name: &str, db: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let restored = mqdb_agent::Database::restore_backup(db, name).map_err(|e| e.to_string())?;
+    println!(
+        "restored backup {name} into {} ({restored} files)",
+        db.display()
+    );
     Ok(())
 }
 

@@ -281,12 +281,20 @@ Examples:
         #[command(subcommand)]
         action: BackupAction,
     },
-    #[command(about = "Restore a database from a named backup")]
+    #[command(
+        about = "Restore an agent database from a named backup (agent must be stopped)",
+        after_long_help = "\
+Replaces the database at --db with the backup in <db>/backups/<name>.
+Other backups are kept. Stop the agent first; restore refuses a database in use.
+
+Example:
+  mqdb restore --db /var/lib/mqdb --name daily_backup"
+    )]
     Restore {
         #[arg(short, long, help = "Name of the backup to restore")]
         name: String,
-        #[command(flatten)]
-        conn: ConnectionArgs,
+        #[arg(long, env = "MQDB_DB", help = "Path to the agent database directory")]
+        db: PathBuf,
     },
     #[command(
         about = "Subscribe to entity change events",

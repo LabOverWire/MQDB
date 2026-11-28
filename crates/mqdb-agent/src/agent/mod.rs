@@ -62,7 +62,7 @@ impl MqdbAgent {
     #[must_use]
     pub fn new(db: Database) -> Self {
         let (shutdown_tx, _) = broadcast::channel(1);
-        let backup_dir = db.path().join("backups");
+        let backup_dir = db.path().join(crate::database::BACKUPS_DIR);
         Self {
             db: Arc::new(db),
             bind_address: SocketAddr::from(([127, 0, 0, 1], 1883)),

@@ -54,7 +54,7 @@ impl ClusteredAgent {
         } else if req.topic == "$DB/_admin/restore" {
             Response::error(
                 ErrorCode::BadRequest,
-                "restore requires agent restart - use CLI with --restore flag",
+                "restore is not supported in cluster mode",
             )
         } else if req.topic == "$DB/_admin/consumer-groups" {
             Self::handle_consumer_group_list()

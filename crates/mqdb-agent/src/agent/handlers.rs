@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use crate::database::Database;
+use crate::database::{Database, is_valid_backup_name};
 use crate::response_limit::{ReplyKind, publish_reply};
 use crate::vault_backend::{VaultBackend, VaultError};
 use mqdb_core::constraint::Constraint;
@@ -488,8 +488,8 @@ async fn handle_admin_operation(ctx: &AdminContext<'_>, op: AdminOperation) {
         AdminOperation::ConstraintList { entity } => handle_constraint_list(ctx.db, &entity).await,
         AdminOperation::Backup => handle_backup(ctx.db, &payload, ctx.backup_dir).await,
         AdminOperation::Restore => Response::error(
-            mqdb_core::ErrorCode::Internal,
-            "restore requires agent restart - use CLI with --restore flag",
+            mqdb_core::ErrorCode::BadRequest,
+            "restore runs offline: stop the agent, then run mqdb restore --db <path> --name <backup>",
         ),
         AdminOperation::BackupList => handle_backup_list(ctx.backup_dir).await,
         AdminOperation::Subscribe => {
@@ -970,16 +970,6 @@ fn handle_health(db: &Database) -> Response {
             "partitions": db.num_partitions()
         }
     }))
-}
-
-fn is_valid_backup_name(name: &str) -> bool {
-    !name.is_empty()
-        && !name.contains('/')
-        && !name.contains('\\')
-        && !name.contains("..")
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 fn no_auth_response() -> Response {

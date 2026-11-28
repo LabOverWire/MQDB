@@ -9,6 +9,7 @@ mod schema_ops;
 mod sharing;
 mod subscriptions;
 
+pub(crate) use backup::{BACKUPS_DIR, is_valid_backup_name};
 pub use crud::{CallerContext, DerivedAccess, UpdatePrecondition};
 pub(crate) use query::{ListQuery, RowScope};
 pub use sharing::{GranteeIdentity, ShareActor};
