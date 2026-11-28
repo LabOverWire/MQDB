@@ -143,10 +143,13 @@ impl<T: ClusterTransport> NodeController<T> {
     async fn send_to_replicas(&mut self, write: &ReplicationWrite, replicas: &[NodeId]) {
         self.remember_unanswered(write, replicas);
         for &replica in replicas {
-            let _ = self
+            if let Err(e) = self
                 .transport
                 .send(replica, ClusterMessage::Write(write.clone()))
-                .await;
+                .await
+            {
+                tracing::debug!(replica = replica.get(), %e, "replication write not sent");
+            }
         }
     }
 
@@ -244,10 +247,13 @@ impl<T: ClusterTransport> NodeController<T> {
 
         self.remember_unanswered(&write_msg, replicas);
         for &replica in replicas {
-            let _ = self
+            if let Err(e) = self
                 .transport
                 .send(replica, ClusterMessage::Write(write_msg.clone()))
-                .await;
+                .await
+            {
+                tracing::debug!(replica = replica.get(), %e, "replication write not sent");
+            }
         }
         let t_send = super::elapsed_micros(start);
 

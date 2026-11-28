@@ -96,7 +96,9 @@ impl<T: ClusterTransport> NodeController<T> {
             self.refused_while_primary.insert(partition);
         }
 
-        let _ = self.transport.send(from, ClusterMessage::Ack(ack)).await;
+        if let Err(e) = self.transport.send(from, ClusterMessage::Ack(ack)).await {
+            tracing::debug!(to = from.get(), %e, "replication ack not sent");
+        }
     }
 
     pub(crate) async fn handle_write_request(&mut self, from: NodeId, write: ReplicationWrite) {
@@ -392,10 +394,13 @@ impl<T: ClusterTransport> NodeController<T> {
         }
 
         for &replica in replicas {
-            let _ = self
+            if let Err(e) = self
                 .transport
                 .send(replica, ClusterMessage::Write(write_msg.clone()))
-                .await;
+                .await
+            {
+                tracing::debug!(replica = replica.get(), %e, "replication write not sent");
+            }
         }
 
         Ok(sequence)
