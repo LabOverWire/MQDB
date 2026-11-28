@@ -133,3 +133,33 @@ async fn restore_refuses_a_cluster_node_database() {
     assert!(err.to_string().contains("cluster node"), "{err}");
     assert!(db_path.join("raft").is_dir());
 }
+
+#[tokio::test]
+async fn an_interrupted_restore_blocks_opening_until_restore_runs_again() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("db");
+    drop(backed_up_database(&db_path, "snap").await);
+    for entry in std::fs::read_dir(&db_path).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        if name == "lock" || name == "backups" {
+            continue;
+        }
+        if entry.file_type().unwrap().is_dir() {
+            std::fs::remove_dir_all(entry.path()).unwrap();
+        } else {
+            std::fs::remove_file(entry.path()).unwrap();
+        }
+    }
+    std::fs::create_dir(db_path.join(".restore-staging")).unwrap();
+
+    let refused = Database::open_without_background_tasks(&db_path).await;
+    let message = refused.err().map(|e| e.to_string()).unwrap_or_default();
+    assert!(message.contains("did not finish"), "{message}");
+
+    Database::restore_backup(&db_path, "snap").unwrap();
+    let db = Database::open_without_background_tasks(&db_path)
+        .await
+        .unwrap();
+    assert!(user_exists(&db, "alice").await);
+}

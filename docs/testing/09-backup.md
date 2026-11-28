@@ -50,9 +50,13 @@ restored backup my-snapshot into ./data/testdb (N files)
 ```
 
 Start the agent again on the same `--db`; records match the time of the backup and every backup
-is still listed. With the agent still running, restore fails with
+is still listed. With the agent still running, restore fails with an error that includes
 `database at ./data/testdb is in use: stop the agent before restoring` and changes nothing.
 A cluster node database is refused. The `$DB/_admin/restore` endpoint is not served online.
+
+If a restore is interrupted (killed or out of disk), the agent refuses to open the database with
+`a restore into ./data/testdb did not finish: run mqdb restore again before starting the agent`.
+Running the same restore again finishes it.
 
 `mqdb backup create` and `mqdb backup list` connect to the broker (support `--broker`, `--user`,
 `--pass`, `--insecure` flags) and exit non-zero when the broker returns an error.

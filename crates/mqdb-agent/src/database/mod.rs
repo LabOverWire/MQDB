@@ -69,6 +69,7 @@ impl Database {
     }
 
     pub async fn open_with_config(config: DatabaseConfig) -> mqdb_core::error::Result<Self> {
+        backup::refuse_unfinished_restore(&config.path)?;
         let storage = if let Some(ref passphrase) = config.passphrase {
             Arc::new(Storage::open_encrypted(
                 &config.path,
@@ -123,25 +124,19 @@ impl Database {
             entity_names.insert(name);
         }
         let persisted = storage
-            .get(ENTITY_NAMES_KEY)
-            .ok()
-            .flatten()
+            .get(ENTITY_NAMES_KEY)?
             .and_then(|bytes| serde_json::from_slice::<HashSet<String>>(&bytes).ok());
         if let Some(names) = persisted {
-            for name in names {
-                entity_names.insert(name);
-            }
-        } else if let Ok(keys) = storage.prefix_scan_keys(b"data/") {
-            for key in keys {
+            entity_names.extend(names);
+        } else {
+            for key in storage.prefix_scan_keys(b"data/")? {
                 if let Ok((entity, _)) = mqdb_core::keys::decode_data_key(&key)
                     && !entity.starts_with('_')
                 {
                     entity_names.insert(entity);
                 }
             }
-            if let Ok(bytes) = serde_json::to_vec(&entity_names) {
-                let _ = storage.insert(ENTITY_NAMES_KEY, &bytes);
-            }
+            storage.insert(ENTITY_NAMES_KEY, &serde_json::to_vec(&entity_names)?)?;
         }
         let entity_names = Arc::new(RwLock::new(entity_names));
 

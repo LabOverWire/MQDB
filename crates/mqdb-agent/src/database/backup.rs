@@ -14,6 +14,16 @@ const RESTORE_STAGING_DIR: &str = ".restore-staging";
 const CLUSTER_NODE_DIRS: [&str; 2] = ["stores", "raft"];
 const KEPT_ON_RESTORE: [&str; 3] = [LOCK_FILE, BACKUPS_DIR, RESTORE_STAGING_DIR];
 
+pub(crate) fn refuse_unfinished_restore(db_path: &Path) -> Result<()> {
+    if db_path.join(RESTORE_STAGING_DIR).exists() {
+        return Err(Error::BackupFailed(format!(
+            "a restore into {} did not finish: run mqdb restore again before starting the agent",
+            db_path.display()
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn is_valid_backup_name(name: &str) -> bool {
     !name.is_empty()
         && name
