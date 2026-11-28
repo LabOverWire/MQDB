@@ -17,6 +17,28 @@ pub enum OnDeleteAction {
     SetNull,
 }
 
+fn name_part(part: &str) -> String {
+    part.replace('%', "%25").replace('_', "%5F")
+}
+
+fn unique_name(entity: &str, fields: &[String]) -> String {
+    let fields: Vec<String> = fields.iter().map(|f| name_part(f)).collect();
+    format!("{}_{}_unique", name_part(entity), fields.join("_"))
+}
+
+fn foreign_key_name(source_entity: &str, source_field: &str, target_entity: &str) -> String {
+    format!(
+        "{}_{}_{}_fk",
+        name_part(source_entity),
+        name_part(source_field),
+        name_part(target_entity)
+    )
+}
+
+fn not_null_name(entity: &str, field: &str) -> String {
+    format!("{}_{}_notnull", name_part(entity), name_part(field))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UniqueConstraint {
     pub entity: String,
@@ -27,7 +49,7 @@ pub struct UniqueConstraint {
 impl UniqueConstraint {
     pub fn new(entity: impl Into<String>, fields: Vec<String>) -> Self {
         let entity = entity.into();
-        let name = format!("{}_{}_unique", entity, fields.join("_"));
+        let name = unique_name(&entity, &fields);
         Self {
             entity,
             fields,
@@ -58,7 +80,7 @@ impl ForeignKeyConstraint {
         let source_field = source_field.into();
         let target_entity = target_entity.into();
         let target_field = target_field.into();
-        let name = format!("{source_entity}_{source_field}_{target_entity}_fk");
+        let name = foreign_key_name(&source_entity, &source_field, &target_entity);
         Self {
             source_entity,
             source_field,
@@ -81,7 +103,7 @@ impl NotNullConstraint {
     pub fn new(entity: impl Into<String>, field: impl Into<String>) -> Self {
         let entity = entity.into();
         let field = field.into();
-        let name = format!("{entity}_{field}_notnull");
+        let name = not_null_name(&entity, &field);
         Self {
             entity,
             field,
@@ -104,6 +126,17 @@ impl Constraint {
             Constraint::Unique(c) => &c.name,
             Constraint::ForeignKey(c) => &c.name,
             Constraint::NotNull(c) => &c.name,
+        }
+    }
+
+    #[must_use]
+    pub fn derived_name(&self) -> String {
+        match self {
+            Constraint::Unique(c) => unique_name(&c.entity, &c.fields),
+            Constraint::ForeignKey(c) => {
+                foreign_key_name(&c.source_entity, &c.source_field, &c.target_entity)
+            }
+            Constraint::NotNull(c) => not_null_name(&c.entity, &c.field),
         }
     }
 
@@ -193,7 +226,7 @@ pub struct ConstraintManager {
 }
 
 impl ConstraintManager {
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
     pub fn new() -> Self {
         Self {
             constraints: HashMap::new(),
@@ -384,7 +417,6 @@ impl ConstraintManager {
             .is_some_and(|field_def| field_def.field_type != crate::schema::FieldType::Null)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn collect_delete_operations(
         &self,
         entity: &Entity,
@@ -757,6 +789,21 @@ mod tests {
         let not_null = NotNullConstraint::new("users", "email");
         assert_eq!(not_null.entity, "users");
         assert_eq!(not_null.field, "email");
+    }
+
+    #[test]
+    fn distinct_constraints_get_distinct_names() {
+        let single = UniqueConstraint::new("items", vec!["a_b".into()]);
+        let pair = UniqueConstraint::new("items", vec!["a".into(), "b".into()]);
+        assert_ne!(single.name, pair.name);
+
+        let fk_one = ForeignKeyConstraint::new("items", "x_y", "z", "id", OnDeleteAction::Restrict);
+        let fk_two = ForeignKeyConstraint::new("items", "x", "y_z", "id", OnDeleteAction::Restrict);
+        assert_ne!(fk_one.name, fk_two.name);
+
+        let not_null_one = NotNullConstraint::new("a_b", "c");
+        let not_null_two = NotNullConstraint::new("a", "b_c");
+        assert_ne!(not_null_one.name, not_null_two.name);
     }
 
     #[test]
