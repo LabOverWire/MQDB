@@ -202,7 +202,7 @@ meta/index/users                                     → Users index definition
 meta/constraint/fk/posts/posts_author%5Fid_users_fk  → Foreign key constraint
 ```
 
-Agent constraint names join the entity, field and target names with `_`, and write `_` inside a name as `%5F` (and `%` as `%25`), so two different constraints never share a name. Constraints stored by older versions keep the name they were stored under.
+Agent constraint names join the entity, field and target names with `_`, and write `_` inside a name as `%5F` (and `%` as `%25`), so two different constraints never share a name. Opening a database renames constraints stored by older versions to this form, so the foreign key above, stored as `posts_author_id_users_fk`, becomes `posts_author%5Fid_users_fk`.
 
 ---
 

@@ -276,11 +276,7 @@ fn refuse_conflicting(
     use mqdb_core::error::Error;
 
     let existing = manager.get_constraints(constraint.entity());
-    let derived_name = constraint.derived_name();
-    if existing
-        .iter()
-        .any(|c| c.name() == constraint.name() || c.derived_name() == derived_name)
-    {
+    if existing.iter().any(|c| c.name() == constraint.name()) {
         return Err(Error::AlreadyExists {
             entity: constraint.entity().to_string(),
             id: constraint.name().to_string(),
@@ -704,7 +700,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn constraint_stored_under_legacy_name_loads_and_refuses_a_duplicate() {
+    async fn constraint_stored_under_legacy_name_is_renamed_and_refuses_a_duplicate() {
         let backend = Arc::new(MemoryBackend::new());
         let legacy = json!({"ForeignKey": {
             "source_entity": "posts",
@@ -714,17 +710,30 @@ mod tests {
             "on_delete": "Cascade",
             "name": "posts_author_id_users_fk"
         }});
+        let legacy_key = keys::encode_constraint_key("fk", "posts", "posts_author_id_users_fk");
         backend
-            .insert(
-                &keys::encode_constraint_key("fk", "posts", "posts_author_id_users_fk"),
-                &serde_json::to_vec(&legacy).unwrap(),
-            )
+            .insert(&legacy_key, &serde_json::to_vec(&legacy).unwrap())
             .unwrap();
 
-        let db = open_memory_db(backend).await;
+        let db = open_memory_db(Arc::clone(&backend)).await;
         assert_eq!(
             foreign_key_targets(&db.list_constraints("posts").await),
             vec![("author_id".to_string(), "users".to_string())]
+        );
+        assert_eq!(
+            (
+                backend.get(&legacy_key).unwrap().is_some(),
+                backend
+                    .get(&keys::encode_constraint_key(
+                        "fk",
+                        "posts",
+                        "posts_author%5Fid_users_fk"
+                    ))
+                    .unwrap()
+                    .is_some()
+            ),
+            (false, true),
+            "legacy key, renamed key"
         );
 
         let refused = db
@@ -741,5 +750,36 @@ mod tests {
             "re-adding a constraint stored under its legacy name must be refused, got {refused:?}"
         );
         assert_eq!(db.list_constraints("posts").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_legacy_name_does_not_block_the_constraint_that_now_owns_it() {
+        let backend = Arc::new(MemoryBackend::new());
+        let legacy = json!({"Unique": {
+            "entity": "items",
+            "fields": ["a_b"],
+            "name": "items_a_b_unique"
+        }});
+        backend
+            .insert(
+                &keys::encode_constraint_key("unique", "items", "items_a_b_unique"),
+                &serde_json::to_vec(&legacy).unwrap(),
+            )
+            .unwrap();
+
+        let db = open_memory_db(Arc::clone(&backend)).await;
+        db.add_unique_constraint("items".to_string(), vec!["a".to_string(), "b".to_string()])
+            .await
+            .unwrap();
+        drop(db);
+
+        let reopened = open_memory_db(backend).await;
+        assert_eq!(
+            unique_field_sets(&reopened.list_constraints("items").await),
+            vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["a_b".to_string()],
+            ]
+        );
     }
 }

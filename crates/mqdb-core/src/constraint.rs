@@ -130,13 +130,19 @@ impl Constraint {
     }
 
     #[must_use]
-    pub fn derived_name(&self) -> String {
+    pub fn with_derived_name(self) -> Self {
         match self {
-            Constraint::Unique(c) => unique_name(&c.entity, &c.fields),
-            Constraint::ForeignKey(c) => {
-                foreign_key_name(&c.source_entity, &c.source_field, &c.target_entity)
+            Constraint::Unique(c) => Constraint::Unique(UniqueConstraint::new(c.entity, c.fields)),
+            Constraint::ForeignKey(c) => Constraint::ForeignKey(ForeignKeyConstraint::new(
+                c.source_entity,
+                c.source_field,
+                c.target_entity,
+                c.target_field,
+                c.on_delete,
+            )),
+            Constraint::NotNull(c) => {
+                Constraint::NotNull(NotNullConstraint::new(c.entity, c.field))
             }
-            Constraint::NotNull(c) => not_null_name(&c.entity, &c.field),
         }
     }
 
@@ -724,17 +730,23 @@ impl ConstraintManager {
     }
 
     /// # Errors
-    /// Returns an error if reading or deserializing constraints fails.
+    /// Returns an error if reading, deserializing or renaming constraints fails.
     pub fn load_constraints(&mut self, storage: &Storage) -> Result<()> {
         let prefix = b"meta/constraint/";
         let items = storage.prefix_scan(prefix)?;
+        let mut renames = storage.batch();
 
-        for (_key, value) in items {
-            let constraint: Constraint = serde_json::from_slice(&value)?;
+        for (key, value) in items {
+            let stored: Constraint = serde_json::from_slice(&value)?;
+            let constraint = stored.clone().with_derived_name();
+            if constraint.name() != stored.name() {
+                renames.remove(key);
+                self.persist_constraint(&mut renames, &constraint)?;
+            }
             self.add_constraint(constraint);
         }
 
-        Ok(())
+        renames.commit()
     }
 
     #[must_use]
