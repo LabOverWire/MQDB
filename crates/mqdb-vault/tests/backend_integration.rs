@@ -236,6 +236,69 @@ async fn hot_path_encrypts_create_and_decrypts_read() {
     assert_eq!(decrypted["body"], "secret");
 }
 
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs()
+}
+
+#[tokio::test]
+async fn vault_create_with_ttl_secs_stores_a_plain_expiry() {
+    let (_td, db, ownership, backend) = setup(0).await;
+    seed_identity(&db, "u1").await;
+    backend
+        .admin_enable(&db, &ownership, "u1", "pw")
+        .await
+        .expect("enable");
+
+    let req = Request::Create {
+        entity: "notes".to_string(),
+        data: json!({"id": "note-ttl", "userId": "u1", "title": "t", "ttl_secs": 5}),
+    };
+    let before = unix_now_secs();
+    let (encrypted_req, vault_constraint) = backend
+        .encrypt_request(&db, "notes", &ownership, Some("u1"), req)
+        .await
+        .expect("encrypt_request");
+
+    let scope = ScopeConfig::default();
+    let response = db
+        .execute_with_sender(
+            encrypted_req,
+            Some("u1"),
+            None,
+            &ownership,
+            &scope,
+            vault_constraint,
+        )
+        .await;
+    assert!(
+        matches!(response, Response::Ok { .. }),
+        "create failed: {response:?}"
+    );
+    let after = unix_now_secs();
+
+    let stored = db
+        .read("notes".to_string(), "note-ttl".to_string(), vec![], None)
+        .await
+        .expect("read raw");
+    assert_ne!(
+        stored["title"], "t",
+        "vault must encrypt the title: {stored}"
+    );
+    assert!(stored.get("ttl_secs").is_none(), "stored: {stored}");
+    let expires_at = stored["_expires_at"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("no numeric _expires_at in {stored}"));
+    assert!(
+        (before + 5..=after + 5).contains(&expires_at),
+        "expires_at {expires_at} outside [{}, {}]",
+        before + 5,
+        after + 5
+    );
+}
+
 #[tokio::test]
 async fn hot_path_skips_when_locked() {
     let (_td, db, ownership, backend) = setup(0).await;

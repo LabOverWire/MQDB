@@ -154,6 +154,21 @@ impl Database {
             .await
     }
 
+    pub fn resolve_ttl_expiry(mut data: Value) -> Result<Value> {
+        if let Value::Object(ref mut obj) = data
+            && let Some(ttl_secs) = obj.get("ttl_secs").and_then(Value::as_u64)
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| Error::SystemTime(format!("failed to get system time: {e}")))?
+                .as_secs();
+            let expires_at = now.saturating_add(ttl_secs);
+            obj.insert("_expires_at".to_string(), Value::Number(expires_at.into()));
+            obj.remove("ttl_secs");
+        }
+        Ok(data)
+    }
+
     async fn insert_new_record(
         &self,
         entity_name: String,
@@ -172,17 +187,7 @@ impl Database {
             generated
         };
 
-        if let Value::Object(ref mut obj) = data
-            && let Some(ttl_secs) = obj.get("ttl_secs").and_then(Value::as_u64)
-        {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|e| Error::SystemTime(format!("failed to get system time: {e}")))?
-                .as_secs();
-            let expires_at = now.saturating_add(ttl_secs);
-            obj.insert("_expires_at".to_string(), Value::Number(expires_at.into()));
-            obj.remove("ttl_secs");
-        }
+        let mut data = Self::resolve_ttl_expiry(data)?;
 
         if let Value::Object(ref mut obj) = data {
             obj.remove("_version");
@@ -197,7 +202,7 @@ impl Database {
 
         let constraint_entity = if let Some(mut cd) = constraint_data {
             let schema_registry = self.schema_registry.read().await;
-            let _ = schema_registry.apply_defaults(&entity_name, &mut cd);
+            schema_registry.apply_defaults(&entity_name, &mut cd)?;
             drop(schema_registry);
             if let Value::Object(ref mut obj) = cd {
                 if !obj.contains_key("id") {
