@@ -2222,7 +2222,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unshare_whose_grantee_lookup_fails_is_refused() {
+    async fn a_share_or_unshare_whose_grantee_lookup_fails_is_refused() {
         use super::resolve_share_request;
         use mqdb_core::transport::{Request, Response};
         use std::sync::Arc;
@@ -2241,7 +2241,7 @@ mod tests {
         let crypto = Arc::new(crypto);
         backend.failing.store(true, Ordering::SeqCst);
 
-        let refused = resolve_share_request(
+        let unshare = resolve_share_request(
             &db,
             Some(&crypto),
             Request::Unshare {
@@ -2253,10 +2253,25 @@ mod tests {
             },
         )
         .await;
+        let share = resolve_share_request(
+            &db,
+            Some(&crypto),
+            Request::Share {
+                entity: "diagrams".into(),
+                id: "d1".into(),
+                grantee: "bob@example.com".into(),
+                grantee_key: None,
+                grantee_email: None,
+                permission: "view".into(),
+                cascade: false,
+            },
+        )
+        .await;
 
         assert!(
-            matches!(refused, Err(Response::Error { code: 500, .. })),
-            "got {refused:?}"
+            matches!(unshare, Err(Response::Error { code: 500, .. }))
+                && matches!(share, Err(Response::Error { code: 500, .. })),
+            "unshare {unshare:?}, share {share:?}"
         );
     }
 
