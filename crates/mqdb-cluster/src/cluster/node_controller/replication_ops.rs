@@ -10,7 +10,7 @@ use super::super::transport::{ClusterMessage, ClusterTransport};
 use super::super::{Epoch, NodeId, PartitionAssignment, PartitionId, PartitionMap};
 use super::{
     HELD_WRITE_CAPACITY, HELD_WRITE_TIMEOUT, HeldWrite, NodeController, NodeStatus,
-    ReplicationError, WRITE_COUNTER, WRITE_RECEIVED, WRITE_REQUEST_SENT,
+    ReplicationError, SupersededPrimaryWrite, WRITE_COUNTER, WRITE_RECEIVED, WRITE_REQUEST_SENT,
 };
 use std::sync::atomic::Ordering as AtomicOrdering;
 
@@ -81,8 +81,19 @@ impl<T: ClusterTransport> NodeController<T> {
                 from = from.get(),
                 "not a replica for partition, rejecting write"
             );
-            ReplicationAck::not_replica(partition, self.node_id)
+            ReplicationAck::not_replica(partition, write.sequence, self.node_id)
         };
+        if ack.status() == Some(protocol::AckStatus::NotReplica)
+            && self.role(partition) == ReplicaRole::Primary
+        {
+            tracing::warn!(
+                ?partition,
+                from = from.get(),
+                epoch = ?write.epoch,
+                "refused a replication write while primary for the partition"
+            );
+            self.refused_while_primary.insert(partition);
+        }
 
         let _ = self.transport.send(from, ClusterMessage::Ack(ack)).await;
     }
@@ -249,8 +260,22 @@ impl<T: ClusterTransport> NodeController<T> {
             self.handle_sequence_gap_ack(&ack).await;
         }
 
+        match ack.status() {
+            Some(protocol::AckStatus::StaleEpoch) => {
+                self.note_replica_answer(&ack);
+                self.keep_superseded_write(&ack);
+            }
+            Some(protocol::AckStatus::Ok | protocol::AckStatus::NotReplica) => {
+                self.note_replica_answer(&ack);
+            }
+            Some(protocol::AckStatus::SequenceGap) | None => {}
+        }
+
         for (partition, seq, result) in self.pending.drain_completed() {
             self.on_write_complete(partition, seq, result);
+        }
+        if self.has_handoff_work() {
+            Box::pin(self.settle_handoff()).await;
         }
     }
 
@@ -457,7 +482,12 @@ impl<T: ClusterTransport> NodeController<T> {
                     ReplicaRole::Primary | ReplicaRole::Replica
                 ) {
                     let sequence = self.sequence(partition).unwrap_or(0);
+                    let demoted = self.role(partition) == ReplicaRole::Primary;
                     self.become_replica(partition, new_assignment.epoch, sequence);
+                    if demoted && self.holds_unconfirmed_writes(partition, sequence) {
+                        self.resync_after_demotion.insert(partition, sequence);
+                    }
+                    self.refused_while_primary.remove(&partition);
                 } else if let Some(primary) = new_assignment.primary {
                     self.become_replica_with_snapshot(partition, new_assignment.epoch, primary)
                         .await;
@@ -466,6 +496,7 @@ impl<T: ClusterTransport> NodeController<T> {
             } else {
                 self.step_down(partition);
                 self.forget_change_events(partition);
+                self.refused_while_primary.remove(&partition);
             }
             changes += 1;
             if changes.is_multiple_of(8) {
@@ -476,7 +507,142 @@ impl<T: ClusterTransport> NodeController<T> {
         self.update_partition_map(raft_map);
         self.release_held_writes().await;
         self.serve_deferred_snapshots().await;
+        if self.has_handoff_work() {
+            Box::pin(self.settle_handoff()).await;
+        }
         became_primary | std::mem::take(&mut self.primary_taken_after_wait)
+    }
+
+    fn holds_unconfirmed_writes(&self, partition: PartitionId, own_sequence: u64) -> bool {
+        self.refused_while_primary.contains(&partition)
+            || self.awaits_answers(partition, own_sequence)
+            || self.holds_superseded(partition)
+    }
+
+    fn awaits_answers(&self, partition: PartitionId, own_sequence: u64) -> bool {
+        self.replica_answered
+            .get(&partition)
+            .is_none_or(|answered| *answered < own_sequence)
+    }
+
+    fn holds_superseded(&self, partition: PartitionId) -> bool {
+        self.superseded_writes
+            .iter()
+            .any(|entry| entry.write.partition == partition)
+    }
+
+    fn note_replica_answer(&mut self, ack: &ReplicationAck) {
+        let sequence = ack.sequence();
+        if sequence == 0 {
+            return;
+        }
+        let answered = self.replica_answered.entry(ack.partition()).or_insert(0);
+        *answered = (*answered).max(sequence);
+    }
+
+    fn keep_superseded_write(&mut self, ack: &ReplicationAck) {
+        let partition = ack.partition();
+        let sequence = ack.sequence();
+        if sequence == 0 {
+            return;
+        }
+        let Some(mut write) = self
+            .write_log
+            .get_range(partition, sequence, sequence)
+            .into_iter()
+            .find(|write| write.epoch < ack.epoch())
+        else {
+            return;
+        };
+        if self.superseded_writes.iter().any(|entry| {
+            entry.write.partition == partition
+                && entry.write.sequence == sequence
+                && entry.write.epoch == write.epoch
+        }) {
+            return;
+        }
+        write.event = None;
+        if self.superseded_writes.len() >= HELD_WRITE_CAPACITY
+            && let Some(dropped) = self.superseded_writes.pop_front()
+        {
+            tracing::warn!(
+                partition = ?dropped.write.partition,
+                entity = %dropped.write.entity,
+                id = %dropped.write.id,
+                "dropping a write refused by a newer primary: too many waiting"
+            );
+        }
+        self.superseded_writes.push_back(SupersededPrimaryWrite {
+            write,
+            superseded_at: ack.epoch(),
+        });
+    }
+
+    fn has_handoff_work(&self) -> bool {
+        !self.superseded_writes.is_empty() || !self.resync_after_demotion.is_empty()
+    }
+
+    async fn settle_handoff(&mut self) {
+        self.forward_superseded_writes().await;
+        self.start_due_resyncs().await;
+    }
+
+    async fn forward_superseded_writes(&mut self) {
+        let waiting = std::mem::take(&mut self.superseded_writes);
+        for entry in waiting {
+            let partition = entry.write.partition;
+            if !self.is_primary_for_partition(partition) {
+                tracing::info!(
+                    ?partition,
+                    entity = %entry.write.entity,
+                    id = %entry.write.id,
+                    "forwarding a write a newer primary refused to the current primary"
+                );
+                if let Err(e) = self
+                    .write_or_forward_with_event(entry.write, None, &[])
+                    .await
+                {
+                    tracing::warn!(?partition, %e, "refused write not forwarded");
+                }
+            } else if self.partition_map.get(partition).epoch >= entry.superseded_at {
+                tracing::warn!(
+                    ?partition,
+                    entity = %entry.write.entity,
+                    id = %entry.write.id,
+                    "a replica refused a write at an epoch this node is still primary for"
+                );
+            } else {
+                self.superseded_writes.push_back(entry);
+            }
+        }
+    }
+
+    async fn start_due_resyncs(&mut self) {
+        let waiting = std::mem::take(&mut self.resync_after_demotion);
+        for (partition, own_sequence) in waiting {
+            if self.awaits_answers(partition, own_sequence) || self.holds_superseded(partition) {
+                self.resync_after_demotion.insert(partition, own_sequence);
+                continue;
+            }
+            if self.role(partition) != ReplicaRole::Replica {
+                continue;
+            }
+            let Some(primary) = self
+                .partition_map
+                .primary(partition)
+                .filter(|primary| *primary != self.node_id)
+            else {
+                continue;
+            };
+            let epoch = self.partition_map.get(partition).epoch;
+            tracing::info!(
+                ?partition,
+                primary = primary.get(),
+                "resyncing a demoted primary that held unconfirmed writes"
+            );
+            self.become_replica_with_snapshot(partition, epoch, primary)
+                .await;
+        }
     }
 
     fn waiting_to_take(&self, partition: PartitionId) -> bool {

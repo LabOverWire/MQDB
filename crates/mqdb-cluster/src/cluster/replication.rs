@@ -104,11 +104,20 @@ impl ReplicaState {
 
     pub fn handle_write(&mut self, write: &ReplicationWrite) -> ReplicationAck {
         if self.role == ReplicaRole::None || self.role == ReplicaRole::AwaitingSnapshot {
-            return ReplicationAck::not_replica(self.partition, self.node_id);
+            return ReplicationAck::not_replica(self.partition, write.sequence, self.node_id);
         }
 
         if write.epoch < self.epoch {
-            return ReplicationAck::stale_epoch(self.partition, self.epoch, self.node_id);
+            return ReplicationAck::stale_epoch(
+                self.partition,
+                self.epoch,
+                write.sequence,
+                self.node_id,
+            );
+        }
+
+        if self.role == ReplicaRole::Primary {
+            return ReplicationAck::not_replica(self.partition, write.sequence, self.node_id);
         }
 
         if write.epoch > self.epoch {
@@ -280,6 +289,46 @@ mod tests {
         let ack = state.handle_write(&write(3, 11));
         assert_eq!(ack.status(), Some(AckStatus::StaleEpoch));
         assert_eq!(ack.epoch(), Epoch::new(5));
+    }
+
+    #[test]
+    fn a_refusal_names_the_refused_sequence() {
+        let mut stale = ReplicaState::new(partition(), node());
+        stale.become_replica(Epoch::new(5), 10);
+        let mut absent = ReplicaState::new(partition(), node());
+
+        assert_eq!(
+            (
+                stale.handle_write(&write(3, 11)).sequence(),
+                absent.handle_write(&write(1, 7)).sequence()
+            ),
+            (11, 7)
+        );
+    }
+
+    #[test]
+    fn a_primary_refuses_a_replication_write_and_keeps_its_epoch_and_sequence() {
+        let mut state = ReplicaState::new(partition(), node());
+        state.become_primary(Epoch::new(1));
+        state.advance_sequence();
+
+        let newer = state.handle_write(&write(2, 1));
+        let same = state.handle_write(&write(1, 2));
+
+        assert_eq!(
+            (
+                newer.status(),
+                same.status(),
+                state.epoch(),
+                state.sequence()
+            ),
+            (
+                Some(AckStatus::NotReplica),
+                Some(AckStatus::NotReplica),
+                Epoch::new(1),
+                1
+            )
+        );
     }
 
     #[test]

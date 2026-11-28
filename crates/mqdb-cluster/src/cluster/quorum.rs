@@ -307,10 +307,11 @@ mod tests {
         )
     }
 
-    fn stale_ack(partition: u16, epoch: u64, node: u16) -> ReplicationAck {
+    fn stale_ack(partition: u16, epoch: u64, seq: u64, node: u16) -> ReplicationAck {
         ReplicationAck::stale_epoch(
             PartitionId::new(partition).unwrap(),
             Epoch::new(epoch),
+            seq,
             NodeId::validated(node).unwrap(),
         )
     }
@@ -348,7 +349,7 @@ mod tests {
         let replicas = nodes(&[2, 3]);
         let mut tracker = QuorumTracker::new(PartitionId::ZERO, 1, Epoch::new(1), &replicas, 1);
 
-        tracker.record_ack(&stale_ack(0, 5, 2));
+        tracker.record_ack(&stale_ack(0, 5, 1, 2));
         assert_eq!(tracker.current_result(), QuorumResult::Failed);
         assert!(tracker.saw_stale_epoch());
         assert_eq!(tracker.highest_epoch(), Epoch::new(5));
@@ -518,6 +519,7 @@ mod tests {
 
         pending.record_ack(&ReplicationAck::not_replica(
             PartitionId::ZERO,
+            1,
             NodeId::validated(2).unwrap(),
         ));
         let after_refusal = pending.drain_completed();
@@ -553,6 +555,7 @@ mod tests {
             QuorumTracker::new(PartitionId::ZERO, 1, Epoch::new(1), &nodes(&[2, 3]), 2);
         tracker.record_ack(&ReplicationAck::not_replica(
             PartitionId::ZERO,
+            1,
             NodeId::validated(2).unwrap(),
         ));
         tracker.record_ack(&ok_ack(0, 1, 1, 2));
@@ -564,6 +567,42 @@ mod tests {
                 tracker.pending_count()
             ),
             (1, 0, 1)
+        );
+    }
+
+    #[test]
+    fn refusals_that_name_the_write_complete_its_tracker() {
+        let mut pending = PendingWrites::new(10);
+        for sequence in [4, 5] {
+            pending
+                .add(QuorumTracker::new(
+                    PartitionId::ZERO,
+                    sequence,
+                    Epoch::new(1),
+                    &nodes(&[2]),
+                    1,
+                ))
+                .unwrap();
+        }
+
+        pending.record_ack(&ReplicationAck::not_replica(
+            PartitionId::ZERO,
+            4,
+            NodeId::validated(2).unwrap(),
+        ));
+        pending.record_ack(&stale_ack(0, 2, 5, 2));
+        let mut completed = pending.drain_completed();
+        completed.sort_by_key(|(_, sequence, _)| *sequence);
+
+        assert_eq!(
+            (completed, pending.is_empty()),
+            (
+                vec![
+                    (PartitionId::ZERO, 4, QuorumResult::Failed),
+                    (PartitionId::ZERO, 5, QuorumResult::Failed)
+                ],
+                true
+            )
         );
     }
 }

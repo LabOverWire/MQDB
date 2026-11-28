@@ -149,12 +149,14 @@ fn replication_ack_statuses() {
     assert!(ok.is_ok());
     assert_eq!(ok.status(), Some(AckStatus::Ok));
 
-    let stale = ReplicationAck::stale_epoch(partition, epoch, node);
+    let stale = ReplicationAck::stale_epoch(partition, epoch, 7, node);
     assert!(!stale.is_ok());
     assert_eq!(stale.status(), Some(AckStatus::StaleEpoch));
+    assert_eq!(stale.sequence(), 7);
 
-    let not_replica = ReplicationAck::not_replica(partition, node);
+    let not_replica = ReplicationAck::not_replica(partition, 8, node);
     assert_eq!(not_replica.status(), Some(AckStatus::NotReplica));
+    assert_eq!(not_replica.sequence(), 8);
 
     let gap = ReplicationAck::sequence_gap(partition, epoch, 50, node);
     assert_eq!(gap.status(), Some(AckStatus::SequenceGap));

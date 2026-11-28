@@ -3273,6 +3273,7 @@ mod oversize_list;
 mod owner_field;
 mod partition_map;
 mod pending_update;
+mod primary_move_window;
 mod primary_role_wait;
 mod promoted_transfer;
 mod remote_fk_unique;
