@@ -40,8 +40,11 @@ impl ClusteredAgent {
         } else if req.topic == "$DB/_admin/catalog" {
             self.handle_catalog().await
         } else if let Some(rest) = req.topic.strip_prefix("$DB/_admin/index/") {
-            if let Some(entity) = rest.strip_suffix("/add") {
-                Self::handle_index_add(entity, &req.payload)
+            if rest.ends_with("/add") {
+                Response::error(
+                    ErrorCode::Forbidden,
+                    "index management is only supported in agent mode",
+                )
             } else {
                 Response::error(ErrorCode::BadRequest, "invalid index operation")
             }
@@ -350,13 +353,6 @@ impl ClusteredAgent {
                 format!("no schema for entity: {entity}"),
             ),
         }
-    }
-
-    fn handle_index_add(_entity: &str, _payload: &[u8]) -> Response {
-        Response::error(
-            ErrorCode::Forbidden,
-            "index management is only supported in agent mode",
-        )
     }
 
     async fn set_null_schema_conflict(&self, entity: &str, field: &str) -> Option<String> {

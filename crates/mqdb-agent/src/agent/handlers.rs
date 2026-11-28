@@ -2074,7 +2074,7 @@ mod tests {
         let db = Database::open_without_background_tasks(tmp.path())
             .await
             .unwrap();
-        let (crypto, _key) = IdentityCrypto::generate().unwrap();
+        let crypto = IdentityCrypto::generate().unwrap().0;
 
         let hash = crypto.blind_index("_identity_links", "bob@example.com");
         crate::db_helpers::create_entity_db(
@@ -2114,7 +2114,7 @@ mod tests {
         let db = Database::open_without_background_tasks(tmp.path())
             .await
             .unwrap();
-        let (crypto, _key) = IdentityCrypto::generate().unwrap();
+        let crypto = IdentityCrypto::generate().unwrap().0;
         let crypto = Arc::new(crypto);
 
         let req = resolve_share_request(
@@ -2237,7 +2237,7 @@ mod tests {
         let db = Database::open_with_backend(Arc::clone(&backend) as _, config)
             .await
             .unwrap();
-        let (crypto, _key) = IdentityCrypto::generate().unwrap();
+        let crypto = IdentityCrypto::generate().unwrap().0;
         let crypto = Arc::new(crypto);
         backend.failing.store(true, Ordering::SeqCst);
 
@@ -2267,7 +2267,7 @@ mod tests {
         use mqdb_core::types::SHARES_ENTITY;
         use std::sync::Arc;
 
-        let (crypto, _key) = IdentityCrypto::generate().unwrap();
+        let crypto = IdentityCrypto::generate().unwrap().0;
         let crypto = Arc::new(crypto);
         let enc = crypto.encrypt_field(SHARES_ENTITY, "alice@x.com").unwrap();
         assert_ne!(enc, "alice@x.com");
