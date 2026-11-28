@@ -164,6 +164,11 @@ impl Database {
         use mqdb_core::error::Error;
         use std::collections::HashSet;
 
+        if fields.is_empty() || fields.iter().any(String::is_empty) {
+            return Err(Error::Validation(
+                "a unique constraint needs at least one field and no empty field names".into(),
+            ));
+        }
         let constraint = Constraint::Unique(UniqueConstraint::new(entity.clone(), fields.clone()));
         self.refuse_existing_constraint(&constraint).await?;
 
@@ -313,6 +318,7 @@ fn refuse_conflicting(
 mod tests {
     use super::Database;
     use mqdb_core::config::DatabaseConfig;
+    use mqdb_core::constraint::{Constraint, OnDeleteAction};
     use mqdb_core::error::{Error, Result};
     use mqdb_core::keys;
     use mqdb_core::storage::{BatchOperations, MemoryBackend, StorageBackend};
@@ -322,7 +328,6 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// Wraps an in-memory backend but can be told to fail every `commit()`.
     struct FailingBackend {
         inner: MemoryBackend,
         fail_commit: Arc<AtomicBool>,
@@ -440,7 +445,6 @@ mod tests {
             "username must not be indexed after a failed add_index commit"
         );
 
-        // Recoverable: a later successful add_index registers and indexes it.
         db.add_index("users".to_string(), vec!["username".to_string()])
             .await
             .unwrap();
@@ -595,5 +599,303 @@ mod tests {
                 "on-disk definition must persist {field} after concurrent adds, got {disk_fields:?}"
             );
         }
+    }
+
+    async fn open_memory_db(backend: Arc<MemoryBackend>) -> Database {
+        let config = DatabaseConfig::new(PathBuf::from("mem")).without_background_tasks();
+        Database::open_with_backend(backend, config).await.unwrap()
+    }
+
+    fn unique_field_sets(constraints: &[Constraint]) -> Vec<Vec<String>> {
+        let mut sets: Vec<Vec<String>> = constraints
+            .iter()
+            .filter_map(|c| match c {
+                Constraint::Unique(u) => Some(u.fields.clone()),
+                _ => None,
+            })
+            .collect();
+        sets.sort();
+        sets
+    }
+
+    fn foreign_key_targets(constraints: &[Constraint]) -> Vec<(String, String)> {
+        let mut targets: Vec<(String, String)> = constraints
+            .iter()
+            .filter_map(|c| match c {
+                Constraint::ForeignKey(fk) => {
+                    Some((fk.source_field.clone(), fk.target_entity.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        targets.sort();
+        targets
+    }
+
+    #[tokio::test]
+    async fn distinct_unique_constraints_with_underscored_fields_both_persist() {
+        let backend = Arc::new(MemoryBackend::new());
+        let db = open_memory_db(Arc::clone(&backend)).await;
+
+        db.add_unique_constraint("items".to_string(), vec!["a_b".to_string()])
+            .await
+            .unwrap();
+        db.add_unique_constraint("items".to_string(), vec!["a".to_string(), "b".to_string()])
+            .await
+            .unwrap();
+
+        let expected = vec![
+            vec!["a".to_string(), "b".to_string()],
+            vec!["a_b".to_string()],
+        ];
+        assert_eq!(
+            unique_field_sets(&db.list_constraints("items").await),
+            expected
+        );
+        drop(db);
+
+        let reopened = open_memory_db(backend).await;
+        assert_eq!(
+            unique_field_sets(&reopened.list_constraints("items").await),
+            expected,
+            "both unique constraints must survive a reload"
+        );
+    }
+
+    #[tokio::test]
+    async fn distinct_foreign_keys_with_underscored_names_both_persist() {
+        let backend = Arc::new(MemoryBackend::new());
+        let db = open_memory_db(Arc::clone(&backend)).await;
+
+        db.add_foreign_key(
+            "items".to_string(),
+            "x_y".to_string(),
+            "z".to_string(),
+            "id".to_string(),
+            OnDeleteAction::Restrict,
+        )
+        .await
+        .unwrap();
+        db.add_foreign_key(
+            "items".to_string(),
+            "x".to_string(),
+            "y_z".to_string(),
+            "id".to_string(),
+            OnDeleteAction::Restrict,
+        )
+        .await
+        .unwrap();
+
+        let expected = vec![
+            ("x".to_string(), "y_z".to_string()),
+            ("x_y".to_string(), "z".to_string()),
+        ];
+        assert_eq!(
+            foreign_key_targets(&db.list_constraints("items").await),
+            expected
+        );
+        drop(db);
+
+        let reopened = open_memory_db(backend).await;
+        assert_eq!(
+            foreign_key_targets(&reopened.list_constraints("items").await),
+            expected,
+            "both foreign keys must survive a reload"
+        );
+    }
+
+    #[tokio::test]
+    async fn constraint_stored_under_legacy_name_is_renamed_and_refuses_a_duplicate() {
+        let backend = Arc::new(MemoryBackend::new());
+        let legacy = json!({"ForeignKey": {
+            "source_entity": "posts",
+            "source_field": "author_id",
+            "target_entity": "users",
+            "target_field": "id",
+            "on_delete": "Cascade",
+            "name": "posts_author_id_users_fk"
+        }});
+        let legacy_key = keys::encode_constraint_key("fk", "posts", "posts_author_id_users_fk");
+        backend
+            .insert(&legacy_key, &serde_json::to_vec(&legacy).unwrap())
+            .unwrap();
+
+        let db = open_memory_db(Arc::clone(&backend)).await;
+        assert_eq!(
+            foreign_key_targets(&db.list_constraints("posts").await),
+            vec![("author_id".to_string(), "users".to_string())]
+        );
+        assert_eq!(
+            (
+                backend.get(&legacy_key).unwrap().is_some(),
+                backend
+                    .get(&keys::encode_constraint_key(
+                        "fk",
+                        "posts",
+                        "posts_author%5Fid_users_fk"
+                    ))
+                    .unwrap()
+                    .is_some()
+            ),
+            (false, true),
+            "legacy key, renamed key"
+        );
+
+        let refused = db
+            .add_foreign_key(
+                "posts".to_string(),
+                "author_id".to_string(),
+                "users".to_string(),
+                "id".to_string(),
+                OnDeleteAction::Cascade,
+            )
+            .await;
+        assert!(
+            matches!(refused, Err(Error::AlreadyExists { .. })),
+            "re-adding a constraint stored under its legacy name must be refused, got {refused:?}"
+        );
+        assert_eq!(db.list_constraints("posts").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_unique_constraint_without_fields_or_with_an_empty_field_is_refused() {
+        let db = open_memory_db(Arc::new(MemoryBackend::new())).await;
+        for fields in [vec![], vec![String::new()]] {
+            let refused = db.add_unique_constraint("items".to_string(), fields).await;
+            assert!(
+                matches!(refused, Err(Error::Validation(_))),
+                "got {refused:?}"
+            );
+        }
+        assert!(db.list_constraints("items").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_constraint_stored_under_both_names_loads_once() {
+        let backend = Arc::new(MemoryBackend::new());
+        let value = |name: &str| {
+            serde_json::to_vec(&json!({"Unique": {
+                "entity": "items",
+                "fields": ["a_b"],
+                "name": name
+            }}))
+            .unwrap()
+        };
+        let legacy_key = keys::encode_constraint_key("unique", "items", "items_a_b_unique");
+        backend
+            .insert(&legacy_key, &value("items_a_b_unique"))
+            .unwrap();
+        backend
+            .insert(
+                &keys::encode_constraint_key("unique", "items", "items_a%5Fb_unique"),
+                &value("items_a%5Fb_unique"),
+            )
+            .unwrap();
+
+        let db = open_memory_db(Arc::clone(&backend)).await;
+        assert_eq!(
+            (
+                db.list_constraints("items").await.len(),
+                backend.get(&legacy_key).unwrap().is_some()
+            ),
+            (1, false),
+            "loaded constraints, legacy key still stored"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_copy_stored_under_the_new_name_wins_over_a_legacy_copy() {
+        let backend = Arc::new(MemoryBackend::new());
+        let fk = |name: &str, on_delete: &str| {
+            serde_json::to_vec(&json!({"ForeignKey": {
+                "source_entity": "posts",
+                "source_field": "x%1_y",
+                "target_entity": "users",
+                "target_field": "id",
+                "on_delete": on_delete,
+                "name": name
+            }}))
+            .unwrap()
+        };
+        backend
+            .insert(
+                &keys::encode_constraint_key("fk", "posts", "posts_x%1_y_users_fk"),
+                &fk("posts_x%1_y_users_fk", "Restrict"),
+            )
+            .unwrap();
+        backend
+            .insert(
+                &keys::encode_constraint_key("fk", "posts", "posts_x%251%5Fy_users_fk"),
+                &fk("posts_x%251%5Fy_users_fk", "Cascade"),
+            )
+            .unwrap();
+
+        let db = open_memory_db(backend).await;
+        let loaded: Vec<OnDeleteAction> = db
+            .list_constraints("posts")
+            .await
+            .into_iter()
+            .filter_map(|c| match c {
+                Constraint::ForeignKey(fk) => Some(fk.on_delete),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(loaded, vec![OnDeleteAction::Cascade]);
+    }
+
+    #[tokio::test]
+    async fn renaming_onto_another_legacy_key_keeps_both_constraints() {
+        let backend = Arc::new(MemoryBackend::new());
+        for (field, legacy_name) in [("%0", "items_%0_unique"), ("%250", "items_%250_unique")] {
+            backend
+                .insert(
+                    &keys::encode_constraint_key("unique", "items", legacy_name),
+                    &serde_json::to_vec(&json!({"Unique": {
+                        "entity": "items",
+                        "fields": [field],
+                        "name": legacy_name
+                    }}))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+
+        drop(open_memory_db(Arc::clone(&backend)).await);
+        let reopened = open_memory_db(backend).await;
+        assert_eq!(
+            unique_field_sets(&reopened.list_constraints("items").await),
+            vec![vec!["%0".to_string()], vec!["%250".to_string()]]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_legacy_name_does_not_block_the_constraint_that_now_owns_it() {
+        let backend = Arc::new(MemoryBackend::new());
+        let legacy = json!({"Unique": {
+            "entity": "items",
+            "fields": ["a_b"],
+            "name": "items_a_b_unique"
+        }});
+        backend
+            .insert(
+                &keys::encode_constraint_key("unique", "items", "items_a_b_unique"),
+                &serde_json::to_vec(&legacy).unwrap(),
+            )
+            .unwrap();
+
+        let db = open_memory_db(Arc::clone(&backend)).await;
+        db.add_unique_constraint("items".to_string(), vec!["a".to_string(), "b".to_string()])
+            .await
+            .unwrap();
+        drop(db);
+
+        let reopened = open_memory_db(backend).await;
+        assert_eq!(
+            unique_field_sets(&reopened.list_constraints("items").await),
+            vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["a_b".to_string()],
+            ]
+        );
     }
 }
