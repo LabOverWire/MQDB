@@ -202,7 +202,7 @@ impl Database {
 
         let constraint_entity = if let Some(mut cd) = constraint_data {
             let schema_registry = self.schema_registry.read().await;
-            let _ = schema_registry.apply_defaults(&entity_name, &mut cd);
+            schema_registry.apply_defaults(&entity_name, &mut cd)?;
             drop(schema_registry);
             if let Value::Object(ref mut obj) = cd {
                 if !obj.contains_key("id") {
