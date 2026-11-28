@@ -195,12 +195,14 @@ fkref/{target_entity}/{target_id}/...       → FK reverse lookups (reserved)
 
 **Example Keys:**
 ```
-data/users/123                              → User entity with ID 123
-idx/users/email/alice@example.com/123       → Email index entry
-meta/schema/users                           → Users schema definition
-meta/index/users                            → Users index definition
-meta/constraint/fk/posts/posts_author_id_fk → Foreign key constraint
+data/users/123                                       → User entity with ID 123
+idx/users/email/alice@example.com/123                → Email index entry
+meta/schema/users                                    → Users schema definition
+meta/index/users                                     → Users index definition
+meta/constraint/fk/posts/posts_author%5Fid_users_fk  → Foreign key constraint
 ```
+
+Agent constraint names join the entity, field and target names with `_`, and write `_` inside a name as `%5F` (and `%` as `%25`), so two different constraints never share a name. Opening a database renames constraints stored by older versions to this form, so the foreign key above, stored as `posts_author_id_users_fk`, becomes `posts_author%5Fid_users_fk`.
 
 ---
 
