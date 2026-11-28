@@ -182,10 +182,9 @@ impl VaultBackend for VaultBackendImpl {
 
             let skip = build_vault_skip_fields(entity, ownership);
             match request {
-                Request::Create {
-                    entity: ent,
-                    mut data,
-                } => {
+                Request::Create { entity: ent, data } => {
+                    let mut data = Database::resolve_ttl_expiry(data)
+                        .map_err(|e| VaultError::Internal(e.to_string()))?;
                     let id = ensure_id(&mut data);
                     let constraint_clone = data.clone();
                     vault_encrypt_fields(&crypto, &ent, &id, &mut data, &skip);
