@@ -416,7 +416,9 @@ pub(crate) async fn cmd_subscribe(
         let shutdown_clone = shutdown.clone();
 
         tokio::spawn(async move {
-            tokio::signal::ctrl_c().await.ok();
+            if let Err(e) = tokio::signal::ctrl_c().await {
+                eprintln!("cannot wait for Ctrl+C: {e}");
+            }
             shutdown_clone.store(true, Ordering::SeqCst);
         });
 

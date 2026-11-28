@@ -538,10 +538,7 @@ impl ClusteredAgent {
             .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(String::from))
             .unwrap_or_else(|| "backup".to_string());
 
-        if !name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-        {
+        if !is_valid_backup_name(&name) {
             return Response::error(
                 ErrorCode::BadRequest,
                 "invalid backup name: must be alphanumeric, underscore, or hyphen only",
@@ -580,11 +577,23 @@ impl ClusteredAgent {
 
         match std::fs::read_dir(&backup_dir) {
             Ok(entries) => {
-                let backups: Vec<String> = entries
-                    .filter_map(std::result::Result::ok)
-                    .filter(|e| e.path().is_dir())
-                    .filter_map(|e| e.file_name().into_string().ok())
-                    .collect();
+                let mut backups = Vec::new();
+                for entry in entries {
+                    match entry {
+                        Ok(entry) if entry.path().is_dir() => {
+                            if let Ok(name) = entry.file_name().into_string() {
+                                backups.push(name);
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            return Response::error(
+                                ErrorCode::Internal,
+                                format!("failed to list backups: {e}"),
+                            );
+                        }
+                    }
+                }
                 Response::ok(json!(backups))
             }
             Err(e) => Response::error(ErrorCode::Internal, format!("failed to list backups: {e}")),
@@ -946,9 +955,24 @@ async fn handle_acl_assignment_list(
     Response::ok(json!(roles))
 }
 
+fn is_valid_backup_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+
+    #[test]
+    fn a_backup_name_must_be_non_empty_ascii() {
+        assert_eq!(
+            ["nightly-1", "", "caf\u{e9}", "a/b"].map(super::is_valid_backup_name),
+            [true, false, false, false]
+        );
+    }
 
     #[tokio::test]
     async fn a_role_with_a_malformed_rule_is_refused_and_not_created() {
