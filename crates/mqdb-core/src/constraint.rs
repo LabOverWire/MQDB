@@ -733,27 +733,29 @@ impl ConstraintManager {
     /// Returns an error if reading, deserializing or renaming constraints fails.
     pub fn load_constraints(&mut self, storage: &Storage) -> Result<()> {
         let prefix = b"meta/constraint/";
-        let items = storage.prefix_scan(prefix)?;
-        let mut renames = storage.batch();
-
-        for (key, value) in items {
+        let mut legacy = Vec::new();
+        for (key, value) in storage.prefix_scan(prefix)? {
             let stored: Constraint = serde_json::from_slice(&value)?;
             let constraint = stored.clone().with_derived_name();
+            if constraint.name() == stored.name() {
+                self.add_constraint(constraint);
+            } else {
+                legacy.push((key, constraint));
+            }
+        }
+
+        let mut renames = storage.batch();
+        for (key, constraint) in legacy {
+            renames.remove(key);
             let already_loaded = self
                 .get_constraints(constraint.entity())
                 .iter()
                 .any(|loaded| loaded.name() == constraint.name());
-            if constraint.name() != stored.name() {
-                renames.remove(key);
-                if !already_loaded {
-                    self.persist_constraint(&mut renames, &constraint)?;
-                }
-            }
             if !already_loaded {
+                self.persist_constraint(&mut renames, &constraint)?;
                 self.add_constraint(constraint);
             }
         }
-
         renames.commit()
     }
 

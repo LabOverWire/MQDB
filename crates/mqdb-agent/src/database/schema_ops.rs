@@ -804,6 +804,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_copy_stored_under_the_new_name_wins_over_a_legacy_copy() {
+        let backend = Arc::new(MemoryBackend::new());
+        let fk = |name: &str, on_delete: &str| {
+            serde_json::to_vec(&json!({"ForeignKey": {
+                "source_entity": "posts",
+                "source_field": "x%1_y",
+                "target_entity": "users",
+                "target_field": "id",
+                "on_delete": on_delete,
+                "name": name
+            }}))
+            .unwrap()
+        };
+        backend
+            .insert(
+                &keys::encode_constraint_key("fk", "posts", "posts_x%1_y_users_fk"),
+                &fk("posts_x%1_y_users_fk", "Restrict"),
+            )
+            .unwrap();
+        backend
+            .insert(
+                &keys::encode_constraint_key("fk", "posts", "posts_x%251%5Fy_users_fk"),
+                &fk("posts_x%251%5Fy_users_fk", "Cascade"),
+            )
+            .unwrap();
+
+        let db = open_memory_db(backend).await;
+        let loaded: Vec<OnDeleteAction> = db
+            .list_constraints("posts")
+            .await
+            .into_iter()
+            .filter_map(|c| match c {
+                Constraint::ForeignKey(fk) => Some(fk.on_delete),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(loaded, vec![OnDeleteAction::Cascade]);
+    }
+
+    #[tokio::test]
     async fn a_legacy_name_does_not_block_the_constraint_that_now_owns_it() {
         let backend = Arc::new(MemoryBackend::new());
         let legacy = json!({"Unique": {
