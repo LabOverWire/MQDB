@@ -10,7 +10,8 @@ use super::super::transport::{ClusterMessage, ClusterTransport};
 use super::super::{Epoch, NodeId, PartitionAssignment, PartitionId, PartitionMap};
 use super::{
     HELD_WRITE_CAPACITY, HELD_WRITE_TIMEOUT, HeldWrite, NodeController, NodeStatus,
-    ReplicationError, SupersededPrimaryWrite, WRITE_COUNTER, WRITE_RECEIVED, WRITE_REQUEST_SENT,
+    ReplicationError, SupersededPrimaryWrite, UnansweredWrite, WRITE_COUNTER, WRITE_RECEIVED,
+    WRITE_REQUEST_SENT,
 };
 use std::sync::atomic::Ordering as AtomicOrdering;
 
@@ -260,16 +261,7 @@ impl<T: ClusterTransport> NodeController<T> {
             self.handle_sequence_gap_ack(&ack).await;
         }
 
-        match ack.status() {
-            Some(protocol::AckStatus::StaleEpoch) => {
-                self.note_replica_answer(&ack);
-                self.keep_superseded_write(&ack);
-            }
-            Some(protocol::AckStatus::Ok | protocol::AckStatus::NotReplica) => {
-                self.note_replica_answer(&ack);
-            }
-            Some(protocol::AckStatus::SequenceGap) | None => {}
-        }
+        self.settle_unanswered(&ack);
 
         for (partition, seq, result) in self.pending.drain_completed() {
             self.on_write_complete(partition, seq, result);
@@ -484,8 +476,8 @@ impl<T: ClusterTransport> NodeController<T> {
                     let sequence = self.sequence(partition).unwrap_or(0);
                     let demoted = self.role(partition) == ReplicaRole::Primary;
                     self.become_replica(partition, new_assignment.epoch, sequence);
-                    if demoted && self.holds_unconfirmed_writes(partition, sequence) {
-                        self.resync_after_demotion.insert(partition, sequence);
+                    if demoted && self.holds_unconfirmed_writes(partition) {
+                        self.resync_after_demotion.insert(partition);
                     }
                     self.refused_while_primary.remove(&partition);
                 } else if let Some(primary) = new_assignment.primary {
@@ -513,16 +505,14 @@ impl<T: ClusterTransport> NodeController<T> {
         became_primary | std::mem::take(&mut self.primary_taken_after_wait)
     }
 
-    fn holds_unconfirmed_writes(&self, partition: PartitionId, own_sequence: u64) -> bool {
+    fn holds_unconfirmed_writes(&self, partition: PartitionId) -> bool {
         self.refused_while_primary.contains(&partition)
-            || self.awaits_answers(partition, own_sequence)
+            || self.holds_unanswered(partition)
             || self.holds_superseded(partition)
     }
 
-    fn awaits_answers(&self, partition: PartitionId, own_sequence: u64) -> bool {
-        self.replica_answered
-            .get(&partition)
-            .is_none_or(|answered| *answered < own_sequence)
+    fn holds_unanswered(&self, partition: PartitionId) -> bool {
+        self.unanswered.keys().any(|(held, _)| *held == partition)
     }
 
     fn holds_superseded(&self, partition: PartitionId) -> bool {
@@ -531,37 +521,66 @@ impl<T: ClusterTransport> NodeController<T> {
             .any(|entry| entry.write.partition == partition)
     }
 
-    fn note_replica_answer(&mut self, ack: &ReplicationAck) {
-        let sequence = ack.sequence();
-        if sequence == 0 {
+    pub(super) fn remember_unanswered(&mut self, write: &ReplicationWrite, replicas: &[NodeId]) {
+        if replicas.is_empty() {
             return;
         }
-        let answered = self.replica_answered.entry(ack.partition()).or_insert(0);
-        *answered = (*answered).max(sequence);
+        if self.unanswered_order.len() >= HELD_WRITE_CAPACITY
+            && let Some((partition, sequence, epoch)) = self.unanswered_order.pop_front()
+            && self
+                .unanswered
+                .get(&(partition, sequence))
+                .is_some_and(|held| held.write.epoch == epoch)
+            && let Some(dropped) = self.unanswered.remove(&(partition, sequence))
+        {
+            tracing::warn!(
+                ?partition,
+                entity = %dropped.write.entity,
+                id = %dropped.write.id,
+                "forgetting a write no replica answered: too many waiting"
+            );
+        }
+        let mut held = write.clone();
+        held.event = None;
+        self.unanswered_order
+            .push_back((held.partition, held.sequence, held.epoch));
+        self.unanswered.insert(
+            (held.partition, held.sequence),
+            UnansweredWrite {
+                write: held,
+                awaiting: replicas.to_vec(),
+            },
+        );
     }
 
-    fn keep_superseded_write(&mut self, ack: &ReplicationAck) {
-        let partition = ack.partition();
-        let sequence = ack.sequence();
-        if sequence == 0 {
-            return;
-        }
-        let Some(mut write) = self
-            .write_log
-            .get_range(partition, sequence, sequence)
-            .into_iter()
-            .find(|write| write.epoch < ack.epoch())
-        else {
+    fn settle_unanswered(&mut self, ack: &ReplicationAck) {
+        let key = (ack.partition(), ack.sequence());
+        let Some(held) = self.unanswered.get_mut(&key) else {
             return;
         };
-        if self.superseded_writes.iter().any(|entry| {
-            entry.write.partition == partition
-                && entry.write.sequence == sequence
-                && entry.write.epoch == write.epoch
-        }) {
+        let answers = match ack.status() {
+            Some(protocol::AckStatus::Ok) => held.write.epoch == ack.epoch(),
+            Some(protocol::AckStatus::StaleEpoch) => held.write.epoch < ack.epoch(),
+            Some(protocol::AckStatus::NotReplica) => true,
+            Some(protocol::AckStatus::SequenceGap) | None => false,
+        };
+        if !answers {
             return;
         }
-        write.event = None;
+        if ack.status() == Some(protocol::AckStatus::StaleEpoch) {
+            if let Some(refused) = self.unanswered.remove(&key) {
+                self.keep_superseded_write(refused.write, ack.epoch());
+            }
+            return;
+        }
+        held.awaiting
+            .retain(|replica| replica.get() != ack.node_id());
+        if held.awaiting.is_empty() {
+            self.unanswered.remove(&key);
+        }
+    }
+
+    fn keep_superseded_write(&mut self, write: ReplicationWrite, superseded_at: Epoch) {
         if self.superseded_writes.len() >= HELD_WRITE_CAPACITY
             && let Some(dropped) = self.superseded_writes.pop_front()
         {
@@ -574,7 +593,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
         self.superseded_writes.push_back(SupersededPrimaryWrite {
             write,
-            superseded_at: ack.epoch(),
+            superseded_at,
         });
     }
 
@@ -619,9 +638,9 @@ impl<T: ClusterTransport> NodeController<T> {
 
     async fn start_due_resyncs(&mut self) {
         let waiting = std::mem::take(&mut self.resync_after_demotion);
-        for (partition, own_sequence) in waiting {
-            if self.awaits_answers(partition, own_sequence) || self.holds_superseded(partition) {
-                self.resync_after_demotion.insert(partition, own_sequence);
+        for partition in waiting {
+            if self.holds_unanswered(partition) || self.holds_superseded(partition) {
+                self.resync_after_demotion.insert(partition);
                 continue;
             }
             if self.role(partition) != ReplicaRole::Replica {

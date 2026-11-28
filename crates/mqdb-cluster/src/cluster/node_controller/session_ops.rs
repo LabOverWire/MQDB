@@ -140,7 +140,8 @@ impl<T: ClusterTransport> NodeController<T> {
         })
     }
 
-    async fn send_to_replicas(&self, write: &ReplicationWrite, replicas: &[NodeId]) {
+    async fn send_to_replicas(&mut self, write: &ReplicationWrite, replicas: &[NodeId]) {
+        self.remember_unanswered(write, replicas);
         for &replica in replicas {
             let _ = self
                 .transport
@@ -241,6 +242,7 @@ impl<T: ClusterTransport> NodeController<T> {
             .append(partition, sequence, write_msg.clone());
         let t_writelog = super::elapsed_micros(start);
 
+        self.remember_unanswered(&write_msg, replicas);
         for &replica in replicas {
             let _ = self
                 .transport

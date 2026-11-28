@@ -105,7 +105,7 @@ ReceiveAck(from, to) ==
            rest == Tail(chan[<<from, to>>])
            trackers == {p \in pending[to] : p.seq = m.seq}
            resolved == IF m.status = "Gap" THEN {} ELSE trackers
-           stale == {p \in resolved : m.status = "Stale" \/ (m.status = "Ok" /\ m.epoch > p.epoch)}
+           stale == {p \in resolved : m.status = "Stale"}
            refused == {[k |-> e.k, v |-> e.v] : e \in {x \in wlog[to] : \E p \in stale : x.seq = p.seq /\ x.epoch = p.epoch}}
        IN /\ pending' = [pending EXCEPT ![to] = @ \ resolved]
           /\ superseded' = [superseded EXCEPT ![to] = IF Forward THEN @ \cup refused ELSE @]

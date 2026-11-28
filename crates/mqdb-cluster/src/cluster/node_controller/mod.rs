@@ -80,6 +80,11 @@ pub(super) struct SupersededPrimaryWrite {
     pub(super) superseded_at: Epoch,
 }
 
+pub(super) struct UnansweredWrite {
+    pub(super) write: ReplicationWrite,
+    pub(super) awaiting: Vec<NodeId>,
+}
+
 #[derive(Default)]
 pub struct TickOutput {
     pub heartbeat: Option<ClusterMessage>,
@@ -472,8 +477,9 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) held_writes: VecDeque<HeldWrite>,
     pub(super) superseded_writes: VecDeque<SupersededPrimaryWrite>,
     pub(super) refused_while_primary: HashSet<PartitionId>,
-    pub(super) resync_after_demotion: HashMap<PartitionId, u64>,
-    pub(super) replica_answered: HashMap<PartitionId, u64>,
+    pub(super) resync_after_demotion: HashSet<PartitionId>,
+    pub(super) unanswered: HashMap<(PartitionId, u64), UnansweredWrite>,
+    pub(super) unanswered_order: VecDeque<(PartitionId, u64, Epoch)>,
     pub(super) event_delivery: super::event_delivery::EventDelivery,
     pub(super) tx_raft_messages: flume::Sender<RaftMessage>,
     pub(super) tx_raft_events: flume::Sender<RaftEvent>,
@@ -555,10 +561,11 @@ impl<T: ClusterTransport> NodeController<T> {
             forward_dedup: HashSet::with_capacity(FORWARD_DEDUP_CAPACITY),
             forward_dedup_order: VecDeque::with_capacity(FORWARD_DEDUP_CAPACITY),
             held_writes: VecDeque::with_capacity(HELD_WRITE_CAPACITY),
-            superseded_writes: VecDeque::new(),
+            superseded_writes: VecDeque::with_capacity(HELD_WRITE_CAPACITY),
             refused_while_primary: HashSet::new(),
-            resync_after_demotion: HashMap::new(),
-            replica_answered: HashMap::new(),
+            resync_after_demotion: HashSet::new(),
+            unanswered: HashMap::with_capacity(HELD_WRITE_CAPACITY),
+            unanswered_order: VecDeque::with_capacity(HELD_WRITE_CAPACITY),
             event_delivery: super::event_delivery::EventDelivery::default(),
             tx_raft_messages,
             tx_raft_events,
@@ -730,9 +737,9 @@ impl<T: ClusterTransport> NodeController<T> {
             .entry(partition.get())
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
         state.become_primary(epoch);
-        let sequence = state.sequence();
         self.refused_while_primary.remove(&partition);
-        self.replica_answered.insert(partition, sequence);
+        self.resync_after_demotion.remove(&partition);
+        self.unanswered.retain(|(held, _), _| *held != partition);
         self.incoming_snapshots.remove(&partition);
         self.stores.close_transfer_window(partition);
         if let Err(e) = self.stores.record_held_primary(partition, epoch) {

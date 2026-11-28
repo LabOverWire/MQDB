@@ -199,3 +199,26 @@ async fn a_demoted_primary_stores_the_new_primarys_first_write() {
         "new primary, demoted primary"
     );
 }
+
+#[tokio::test]
+async fn a_create_refused_after_the_new_primarys_write_replaced_it_in_the_log_survives() {
+    let partition = data_partition(ENTITY, ID);
+    let second = another_id_in(partition);
+    let (mut old, mut new) = pair_in_epoch_one(partition).await;
+    apply_moved_map(&mut new, partition).await;
+    create(&mut old, ID, br#"{"n":1}"#).await;
+    create(&mut new, &second, br#"{"n":2}"#).await;
+    apply_moved_map(&mut old, partition).await;
+    deliver(&mut new, NEW, &mut old, OLD).await;
+    deliver(&mut old, OLD, &mut new, NEW).await;
+    settle(&mut old, &mut new).await;
+
+    assert_eq!(
+        (
+            new.stores().db_get(ENTITY, ID).is_some(),
+            old.stores().db_get(ENTITY, ID).is_some()
+        ),
+        (true, true),
+        "new primary, old primary"
+    );
+}
