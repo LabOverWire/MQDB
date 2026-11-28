@@ -371,20 +371,20 @@ impl MqdbAgent {
             }
         };
 
-        let _ = self.shutdown_tx.send(());
-        let _ = handler_task.await;
-        let _ = event_task.await;
+        signal_shutdown(&self.shutdown_tx);
+        join_task("handler", handler_task).await;
+        join_task("event", event_task).await;
         if let Some(presence) = presence_task {
-            let _ = presence.await;
+            join_task("presence", presence).await;
         }
         if let Some(http) = http_task {
-            let _ = http.await;
+            join_task("http", http).await;
         }
         if let Some(lic) = license_task {
-            let _ = lic.await;
+            join_task("license", lic).await;
         }
         if let Some(ws) = ws_task {
-            let _ = ws.await;
+            join_task("websocket", ws).await;
         }
 
         Ok(broker_result?)
@@ -494,20 +494,20 @@ impl MqdbAgent {
                 }
                 _ = shutdown_rx.recv() => info!("MQDB Agent shutting down"),
             }
-            let _ = shutdown_tx.send(());
-            let _ = handler_task.await;
-            let _ = event_task.await;
+            signal_shutdown(&shutdown_tx);
+            join_task("handler", handler_task).await;
+            join_task("event", event_task).await;
             if let Some(presence) = presence_task {
-                let _ = presence.await;
+                join_task("presence", presence).await;
             }
             if let Some(http) = http_task {
-                let _ = http.await;
+                join_task("http", http).await;
             }
             if let Some(lic) = license_task {
-                let _ = lic.await;
+                join_task("license", lic).await;
             }
             if let Some(ws) = ws_task {
-                let _ = ws.await;
+                join_task("websocket", ws).await;
             }
         });
 
@@ -516,7 +516,7 @@ impl MqdbAgent {
     }
 
     pub fn shutdown(&self) {
-        let _ = self.shutdown_tx.send(());
+        signal_shutdown(&self.shutdown_tx);
     }
 }
 
@@ -544,7 +544,7 @@ impl ReadinessSignals {
             {
                 return;
             }
-            let _ = ready_tx.send(true);
+            ready_tx.send_replace(true);
         });
         Self {
             handler,
@@ -588,5 +588,17 @@ pub(super) async fn connect_mqtt_client(
             .map(|_| ())
     } else {
         client.connect(addr).await
+    }
+}
+
+async fn join_task(name: &str, task: tokio::task::JoinHandle<()>) {
+    if let Err(e) = task.await {
+        tracing::warn!(task = name, %e, "agent task ended abnormally");
+    }
+}
+
+fn signal_shutdown(shutdown_tx: &broadcast::Sender<()>) {
+    if shutdown_tx.send(()).is_err() {
+        tracing::debug!("agent tasks had already stopped");
     }
 }

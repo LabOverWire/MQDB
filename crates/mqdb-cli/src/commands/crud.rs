@@ -187,8 +187,10 @@ pub(crate) async fn cmd_watch(
 
     client
         .subscribe(&topic, move |msg| {
-            if let Ok(value) = serde_json::from_slice::<Value>(&msg.payload) {
-                let _ = tx.try_send(value);
+            if let Ok(value) = serde_json::from_slice::<Value>(&msg.payload)
+                && tx.try_send(value).is_err()
+            {
+                eprintln!("event dropped: output is falling behind");
             }
         })
         .await?;
@@ -400,8 +402,10 @@ pub(crate) async fn cmd_subscribe(
 
         client
             .subscribe(&event_pattern, move |msg| {
-                if let Ok(value) = serde_json::from_slice::<Value>(&msg.payload) {
-                    let _ = tx.try_send(value);
+                if let Ok(value) = serde_json::from_slice::<Value>(&msg.payload)
+                    && tx.try_send(value).is_err()
+                {
+                    eprintln!("event dropped: output is falling behind");
                 }
             })
             .await?;
@@ -427,7 +431,10 @@ pub(crate) async fn cmd_subscribe(
                     break;
                 }
                 let topic = format!("$DB/_sub/{heartbeat_sub_id}/heartbeat");
-                let _ = Box::pin(execute_request(&heartbeat_conn, &topic, json!({}))).await;
+                if let Err(e) = Box::pin(execute_request(&heartbeat_conn, &topic, json!({}))).await
+                {
+                    eprintln!("subscription heartbeat failed: {e}");
+                }
             }
         });
 
@@ -448,7 +455,9 @@ pub(crate) async fn cmd_subscribe(
 
         eprintln!("\nUnsubscribing...");
         let unsub_topic = format!("$DB/_sub/{sub_id}/unsubscribe");
-        let _ = Box::pin(execute_request(&conn, &unsub_topic, json!({}))).await;
+        if let Err(e) = Box::pin(execute_request(&conn, &unsub_topic, json!({}))).await {
+            eprintln!("unsubscribe failed: {e}");
+        }
         client.disconnect().await?;
     } else if let Some(error) = response.get("message").and_then(serde_json::Value::as_str) {
         eprintln!("Error: {error}");

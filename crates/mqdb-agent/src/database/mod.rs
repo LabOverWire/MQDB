@@ -173,19 +173,21 @@ impl Database {
     }
 
     pub fn shutdown(&self) {
-        let _ = self.shutdown_tx.send(true);
+        self.shutdown_tx.send_replace(true);
         tracing::info!("database shutdown signal sent");
     }
 
     pub async fn close(self) {
-        let _ = self.shutdown_tx.send(true);
+        self.shutdown_tx.send_replace(true);
         let handles: Vec<_> = self
             .background_handles
             .lock()
             .map(|mut guard| guard.drain(..).collect())
             .unwrap_or_default();
         for handle in handles {
-            let _ = handle.await;
+            if let Err(e) = handle.await {
+                tracing::warn!(%e, "database background task ended abnormally");
+            }
         }
     }
 
@@ -250,7 +252,7 @@ impl Database {
 
 impl Drop for Database {
     fn drop(&mut self) {
-        let _ = self.shutdown_tx.send(true);
+        self.shutdown_tx.send_replace(true);
         if let Ok(mut handles) = self.background_handles.lock() {
             for handle in handles.drain(..) {
                 handle.abort();
