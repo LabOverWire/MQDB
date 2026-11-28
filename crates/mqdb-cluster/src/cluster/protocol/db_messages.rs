@@ -4,6 +4,14 @@
 use super::types::JsonDbOp;
 use super::wire::{WireReader, push_length_prefixed};
 
+pub const SCATTER_REPLY_PREFIX: &str = "_mqdb/scatter/";
+pub const CASCADE_ACK_REPLY_PREFIX: &str = "_mqdb/cascade_ack/";
+
+#[must_use]
+pub fn is_internal_reply_topic(topic: &str) -> bool {
+    topic.starts_with(SCATTER_REPLY_PREFIX) || topic.starts_with(CASCADE_ACK_REPLY_PREFIX)
+}
+
 #[derive(Debug, Clone)]
 pub struct JsonDbRequest {
     pub request_id: u64,

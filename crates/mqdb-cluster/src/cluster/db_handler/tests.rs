@@ -4783,3 +4783,68 @@ async fn list_filters_by_the_record_key_after_an_update_writes_an_id_field() {
     }
     assert_eq!(listed_ids(&last), ["a"], "{last}");
 }
+
+async fn forwarded_requests_for_a_create_with_response_topic(response_topic: &str) -> usize {
+    let node1 = NodeId::validated(1).unwrap();
+    let node2 = NodeId::validated(2).unwrap();
+    let handler = DbRequestHandler::new(node1);
+    let partition = data_partition("notes", "n1");
+    let outbox = Arc::new(Mutex::new(Vec::new()));
+    let transport = MockTransport {
+        node_id: node1,
+        inbox: Arc::new(Mutex::new(VecDeque::new())),
+        outbox: Arc::clone(&outbox),
+        retained_publishes: Arc::new(Mutex::new(Vec::new())),
+        retained_refreshes: Arc::new(Mutex::new(Vec::new())),
+        local_responses: Arc::new(Mutex::new(Vec::new())),
+    };
+    let mut ctrl = create_test_controller(node1, transport);
+    let mut map = PartitionMap::default();
+    map.set(
+        partition,
+        crate::cluster::PartitionAssignment {
+            primary: Some(node2),
+            replicas: vec![],
+            epoch: Epoch::new(1),
+            primary_since: Epoch::new(1),
+        },
+    );
+    ctrl.update_partition_map(map);
+    let payload = serde_json::to_vec(&serde_json::json!({"id": "n1", "body": "x"})).unwrap();
+
+    let response = handler
+        .handle_publish(
+            &mut ctrl,
+            "$DB/notes/create",
+            &payload,
+            &MqttRequestContext {
+                response_topic: Some(response_topic),
+                correlation_data: None,
+                sender: Some("alice"),
+                client_id: Some("alice-client"),
+            },
+        )
+        .await;
+
+    assert!(response.is_none());
+    outbox
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(to, message)| {
+            *to == node2 && matches!(message, ClusterMessage::JsonDbRequest { .. })
+        })
+        .count()
+}
+
+#[tokio::test]
+async fn a_client_request_with_an_internal_reply_topic_is_not_forwarded() {
+    assert_eq!(
+        (
+            forwarded_requests_for_a_create_with_response_topic("$DB/_resp/alice").await,
+            forwarded_requests_for_a_create_with_response_topic("_mqdb/cascade_ack/1/1").await,
+            forwarded_requests_for_a_create_with_response_topic("_mqdb/scatter/1/7").await,
+        ),
+        (1, 0, 0)
+    );
+}

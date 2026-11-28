@@ -546,8 +546,10 @@ impl<T: ClusterTransport> NodeController<T> {
         partition: PartitionId,
         request: &JsonDbRequest,
     ) -> Option<super::PendingConstraintWork> {
-        let internal_shares_scatter =
-            request.op == JsonDbOp::List && request.response_topic.starts_with("_mqdb/scatter/");
+        let internal_shares_scatter = request.op == JsonDbOp::List
+            && request
+                .response_topic
+                .starts_with(crate::cluster::protocol::SCATTER_REPLY_PREFIX);
         if request.entity == mqdb_core::types::SHARES_ENTITY
             && !internal_shares_scatter
             && matches!(
@@ -705,8 +707,16 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     pub(crate) async fn handle_json_db_response(&mut self, response: &JsonDbResponse) {
-        let scatter_prefix = format!("_mqdb/scatter/{}/", self.node_id.get());
-        let cascade_prefix = format!("_mqdb/cascade_ack/{}/", self.node_id.get());
+        let scatter_prefix = format!(
+            "{}{}/",
+            crate::cluster::protocol::SCATTER_REPLY_PREFIX,
+            self.node_id.get()
+        );
+        let cascade_prefix = format!(
+            "{}{}/",
+            crate::cluster::protocol::CASCADE_ACK_REPLY_PREFIX,
+            self.node_id.get()
+        );
 
         tracing::debug!(
             response_topic = %response.response_topic,
@@ -932,7 +942,11 @@ impl<T: ClusterTransport> NodeController<T> {
         let fk_expected = data
             .as_object_mut()
             .and_then(|obj| obj.remove(mqdb_core::protocol::FK_EXPECTED_FIELD))
-            .filter(|_| request.response_topic.starts_with("_mqdb/cascade_ack/"))
+            .filter(|_| {
+                request
+                    .response_topic
+                    .starts_with(crate::cluster::protocol::CASCADE_ACK_REPLY_PREFIX)
+            })
             .and_then(|v| v.as_str().map(String::from));
 
         let expected_version = match mqdb_core::protocol::take_expected_version(&mut data) {
@@ -1596,7 +1610,11 @@ impl<T: ClusterTransport> NodeController<T> {
         let (tx, rx) = oneshot::channel();
         self.pending_constraints.insert_cascade_ack(request_id, tx);
 
-        let response_topic = format!("_mqdb/cascade_ack/{}/{request_id}", self.node_id.get());
+        let response_topic = format!(
+            "{}{}/{request_id}",
+            crate::cluster::protocol::CASCADE_ACK_REPLY_PREFIX,
+            self.node_id.get()
+        );
         let request = JsonDbRequest {
             request_id,
             op,
@@ -1650,7 +1668,11 @@ impl<T: ClusterTransport> NodeController<T> {
         let (tx, rx) = oneshot::channel();
         self.pending_constraints.insert_cascade_ack(request_id, tx);
 
-        let response_topic = format!("_mqdb/cascade_ack/{}/{request_id}", self.node_id.get());
+        let response_topic = format!(
+            "{}{}/{request_id}",
+            crate::cluster::protocol::CASCADE_ACK_REPLY_PREFIX,
+            self.node_id.get()
+        );
         let payload = serde_json::json!({
             field: serde_json::Value::Null,
             mqdb_core::protocol::FK_EXPECTED_FIELD: format!("{field}={expected_value}"),
@@ -2631,7 +2653,11 @@ impl<T: ClusterTransport> NodeController<T> {
             entity: entity.to_string(),
             id: Some(id.to_string()),
             payload: payload.to_vec(),
-            response_topic: format!("_mqdb/cascade_ack/{}/0", self.node_id.get()),
+            response_topic: format!(
+                "{}{}/0",
+                crate::cluster::protocol::CASCADE_ACK_REPLY_PREFIX,
+                self.node_id.get()
+            ),
             correlation_data: None,
             sender: None,
             client_id: None,
