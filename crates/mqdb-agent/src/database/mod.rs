@@ -9,6 +9,7 @@ mod schema_ops;
 mod sharing;
 mod subscriptions;
 
+pub(crate) use backup::{BACKUPS_DIR, is_valid_backup_name};
 pub use crud::{CallerContext, DerivedAccess, UpdatePrecondition};
 pub(crate) use query::{ListQuery, RowScope};
 pub use sharing::{GranteeIdentity, ShareActor};
@@ -68,6 +69,7 @@ impl Database {
     }
 
     pub async fn open_with_config(config: DatabaseConfig) -> mqdb_core::error::Result<Self> {
+        backup::refuse_unfinished_restore(&config.path)?;
         let storage = if let Some(ref passphrase) = config.passphrase {
             Arc::new(Storage::open_encrypted(
                 &config.path,
@@ -122,25 +124,19 @@ impl Database {
             entity_names.insert(name);
         }
         let persisted = storage
-            .get(ENTITY_NAMES_KEY)
-            .ok()
-            .flatten()
+            .get(ENTITY_NAMES_KEY)?
             .and_then(|bytes| serde_json::from_slice::<HashSet<String>>(&bytes).ok());
         if let Some(names) = persisted {
-            for name in names {
-                entity_names.insert(name);
-            }
-        } else if let Ok(keys) = storage.prefix_scan_keys(b"data/") {
-            for key in keys {
+            entity_names.extend(names);
+        } else {
+            for key in storage.prefix_scan_keys(b"data/")? {
                 if let Ok((entity, _)) = mqdb_core::keys::decode_data_key(&key)
                     && !entity.starts_with('_')
                 {
                     entity_names.insert(entity);
                 }
             }
-            if let Ok(bytes) = serde_json::to_vec(&entity_names) {
-                let _ = storage.insert(ENTITY_NAMES_KEY, &bytes);
-            }
+            storage.insert(ENTITY_NAMES_KEY, &serde_json::to_vec(&entity_names)?)?;
         }
         let entity_names = Arc::new(RwLock::new(entity_names));
 
@@ -177,19 +173,21 @@ impl Database {
     }
 
     pub fn shutdown(&self) {
-        let _ = self.shutdown_tx.send(true);
+        self.shutdown_tx.send_replace(true);
         tracing::info!("database shutdown signal sent");
     }
 
     pub async fn close(self) {
-        let _ = self.shutdown_tx.send(true);
+        self.shutdown_tx.send_replace(true);
         let handles: Vec<_> = self
             .background_handles
             .lock()
             .map(|mut guard| guard.drain(..).collect())
             .unwrap_or_default();
         for handle in handles {
-            let _ = handle.await;
+            if let Err(e) = handle.await {
+                tracing::warn!(%e, "database background task ended abnormally");
+            }
         }
     }
 
@@ -254,7 +252,7 @@ impl Database {
 
 impl Drop for Database {
     fn drop(&mut self) {
-        let _ = self.shutdown_tx.send(true);
+        self.shutdown_tx.send_replace(true);
         if let Ok(mut handles) = self.background_handles.lock() {
             for handle in handles.drain(..) {
                 handle.abort();

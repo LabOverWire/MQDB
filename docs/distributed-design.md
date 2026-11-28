@@ -455,7 +455,7 @@ Seven topic namespaces structure MQDB communication:
 | `$DB/_admin/constraint/{entity}/list` | List constraints |
 | `$DB/_admin/backup` | Trigger backup |
 | `$DB/_admin/backup/list` | List backups |
-| `$DB/_admin/restore` | Restore from backup |
+| `$DB/_admin/restore` | Not supported in cluster mode (returns an error) |
 | `$DB/_admin/consumer-groups` | List consumer groups |
 | `$DB/_admin/consumer-groups/{name}` | Get consumer group |
 | `_mqdb/http_resp/{uuid}` | HTTP handler response routing |

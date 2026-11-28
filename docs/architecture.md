@@ -1016,13 +1016,13 @@ Response: ["backup1", "backup2", ...]
 ```
 
 **Restore:**
-Restore requires agent restart due to open file handles. The CLI provides guidance:
+Restore runs offline, because the agent holds the database lock and open file handles. Stop the agent, then:
 ```bash
-mqdb restore --name daily_backup
-# Error: restore requires agent restart
+mqdb restore --db /path/to/db --name daily_backup
 ```
-
-For restore, stop the agent and copy backup directory over the database directory.
+- Replaces the database at `--db` with `{db_path}/backups/{name}/`; every backup is kept
+- Refuses a database that is in use (its lock is held), a missing backup, and a cluster node database
+- `$DB/_admin/restore` is not served online and returns an error naming this command
 
 ---
 
@@ -1107,7 +1107,7 @@ Response via response_topic (MQTT 5.0)
 - `$DB/_admin/constraint/{entity}/list` - List constraints
 - `$DB/_admin/backup` - Create backup
 - `$DB/_admin/backup/list` - List backups
-- `$DB/_admin/restore` - Restore (requires restart)
+- `$DB/_admin/restore` - Not served online; use `mqdb restore --db` with the agent stopped
 - `$DB/_admin/consumer-groups` - List consumer groups
 - `$DB/_admin/consumer-groups/{name}` - Show consumer group details
 

@@ -38,15 +38,28 @@ An empty backup directory prints `No backups found`.
 
 ### Restore from Backup
 
+Restore runs offline against the agent's database directory. Stop the agent first.
+
 ```bash
-mqdb restore --name my-snapshot
+mqdb restore --db ./data/testdb --name my-snapshot
 ```
 
-> **Note:** In agent mode the `$DB/_admin/restore` endpoint is not handled online — it returns
-> `Error: restore requires agent restart - use CLI with --restore flag`. Restore a snapshot by
-> stopping the agent and starting it against the restored data directory.
+**Expected output:**
+```
+restored backup my-snapshot into ./data/testdb (N files)
+```
 
-All backup/restore commands connect to the broker (support `--broker`, `--user`, `--pass`, `--insecure` flags).
+Start the agent again on the same `--db`; records match the time of the backup and every backup
+is still listed. With the agent still running, restore fails with an error that includes
+`database at ./data/testdb is in use: stop the agent before restoring` and changes nothing.
+A cluster node database is refused. The `$DB/_admin/restore` endpoint is not served online.
+
+If a restore is interrupted (killed or out of disk), the agent refuses to open the database with
+`a restore into ./data/testdb did not finish: run mqdb restore again before starting the agent`.
+Running the same restore again finishes it.
+
+`mqdb backup create` and `mqdb backup list` connect to the broker (support `--broker`, `--user`,
+`--pass`, `--insecure` flags) and exit non-zero when the broker returns an error.
 
 ### Verification Checklist
 
@@ -54,4 +67,6 @@ All backup/restore commands connect to the broker (support `--broker`, `--user`,
 - [ ] A `my-snapshot` directory exists under the agent's backup directory
 - [ ] `mqdb backup list` includes `my-snapshot`
 - [ ] `mqdb backup list` on a fresh agent prints `No backups found`
-- [ ] `mqdb restore --name my-snapshot` reports the restart-required error in agent mode
+- [ ] `mqdb backup create --name my-snapshot` a second time succeeds and the backup holds no nested `backups` directory
+- [ ] `mqdb restore --db <db> --name my-snapshot` with the agent running fails with "in use" and exits non-zero
+- [ ] `mqdb restore --db <db> --name my-snapshot` with the agent stopped brings back the records from the backup

@@ -4,7 +4,32 @@
 use super::Database;
 use mqdb_core::error::{Error, Result};
 use serde_json::Value;
+use std::fs::TryLockError;
 use std::path::Path;
+
+pub(crate) const BACKUPS_DIR: &str = "backups";
+const LOCK_FILE: &str = "lock";
+const VERSION_FILE: &str = "version";
+const RESTORE_STAGING_DIR: &str = ".restore-staging";
+const CLUSTER_NODE_DIRS: [&str; 2] = ["stores", "raft"];
+const KEPT_ON_RESTORE: [&str; 3] = [LOCK_FILE, BACKUPS_DIR, RESTORE_STAGING_DIR];
+
+pub(crate) fn refuse_unfinished_restore(db_path: &Path) -> Result<()> {
+    if db_path.join(RESTORE_STAGING_DIR).exists() {
+        return Err(Error::BackupFailed(format!(
+            "a restore into {} did not finish: run mqdb restore again before starting the agent",
+            db_path.display()
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn is_valid_backup_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
 
 impl Database {
     /// # Errors
@@ -21,10 +46,65 @@ impl Database {
             })?;
         }
 
-        copy_dir_recursive(src, dst)
+        copy_database(src, dst)
             .map_err(|e| Error::BackupFailed(format!("failed to create backup: {e}")))?;
 
         Ok(())
+    }
+
+    /// # Errors
+    /// Returns an error if the name is invalid, the backup is missing, `db_path`
+    /// is a cluster node database or in use, or a file operation fails.
+    pub fn restore_backup<P: AsRef<Path>>(db_path: P, name: &str) -> Result<usize> {
+        let db_path = db_path.as_ref();
+        if !is_valid_backup_name(name) {
+            return Err(Error::BackupFailed(format!(
+                "invalid backup name: {name}: must be alphanumeric, underscore, or hyphen only"
+            )));
+        }
+        let backup = db_path.join(BACKUPS_DIR).join(name);
+        if !backup.join(VERSION_FILE).is_file() {
+            return Err(Error::BackupFailed(format!(
+                "no database backup at {}",
+                backup.display()
+            )));
+        }
+        if CLUSTER_NODE_DIRS
+            .iter()
+            .any(|dir| db_path.join(dir).exists())
+        {
+            return Err(Error::BackupFailed(format!(
+                "{} is a cluster node database: restore supports agent databases only",
+                db_path.display()
+            )));
+        }
+
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(db_path.join(LOCK_FILE))
+            .map_err(|e| Error::BackupFailed(format!("failed to open database lock: {e}")))?;
+        lock.try_lock().map_err(|e| match e {
+            TryLockError::WouldBlock => Error::BackupFailed(format!(
+                "database at {} is in use: stop the agent before restoring",
+                db_path.display()
+            )),
+            TryLockError::Error(e) => Error::BackupFailed(format!("failed to lock database: {e}")),
+        })?;
+
+        let restored = replace_with_backup(db_path, &backup)
+            .map_err(|e| Error::BackupFailed(format!("failed to restore backup: {e}")))?;
+
+        lock.unlock()
+            .map_err(|e| Error::BackupFailed(format!("failed to unlock database: {e}")))?;
+
+        tracing::info!(
+            "restore completed: {restored} files from {} into {}",
+            backup.display(),
+            db_path.display()
+        );
+        Ok(restored)
     }
 
     /// # Errors
@@ -43,7 +123,7 @@ impl Database {
 
         let src = &self.config.path;
 
-        copy_dir_recursive(src, dest)
+        copy_database(src, dest)
             .map_err(|e| Error::BackupFailed(format!("failed to copy database: {e}")))?;
 
         tracing::info!(
@@ -163,18 +243,64 @@ impl Database {
     }
 }
 
-fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+fn copy_database(src: &Path, dst: &Path) -> std::io::Result<usize> {
     std::fs::create_dir_all(dst)?;
+    let dst = std::fs::canonicalize(dst)?;
+    copy_tree(&std::fs::canonicalize(src)?, &dst, &|path| {
+        dst.starts_with(path)
+    })
+}
+
+fn copy_tree(src: &Path, dst: &Path, skip: &dyn Fn(&Path) -> bool) -> std::io::Result<usize> {
+    std::fs::create_dir_all(dst)?;
+    let mut copied = 0;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
-        let file_type = entry.file_type()?;
         let src_path = entry.path();
+        if skip(&src_path) {
+            continue;
+        }
         let dst_path = dst.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
+        if entry.file_type()?.is_dir() {
+            copied += copy_tree(&src_path, &dst_path, skip)?;
         } else {
             std::fs::copy(&src_path, &dst_path)?;
+            copied += 1;
         }
     }
-    Ok(())
+    Ok(copied)
+}
+
+fn replace_with_backup(db_path: &Path, backup: &Path) -> std::io::Result<usize> {
+    let staging = db_path.join(RESTORE_STAGING_DIR);
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging)?;
+    }
+    let restored = copy_tree(backup, &staging, &|path| {
+        path.parent() == Some(backup) && is_kept_on_restore(path)
+    })?;
+
+    for entry in std::fs::read_dir(db_path)? {
+        let entry = entry?;
+        if is_kept_on_restore(&entry.path()) {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            std::fs::remove_dir_all(entry.path())?;
+        } else {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+
+    for entry in std::fs::read_dir(&staging)? {
+        let entry = entry?;
+        std::fs::rename(entry.path(), db_path.join(entry.file_name()))?;
+    }
+    std::fs::remove_dir(&staging)?;
+    Ok(restored)
+}
+
+fn is_kept_on_restore(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| KEPT_ON_RESTORE.iter().any(|kept| name == *kept))
 }

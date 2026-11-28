@@ -83,7 +83,7 @@ async fn dispatch_command(command: Commands) -> Result<(), Box<dyn std::error::E
         Commands::Constraint { action } => dispatch_constraint(action).await?,
         Commands::Index { action } => dispatch_index(action).await?,
         Commands::Backup { action } => dispatch_backup(action).await?,
-        Commands::Restore { name, conn } => Box::pin(cmd_restore(&name, &conn)).await?,
+        Commands::Restore { name, db } => cmd_restore(&name, &db)?,
         Commands::ConsumerGroup { action } => dispatch_consumer_group(action).await?,
         #[cfg(feature = "cluster")]
         Commands::Db { action } => dispatch_db(action).await?,

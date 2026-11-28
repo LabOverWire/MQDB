@@ -40,8 +40,11 @@ impl ClusteredAgent {
         } else if req.topic == "$DB/_admin/catalog" {
             self.handle_catalog().await
         } else if let Some(rest) = req.topic.strip_prefix("$DB/_admin/index/") {
-            if let Some(entity) = rest.strip_suffix("/add") {
-                Self::handle_index_add(entity, &req.payload)
+            if rest.ends_with("/add") {
+                Response::error(
+                    ErrorCode::Forbidden,
+                    "index management is only supported in agent mode",
+                )
             } else {
                 Response::error(ErrorCode::BadRequest, "invalid index operation")
             }
@@ -54,7 +57,7 @@ impl ClusteredAgent {
         } else if req.topic == "$DB/_admin/restore" {
             Response::error(
                 ErrorCode::BadRequest,
-                "restore requires agent restart - use CLI with --restore flag",
+                "restore is not supported in cluster mode",
             )
         } else if req.topic == "$DB/_admin/consumer-groups" {
             Self::handle_consumer_group_list()
@@ -352,13 +355,6 @@ impl ClusteredAgent {
         }
     }
 
-    fn handle_index_add(_entity: &str, _payload: &[u8]) -> Response {
-        Response::error(
-            ErrorCode::Forbidden,
-            "index management is only supported in agent mode",
-        )
-    }
-
     async fn set_null_schema_conflict(&self, entity: &str, field: &str) -> Option<String> {
         let cluster_schema = self.controller.read().await.schema_get(entity)?;
         let schema: mqdb_core::schema::Schema =
@@ -542,10 +538,7 @@ impl ClusteredAgent {
             .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(String::from))
             .unwrap_or_else(|| "backup".to_string());
 
-        if !name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-        {
+        if !is_valid_backup_name(&name) {
             return Response::error(
                 ErrorCode::BadRequest,
                 "invalid backup name: must be alphanumeric, underscore, or hyphen only",
@@ -584,11 +577,23 @@ impl ClusteredAgent {
 
         match std::fs::read_dir(&backup_dir) {
             Ok(entries) => {
-                let backups: Vec<String> = entries
-                    .filter_map(std::result::Result::ok)
-                    .filter(|e| e.path().is_dir())
-                    .filter_map(|e| e.file_name().into_string().ok())
-                    .collect();
+                let mut backups = Vec::new();
+                for entry in entries {
+                    match entry {
+                        Ok(entry) if entry.path().is_dir() => {
+                            if let Ok(name) = entry.file_name().into_string() {
+                                backups.push(name);
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            return Response::error(
+                                ErrorCode::Internal,
+                                format!("failed to list backups: {e}"),
+                            );
+                        }
+                    }
+                }
                 Response::ok(json!(backups))
             }
             Err(e) => Response::error(ErrorCode::Internal, format!("failed to list backups: {e}")),
@@ -727,10 +732,9 @@ fn handle_user_delete(auth: Option<&ComprehensiveAuthProvider>, payload: &Value)
     let Some(username) = payload.get("username").and_then(|v| v.as_str()) else {
         return Response::error(ErrorCode::BadRequest, "missing field: username");
     };
-    if !auth.password_provider().has_user(username) {
+    if !auth.password_provider().remove_user(username) {
         return Response::error(ErrorCode::NotFound, "user not found");
     }
-    let _ = auth.password_provider().remove_user(username);
     Response::ok(json!({"message": "user deleted"}))
 }
 
@@ -822,22 +826,38 @@ async fn handle_acl_role_add(
     let Some(role_name) = payload.get("role").and_then(|v| v.as_str()) else {
         return Response::error(ErrorCode::BadRequest, "missing field: role");
     };
+    let rule_values = match payload.get("rules") {
+        None => &[][..],
+        Some(Value::Array(rules)) => rules.as_slice(),
+        Some(_) => {
+            return Response::error(ErrorCode::BadRequest, "rules must be an array");
+        }
+    };
+    let mut rules = Vec::new();
+    for rule_val in rule_values {
+        let topic = rule_val.get("topic").and_then(|v| v.as_str());
+        let permission = rule_val
+            .get("access")
+            .and_then(|v| v.as_str())
+            .and_then(parse_permission);
+        let (Some(topic), Some(permission)) = (topic, permission) else {
+            return Response::error(
+                ErrorCode::BadRequest,
+                format!(
+                    "invalid rule: {rule_val}: needs a topic and an access of read, write, readwrite or deny"
+                ),
+            );
+        };
+        rules.push((topic, permission));
+    }
     auth.acl_manager().add_role(role_name.to_string()).await;
-    if let Some(rules) = payload.get("rules").and_then(|v| v.as_array()) {
-        for rule_val in rules {
-            let Some(topic) = rule_val.get("topic").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let Some(access_str) = rule_val.get("access").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let Some(permission) = parse_permission(access_str) else {
-                continue;
-            };
-            let _ = auth
-                .acl_manager()
-                .add_role_rule(role_name, topic.to_string(), permission)
-                .await;
+    for (topic, permission) in rules {
+        if let Err(e) = auth
+            .acl_manager()
+            .add_role_rule(role_name, topic.to_string(), permission)
+            .await
+        {
+            return Response::error(ErrorCode::Internal, e.to_string());
         }
     }
     Response::ok(json!({"message": "role added"}))
@@ -935,8 +955,56 @@ async fn handle_acl_assignment_list(
     Response::ok(json!(roles))
 }
 
+fn is_valid_backup_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
+    #[test]
+    fn a_backup_name_must_be_non_empty_ascii() {
+        assert_eq!(
+            ["nightly-1", "", "caf\u{e9}", "a/b"].map(super::is_valid_backup_name),
+            [true, false, false, false]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_role_with_a_malformed_rule_is_refused_and_not_created() {
+        let auth = mqtt5::broker::auth::ComprehensiveAuthProvider::new();
+        let response = super::handle_acl_role_add(
+            Some(&auth),
+            &json!({"role": "editors", "rules": [{"topic": "a/#", "access": "sometimes"}]}),
+        )
+        .await;
+        assert!(matches!(
+            response,
+            mqdb_core::transport::Response::Error { code: 400, .. }
+        ));
+        let not_an_array =
+            super::handle_acl_role_add(Some(&auth), &json!({"role": "editors", "rules": "a/#"}))
+                .await;
+        assert!(matches!(
+            not_an_array,
+            mqdb_core::transport::Response::Error { code: 400, .. }
+        ));
+        assert!(auth.acl_manager().get_role("editors").await.is_none());
+    }
+
+    #[test]
+    fn deleting_an_unknown_user_answers_404() {
+        let auth = mqtt5::broker::auth::ComprehensiveAuthProvider::new();
+        let response = super::handle_user_delete(Some(&auth), &json!({"username": "ghost"}));
+        assert!(matches!(
+            response,
+            mqdb_core::transport::Response::Error { code: 404, .. }
+        ));
+    }
     #[test]
     fn a_constraint_the_node_cannot_store_answers_500() {
         let response = super::ClusteredAgent::constraint_add_response(

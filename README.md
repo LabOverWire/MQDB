@@ -449,7 +449,7 @@ The check runs when a client subscribes and when a persistent session resumes. A
 | `$DB/_admin/constraint/{entity}/list` | List constraints |
 | `$DB/_admin/backup` | Create backup |
 | `$DB/_admin/backup/list` | List backups |
-| `$DB/_admin/restore` | Restore (requires restart) |
+| `$DB/_admin/restore` | Not served online; returns an error pointing to `mqdb restore --db` |
 | `$DB/_admin/consumer-groups` | List consumer groups |
 | `$DB/_admin/consumer-groups/{name}` | Show consumer group details |
 
@@ -916,7 +916,7 @@ Use `--no-persist-stores` for testing or ephemeral deployments where data doesn'
 | TTL expiration | Full | 60-second cleanup interval |
 | Schema validation | Full | Registration and enforcement across nodes |
 | Authentication | Full | Password, SCRAM, JWT, federated JWT, rate limiting |
-| Backups | Partial | Per-node only (no cluster-wide snapshot) |
+| Backups | Partial | Per-node only (no cluster-wide snapshot); `mqdb restore` supports agent databases only |
 | Unique constraints | Full | Distributed reserve-commit-release protocol across nodes |
 | Foreign key constraints | Full | Distributed existence checks, owner-aware cascade/set-null with ack-wait, in-memory reverse index |
 | NOT NULL constraints | — | Agent mode only; not yet available in cluster mode |
@@ -1142,7 +1142,8 @@ mqdb constraint list users
 # Backup
 mqdb backup create --name daily_backup
 mqdb backup list
-mqdb restore --name daily_backup
+# Restore runs offline: stop the agent first
+mqdb restore --db /path/to/db --name daily_backup
 
 # Password management
 mqdb passwd admin -b admin123 -f passwd.txt
