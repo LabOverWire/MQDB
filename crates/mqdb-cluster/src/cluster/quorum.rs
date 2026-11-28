@@ -92,8 +92,10 @@ impl QuorumTracker {
     }
 
     pub fn signal_completion(&mut self) {
-        if let Some(tx) = self.completion_tx.take() {
-            let _ = tx.send(self.current_result());
+        if let Some(tx) = self.completion_tx.take()
+            && tx.send(self.current_result()).is_err()
+        {
+            tracing::debug!("quorum result receiver dropped");
         }
     }
 

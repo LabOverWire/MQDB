@@ -242,3 +242,111 @@ async fn writes_a_replica_heals_by_catchup_are_no_longer_unanswered() {
         "replica healed the gap, primary still waits for an answer"
     );
 }
+
+#[tokio::test]
+async fn a_write_held_for_a_gap_when_the_replica_becomes_primary_survives() {
+    let partition = data_partition(ENTITY, ID);
+    let second = another_id_in(partition);
+    let (mut old, mut new) = pair_in_epoch_one(partition).await;
+    create(&mut old, ID, br#"{"n":1}"#).await;
+    create(&mut old, &second, br#"{"n":2}"#).await;
+    let mut writes: Vec<ClusterMessage> = old
+        .transport
+        .take_sent()
+        .into_iter()
+        .filter_map(|(target, message)| (target == node(NEW)).then_some(message))
+        .collect();
+    let later = writes.pop().expect("second write sent");
+    let earlier = writes.pop().expect("first write sent");
+
+    new.transport.inject_message(node(OLD), later);
+    Box::pin(new.process_messages()).await;
+    deliver(&mut new, NEW, &mut old, OLD).await;
+    apply_moved_map(&mut new, partition).await;
+    new.transport.inject_message(node(OLD), earlier);
+    Box::pin(new.process_messages()).await;
+    apply_moved_map(&mut old, partition).await;
+    settle(&mut old, &mut new).await;
+
+    assert_eq!(
+        (
+            new.stores().db_get(ENTITY, ID).is_some(),
+            new.stores().db_get(ENTITY, &second).is_some()
+        ),
+        (true, true),
+        "new primary holds the first write, the write it held for the gap"
+    );
+}
+
+#[tokio::test]
+async fn a_held_write_survives_when_the_old_primary_moves_before_the_gap_ack() {
+    let partition = data_partition(ENTITY, ID);
+    let second = another_id_in(partition);
+    let (mut old, mut new) = pair_in_epoch_one(partition).await;
+    create(&mut old, ID, br#"{"n":1}"#).await;
+    create(&mut old, &second, br#"{"n":2}"#).await;
+    let mut writes: Vec<ClusterMessage> = old
+        .transport
+        .take_sent()
+        .into_iter()
+        .filter_map(|(target, message)| (target == node(NEW)).then_some(message))
+        .collect();
+    let later = writes.pop().expect("second write sent");
+    let earlier = writes.pop().expect("first write sent");
+
+    new.transport.inject_message(node(OLD), later);
+    Box::pin(new.process_messages()).await;
+    let gap_ack = new.transport.take_sent();
+    apply_moved_map(&mut new, partition).await;
+    apply_moved_map(&mut old, partition).await;
+    for (target, message) in gap_ack {
+        if target == node(OLD) {
+            old.transport.inject_message(node(NEW), message);
+        }
+    }
+    Box::pin(old.process_messages()).await;
+    new.transport.inject_message(node(OLD), earlier);
+    Box::pin(new.process_messages()).await;
+    settle(&mut old, &mut new).await;
+
+    assert_eq!(
+        (
+            new.stores().db_get(ENTITY, ID).is_some(),
+            new.stores().db_get(ENTITY, &second).is_some()
+        ),
+        (true, true),
+        "new primary holds the first write, the write it held for the gap"
+    );
+}
+
+#[tokio::test]
+async fn a_dropped_write_survives_when_its_catch_up_reaches_the_new_primary() {
+    let partition = data_partition(ENTITY, ID);
+    let second = another_id_in(partition);
+    let (mut old, mut new) = pair_in_epoch_one(partition).await;
+    create(&mut old, ID, br#"{"n":1}"#).await;
+    create(&mut old, &second, br#"{"n":2}"#).await;
+    let later = old
+        .transport
+        .take_sent()
+        .into_iter()
+        .filter_map(|(target, message)| (target == node(NEW)).then_some(message))
+        .next_back()
+        .expect("second write sent");
+
+    new.transport.inject_message(node(OLD), later);
+    Box::pin(new.process_messages()).await;
+    deliver(&mut new, NEW, &mut old, OLD).await;
+    apply_moved_map(&mut new, partition).await;
+    apply_moved_map(&mut old, partition).await;
+    settle(&mut old, &mut new).await;
+
+    assert_eq!(
+        (
+            new.stores().db_get(ENTITY, ID).is_some(),
+            new.stores().db_get(ENTITY, &second).is_some()
+        ),
+        (true, true),
+        "new primary holds the dropped write, the write it held for the gap"
+    );
+}

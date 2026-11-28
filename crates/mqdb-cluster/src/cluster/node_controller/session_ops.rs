@@ -66,7 +66,9 @@ impl<T: ClusterTransport> NodeController<T> {
 
         if stored.replicas.is_empty() {
             let (tx, rx) = tokio::sync::oneshot::channel();
-            let _ = tx.send(QuorumResult::Success);
+            if tx.send(QuorumResult::Success).is_err() {
+                tracing::debug!("quorum result receiver dropped");
+            }
             return Ok((stored.session, rx));
         }
 

@@ -24,10 +24,10 @@ use super::heartbeat::{HeartbeatManager, NodeStatus};
 use super::migration::{MigrationManager, MigrationPhase};
 use super::protocol::{
     BatchReadRequest, CatchupRequest, ForwardTarget, ForwardedPublish, JsonDbOp, JsonDbRequest,
-    JsonDbResponse, QueryRequest, QueryResponse, ReplicationWrite, UniqueCommitRequest,
-    UniqueCommitResponse, UniqueReassertRequest, UniqueReleaseRequest, UniqueReleaseResponse,
-    UniqueReserveRequest, UniqueReserveResponse, UniqueReserveStatus, UniqueSealRequest,
-    UniqueSealResponse,
+    JsonDbResponse, QueryRequest, QueryResponse, ReplicationAck, ReplicationWrite,
+    UniqueCommitRequest, UniqueCommitResponse, UniqueReassertRequest, UniqueReleaseRequest,
+    UniqueReleaseResponse, UniqueReserveRequest, UniqueReserveResponse, UniqueReserveStatus,
+    UniqueSealRequest, UniqueSealResponse,
 };
 use super::query_coordinator::QueryCoordinator;
 use super::quorum::PendingWrites;
@@ -480,6 +480,7 @@ pub struct NodeController<T: ClusterTransport> {
     pub(super) resync_after_demotion: HashSet<PartitionId>,
     pub(super) unanswered: HashMap<(PartitionId, u64), UnansweredWrite>,
     pub(super) unanswered_order: VecDeque<(PartitionId, u64, Epoch)>,
+    pub(super) refusals_owed: Vec<(NodeId, ReplicationAck)>,
     pub(super) event_delivery: super::event_delivery::EventDelivery,
     pub(super) tx_raft_messages: flume::Sender<RaftMessage>,
     pub(super) tx_raft_events: flume::Sender<RaftEvent>,
@@ -566,6 +567,7 @@ impl<T: ClusterTransport> NodeController<T> {
             resync_after_demotion: HashSet::new(),
             unanswered: HashMap::with_capacity(HELD_WRITE_CAPACITY),
             unanswered_order: VecDeque::with_capacity(HELD_WRITE_CAPACITY),
+            refusals_owed: Vec::new(),
             event_delivery: super::event_delivery::EventDelivery::default(),
             tx_raft_messages,
             tx_raft_events,
@@ -736,7 +738,30 @@ impl<T: ClusterTransport> NodeController<T> {
             .replicas
             .entry(partition.get())
             .or_insert_with(|| ReplicaState::new(partition, self.node_id));
+        let held = state.take_held_writes();
         state.become_primary(epoch);
+        if let Some(previous) = self
+            .partition_map
+            .primary(partition)
+            .filter(|previous| *previous != self.node_id)
+        {
+            self.refusals_owed
+                .extend(
+                    held.iter()
+                        .filter(|write| write.epoch < epoch)
+                        .map(|write| {
+                            (
+                                previous,
+                                ReplicationAck::stale_epoch(
+                                    partition,
+                                    epoch,
+                                    write.sequence,
+                                    self.node_id,
+                                ),
+                            )
+                        }),
+                );
+        }
         self.refused_while_primary.remove(&partition);
         self.resync_after_demotion.remove(&partition);
         self.unanswered.retain(|(held, _), _| *held != partition);
@@ -823,14 +848,20 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     pub async fn send_tick_output(&self, output: TickOutput) {
-        if let Some(hb) = output.heartbeat {
-            let _ = self.transport.broadcast(hb).await;
+        if let Some(hb) = output.heartbeat
+            && let Err(e) = self.transport.broadcast(hb).await
+        {
+            tracing::debug!(%e, "cluster message not sent");
         }
         for (target, msg) in output.catchup_requests {
-            let _ = self.transport.send(target, msg).await;
+            if let Err(e) = self.transport.send(target, msg).await {
+                tracing::debug!(%e, "cluster message not sent");
+            }
         }
         for (target, msg) in output.seal_requests {
-            let _ = self.transport.send(target, msg).await;
+            if let Err(e) = self.transport.send(target, msg).await {
+                tracing::debug!(%e, "cluster message not sent");
+            }
         }
         for (topic, payload, correlation_data) in output.local_publishes {
             self.transport
@@ -1128,9 +1159,13 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             ClusterMessage::DrainNotification { node_id } => {
                 tracing::info!(?node_id, "received drain notification");
-                let _ = self
+                if self
                     .tx_raft_events
-                    .send(RaftEvent::DrainNotification(node_id));
+                    .send(RaftEvent::DrainNotification(node_id))
+                    .is_err()
+                {
+                    tracing::debug!("raft message not queued");
+                }
                 None
             }
             ClusterMessage::CatchupRequest(req) => {
@@ -1179,13 +1214,17 @@ impl<T: ClusterTransport> NodeController<T> {
     ) {
         let response = self.handle_query_request(partition, request);
         let response_msg = ClusterMessage::QueryResponse(response);
-        let _ = self.transport.send(from, response_msg).await;
+        if let Err(e) = self.transport.send(from, response_msg).await {
+            tracing::debug!(%e, "cluster message not sent");
+        }
     }
 
     async fn handle_batch_read_and_respond(&mut self, from: NodeId, request: &BatchReadRequest) {
         let response = self.handle_batch_read_request(request);
         let response_msg = ClusterMessage::BatchReadResponse(response);
-        let _ = self.transport.send(from, response_msg).await;
+        if let Err(e) = self.transport.send(from, response_msg).await {
+            tracing::debug!(%e, "cluster message not sent");
+        }
     }
 
     async fn handle_forwarded_publish_no_dedup(&mut self, from: NodeId, fwd: &ForwardedPublish) {
@@ -1226,9 +1265,13 @@ impl<T: ClusterTransport> NodeController<T> {
             }
             ClusterMessage::DrainNotification { node_id } => {
                 tracing::info!(?node_id, "received drain notification");
-                let _ = self
+                if self
                     .tx_raft_events
-                    .try_send(RaftEvent::DrainNotification(node_id));
+                    .try_send(RaftEvent::DrainNotification(node_id))
+                    .is_err()
+                {
+                    tracing::debug!("raft message not queued");
+                }
             }
             ClusterMessage::RequestVote(req) => {
                 self.forward_raft_vote(msg.from, req);
@@ -1243,12 +1286,16 @@ impl<T: ClusterTransport> NodeController<T> {
                 self.forward_raft_append_response(msg.from, resp);
             }
             ClusterMessage::InstallSnapshot(request) => {
-                let _ = self
+                if self
                     .tx_raft_messages
                     .try_send(RaftMessage::InstallSnapshot {
                         from: msg.from,
                         request,
-                    });
+                    })
+                    .is_err()
+                {
+                    tracing::debug!("raft message not queued");
+                }
             }
             ClusterMessage::CatchupRequest(req) => {
                 self.handle_catchup_request(
@@ -1272,21 +1319,33 @@ impl<T: ClusterTransport> NodeController<T> {
     }
 
     fn forward_raft_vote(&self, from: NodeId, request: super::raft::RequestVoteRequest) {
-        let _ = self
+        if self
             .tx_raft_messages
-            .try_send(RaftMessage::RequestVote { from, request });
+            .try_send(RaftMessage::RequestVote { from, request })
+            .is_err()
+        {
+            tracing::debug!("raft message not queued");
+        }
     }
 
     fn forward_raft_vote_response(&self, from: NodeId, response: super::raft::RequestVoteResponse) {
-        let _ = self
+        if self
             .tx_raft_messages
-            .try_send(RaftMessage::RequestVoteResponse { from, response });
+            .try_send(RaftMessage::RequestVoteResponse { from, response })
+            .is_err()
+        {
+            tracing::debug!("raft message not queued");
+        }
     }
 
     fn forward_raft_append(&self, from: NodeId, request: super::raft::AppendEntriesRequest) {
-        let _ = self
+        if self
             .tx_raft_messages
-            .try_send(RaftMessage::AppendEntries { from, request });
+            .try_send(RaftMessage::AppendEntries { from, request })
+            .is_err()
+        {
+            tracing::debug!("raft message not queued");
+        }
     }
 
     fn forward_raft_append_response(
@@ -1294,9 +1353,13 @@ impl<T: ClusterTransport> NodeController<T> {
         from: NodeId,
         response: super::raft::AppendEntriesResponse,
     ) {
-        let _ = self
+        if self
             .tx_raft_messages
-            .try_send(RaftMessage::AppendEntriesResponse { from, response });
+            .try_send(RaftMessage::AppendEntriesResponse { from, response })
+            .is_err()
+        {
+            tracing::debug!("raft message not queued");
+        }
     }
 
     async fn dispatch_data_plane_message(
@@ -1536,7 +1599,9 @@ impl<T: ClusterTransport> NodeController<T> {
             let msg = ClusterMessage::DrainNotification {
                 node_id: self.node_id,
             };
-            let _ = self.transport.broadcast(msg).await;
+            if let Err(e) = self.transport.broadcast(msg).await {
+                tracing::debug!(%e, "cluster message not sent");
+            }
         } else {
             tracing::info!(node_id = self.node_id.get(), "node exiting draining mode");
         }

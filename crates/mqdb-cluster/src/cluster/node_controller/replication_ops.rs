@@ -502,6 +502,7 @@ impl<T: ClusterTransport> NodeController<T> {
         }
         self.held_primaries = Some(held.without_legacy());
         self.update_partition_map(raft_map);
+        self.send_owed_refusals().await;
         self.release_held_writes().await;
         self.serve_deferred_snapshots().await;
         if self.has_handoff_work() {
@@ -600,6 +601,24 @@ impl<T: ClusterTransport> NodeController<T> {
             write,
             superseded_at,
         });
+    }
+
+    pub(super) async fn send_owed_refusals(&mut self) {
+        for (previous, refusal) in std::mem::take(&mut self.refusals_owed) {
+            tracing::info!(
+                partition = ?refusal.partition(),
+                sequence = refusal.sequence(),
+                to = previous.get(),
+                "refusing a write held for a gap when this node took the primary"
+            );
+            if let Err(e) = self
+                .transport
+                .send(previous, ClusterMessage::Ack(refusal))
+                .await
+            {
+                tracing::debug!(to = previous.get(), %e, "held-write refusal not sent");
+            }
+        }
     }
 
     fn has_handoff_work(&self) -> bool {

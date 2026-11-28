@@ -72,6 +72,12 @@ impl ReplicaState {
         self.sequence + 1
     }
 
+    pub fn take_held_writes(&mut self) -> Vec<ReplicationWrite> {
+        std::mem::take(&mut self.pending_writes)
+            .into_values()
+            .collect()
+    }
+
     pub fn become_primary(&mut self, epoch: Epoch) {
         self.role = ReplicaRole::Primary;
         self.epoch = epoch;
