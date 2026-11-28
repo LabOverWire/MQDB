@@ -164,6 +164,11 @@ impl Database {
         use mqdb_core::error::Error;
         use std::collections::HashSet;
 
+        if fields.is_empty() || fields.iter().any(String::is_empty) {
+            return Err(Error::Validation(
+                "a unique constraint needs at least one field and no empty field names".into(),
+            ));
+        }
         let constraint = Constraint::Unique(UniqueConstraint::new(entity.clone(), fields.clone()));
         self.refuse_existing_constraint(&constraint).await?;
 
@@ -750,6 +755,52 @@ mod tests {
             "re-adding a constraint stored under its legacy name must be refused, got {refused:?}"
         );
         assert_eq!(db.list_constraints("posts").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_unique_constraint_without_fields_or_with_an_empty_field_is_refused() {
+        let db = open_memory_db(Arc::new(MemoryBackend::new())).await;
+        for fields in [vec![], vec![String::new()]] {
+            let refused = db.add_unique_constraint("items".to_string(), fields).await;
+            assert!(
+                matches!(refused, Err(Error::Validation(_))),
+                "got {refused:?}"
+            );
+        }
+        assert!(db.list_constraints("items").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_constraint_stored_under_both_names_loads_once() {
+        let backend = Arc::new(MemoryBackend::new());
+        let value = |name: &str| {
+            serde_json::to_vec(&json!({"Unique": {
+                "entity": "items",
+                "fields": ["a_b"],
+                "name": name
+            }}))
+            .unwrap()
+        };
+        let legacy_key = keys::encode_constraint_key("unique", "items", "items_a_b_unique");
+        backend
+            .insert(&legacy_key, &value("items_a_b_unique"))
+            .unwrap();
+        backend
+            .insert(
+                &keys::encode_constraint_key("unique", "items", "items_a%5Fb_unique"),
+                &value("items_a%5Fb_unique"),
+            )
+            .unwrap();
+
+        let db = open_memory_db(Arc::clone(&backend)).await;
+        assert_eq!(
+            (
+                db.list_constraints("items").await.len(),
+                backend.get(&legacy_key).unwrap().is_some()
+            ),
+            (1, false),
+            "loaded constraints, legacy key still stored"
+        );
     }
 
     #[tokio::test]

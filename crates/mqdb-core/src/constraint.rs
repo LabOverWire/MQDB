@@ -739,11 +739,19 @@ impl ConstraintManager {
         for (key, value) in items {
             let stored: Constraint = serde_json::from_slice(&value)?;
             let constraint = stored.clone().with_derived_name();
+            let already_loaded = self
+                .get_constraints(constraint.entity())
+                .iter()
+                .any(|loaded| loaded.name() == constraint.name());
             if constraint.name() != stored.name() {
                 renames.remove(key);
-                self.persist_constraint(&mut renames, &constraint)?;
+                if !already_loaded {
+                    self.persist_constraint(&mut renames, &constraint)?;
+                }
             }
-            self.add_constraint(constraint);
+            if !already_loaded {
+                self.add_constraint(constraint);
+            }
         }
 
         renames.commit()
