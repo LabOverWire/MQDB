@@ -23,6 +23,9 @@ struct Certs {
 }
 
 fn generate_certs() -> Certs {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
     let mut ca_params = CertificateParams::new(Vec::new()).unwrap();
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     let ca_key = KeyPair::generate().unwrap();
@@ -110,10 +113,6 @@ struct StalledPeer {
 }
 
 async fn setup_stalled_peer() -> StalledPeer {
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .ok();
-
     let certs = generate_certs();
     let dir = tempfile::tempdir().unwrap();
     let ca_path = dir.path().join("ca.pem");
@@ -422,10 +421,6 @@ async fn reconnecting_far_end(
 
 #[tokio::test]
 async fn dead_peer_is_removed_and_redialled() {
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .ok();
-
     let certs = generate_certs();
     let dir = tempfile::tempdir().unwrap();
     let ca_path = dir.path().join("ca.pem");
@@ -502,10 +497,6 @@ async fn stream_stopping_far_end(endpoint: Endpoint, closed_tx: oneshot::Sender<
 
 #[tokio::test]
 async fn a_failed_writer_closes_the_peer_connection() {
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .ok();
-
     let certs = generate_certs();
     let dir = tempfile::tempdir().unwrap();
     let ca_path = dir.path().join("ca.pem");
@@ -869,7 +860,6 @@ async fn linked_transport(
     tokio::task::JoinHandle<()>,
     tempfile::TempDir,
 ) {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let certs = generate_certs();
     let dir = tempfile::tempdir().unwrap();
     let ca_path = dir.path().join("ca.pem");
@@ -954,7 +944,6 @@ async fn a_lost_link_needs_a_dial_before_failure_detection() {
 
 #[tokio::test]
 async fn a_redial_skips_a_peer_that_is_already_being_dialled() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let certs = generate_certs();
     let dir = tempfile::tempdir().unwrap();
     let ca_path = dir.path().join("ca.pem");
@@ -1000,7 +989,6 @@ fn free_udp_addr() -> SocketAddr {
 
 #[tokio::test]
 async fn a_node_restarted_without_peers_dials_the_peers_that_once_dialled_it() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let certs = generate_certs();
     let dir = tempfile::tempdir().unwrap();
     let ca_path = dir.path().join("ca.pem");
@@ -1089,7 +1077,6 @@ async fn stream_counting_far_end(endpoint: Endpoint, streams_tx: flume::Sender<(
 
 #[tokio::test]
 async fn a_redial_that_finishes_after_the_peer_linked_first_keeps_the_new_link() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let certs = generate_certs();
     let dir = tempfile::tempdir().unwrap();
     let ca_path = dir.path().join("ca.pem");
@@ -1153,7 +1140,6 @@ async fn dials_reuse_the_client_tls_config_loaded_by_the_first_one() {
 
 #[tokio::test]
 async fn connecting_configured_peers_remembers_them_and_reports_each_failure() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let certs = generate_certs();
     let dir = tempfile::tempdir().unwrap();
     let ca_path = dir.path().join("ca.pem");
@@ -1197,7 +1183,6 @@ async fn connecting_configured_peers_remembers_them_and_reports_each_failure() {
 
 #[tokio::test]
 async fn a_remembered_address_that_answers_as_another_node_is_forgotten() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let certs = generate_certs();
     let dir = tempfile::tempdir().unwrap();
     let ca_path = dir.path().join("ca.pem");
@@ -1269,7 +1254,6 @@ struct SelfDialFiles {
 }
 
 fn self_dial_files() -> SelfDialFiles {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let certs = generate_certs();
     let dir = tempfile::tempdir().unwrap();
     let ca = dir.path().join("ca.pem");
@@ -1391,7 +1375,6 @@ async fn a_link_back_to_this_node_gives_no_reach_for_an_election() {
 
 #[tokio::test]
 async fn redialling_a_silent_peer_does_not_pile_up_connections() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let certs = generate_certs();
     let dir = tempfile::tempdir().unwrap();
     let ca_path = dir.path().join("ca.pem");
@@ -1442,7 +1425,6 @@ async fn redialling_a_silent_peer_does_not_pile_up_connections() {
 
 #[tokio::test]
 async fn a_silent_linked_peer_reaches_the_long_absence_delay_through_the_transport() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let certs = generate_certs();
     let dir = tempfile::tempdir().unwrap();
     let ca_path = dir.path().join("ca.pem");
