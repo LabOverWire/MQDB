@@ -844,6 +844,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn renaming_onto_another_legacy_key_keeps_both_constraints() {
+        let backend = Arc::new(MemoryBackend::new());
+        for (field, legacy_name) in [("%0", "items_%0_unique"), ("%250", "items_%250_unique")] {
+            backend
+                .insert(
+                    &keys::encode_constraint_key("unique", "items", legacy_name),
+                    &serde_json::to_vec(&json!({"Unique": {
+                        "entity": "items",
+                        "fields": [field],
+                        "name": legacy_name
+                    }}))
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+
+        drop(open_memory_db(Arc::clone(&backend)).await);
+        let reopened = open_memory_db(backend).await;
+        assert_eq!(
+            unique_field_sets(&reopened.list_constraints("items").await),
+            vec![vec!["%0".to_string()], vec!["%250".to_string()]]
+        );
+    }
+
+    #[tokio::test]
     async fn a_legacy_name_does_not_block_the_constraint_that_now_owns_it() {
         let backend = Arc::new(MemoryBackend::new());
         let legacy = json!({"Unique": {

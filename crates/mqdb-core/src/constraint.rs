@@ -744,9 +744,12 @@ impl ConstraintManager {
             }
         }
 
+        let (legacy_keys, renamed): (Vec<_>, Vec<_>) = legacy.into_iter().unzip();
         let mut renames = storage.batch();
-        for (key, constraint) in legacy {
+        for key in legacy_keys {
             renames.remove(key);
+        }
+        for constraint in renamed {
             let already_loaded = self
                 .get_constraints(constraint.entity())
                 .iter()
