@@ -1029,10 +1029,9 @@ fn handle_user_delete(auth: Option<&ComprehensiveAuthProvider>, payload: &Value)
     let Some(username) = payload.get("username").and_then(|v| v.as_str()) else {
         return Response::error(mqdb_core::ErrorCode::BadRequest, "missing field: username");
     };
-    if !auth.password_provider().has_user(username) {
+    if !auth.password_provider().remove_user(username) {
         return Response::error(mqdb_core::ErrorCode::NotFound, "user not found");
     }
-    let _ = auth.password_provider().remove_user(username);
     Response::ok(json!({"message": "user deleted"}))
 }
 
@@ -1129,22 +1128,36 @@ async fn handle_acl_role_add(
     let Some(role_name) = payload.get("role").and_then(|v| v.as_str()) else {
         return Response::error(mqdb_core::ErrorCode::BadRequest, "missing field: role");
     };
+    let mut rules = Vec::new();
+    for rule_val in payload
+        .get("rules")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
+        let topic = rule_val.get("topic").and_then(|v| v.as_str());
+        let permission = rule_val
+            .get("access")
+            .and_then(|v| v.as_str())
+            .and_then(parse_permission);
+        let (Some(topic), Some(permission)) = (topic, permission) else {
+            return Response::error(
+                mqdb_core::ErrorCode::BadRequest,
+                format!(
+                    "invalid rule: {rule_val}: needs a topic and an access of read, write, readwrite or deny"
+                ),
+            );
+        };
+        rules.push((topic, permission));
+    }
     auth.acl_manager().add_role(role_name.to_string()).await;
-    if let Some(rules) = payload.get("rules").and_then(|v| v.as_array()) {
-        for rule_val in rules {
-            let Some(topic) = rule_val.get("topic").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let Some(access_str) = rule_val.get("access").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let Some(permission) = parse_permission(access_str) else {
-                continue;
-            };
-            let _ = auth
-                .acl_manager()
-                .add_role_rule(role_name, topic.to_string(), permission)
-                .await;
+    for (topic, permission) in rules {
+        if let Err(e) = auth
+            .acl_manager()
+            .add_role_rule(role_name, topic.to_string(), permission)
+            .await
+        {
+            return Response::error(mqdb_core::ErrorCode::Internal, e.to_string());
         }
     }
     Response::ok(json!({"message": "role added"}))
@@ -1862,6 +1875,31 @@ async fn create_or_update_credentials(
 #[cfg(all(test, feature = "http-api"))]
 mod tests {
     use super::{create_or_update_credentials, resolve_grantee_email};
+
+    #[tokio::test]
+    async fn a_role_with_a_malformed_rule_is_refused_and_not_created() {
+        let auth = mqtt5::broker::auth::ComprehensiveAuthProvider::new();
+        let response = super::handle_acl_role_add(
+            Some(&auth),
+            &json!({"role": "editors", "rules": [{"topic": "a/#", "access": "sometimes"}]}),
+        )
+        .await;
+        assert!(matches!(
+            response,
+            mqdb_core::transport::Response::Error { code: 400, .. }
+        ));
+        assert!(auth.acl_manager().get_role("editors").await.is_none());
+    }
+
+    #[test]
+    fn deleting_an_unknown_user_answers_404() {
+        let auth = mqtt5::broker::auth::ComprehensiveAuthProvider::new();
+        let response = super::handle_user_delete(Some(&auth), &json!({"username": "ghost"}));
+        assert!(matches!(
+            response,
+            mqdb_core::transport::Response::Error { code: 404, .. }
+        ));
+    }
     use crate::database::Database;
     use crate::http::IdentityCrypto;
     use serde_json::json;
