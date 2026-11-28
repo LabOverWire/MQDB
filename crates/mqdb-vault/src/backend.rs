@@ -62,23 +62,32 @@ impl VaultBackendImpl {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+struct PendingUpdate {
+    entity: String,
+    id: String,
+    delta: Value,
+    expected_version: Option<u64>,
+}
+
 async fn pre_update_encrypt(
     db: &Database,
     crypto: &VaultCrypto,
-    entity: &str,
-    id: &str,
     ownership: &OwnershipConfig,
     sender_uid: Option<&str>,
-    delta: Value,
-    expected_version: Option<u64>,
     skip: &[String],
+    update: PendingUpdate,
 ) -> VaultResult<(Request, Option<(Value, Value)>)> {
+    let PendingUpdate {
+        entity,
+        id,
+        delta,
+        expected_version,
+    } = update;
     if let OwnershipDecision::Check {
         owner_field,
         sender: uid,
-    } = ownership.evaluate(entity, sender_uid)
-        && let Err(e) = db.check_ownership(entity, id, owner_field, uid)
+    } = ownership.evaluate(&entity, sender_uid)
+        && let Err(e) = db.check_ownership(&entity, &id, owner_field, uid)
     {
         let refusal = match Response::from(e) {
             Response::Error { message, .. } => message,
@@ -87,14 +96,11 @@ async fn pre_update_encrypt(
         return Err(VaultError::BadRequest(refusal));
     }
 
-    let Ok(mut decrypted_existing) = db
-        .read(entity.to_string(), id.to_string(), vec![], None)
-        .await
-    else {
+    let Ok(mut decrypted_existing) = db.read(entity.clone(), id.clone(), vec![], None).await else {
         return Ok((
             Request::Update {
-                entity: entity.to_string(),
-                id: id.to_string(),
+                entity,
+                id,
                 fields: delta,
                 expected_version,
             },
@@ -102,14 +108,14 @@ async fn pre_update_encrypt(
         ));
     };
 
-    if let Some(owner_field) = ownership.owner_field(entity)
+    if let Some(owner_field) = ownership.owner_field(&entity)
         && let Some(requested) = delta.get(owner_field)
         && let Some(message) = owner_change_refusal(&decrypted_existing, owner_field, requested)
     {
         return Err(VaultError::Forbidden(message));
     }
 
-    vault_decrypt_fields(crypto, entity, id, &mut decrypted_existing, skip);
+    vault_decrypt_fields(crypto, &entity, &id, &mut decrypted_existing, skip);
 
     let plaintext_existing = decrypted_existing.clone();
 
@@ -131,12 +137,12 @@ async fn pre_update_encrypt(
     }
 
     let mut merged = decrypted_existing;
-    vault_encrypt_fields(crypto, entity, id, &mut merged, skip);
+    vault_encrypt_fields(crypto, &entity, &id, &mut merged, skip);
 
     Ok((
         Request::Update {
-            entity: entity.to_string(),
-            id: id.to_string(),
+            entity,
+            id,
             fields: merged,
             expected_version,
         },
@@ -182,10 +188,9 @@ impl VaultBackend for VaultBackendImpl {
 
             let skip = build_vault_skip_fields(entity, ownership);
             match request {
-                Request::Create {
-                    entity: ent,
-                    mut data,
-                } => {
+                Request::Create { entity: ent, data } => {
+                    let mut data = Database::resolve_ttl_expiry(data)
+                        .map_err(|e| VaultError::Internal(e.to_string()))?;
                     let id = ensure_id(&mut data);
                     let constraint_clone = data.clone();
                     vault_encrypt_fields(&crypto, &ent, &id, &mut data, &skip);
@@ -196,23 +201,20 @@ impl VaultBackend for VaultBackendImpl {
                     ))
                 }
                 Request::Update {
-                    entity: ent,
+                    entity,
                     id,
                     fields: delta,
                     expected_version,
                 } => {
-                    let (req, constraint) = pre_update_encrypt(
-                        db,
-                        &crypto,
-                        &ent,
-                        &id,
-                        ownership,
-                        sender_uid,
+                    let update = PendingUpdate {
+                        entity,
+                        id,
                         delta,
                         expected_version,
-                        &skip,
-                    )
-                    .await?;
+                    };
+                    let (req, constraint) =
+                        pre_update_encrypt(db, &crypto, ownership, sender_uid, &skip, update)
+                            .await?;
                     Ok((
                         req,
                         constraint.map(|(new_data, old_data)| {
