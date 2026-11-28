@@ -728,6 +728,7 @@ impl<T: ClusterTransport> NodeController<T> {
         };
         let sequence = self.sequence(partition).unwrap_or(0);
         self.become_primary(partition, epoch);
+        self.send_owed_refusals().await;
         self.primary_taken_after_wait = true;
         if let Some(state) = self.replicas.get_mut(&partition.get()) {
             state.set_sequence(sequence);

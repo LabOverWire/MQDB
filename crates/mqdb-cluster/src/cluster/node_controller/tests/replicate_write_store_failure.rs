@@ -272,7 +272,7 @@ async fn session_after_a_refusal_then_an_ok(
 #[tokio::test]
 async fn a_stale_epoch_ack_for_an_older_write_does_not_fail_a_session_the_replica_acks() {
     let result = session_after_a_refusal_then_an_ok(|partition, epoch| {
-        crate::cluster::protocol::ReplicationAck::stale_epoch(partition, epoch, node(2))
+        crate::cluster::protocol::ReplicationAck::stale_epoch(partition, epoch, 0, node(2))
     })
     .await;
     assert_eq!(result, Some(QuorumResult::Success));
@@ -281,7 +281,7 @@ async fn a_stale_epoch_ack_for_an_older_write_does_not_fail_a_session_the_replic
 #[tokio::test]
 async fn a_not_replica_ack_does_not_fail_a_session_the_replica_later_acks() {
     let result = session_after_a_refusal_then_an_ok(|partition, _| {
-        crate::cluster::protocol::ReplicationAck::not_replica(partition, node(2))
+        crate::cluster::protocol::ReplicationAck::not_replica(partition, 0, node(2))
     })
     .await;
     assert_eq!(result, Some(QuorumResult::Success));

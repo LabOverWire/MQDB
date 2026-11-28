@@ -66,7 +66,9 @@ impl<T: ClusterTransport> NodeController<T> {
 
         if stored.replicas.is_empty() {
             let (tx, rx) = tokio::sync::oneshot::channel();
-            let _ = tx.send(QuorumResult::Success);
+            if tx.send(QuorumResult::Success).is_err() {
+                tracing::debug!("quorum result receiver dropped");
+            }
             return Ok((stored.session, rx));
         }
 
@@ -140,12 +142,16 @@ impl<T: ClusterTransport> NodeController<T> {
         })
     }
 
-    async fn send_to_replicas(&self, write: &ReplicationWrite, replicas: &[NodeId]) {
+    async fn send_to_replicas(&mut self, write: &ReplicationWrite, replicas: &[NodeId]) {
+        self.remember_unanswered(write, replicas);
         for &replica in replicas {
-            let _ = self
+            if let Err(e) = self
                 .transport
                 .send(replica, ClusterMessage::Write(write.clone()))
-                .await;
+                .await
+            {
+                tracing::debug!(replica = replica.get(), %e, "replication write not sent");
+            }
         }
     }
 
@@ -241,11 +247,15 @@ impl<T: ClusterTransport> NodeController<T> {
             .append(partition, sequence, write_msg.clone());
         let t_writelog = super::elapsed_micros(start);
 
+        self.remember_unanswered(&write_msg, replicas);
         for &replica in replicas {
-            let _ = self
+            if let Err(e) = self
                 .transport
                 .send(replica, ClusterMessage::Write(write_msg.clone()))
-                .await;
+                .await
+            {
+                tracing::debug!(replica = replica.get(), %e, "replication write not sent");
+            }
         }
         let t_send = super::elapsed_micros(start);
 

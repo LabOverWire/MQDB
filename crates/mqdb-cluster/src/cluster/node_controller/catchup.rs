@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use super::NodeController;
-use crate::cluster::protocol::{CatchupResponse, ReplicationWrite};
+use crate::cluster::protocol::{CatchupResponse, ReplicationAck, ReplicationWrite};
 use crate::cluster::replication::{ReplicaRole, ReplicaState};
 use crate::cluster::transport::{ClusterMessage, ClusterTransport};
 use crate::cluster::{NodeId, PartitionId};
@@ -105,6 +105,11 @@ impl<T: ClusterTransport> NodeController<T> {
                 responder = responder.get(),
                 "ignoring catchup response from a node this node did not ask"
             );
+            return;
+        }
+        if taking_from.is_none() && self.role(partition) == ReplicaRole::Primary {
+            self.refuse_catchup_as_primary(partition, responder, &resp.writes)
+                .await;
             return;
         }
         if taking_from.is_none() && self.role(partition) != ReplicaRole::Replica {
@@ -210,6 +215,13 @@ impl<T: ClusterTransport> NodeController<T> {
                     self.sync_retained_to_broker(write).await;
                     self.write_log
                         .append(partition, write.sequence, write.clone());
+                    if let Err(e) = self
+                        .transport
+                        .send(responder, ClusterMessage::Ack(ack))
+                        .await
+                    {
+                        tracing::debug!(?partition, %e, "catchup write applied but its ack was not sent");
+                    }
                     applied_count += 1;
                 } else {
                     rejected_count += 1;
@@ -233,6 +245,28 @@ impl<T: ClusterTransport> NodeController<T> {
             self.catch_up_by_snapshot(partition, responder).await;
         } else {
             self.catchup_progressed(partition);
+        }
+    }
+
+    async fn refuse_catchup_as_primary(
+        &self,
+        partition: PartitionId,
+        responder: NodeId,
+        writes: &[ReplicationWrite],
+    ) {
+        let Some(epoch) = self.epoch(partition) else {
+            return;
+        };
+        for write in writes.iter().filter(|write| write.epoch < epoch) {
+            let refusal =
+                ReplicationAck::stale_epoch(partition, epoch, write.sequence, self.node_id);
+            if let Err(e) = self
+                .transport
+                .send(responder, ClusterMessage::Ack(refusal))
+                .await
+            {
+                tracing::debug!(?partition, %e, "catch-up refusal not sent");
+            }
         }
     }
 

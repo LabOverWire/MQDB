@@ -163,25 +163,30 @@ impl ReplicationAck {
     }
 
     #[must_use]
-    pub fn stale_epoch(partition: PartitionId, current_epoch: Epoch, node_id: NodeId) -> Self {
+    pub fn stale_epoch(
+        partition: PartitionId,
+        current_epoch: Epoch,
+        refused_sequence: u64,
+        node_id: NodeId,
+    ) -> Self {
         Self {
             version: Self::VERSION,
             partition: partition.get(),
             status: AckStatus::StaleEpoch as u8,
             epoch: wire_epoch(current_epoch),
-            sequence: 0,
+            sequence: refused_sequence,
             node_id: node_id.get(),
         }
     }
 
     #[must_use]
-    pub fn not_replica(partition: PartitionId, node_id: NodeId) -> Self {
+    pub fn not_replica(partition: PartitionId, refused_sequence: u64, node_id: NodeId) -> Self {
         Self {
             version: Self::VERSION,
             partition: partition.get(),
             status: AckStatus::NotReplica as u8,
             epoch: 0,
-            sequence: 0,
+            sequence: refused_sequence,
             node_id: node_id.get(),
         }
     }
