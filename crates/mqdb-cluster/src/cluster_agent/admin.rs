@@ -821,13 +821,15 @@ async fn handle_acl_role_add(
     let Some(role_name) = payload.get("role").and_then(|v| v.as_str()) else {
         return Response::error(ErrorCode::BadRequest, "missing field: role");
     };
+    let rule_values = match payload.get("rules") {
+        None => &[][..],
+        Some(Value::Array(rules)) => rules.as_slice(),
+        Some(_) => {
+            return Response::error(ErrorCode::BadRequest, "rules must be an array");
+        }
+    };
     let mut rules = Vec::new();
-    for rule_val in payload
-        .get("rules")
-        .and_then(|v| v.as_array())
-        .into_iter()
-        .flatten()
-    {
+    for rule_val in rule_values {
         let topic = rule_val.get("topic").and_then(|v| v.as_str());
         let permission = rule_val
             .get("access")
@@ -962,6 +964,13 @@ mod tests {
         .await;
         assert!(matches!(
             response,
+            mqdb_core::transport::Response::Error { code: 400, .. }
+        ));
+        let not_an_array =
+            super::handle_acl_role_add(Some(&auth), &json!({"role": "editors", "rules": "a/#"}))
+                .await;
+        assert!(matches!(
+            not_an_array,
             mqdb_core::transport::Response::Error { code: 400, .. }
         ));
         assert!(auth.acl_manager().get_role("editors").await.is_none());

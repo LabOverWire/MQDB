@@ -86,44 +86,44 @@ pub(super) struct MessageContext<'a> {
     pub jti_revocation: Option<&'a Arc<crate::http::JtiRevocationStore>>,
 }
 
-/// Resolve a grantee email to its canonical identity via `_identity_links`.
-/// Returns `None` when no registered identity matches the email.
 #[cfg(feature = "http-api")]
 pub(crate) async fn resolve_grantee_email(
     db: &Database,
     crypto: &crate::http::IdentityCrypto,
     email: &str,
-) -> Option<String> {
+) -> Result<Option<String>, mqdb_core::error::Error> {
     let hash = crypto.blind_index("_identity_links", email);
     let records =
         crate::db_helpers::list_entities_db(db, "_identity_links", &format!("email_hash={hash}"))
-            .await
-            .ok()?;
-    records
-        .first()?
-        .get("canonical_id")
+            .await?;
+    Ok(records
+        .first()
+        .and_then(|record| record.get("canonical_id"))
         .and_then(Value::as_str)
-        .map(String::from)
+        .map(String::from))
 }
 
-/// For `Share`/`Unshare` in identity (OAuth) deployments, split the grantee email
-/// into a stable `grantee_key` (the lowercased input identifier) and a resolved
-/// `grantee`. A registered email resolves to its canonical id; an unregistered email
-/// becomes a **pending** grant (empty `grantee`, `grantee_key = email`) that stays
-/// inert until the recipient first signs in. The stored `grantee_key` is a blind index
-/// of the lowercased email (never the plaintext), and the plaintext email is retained
-/// only encrypted in `grantee_email` for owner display. `Unshare` carries the blind
-/// index as the primary key plus any resolved canonical id for dual-key revoke. When no
-/// identity crypto is configured (password mode), the request is used verbatim.
+#[cfg(feature = "http-api")]
+async fn resolve_grantee_or_refuse(
+    db: &Database,
+    crypto: &crate::http::IdentityCrypto,
+    email: &str,
+) -> Result<Option<String>, Response> {
+    resolve_grantee_email(db, crypto, email).await.map_err(|e| {
+        warn!("share grantee lookup failed: {e}");
+        Response::error(mqdb_core::ErrorCode::Internal, "failed to resolve grantee")
+    })
+}
+
 #[cfg(feature = "http-api")]
 async fn resolve_share_request(
     db: &Database,
     crypto: Option<&Arc<crate::http::IdentityCrypto>>,
     request: mqdb_core::transport::Request,
-) -> mqdb_core::transport::Request {
+) -> Result<mqdb_core::transport::Request, Response> {
     use mqdb_core::transport::Request;
     let Some(crypto) = crypto else {
-        return request;
+        return Ok(request);
     };
     match request {
         Request::Share {
@@ -136,7 +136,7 @@ async fn resolve_share_request(
         } => {
             let trimmed = grantee.trim();
             if trimmed.is_empty() {
-                return Request::Share {
+                return Ok(Request::Share {
                     entity,
                     id,
                     grantee,
@@ -144,23 +144,26 @@ async fn resolve_share_request(
                     grantee_email: None,
                     permission,
                     cascade,
-                };
+                });
             }
             let email = trimmed.to_lowercase();
             let key = crypto.blind_index(mqdb_core::types::SHARES_ENTITY, &email);
             let encrypted_email = crypto
                 .encrypt_field(mqdb_core::types::SHARES_ENTITY, &email)
-                .ok();
-            let resolved = resolve_grantee_email(db, crypto, trimmed).await;
-            Request::Share {
+                .map_err(|e| {
+                    warn!("share grantee email not encrypted: {e}");
+                    Response::error(mqdb_core::ErrorCode::Internal, "failed to encrypt grantee")
+                })?;
+            let resolved = resolve_grantee_or_refuse(db, crypto, trimmed).await?;
+            Ok(Request::Share {
                 entity,
                 id,
                 grantee: resolved.unwrap_or_default(),
                 grantee_key: Some(key),
-                grantee_email: encrypted_email,
+                grantee_email: Some(encrypted_email),
                 permission,
                 cascade,
-            }
+            })
         }
         Request::Unshare {
             entity,
@@ -171,21 +174,19 @@ async fn resolve_share_request(
         } => {
             let email = grantee.trim().to_lowercase();
             let key = crypto.blind_index(mqdb_core::types::SHARES_ENTITY, &email);
-            let resolved = resolve_grantee_email(db, crypto, grantee.trim()).await;
-            Request::Unshare {
+            let resolved = resolve_grantee_or_refuse(db, crypto, grantee.trim()).await?;
+            Ok(Request::Unshare {
                 entity,
                 id,
                 grantee: key,
                 grantee_key: resolved,
                 cascade,
-            }
+            })
         }
-        other => other,
+        other => Ok(other),
     }
 }
 
-/// Decrypt the stored `grantee_email` on each record of a `Shares` listing so the
-/// resource owner sees the plaintext email (it is encrypted at rest).
 #[cfg(feature = "http-api")]
 fn decrypt_shares_grantee_email(
     crypto: &Arc<crate::http::IdentityCrypto>,
@@ -355,7 +356,13 @@ pub(super) async fn handle_message(ctx: &MessageContext<'_>, message: Message) {
     };
 
     #[cfg(feature = "http-api")]
-    let request = resolve_share_request(db, ctx.identity_crypto, request).await;
+    let request = match resolve_share_request(db, ctx.identity_crypto, request).await {
+        Ok(request) => request,
+        Err(response) => {
+            reply_read_error(client, &message, &response).await;
+            return;
+        }
+    };
 
     let span = info_span!(
         "database_operation",
@@ -1132,13 +1139,15 @@ async fn handle_acl_role_add(
     let Some(role_name) = payload.get("role").and_then(|v| v.as_str()) else {
         return Response::error(mqdb_core::ErrorCode::BadRequest, "missing field: role");
     };
+    let rule_values = match payload.get("rules") {
+        None => &[][..],
+        Some(Value::Array(rules)) => rules.as_slice(),
+        Some(_) => {
+            return Response::error(mqdb_core::ErrorCode::BadRequest, "rules must be an array");
+        }
+    };
     let mut rules = Vec::new();
-    for rule_val in payload
-        .get("rules")
-        .and_then(|v| v.as_array())
-        .into_iter()
-        .flatten()
-    {
+    for rule_val in rule_values {
         let topic = rule_val.get("topic").and_then(|v| v.as_str());
         let permission = rule_val
             .get("access")
@@ -2013,6 +2022,13 @@ mod tests {
             response,
             mqdb_core::transport::Response::Error { code: 400, .. }
         ));
+        let not_an_array =
+            super::handle_acl_role_add(Some(&auth), &json!({"role": "editors", "rules": "a/#"}))
+                .await;
+        assert!(matches!(
+            not_an_array,
+            mqdb_core::transport::Response::Error { code: 400, .. }
+        ));
         assert!(auth.acl_manager().get_role("editors").await.is_none());
     }
 
@@ -2074,11 +2090,15 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            resolve_grantee_email(&db, &crypto, "bob@example.com").await,
+            resolve_grantee_email(&db, &crypto, "bob@example.com")
+                .await
+                .unwrap(),
             Some("cid-bob".to_string())
         );
         assert_eq!(
-            resolve_grantee_email(&db, &crypto, "nobody@example.com").await,
+            resolve_grantee_email(&db, &crypto, "nobody@example.com")
+                .await
+                .unwrap(),
             None
         );
     }
@@ -2110,7 +2130,8 @@ mod tests {
                 cascade: false,
             },
         )
-        .await;
+        .await
+        .unwrap();
 
         let Request::Share {
             grantee,
@@ -2133,6 +2154,109 @@ mod tests {
             crypto.decrypt_field(SHARES_ENTITY, &enc).unwrap(),
             "alice@x.com",
             "grantee_email decrypts back to the lowercased email"
+        );
+    }
+
+    struct IdentityLookupFails {
+        inner: mqdb_core::storage::MemoryBackend,
+        failing: std::sync::atomic::AtomicBool,
+    }
+
+    impl IdentityLookupFails {
+        fn refuse(&self, prefix: &[u8]) -> mqdb_core::error::Result<()> {
+            let touches_identities = prefix
+                .windows(b"_identity_links".len())
+                .any(|w| w == b"_identity_links");
+            if touches_identities && self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(mqdb_core::error::Error::Internal("lookup failed".into()));
+            }
+            Ok(())
+        }
+    }
+
+    impl mqdb_core::storage::StorageBackend for IdentityLookupFails {
+        fn get(&self, key: &[u8]) -> mqdb_core::error::Result<Option<Vec<u8>>> {
+            self.inner.get(key)
+        }
+        fn insert(&self, key: &[u8], value: &[u8]) -> mqdb_core::error::Result<()> {
+            self.inner.insert(key, value)
+        }
+        fn remove(&self, key: &[u8]) -> mqdb_core::error::Result<()> {
+            self.inner.remove(key)
+        }
+        fn prefix_scan(&self, prefix: &[u8]) -> mqdb_core::error::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+            self.refuse(prefix)?;
+            self.inner.prefix_scan(prefix)
+        }
+        fn prefix_count(&self, prefix: &[u8]) -> mqdb_core::error::Result<usize> {
+            self.refuse(prefix)?;
+            self.inner.prefix_count(prefix)
+        }
+        fn prefix_scan_keys(&self, prefix: &[u8]) -> mqdb_core::error::Result<Vec<Vec<u8>>> {
+            self.refuse(prefix)?;
+            self.inner.prefix_scan_keys(prefix)
+        }
+        fn prefix_scan_batch(
+            &self,
+            prefix: &[u8],
+            batch_size: usize,
+            after_key: Option<&[u8]>,
+        ) -> mqdb_core::error::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+            self.refuse(prefix)?;
+            self.inner.prefix_scan_batch(prefix, batch_size, after_key)
+        }
+        fn range_scan(
+            &self,
+            start: &[u8],
+            end: &[u8],
+        ) -> mqdb_core::error::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+            self.refuse(start)?;
+            self.inner.range_scan(start, end)
+        }
+        fn batch(&self) -> Box<dyn mqdb_core::storage::BatchOperations> {
+            self.inner.batch()
+        }
+        fn flush(&self) -> mqdb_core::error::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unshare_whose_grantee_lookup_fails_is_refused() {
+        use super::resolve_share_request;
+        use mqdb_core::transport::{Request, Response};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let backend = Arc::new(IdentityLookupFails {
+            inner: mqdb_core::storage::MemoryBackend::new(),
+            failing: AtomicBool::new(false),
+        });
+        let config = mqdb_core::config::DatabaseConfig::new(std::path::PathBuf::from("mem"))
+            .without_background_tasks();
+        let db = Database::open_with_backend(Arc::clone(&backend) as _, config)
+            .await
+            .unwrap();
+        let (crypto, _key) = IdentityCrypto::generate().unwrap();
+        let crypto = Arc::new(crypto);
+        backend.failing.store(true, Ordering::SeqCst);
+
+        let refused = resolve_share_request(
+            &db,
+            Some(&crypto),
+            Request::Unshare {
+                entity: "diagrams".into(),
+                id: "d1".into(),
+                grantee: "bob@example.com".into(),
+                grantee_key: None,
+                cascade: false,
+            },
+        )
+        .await;
+
+        assert!(
+            matches!(refused, Err(Response::Error { code: 500, .. })),
+            "got {refused:?}"
         );
     }
 
