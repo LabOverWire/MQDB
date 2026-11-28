@@ -222,3 +222,23 @@ async fn a_create_refused_after_the_new_primarys_write_replaced_it_in_the_log_su
         "new primary, old primary"
     );
 }
+
+#[tokio::test]
+async fn writes_a_replica_heals_by_catchup_are_no_longer_unanswered() {
+    let partition = data_partition(ENTITY, ID);
+    let second = another_id_in(partition);
+    let (mut old, mut new) = pair_in_epoch_one(partition).await;
+    create(&mut old, ID, br#"{"n":1}"#).await;
+    old.transport.take_sent();
+    create(&mut old, &second, br#"{"n":2}"#).await;
+    settle(&mut old, &mut new).await;
+
+    assert_eq!(
+        (
+            new.stores().db_get(ENTITY, ID).is_some(),
+            old.holds_unanswered(partition)
+        ),
+        (true, false),
+        "replica healed the gap, primary still waits for an answer"
+    );
+}

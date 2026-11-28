@@ -511,7 +511,7 @@ impl<T: ClusterTransport> NodeController<T> {
             || self.holds_superseded(partition)
     }
 
-    fn holds_unanswered(&self, partition: PartitionId) -> bool {
+    pub(super) fn holds_unanswered(&self, partition: PartitionId) -> bool {
         self.unanswered.keys().any(|(held, _)| *held == partition)
     }
 

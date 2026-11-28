@@ -210,6 +210,13 @@ impl<T: ClusterTransport> NodeController<T> {
                     self.sync_retained_to_broker(write).await;
                     self.write_log
                         .append(partition, write.sequence, write.clone());
+                    if let Err(e) = self
+                        .transport
+                        .send(responder, ClusterMessage::Ack(ack))
+                        .await
+                    {
+                        tracing::debug!(?partition, %e, "catchup write applied but its ack was not sent");
+                    }
                     applied_count += 1;
                 } else {
                     rejected_count += 1;
